@@ -529,7 +529,19 @@ fn skip_ffield_child(c: &mut R, nt: &NameTable, end: u64) {
     let _field_name = nt.fname(c);
     // FField::Serialize
     let _flags = read_u32(c);
-    let _unknown = read_i32(c);
+    // Metadata (editor-only, present in uncooked assets)
+    // HasMetadata flag: 1 for class members, 0 for function params
+    let has_meta = read_i32(c);
+    if has_meta != 0 {
+        let meta_count = read_i32(c);
+        for _ in 0..meta_count {
+            let _meta_key = nt.fname(c);
+            let meta_val_len = read_i32(c);
+            if meta_val_len > 0 {
+                c.seek(SeekFrom::Current(meta_val_len as i64)).unwrap();
+            }
+        }
+    }
     // FProperty::Serialize
     let _array_dim = read_i32(c);
     let _elem_size = read_i32(c);
@@ -553,6 +565,119 @@ fn skip_ffield_child(c: &mut R, nt: &NameTable, end: u64) {
         | "MulticastInlineDelegateProperty" => { let _ref = read_i32(c); }
         _ => {}
     }
+}
+
+// --- FField type resolution (for function signatures) ---
+
+fn resolve_ffield_type(
+    field_class: &str, c: &mut R, nt: &NameTable,
+    imports: &[ImportEntry], export_names: &[String], end: u64,
+) -> String {
+    match field_class {
+        "FloatProperty" => "float".into(),
+        "DoubleProperty" => "double".into(),
+        "IntProperty" | "Int32Property" | "UInt32Property" => "int".into(),
+        "Int64Property" | "UInt64Property" => "int64".into(),
+        "Int16Property" | "UInt16Property" => "int16".into(),
+        "Int8Property" => "int8".into(),
+        "BoolProperty" => {
+            for _ in 0..6 { read_u8(c); }
+            "bool".into()
+        }
+        "StrProperty" => "FString".into(),
+        "NameProperty" => "FName".into(),
+        "TextProperty" => "FText".into(),
+        "ObjectProperty" | "WeakObjectProperty" | "LazyObjectProperty"
+        | "SoftObjectProperty" | "InterfaceProperty" => {
+            let class_ref = read_i32(c);
+            if class_ref != 0 {
+                format!("{}*", short_class(&resolve_index(imports, export_names, class_ref)))
+            } else {
+                "UObject*".into()
+            }
+        }
+        "ClassProperty" | "SoftClassProperty" => {
+            let _prop_class = read_i32(c);
+            let _meta_class = read_i32(c);
+            "UClass*".into()
+        }
+        "StructProperty" => {
+            let struct_ref = read_i32(c);
+            short_class(&resolve_index(imports, export_names, struct_ref))
+        }
+        "ByteProperty" | "EnumProperty" => {
+            let enum_ref = read_i32(c);
+            if enum_ref != 0 {
+                short_class(&resolve_index(imports, export_names, enum_ref))
+            } else {
+                "byte".into()
+            }
+        }
+        "ArrayProperty" | "SetProperty" => {
+            skip_ffield_child(c, nt, end);
+            if field_class == "SetProperty" { "TSet<>".into() } else { "TArray<>".into() }
+        }
+        "MapProperty" => {
+            skip_ffield_child(c, nt, end);
+            skip_ffield_child(c, nt, end);
+            "TMap<>".into()
+        }
+        "DelegateProperty" | "MulticastDelegateProperty"
+        | "MulticastInlineDelegateProperty" | "MulticastSparseDelegateProperty" => {
+            let _sig = read_i32(c);
+            "Delegate".into()
+        }
+        _ => field_class.strip_suffix("Property").unwrap_or(field_class).to_string(),
+    }
+}
+
+fn format_signature(func_name: &str, params: &[(String, String, u64)]) -> String {
+    const CPF_PARM: u64 = 0x80;
+    const CPF_OUT_PARM: u64 = 0x100;
+    const CPF_RETURN_PARM: u64 = 0x200;
+
+    let mut inputs = Vec::new();
+    let mut ret_type = None;
+
+    for (name, type_name, flags) in params {
+        if *flags & CPF_RETURN_PARM != 0 {
+            ret_type = Some(type_name.clone());
+        } else if *flags & CPF_PARM != 0 {
+            if *flags & CPF_OUT_PARM != 0 {
+                inputs.push(format!("out {}: {}", name, type_name));
+            } else {
+                inputs.push(format!("{}: {}", name, type_name));
+            }
+        }
+        // Internal locals (no CPF_Parm) are not part of the signature
+    }
+
+    let sig = format!("{}({})", func_name, inputs.join(", "));
+    match ret_type {
+        Some(t) => format!("{} -> {}", sig, t),
+        None => sig,
+    }
+}
+
+// --- Bytecode name cleanup ---
+
+fn clean_bc_name(name: &str) -> String {
+    // Shorten verbose Blueprint-generated local variable names
+    // CallFunc_Multiply_FloatFloat_ReturnValue → $Multiply_FloatFloat
+    // K2Node_DynamicCast_AsWinch_Constraint_BP → $Cast_AsWinch_Constraint_BP
+    // K2Node_DynamicCast_bSuccess → $Cast_bSuccess
+    if let Some(rest) = name.strip_prefix("CallFunc_") {
+        // Strip trailing _ReturnValue
+        let rest = rest.strip_suffix("_ReturnValue").unwrap_or(rest);
+        return format!("${}", rest);
+    }
+    if let Some(rest) = name.strip_prefix("K2Node_DynamicCast_") {
+        return format!("$Cast_{}", rest);
+    }
+    if let Some(rest) = name.strip_prefix("K2Node_") {
+        return format!("${}", rest);
+    }
+    name.to_string()
 }
 
 // --- Kismet bytecode decoder ---
@@ -647,7 +772,7 @@ fn read_bc_field_path(bc: &[u8], pos: &mut usize, nt: &NameTable) -> String {
     }
     let mut names = Vec::new();
     for _ in 0..path_num {
-        names.push(read_bc_fname(bc, pos, nt));
+        names.push(clean_bc_name(&read_bc_fname(bc, pos, nt)));
     }
     let _owner = read_bc_i32(bc, pos);
     names.join(".")
@@ -694,15 +819,16 @@ fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
         }
         0x0B => Some("nop".into()), // EX_Nothing
         0x0F => { // EX_Let
-            let prop = read_bc_field_path(bc, pos, nt);
+            let _prop = read_bc_field_path(bc, pos, nt); // type info, redundant with variable
             let var = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
             let val = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
-            Some(format!("{} = {} [{}]", var, val, prop))
+            Some(format!("{} = {}", var, val))
         }
         0x12 => { // EX_ClassContext
             let obj = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
             read_bc_context_rvalue(bc, pos, nt);
             let expr = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            let expr = expr.strip_prefix("self.").unwrap_or(&expr);
             Some(format!("{}.{}", obj, expr))
         }
         0x13 => { // EX_MetaCast
@@ -726,12 +852,14 @@ fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             let obj = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
             read_bc_context_rvalue(bc, pos, nt);
             let expr = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            let expr = expr.strip_prefix("self.").unwrap_or(&expr);
             Some(format!("{}.{}", obj, expr))
         }
         0x1A => { // EX_Context_FailSilent
             let obj = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
             read_bc_context_rvalue(bc, pos, nt);
             let expr = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            let expr = expr.strip_prefix("self.").unwrap_or(&expr);
             Some(format!("{}?.{}", obj, expr))
         }
         0x1B => { // EX_VirtualFunction
@@ -1071,7 +1199,11 @@ fn parse_asset(data: &[u8], _engine_ver: &str, debug: bool) -> ParsedAsset {
         // Detect class type for special handling
         let class_name = resolve_index(&imports, &export_names_pre, hdr.class_index);
 
-        if class_name.ends_with(".Function") || class_name.ends_with(".Struct") {
+        let is_struct = class_name.ends_with(".Function") || class_name.ends_with(".Struct")
+            || class_name.ends_with(".BlueprintGeneratedClass")
+            || class_name.ends_with(".ScriptStruct");
+        if is_struct {
+            let is_function = class_name.ends_with(".Function");
             // UStruct serialization: tagged props, then SuperStruct, Children, bytecode
             let props = read_properties(&mut c, &nt, end, file_ver);
             let after_props = c.position();
@@ -1081,7 +1213,15 @@ fn parse_asset(data: &[u8], _engine_ver: &str, debug: bool) -> ParsedAsset {
             if after_props + 12 <= end {
                 let _next = read_i32(&mut c);
                 let super_ref = read_i32(&mut c);
-                let _children = read_i32(&mut c);
+                // Children is count + array of int32 package indices
+                let children_count = read_i32(&mut c);
+                if children_count > 0 && children_count < 1000 {
+                    c.seek(SeekFrom::Current(children_count as i64 * 4)).unwrap();
+                }
+                if debug {
+                    eprintln!("  {} UStruct: after_props={} next={} super={} children={} pos={}",
+                        hdr.object_name, after_props, _next, super_ref, children_count, c.position());
+                }
 
                 if super_ref != 0 {
                     let super_name = resolve_index(&imports, &export_names_pre, super_ref);
@@ -1092,7 +1232,8 @@ fn parse_asset(data: &[u8], _engine_ver: &str, debug: bool) -> ParsedAsset {
                 }
             }
 
-            // UStruct::ChildProperties (FField children — function parameters)
+            // UStruct::ChildProperties (FField children)
+            let mut ffield_children: Vec<(String, String, u64)> = Vec::new();
             if c.position() + 4 <= end {
                 let child_prop_count = read_i32(&mut c);
                 if debug && child_prop_count > 0 {
@@ -1102,60 +1243,65 @@ fn parse_asset(data: &[u8], _engine_ver: &str, debug: bool) -> ParsedAsset {
                     if c.position() + 16 > end { break; }
                     let field_class = nt.fname(&mut c);
                     let field_name = nt.fname(&mut c);
-                    // FField::Serialize: Flags
+                    // FField::Serialize
                     let _flags = read_u32(&mut c);
-                    let _unknown = read_i32(&mut c);
+                    // Metadata (editor-only, present in uncooked assets)
+                    // HasMetadata flag: 1 for class members, 0 for function params
+                    let has_meta = read_i32(&mut c);
+                    if has_meta != 0 {
+                        let meta_count = read_i32(&mut c);
+                        for _ in 0..meta_count {
+                            let _meta_key = nt.fname(&mut c);
+                            let meta_val_len = read_i32(&mut c);
+                            if meta_val_len > 0 {
+                                c.seek(SeekFrom::Current(meta_val_len as i64)).unwrap();
+                            }
+                        }
+                    }
                     // FProperty::Serialize
                     let _array_dim = read_i32(&mut c);
                     let _elem_size = read_i32(&mut c);
-                    let _prop_flags = read_i64(&mut c); // uint64 PropertyFlags
-                    let _rep_index = read_i32(&mut c); // uint16 RepIndex (read as part of padding)
-                    // Wait — RepIndex is uint16, let me re-examine
-                    // Actually: uint16 RepIndex + FName RepNotifyFunc + uint8 BlueprintRepCondition
-                    // But we already read 4 bytes for RepIndex. Let me adjust.
-                    // The 4 bytes we just read as _rep_index actually contain:
-                    //   uint16 RepIndex (2B) + first 2 bytes of RepNotifyFunc FName
-                    // That's wrong. Let me back up and handle this properly.
-                    c.seek(SeekFrom::Current(-4)).unwrap(); // undo the read_i32
+                    let prop_flags = read_i64(&mut c) as u64;
+                    // uint16 RepIndex + FName RepNotifyFunc + uint8 BlueprintRepCondition
                     let mut rep_bytes = [0u8; 2];
-                    c.read_exact(&mut rep_bytes).unwrap(); // uint16 RepIndex
-                    let _rep_notify_func = nt.fname(&mut c); // FName
+                    c.read_exact(&mut rep_bytes).unwrap();
+                    let _rep_notify_func = nt.fname(&mut c);
                     let _bp_rep_condition = read_u8(&mut c);
-                    // Type-specific data
-                    match field_class.as_str() {
-                        "ObjectProperty" | "WeakObjectProperty" | "LazyObjectProperty"
-                        | "SoftObjectProperty" | "ClassProperty" | "SoftClassProperty"
-                        | "InterfaceProperty" => {
-                            let _prop_class = read_i32(&mut c);
-                        }
-                        "StructProperty" => {
-                            let _struct_ref = read_i32(&mut c);
-                        }
-                        "DelegateProperty" | "MulticastDelegateProperty"
-                        | "MulticastInlineDelegateProperty" | "MulticastSparseDelegateProperty" => {
-                            let _sig_func = read_i32(&mut c);
-                        }
-                        "ByteProperty" | "EnumProperty" => {
-                            let _enum_ref = read_i32(&mut c);
-                        }
-                        "BoolProperty" => {
-                            // FieldSize, ByteOffset, ByteMask, FieldMask, NativeBool, Value
-                            for _ in 0..6 { read_u8(&mut c); }
-                        }
-                        "ArrayProperty" | "SetProperty" => {
-                            // Inner property is serialized as a nested FField
-                            skip_ffield_child(&mut c, &nt, end);
-                        }
-                        "MapProperty" => {
-                            skip_ffield_child(&mut c, &nt, end);
-                            skip_ffield_child(&mut c, &nt, end);
-                        }
-                        _ => {} // FloatProperty, IntProperty, Int64Property, etc. — no extra
-                    }
+                    // Type-specific data — also resolves the type name
+                    let type_name = resolve_ffield_type(
+                        &field_class, &mut c, &nt, &imports, &export_names_pre, end,
+                    );
+                    ffield_children.push((field_name.clone(), type_name, prop_flags));
                     if debug {
-                        eprintln!("    param: {} {} @ {}", field_class, field_name, c.position());
+                        eprintln!("    param: {} {} flags=0x{:x} @ {}",
+                            field_class, field_name, prop_flags, c.position());
                     }
                 }
+            }
+
+            // For functions: build signature from params
+            if is_function && !ffield_children.is_empty() {
+                let sig = format_signature(&hdr.object_name, &ffield_children);
+                extra_props.push(Property {
+                    name: "Signature".into(),
+                    value: PropValue::Str(sig),
+                });
+            }
+
+            // For classes: store member variable declarations
+            if !is_function && !ffield_children.is_empty() {
+                let members: Vec<PropValue> = ffield_children.iter()
+                    .map(|(name, type_name, _flags)| {
+                        PropValue::Str(format!("{}: {}", name, type_name))
+                    })
+                    .collect();
+                extra_props.push(Property {
+                    name: "Members".into(),
+                    value: PropValue::Array {
+                        inner_type: "StrProperty".into(),
+                        items: members,
+                    },
+                });
             }
 
             // Script bytecode
@@ -1200,7 +1346,7 @@ fn parse_asset(data: &[u8], _engine_ver: &str, debug: bool) -> ParsedAsset {
             }
 
             // UFunction: FunctionFlags
-            if c.position() + 4 <= end {
+            if is_function && c.position() + 4 <= end {
                 let func_flags = read_u32(&mut c);
                 if func_flags != 0 {
                     extra_props.push(Property {
@@ -1471,61 +1617,278 @@ fn print_summary(asset: &ParsedAsset, filters: &[String]) {
     println!("Blueprint: {} (extends {})", bp_name, short_class(&bp_parent));
     println!();
 
-    // Components from SCS_Node exports
+    // Components from SCS_Node exports — build tree structure
+    // scs_node_name -> (comp_name, comp_class, child_scs_node_names)
+    let mut scs_nodes: std::collections::HashMap<String, (String, String, Vec<String>)> = std::collections::HashMap::new();
     let mut components: Vec<(String, String)> = Vec::new();
     for (hdr, props) in &asset.exports {
         let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
-        if class.ends_with(".SCS_Node") {
-            let comp_name = find_prop_str(props, "InternalVariableName")
-                .or_else(|| {
-                    // Derive from template name (strip _GEN_VARIABLE suffix)
-                    find_prop(props, "ComponentTemplate").and_then(|p| match &p.value {
-                        PropValue::Object(idx) => {
-                            let tpl = resolve_index(&asset.imports, &export_names, *idx);
-                            Some(tpl.trim_end_matches("_GEN_VARIABLE").to_string())
-                        }
-                        _ => None,
-                    })
-                })
-                .unwrap_or_else(|| hdr.object_name.clone());
-            let comp_class = find_prop(props, "ComponentClass")
-                .and_then(|p| match &p.value {
-                    PropValue::Object(idx) => Some(short_class(&resolve_index(&asset.imports, &export_names, *idx))),
+        if !class.ends_with(".SCS_Node") { continue; }
+        let comp_name = find_prop_str(props, "InternalVariableName")
+            .or_else(|| {
+                find_prop(props, "ComponentTemplate").and_then(|p| match &p.value {
+                    PropValue::Object(idx) => {
+                        let tpl = resolve_index(&asset.imports, &export_names, *idx);
+                        Some(tpl.trim_end_matches("_GEN_VARIABLE").to_string())
+                    }
                     _ => None,
                 })
-                .unwrap_or_else(|| "?".into());
-            components.push((comp_name, comp_class));
-        }
-    }
-    if !components.is_empty() {
-        println!("Components:");
-        for (name, class) in &components {
-            println!("  {} ({})", name, class);
-        }
-        println!();
+            })
+            .unwrap_or_else(|| hdr.object_name.clone());
+        let comp_class = find_prop(props, "ComponentClass")
+            .and_then(|p| match &p.value {
+                PropValue::Object(idx) => Some(short_class(&resolve_index(&asset.imports, &export_names, *idx))),
+                _ => None,
+            })
+            .unwrap_or_else(|| "?".into());
+        let children = find_prop(props, "ChildNodes")
+            .and_then(|p| match &p.value {
+                PropValue::Array { items, .. } => Some(items.iter().filter_map(|i| match i {
+                    PropValue::Object(idx) => Some(resolve_index(&asset.imports, &export_names, *idx)),
+                    _ => None,
+                }).collect()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        components.push((comp_name.clone(), comp_class.clone()));
+        scs_nodes.insert(hdr.object_name.clone(), (comp_name, comp_class, children));
     }
 
-    // Variables from the generated class (CDO properties that aren't components)
-    let mut variables: Vec<String> = Vec::new();
+    // Find root nodes (not referenced as children by any other node)
+    let all_children: Vec<String> = scs_nodes.values()
+        .flat_map(|(_, _, children)| children.iter().cloned())
+        .collect();
+    let root_nodes: Vec<String> = scs_nodes.keys()
+        .filter(|k| !all_children.contains(k))
+        .cloned()
+        .collect();
+
+    // Build lookup of component sub-object properties (*_GEN_VARIABLE exports)
+    let mut comp_props: std::collections::HashMap<String, &[Property]> = std::collections::HashMap::new();
     for (hdr, props) in &asset.exports {
-        if hdr.object_name.starts_with("Default__") && !props.is_empty() {
-            for prop in props {
-                // Skip internal properties
-                if matches!(prop.name.as_str(), "ActorLabel" | "bCanProxyPhysics") { continue; }
-                let val_str = prop_value_short(&prop.value, &asset.imports, &export_names);
-                variables.push(format!("{} = {}", prop.name, val_str));
+        if let Some(comp_name) = hdr.object_name.strip_suffix("_GEN_VARIABLE") {
+            comp_props.insert(comp_name.to_string(), props);
+        }
+    }
+
+    // Build lookup for child actor template exports
+    let mut cat_exports: std::collections::HashMap<String, (String, &[Property])> = std::collections::HashMap::new();
+    for (hdr, props) in &asset.exports {
+        if hdr.object_name.contains("_CAT") {
+            let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
+            cat_exports.insert(hdr.object_name.clone(), (short_class(&class), props));
+        }
+    }
+
+    // Properties to skip in component summaries (pure noise)
+    const COMP_SKIP_PROPS: &[&str] = &[
+        "StaticMeshImportVersion", "bVisualizeComponent",
+        "CreationMethod",
+    ];
+
+    // Print a component and its properties at the given indent depth
+    fn print_comp_props(
+        name: &str, class: &str, depth: usize,
+        comp_props: &std::collections::HashMap<String, &[Property]>,
+        cat_exports: &std::collections::HashMap<String, (String, &[Property])>,
+        imports: &[ImportEntry], export_names: &[String],
+    ) {
+        let indent = "  ".repeat(depth + 1);
+        let prop_indent = "  ".repeat(depth + 2);
+        println!("{}{} ({})", indent, name, class);
+        if let Some(props) = comp_props.get(name) {
+            let mut child_actor_tpl: Option<String> = None;
+            for prop in *props {
+                if COMP_SKIP_PROPS.contains(&prop.name.as_str()) { continue; }
+                // Capture child actor template name for later expansion
+                if prop.name == "ChildActorTemplate" {
+                    if let PropValue::Object(idx) = &prop.value {
+                        let tpl_name = resolve_index(imports, export_names, *idx);
+                        child_actor_tpl = Some(tpl_name);
+                    }
+                    continue;
+                }
+                // For structs: inline Vector/Rotator, summarise others by top-level fields
+                if let PropValue::Struct { struct_type, fields } = &prop.value {
+                    match struct_type.as_str() {
+                        "Vector" | "Rotator" => {
+                            let val = prop_value_short(&prop.value, imports, export_names);
+                            println!("{}{}: {}", prop_indent, prop.name, val);
+                        }
+                        _ => {
+                            let summary: Vec<String> = fields.iter().filter_map(|f| {
+                                match &f.value {
+                                    PropValue::Struct { .. } | PropValue::Array { .. } | PropValue::Map { .. } => None,
+                                    _ => {
+                                        let v = prop_value_short(&f.value, imports, export_names);
+                                        Some(format!("{}: {}", f.name, v))
+                                    }
+                                }
+                            }).collect();
+                            if !summary.is_empty() {
+                                println!("{}{}: {}", prop_indent, prop.name, summary.join(", "));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let val = prop_value_short(&prop.value, imports, export_names);
+                println!("{}{}: {}", prop_indent, prop.name, val);
+            }
+            // Show child actor template properties if present
+            if let Some(tpl_name) = child_actor_tpl {
+                if let Some((tpl_class, tpl_props)) = cat_exports.get(&tpl_name) {
+                    println!("{}[template: {}]", prop_indent, tpl_class);
+                    for prop in *tpl_props {
+                        if let PropValue::Struct { struct_type, fields } = &prop.value {
+                            match struct_type.as_str() {
+                                "Vector" | "Rotator" => {
+                                    let val = prop_value_short(&prop.value, imports, export_names);
+                                    println!("{}  {}: {}", prop_indent, prop.name, val);
+                                }
+                                _ => {
+                                    let summary: Vec<String> = fields.iter().filter_map(|f| {
+                                        match &f.value {
+                                            PropValue::Struct { .. } | PropValue::Array { .. } | PropValue::Map { .. } => None,
+                                            _ => {
+                                                let v = prop_value_short(&f.value, imports, export_names);
+                                                Some(format!("{}: {}", f.name, v))
+                                            }
+                                        }
+                                    }).collect();
+                                    if !summary.is_empty() {
+                                        println!("{}  {}: {}", prop_indent, prop.name, summary.join(", "));
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        let val = prop_value_short(&prop.value, imports, export_names);
+                        println!("{}  {}: {}", prop_indent, prop.name, val);
+                    }
+                }
             }
         }
     }
-    if !variables.is_empty() {
-        println!("Default values:");
-        for v in &variables {
-            println!("  {}", v);
+
+    // Recursive tree printer
+    fn print_comp_tree(
+        node_name: &str, depth: usize,
+        scs_nodes: &std::collections::HashMap<String, (String, String, Vec<String>)>,
+        comp_props: &std::collections::HashMap<String, &[Property]>,
+        cat_exports: &std::collections::HashMap<String, (String, &[Property])>,
+        imports: &[ImportEntry], export_names: &[String],
+    ) {
+        if let Some((comp_name, comp_class, children)) = scs_nodes.get(node_name) {
+            print_comp_props(comp_name, comp_class, depth, comp_props, cat_exports, imports, export_names);
+            for child in children {
+                print_comp_tree(child, depth + 1, scs_nodes, comp_props, cat_exports, imports, export_names);
+            }
+        }
+    }
+
+    if !components.is_empty() {
+        println!("Components:");
+        for root in &root_nodes {
+            print_comp_tree(root, 0, &scs_nodes, &comp_props, &cat_exports, &asset.imports, &export_names);
         }
         println!();
     }
 
-    // Function signatures (from Function exports)
+    // Member variables from BlueprintGeneratedClass FField children
+    let mut members: Vec<String> = Vec::new();
+    let component_names: Vec<&str> = components.iter().map(|(n, _)| n.as_str()).collect();
+    for (hdr, props) in &asset.exports {
+        let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
+        if !class.ends_with(".BlueprintGeneratedClass") { continue; }
+        if let Some(members_prop) = find_prop(props, "Members") {
+            if let PropValue::Array { items, .. } = &members_prop.value {
+                for item in items {
+                    if let PropValue::Str(decl) = item {
+                        // Skip component variables (already shown in Components section)
+                        let var_name = decl.split(':').next().unwrap_or("");
+                        if component_names.contains(&var_name) { continue; }
+                        members.push(decl.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Default values from the CDO (Default__*_C export)
+    let mut defaults: Vec<(String, String)> = Vec::new();
+    for (hdr, props) in &asset.exports {
+        if hdr.object_name.starts_with("Default__") && !props.is_empty() {
+            for prop in props {
+                // Skip internal engine properties
+                if matches!(prop.name.as_str(), "ActorLabel" | "bCanProxyPhysics") { continue; }
+                let val_str = prop_value_short(&prop.value, &asset.imports, &export_names);
+                defaults.push((prop.name.clone(), val_str));
+            }
+        }
+    }
+
+    // Print variables section: declaration with default if available
+    if !members.is_empty() {
+        println!("Variables:");
+        for decl in &members {
+            let var_name = decl.split(':').next().unwrap_or("");
+            if let Some((_, val)) = defaults.iter().find(|(n, _)| n == var_name) {
+                println!("  {} = {}", decl, val);
+            } else {
+                println!("  {}", decl);
+            }
+        }
+        println!();
+    } else if !defaults.is_empty() {
+        // Fallback: show defaults even without member declarations
+        println!("Default values:");
+        for (name, val) in &defaults {
+            println!("  {} = {}", name, val);
+        }
+        println!();
+    }
+
+    // Functions with signatures and bytecode
+    let mut has_functions = false;
+    for (hdr, props) in &asset.exports {
+        let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
+        if !class.ends_with(".Function") { continue; }
+        if !matches_filter(&hdr.object_name, filters) { continue; }
+
+        // Get signature or fall back to bare name
+        let sig = find_prop_str(props, "Signature")
+            .unwrap_or_else(|| format!("{}()", hdr.object_name));
+        let flags = find_prop_str(props, "FunctionFlags")
+            .map(|f| format!(" [{}]", f))
+            .unwrap_or_default();
+
+        if !has_functions {
+            println!("Functions:");
+            has_functions = true;
+        }
+        println!("  {}{}", sig, flags);
+
+        // Show bytecode pseudo-code
+        if let Some(bc_prop) = find_prop(props, "Bytecode") {
+            if let PropValue::Array { items, .. } = &bc_prop.value {
+                for item in items {
+                    if let PropValue::Str(line) = item {
+                        // Strip hex offset prefix (e.g. "0004: ")
+                        let code = if line.len() > 6 && line.as_bytes()[4] == b':' {
+                            &line[6..]
+                        } else {
+                            line
+                        };
+                        println!("    {}", code);
+                    }
+                }
+            }
+        }
+    }
+    if has_functions { println!(); }
+
+    // Function flags for graph headers
     let mut func_flags: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for (hdr, props) in &asset.exports {
         let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
@@ -1536,7 +1899,7 @@ fn print_summary(asset: &ParsedAsset, filters: &[String]) {
         }
     }
 
-    // Function graphs
+    // Graphs (visual node layout)
     for (hdr, props) in &asset.exports {
         let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
         if !class.ends_with(".EdGraph") { continue; }
@@ -1637,6 +2000,17 @@ fn prop_value_short(val: &PropValue, imports: &[ImportEntry], export_names: &[St
         PropValue::Byte { value, .. } => value.clone(),
         PropValue::Array { items, .. } => format!("[{} items]", items.len()),
         PropValue::Map { entries, .. } => format!("{{{} entries}}", entries.len()),
+        PropValue::Struct { struct_type, fields } => {
+            match struct_type.as_str() {
+                "Vector" | "Rotator" => {
+                    let parts: Vec<String> = fields.iter()
+                        .map(|f| prop_value_short(&f.value, imports, export_names))
+                        .collect();
+                    format!("({})", parts.join(", "))
+                }
+                _ => format!("{} {{...}}", struct_type),
+            }
+        }
         _ => "...".into(),
     }
 }
