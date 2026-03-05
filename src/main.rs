@@ -7,14 +7,10 @@ use serde_json::{json, Value};
 // --- CLI ---
 
 #[derive(ClapParser)]
-#[command(name = "bp-inspect", about = "Extract Blueprint graph data from .uasset files")]
+#[command(name = "bp-inspect", about = "Extract Blueprint graph data from .uasset files", version)]
 struct Cli {
     /// Path to the .uasset file
     path: PathBuf,
-
-    /// Engine version (e.g. 4.27, 5.0)
-    #[arg(short = 'v', long, default_value = "4.27")]
-    engine_version: String,
 
     /// Output as JSON
     #[arg(long)]
@@ -1101,7 +1097,7 @@ struct ParsedAsset {
     exports: Vec<(ExportHeader, Vec<Property>)>,
 }
 
-fn parse_asset(data: &[u8], _engine_ver: &str, debug: bool) -> ParsedAsset {
+fn parse_asset(data: &[u8], debug: bool) -> ParsedAsset {
     let file_size = data.len();
     let mut c = Cursor::new(data);
 
@@ -2124,7 +2120,7 @@ fn main() {
         std::process::exit(1);
     });
 
-    let asset = parse_asset(&data, &cli.engine_version, cli.debug);
+    let asset = parse_asset(&data, cli.debug);
 
     // Parse filter patterns
     let filters: Vec<String> = cli.filter

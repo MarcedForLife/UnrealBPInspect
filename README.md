@@ -19,8 +19,8 @@ bp-inspect [OPTIONS] <PATH>
 | `--summary`              | Concise logical structure: class hierarchy, components, variables, functions with pseudo-code |
 | `--json`                 | Full structured output as JSON                                                                |
 | `--filter <name>`        | Filter exports by name (substring match, comma-separated)                                     |
-| `--engine-version <ver>` | Engine version, e.g. `4.27`, `5.0` (default: `4.27`)                                          |
 | `--debug`                | Dump raw table data for format investigation                                                  |
+| `-V` / `--version`       | Print version                                                                                 |
 
 ### Summary mode
 
