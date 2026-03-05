@@ -62,7 +62,7 @@ Key things to know:
 Push a version tag to trigger GitHub Actions:
 
 ```bash
-git tag v0.3.0
+git tag v0.1.0
 git push --tags
 ```
 

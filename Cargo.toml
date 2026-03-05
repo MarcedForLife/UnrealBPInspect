@@ -1,6 +1,6 @@
 [package]
 name = "unreal-bp-inspect"
-version = "0.3.0"
+version = "0.1.0"
 edition = "2021"
 description = "Extract readable structure and logic from Unreal Engine Blueprint .uasset files"
 license = "MIT"
