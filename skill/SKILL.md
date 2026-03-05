@@ -1,0 +1,123 @@
+# Unreal Blueprint Debugging Skill
+
+Use `bp-inspect` to read and understand Unreal Engine Blueprint `.uasset` files from the command line.
+
+## When to use this
+
+- User asks about Blueprint logic, behaviour, or bugs
+- User wants to understand what a Blueprint does without opening the editor
+- User needs to migrate Blueprint logic to C++
+- User is debugging physics, collision, component setup, or variable state in a Blueprint
+- User references a `.uasset` file in their project
+
+## Prerequisites
+
+`bp-inspect` must be installed and available on PATH. Install from source (`cargo install --path .` in the repo) or download a binary from the GitHub releases.
+
+## Commands
+
+### Get a full overview
+
+```bash
+bp-inspect <path>.uasset --summary
+```
+
+Returns: class hierarchy, component tree with properties (meshes, physics, transforms), variable declarations with types, function signatures with decoded bytecode pseudo-code, and graph node summaries.
+
+Start here. This gives you everything you need for most questions.
+
+### Drill into a specific function
+
+```bash
+bp-inspect <path>.uasset --summary --filter <FunctionName>
+```
+
+Filters functions and graphs to the named export while keeping class context (components, variables). Use when the full summary is too noisy or you need to focus on one function.
+
+Multiple names can be comma-separated: `--filter GetSteeringAngle,UserConstructionScript`
+
+### Get structured data
+
+```bash
+bp-inspect <path>.uasset --json
+```
+
+Full export data as JSON. Use when you need to programmatically inspect properties, or when the summary view doesn't show a specific detail you need.
+
+### Find Blueprint files
+
+```bash
+find <ProjectRoot>/Content -name "*.uasset" | head -20
+```
+
+UE4 Blueprint `.uasset` files live under the `Content/` directory. Not all `.uasset` files are Blueprints -- some are meshes, textures, etc. `bp-inspect` will parse what it can and skip non-Blueprint data.
+
+## Reading the output
+
+### Components section
+
+Indentation shows the scene graph hierarchy (parent-child attachment). Each component shows:
+- Type in parentheses: `Stand (StaticMeshComponent)`
+- Sub-object properties: meshes, transforms, physics config, collision profiles
+- Child actor templates: configured defaults for spawned child actors
+
+### Variables section
+
+Class member variables with resolved types. Components are filtered out (shown in Components section). Default values from the CDO are shown inline when present: `MyVar: float = 0.5`
+
+### Functions section
+
+Each function shows:
+- Signature: `FunctionName(params) [Flags]`
+- Decoded bytecode as pseudo-code, indented below
+
+Pseudo-code conventions:
+- `self.VarName` -- instance variable access
+- `$Name` -- compiler-generated temporary (shortened from verbose Blueprint names)
+- `cast<Type>(expr)` -- dynamic cast
+- `ClassName::FunctionName(args)` -- static/library function call
+- `obj.FunctionName(args)` -- context call on an object
+
+### Graph section
+
+EdGraph node list showing the visual Blueprint graph structure. Less detailed than bytecode but shows node types (pure calls, events, variable gets/sets, casts).
+
+## Common workflows
+
+### Understanding what a Blueprint does
+
+1. Run `--summary` to get the full picture
+2. Read the Components section for the physical structure
+3. Read the Variables section for state
+4. Read the Functions section for logic -- the pseudo-code reads like simplified code
+
+### Debugging a specific function
+
+1. Run `--summary --filter FunctionName`
+2. Read the pseudo-code line by line
+3. Cross-reference variable types from the Variables/Components sections
+4. Check component properties for physics/collision configuration if relevant
+
+### Blueprint to C++ migration
+
+1. Run `--summary` to understand the full Blueprint
+2. Components section maps to `CreateDefaultSubobject<T>()` calls in the constructor
+3. Component properties map to constructor defaults (`SetRelativeLocation`, `SetCollisionProfileName`, etc.)
+4. Variables section maps to `UPROPERTY()` declarations
+5. Function pseudo-code maps to the C++ implementation -- the operations translate directly
+6. Function flags indicate `UFUNCTION()` specifiers: `BlueprintPure` -> `BlueprintPure`, `BlueprintCallable` -> `BlueprintCallable`, `Const` -> `const`
+
+### Comparing two Blueprints
+
+Run `--summary` on both and diff the output:
+
+```bash
+diff <(bp-inspect A.uasset --summary) <(bp-inspect B.uasset --summary)
+```
+
+## Limitations
+
+- Only supports UE4 uncooked `.uasset` files (not split `.uasset`/`.uexp` cooked assets)
+- Tested against UE4.27; UE5 support is planned
+- Some complex bytecode expressions may show as `??(0xNN)` -- the common opcodes are covered
+- Default property values only show non-null values from the CDO

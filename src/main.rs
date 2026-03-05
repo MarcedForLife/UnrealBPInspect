@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 // --- CLI ---
 
 #[derive(ClapParser)]
-#[command(name = "bp-dump", about = "Extract Blueprint graph data from .uasset files")]
+#[command(name = "bp-inspect", about = "Extract Blueprint graph data from .uasset files")]
 struct Cli {
     /// Path to the .uasset file
     path: PathBuf,
