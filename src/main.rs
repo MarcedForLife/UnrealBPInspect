@@ -257,6 +257,16 @@ fn read_property_value(
             skip_property_guid(c, file_ver)?;
             Ok(PropValue::Int(read_i32(c)?))
         }
+        "Int8Property" => {
+            skip_property_guid(c, file_ver)?;
+            Ok(PropValue::Int(read_u8(c)? as i8 as i32))
+        }
+        "Int16Property" | "UInt16Property" => {
+            skip_property_guid(c, file_ver)?;
+            let mut b = [0u8; 2];
+            c.read_exact(&mut b)?;
+            Ok(PropValue::Int(i16::from_le_bytes(b) as i32))
+        }
         "Int64Property" | "UInt64Property" => {
             skip_property_guid(c, file_ver)?;
             Ok(PropValue::Int64(read_i64(c)?))
@@ -344,6 +354,36 @@ fn read_property_value(
             c.seek(SeekFrom::Start(map_data_end))?;
             Ok(PropValue::Map { key_type, value_type, entries })
         }
+        "SetProperty" => {
+            let inner_type = nt.fname(c)?;
+            skip_property_guid(c, file_ver)?;
+            let set_data_end = data_start + tag_overhead(type_name, file_ver) + size as u64;
+            let _num_to_remove = read_i32(c)?;
+            let count = read_i32(c)?;
+            let items = read_array_items(c, nt, &inner_type, count, set_data_end, file_ver)?;
+            c.seek(SeekFrom::Start(set_data_end))?;
+            Ok(PropValue::Array { inner_type, items })
+        }
+        "DelegateProperty" => {
+            skip_property_guid(c, file_ver)?;
+            let obj = read_i32(c)?;
+            let func = nt.fname(c)?;
+            let desc = if obj != 0 { format!("{}::{}", obj, func) } else { func };
+            Ok(PropValue::Str(desc))
+        }
+        "MulticastDelegateProperty" | "MulticastInlineDelegateProperty"
+        | "MulticastSparseDelegateProperty" => {
+            skip_property_guid(c, file_ver)?;
+            let count = read_i32(c)?;
+            let mut bindings = Vec::new();
+            for _ in 0..count {
+                let obj = read_i32(c)?;
+                let func = nt.fname(c)?;
+                let desc = if obj != 0 { format!("{}::{}", obj, func) } else { func };
+                bindings.push(PropValue::Str(desc));
+            }
+            Ok(PropValue::Array { inner_type: "DelegateProperty".into(), items: bindings })
+        }
         _ => {
             skip_property_guid(c, file_ver)?;
             c.seek(SeekFrom::Current(size as i64))?;
@@ -364,14 +404,26 @@ fn skip_property_guid(c: &mut R, file_ver: i32) -> Result<()> {
 
 fn read_map_item(c: &mut R, nt: &NameTable, type_name: &str, end_offset: u64, file_ver: i32) -> Result<PropValue> {
     match type_name {
-        "IntProperty" | "Int32Property" => Ok(PropValue::Int(read_i32(c)?)),
+        "IntProperty" | "Int32Property" | "UInt32Property" => Ok(PropValue::Int(read_i32(c)?)),
+        "Int8Property" => Ok(PropValue::Int(read_u8(c)? as i8 as i32)),
+        "Int16Property" | "UInt16Property" => {
+            let mut b = [0u8; 2]; c.read_exact(&mut b)?;
+            Ok(PropValue::Int(i16::from_le_bytes(b) as i32))
+        }
         "Int64Property" | "UInt64Property" => Ok(PropValue::Int64(read_i64(c)?)),
         "FloatProperty" => Ok(PropValue::Float(read_f32(c)?)),
+        "DoubleProperty" => Ok(PropValue::Double(read_f64(c)?)),
         "BoolProperty" => Ok(PropValue::Bool(read_u8(c)? != 0)),
+        "ByteProperty" => Ok(PropValue::Int(read_u8(c)? as i32)),
         "NameProperty" => Ok(PropValue::Name(nt.fname(c)?)),
         "StrProperty" => Ok(PropValue::Str(read_fstring(c)?)),
         "ObjectProperty" => Ok(PropValue::Object(read_i32(c)?)),
         "EnumProperty" => Ok(PropValue::Name(nt.fname(c)?)),
+        "SoftObjectProperty" => {
+            let path = read_fstring(c)?;
+            let _sub = read_fstring(c)?;
+            Ok(PropValue::SoftObject(path))
+        }
         "StructProperty" => {
             let fields = read_properties(c, nt, end_offset, file_ver);
             Ok(PropValue::Struct { struct_type: String::new(), fields })
@@ -387,6 +439,7 @@ fn tag_overhead(_type_name: &str, file_ver: i32) -> u64 {
     let guid_byte: u64 = if file_ver >= 503 { 1 } else { 0 };
     match _type_name {
         "ArrayProperty" => 8 + guid_byte + 4,
+        "SetProperty" => 8 + guid_byte + 8, // inner_type FName + guid + num_to_remove + count
         "MapProperty" => 16 + guid_byte + 8, // key FName + value FName + guid + num_to_remove + count
         "EnumProperty" => 8 + guid_byte,
         "ByteProperty" => 8 + guid_byte,
@@ -482,9 +535,19 @@ fn read_array_items(
             break;
         }
         let item = match inner_type {
-            "IntProperty" | "Int32Property" => PropValue::Int(read_i32(c)?),
+            "IntProperty" | "Int32Property" | "UInt32Property" => PropValue::Int(read_i32(c)?),
+            "Int8Property" => PropValue::Int(read_u8(c)? as i8 as i32),
+            "Int16Property" | "UInt16Property" => {
+                let mut b = [0u8; 2]; c.read_exact(&mut b)?;
+                PropValue::Int(i16::from_le_bytes(b) as i32)
+            }
+            "Int64Property" | "UInt64Property" => PropValue::Int64(read_i64(c)?),
             "FloatProperty" => PropValue::Float(read_f32(c)?),
+            "DoubleProperty" => PropValue::Double(read_f64(c)?),
+            "BoolProperty" => PropValue::Bool(read_u8(c)? != 0),
+            "ByteProperty" => PropValue::Int(read_u8(c)? as i32),
             "NameProperty" => PropValue::Name(nt.fname(c)?),
+            "EnumProperty" => PropValue::Name(nt.fname(c)?),
             "ObjectProperty" => PropValue::Object(read_i32(c)?),
             "StrProperty" => PropValue::Str(read_fstring(c)?),
             "SoftObjectProperty" => {
@@ -710,6 +773,23 @@ fn read_bc_fname(bc: &[u8], pos: &mut usize, nt: &NameTable) -> String {
     if number > 0 { format!("{}_{}", base, number - 1) } else { base.to_string() }
 }
 
+fn read_bc_u16(bc: &[u8], pos: &mut usize) -> u16 {
+    if *pos + 2 > bc.len() { *pos = bc.len(); return 0; }
+    let v = u16::from_le_bytes([bc[*pos], bc[*pos+1]]);
+    *pos += 2;
+    v
+}
+
+fn read_bc_u64(bc: &[u8], pos: &mut usize) -> u64 {
+    if *pos + 8 > bc.len() { *pos = bc.len(); return 0; }
+    let v = u64::from_le_bytes([
+        bc[*pos], bc[*pos+1], bc[*pos+2], bc[*pos+3],
+        bc[*pos+4], bc[*pos+5], bc[*pos+6], bc[*pos+7],
+    ]);
+    *pos += 8;
+    v
+}
+
 fn read_bc_string(bc: &[u8], pos: &mut usize) -> String {
     let mut s = Vec::new();
     while *pos < bc.len() {
@@ -800,6 +880,12 @@ fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             let cond = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
             Some(format!("if !({}) jump 0x{:x}", cond, offset))
         }
+        0x09 => { // EX_Assert
+            let _line = read_bc_u16(bc, pos);
+            let _debug_only = read_bc_u8(bc, pos);
+            let expr = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            Some(format!("assert({})", expr))
+        }
         0x0B => Some("nop".into()), // EX_Nothing
         0x0F => { // EX_Let
             let _prop = read_bc_field_path(bc, pos, nt); // type info, redundant with variable
@@ -886,23 +972,73 @@ fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
         0x29 => { // EX_TextConst
             let text_type = read_bc_u8(bc, pos);
             match text_type {
-                0xFF => Some("\"\"".into()),
-                0 => { // LOCTEXT
-                    let _ns = read_bc_string(bc, pos);
-                    let _key = read_bc_string(bc, pos);
-                    let val = read_bc_string(bc, pos);
-                    Some(format!("\"{}\"", val))
+                0 => Some("\"\"".into()), // Empty
+                1 => { // LocalizedText (3 sub-expressions: namespace, key, source)
+                    let _ns = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+                    let _key = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+                    let val = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+                    Some(format!("LOCTEXT({})", val))
                 }
+                2 | 3 => { // InvariantCultureText | LiteralString
+                    let val = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+                    Some(val)
+                }
+                4 => { // StringTableEntry
+                    let _table = read_bc_obj_ref(bc, pos, imports, export_names);
+                    let key = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+                    Some(format!("STRTABLE({})", key))
+                }
+                0xFF => Some("\"\"".into()), // Legacy empty
                 _ => Some(format!("text(type={})", text_type))
             }
         }
         0x2A => Some("null".into()),  // EX_NoObject
+        0x2B => { // EX_TransformConst
+            let rx = read_bc_f32(bc, pos); let ry = read_bc_f32(bc, pos);
+            let rz = read_bc_f32(bc, pos); let rw = read_bc_f32(bc, pos);
+            let tx = read_bc_f32(bc, pos); let ty = read_bc_f32(bc, pos);
+            let tz = read_bc_f32(bc, pos);
+            let sx = read_bc_f32(bc, pos); let sy = read_bc_f32(bc, pos);
+            let sz = read_bc_f32(bc, pos);
+            Some(format!("Transform(Rot({:.1},{:.1},{:.1},{:.1}),Pos({:.1},{:.1},{:.1}),Scale({:.1},{:.1},{:.1}))",
+                rx, ry, rz, rw, tx, ty, tz, sx, sy, sz))
+        }
         0x2C => Some(format!("{}", read_bc_u8(bc, pos))), // EX_IntConstByte
+        0x2D => Some("null_iface".into()), // EX_NoInterface
         0x2E => { // EX_DynamicCast
             let class = read_bc_obj_ref(bc, pos, imports, export_names);
             let expr = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
             Some(format!("cast<{}>({})", class, expr))
         }
+        0x2F => { // EX_StructConst
+            let struct_ref = read_bc_obj_ref(bc, pos, imports, export_names);
+            let _serial_size = read_bc_i32(bc, pos);
+            let mut fields = Vec::new();
+            loop {
+                if *pos >= bc.len() { break; }
+                if bc[*pos] == 0x30 { *pos += 1; break; } // EX_EndStructConst
+                match decode_expr(bc, pos, nt, imports, export_names) {
+                    Some(f) => fields.push(f),
+                    None => break,
+                }
+            }
+            Some(format!("{}({})", struct_ref, fields.join(", ")))
+        }
+        0x30 => None, // EX_EndStructConst — sentinel
+        0x31 => { // EX_SetArray
+            let target = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            let mut items = Vec::new();
+            loop {
+                if *pos >= bc.len() { break; }
+                if bc[*pos] == 0x32 { *pos += 1; break; } // EX_EndArray
+                match decode_expr(bc, pos, nt, imports, export_names) {
+                    Some(item) => items.push(item),
+                    None => break,
+                }
+            }
+            Some(format!("{} = [{}]", target, items.join(", ")))
+        }
+        0x32 => None, // EX_EndArray — sentinel
         0x34 => { // EX_UnicodeStringConst
             let mut s = Vec::new();
             while *pos + 1 < bc.len() {
@@ -914,15 +1050,85 @@ fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             Some(format!("\"{}\"", String::from_utf16_lossy(&s)))
         }
         0x35 => Some(format!("{}L", read_bc_i64(bc, pos))), // EX_Int64Const
+        0x36 => Some(format!("{}UL", read_bc_u64(bc, pos))), // EX_UInt64Const
         0x38 => { // EX_PrimitiveCast
             let cast_type = read_bc_u8(bc, pos);
             let expr = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
             Some(format!("cast_{}({})", cast_type, expr))
         }
+        0x39 => { // EX_SetSet
+            let target = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            let mut items = Vec::new();
+            loop {
+                if *pos >= bc.len() { break; }
+                if bc[*pos] == 0x3A { *pos += 1; break; } // EX_EndSet
+                match decode_expr(bc, pos, nt, imports, export_names) {
+                    Some(item) => items.push(item),
+                    None => break,
+                }
+            }
+            Some(format!("{} = set{{{}}}", target, items.join(", ")))
+        }
+        0x3A => None, // EX_EndSet — sentinel
+        0x3B => { // EX_SetMap
+            let target = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            let mut items = Vec::new();
+            loop {
+                if *pos >= bc.len() { break; }
+                if bc[*pos] == 0x3C { *pos += 1; break; } // EX_EndMap
+                match decode_expr(bc, pos, nt, imports, export_names) {
+                    Some(item) => items.push(item),
+                    None => break,
+                }
+            }
+            Some(format!("{} = map{{{}}}", target, items.join(", ")))
+        }
+        0x3C => None, // EX_EndMap — sentinel
+        0x3D => { // EX_SetConst
+            let _inner = read_bc_obj_ref(bc, pos, imports, export_names);
+            let _count = read_bc_i32(bc, pos);
+            let mut items = Vec::new();
+            loop {
+                if *pos >= bc.len() { break; }
+                if bc[*pos] == 0x3E { *pos += 1; break; } // EX_EndSetConst
+                match decode_expr(bc, pos, nt, imports, export_names) {
+                    Some(item) => items.push(item),
+                    None => break,
+                }
+            }
+            Some(format!("set{{{}}}", items.join(", ")))
+        }
+        0x3E => None, // EX_EndSetConst — sentinel
+        0x3F => { // EX_MapConst
+            let _key_prop = read_bc_obj_ref(bc, pos, imports, export_names);
+            let _val_prop = read_bc_obj_ref(bc, pos, imports, export_names);
+            let _count = read_bc_i32(bc, pos);
+            let mut items = Vec::new();
+            loop {
+                if *pos >= bc.len() { break; }
+                if bc[*pos] == 0x40 { *pos += 1; break; } // EX_EndMapConst
+                match decode_expr(bc, pos, nt, imports, export_names) {
+                    Some(item) => items.push(item),
+                    None => break,
+                }
+            }
+            Some(format!("map{{{}}}", items.join(", ")))
+        }
+        0x40 => None, // EX_EndMapConst — sentinel
         0x41 => { // EX_StructMemberContext
             let prop = read_bc_field_path(bc, pos, nt);
             let struct_expr = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
             Some(format!("{}.{}", struct_expr, prop))
+        }
+        0x42 => { // EX_LetMulticastDelegate
+            let var = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            let val = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            Some(format!("{} = {}", var, val))
+        }
+        0x43 => { // EX_LetDelegate
+            let var = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            let val = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            Some(format!("{} = {}", var, val))
         }
         0x44 => { // EX_LocalVirtualFunction
             let name = read_bc_fname(bc, pos, nt);
@@ -943,6 +1149,10 @@ fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             Some(format!("push_flow 0x{:x}", offset))
         }
         0x4D => Some("pop_flow".into()), // EX_PopExecutionFlow
+        0x4E => { // EX_ComputedJump
+            let expr = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            Some(format!("jump_computed({})", expr))
+        }
         0x4F => { // EX_PopExecutionFlowIfNot
             let cond = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
             Some(format!("pop_flow_if_not({})", cond))
@@ -958,6 +1168,16 @@ fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             Some(format!("icast<{}>({})", class, expr))
         }
         0x53 => None, // EX_EndOfScript
+        0x54 => { // EX_CrossInterfaceCast
+            let class = read_bc_obj_ref(bc, pos, imports, export_names);
+            let expr = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            Some(format!("icast<{}>({})", class, expr))
+        }
+        0x55 => { // EX_InterfaceToObjCast
+            let class = read_bc_obj_ref(bc, pos, imports, export_names);
+            let expr = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            Some(format!("obj_cast<{}>({})", class, expr))
+        }
         0x5A => Some("wire_trace".into()), // EX_WireTracepoint
         0x5B => { // EX_SkipOffsetConst
             let offset = read_bc_u32(bc, pos);
@@ -967,6 +1187,10 @@ fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             let delegate = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
             let func = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
             Some(format!("{} += {}", delegate, func))
+        }
+        0x5D => { // EX_ClearMulticastDelegate
+            let delegate = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            Some(format!("{}.Clear()", delegate))
         }
         0x5E => Some("tracepoint".into()), // EX_Tracepoint
         0x5F => { // EX_LetObj
@@ -985,19 +1209,74 @@ fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             let obj = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
             Some(format!("bind({}, {}, {})", name, delegate, obj))
         }
+        0x62 => { // EX_RemoveMulticastDelegate
+            let delegate = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            let func = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            Some(format!("{} -= {}", delegate, func))
+        }
         0x63 => { // EX_CallMulticastDelegate
             let func = read_bc_obj_ref(bc, pos, imports, export_names);
             let args = decode_func_args(bc, pos, nt, imports, export_names);
             Some(format!("{}.Broadcast({})", func, args.join(", ")))
+        }
+        0x64 => { // EX_LetValueOnPersistentFrame
+            let prop = read_bc_field_path(bc, pos, nt);
+            let val = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            Some(format!("{} = {} [persistent]", prop, val))
+        }
+        0x65 => { // EX_ArrayConst
+            let _inner = read_bc_obj_ref(bc, pos, imports, export_names);
+            let _count = read_bc_i32(bc, pos);
+            let mut items = Vec::new();
+            loop {
+                if *pos >= bc.len() { break; }
+                if bc[*pos] == 0x66 { *pos += 1; break; } // EX_EndArrayConst
+                match decode_expr(bc, pos, nt, imports, export_names) {
+                    Some(item) => items.push(item),
+                    None => break,
+                }
+            }
+            Some(format!("[{}]", items.join(", ")))
+        }
+        0x66 => None, // EX_EndArrayConst — sentinel
+        0x67 => { // EX_SoftObjectConst
+            let path = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            Some(format!("soft({})", path))
         }
         0x68 => { // EX_CallMath
             let func = read_bc_obj_ref(bc, pos, imports, export_names);
             let args = decode_func_args(bc, pos, nt, imports, export_names);
             Some(format!("{}({})", func, args.join(", ")))
         }
+        0x69 => { // EX_SwitchValue
+            let num_cases = read_bc_u16(bc, pos);
+            let _end_offset = read_bc_u32(bc, pos);
+            let index = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            let mut cases = Vec::new();
+            for _ in 0..num_cases {
+                let case_val = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+                let _next_offset = read_bc_u32(bc, pos);
+                let result = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+                cases.push(format!("{}: {}", case_val, result));
+            }
+            let default = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            Some(format!("switch({}) {{ {}, default: {} }}", index, cases.join(", "), default))
+        }
         0x6A => { // EX_InstrumentationEvent
-            let _event_type = read_bc_u8(bc, pos);
+            let event_type = read_bc_u8(bc, pos);
+            if event_type == 4 { // InlineEvent
+                let _name = read_bc_fname(bc, pos, nt);
+            }
             Some("instrumentation".into())
+        }
+        0x6B => { // EX_ArrayGetByRef
+            let array = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            let index = decode_expr(bc, pos, nt, imports, export_names).unwrap_or_default();
+            Some(format!("{}[{}]", array, index))
+        }
+        0x6D => { // EX_FieldPathConst
+            let path = read_bc_field_path(bc, pos, nt);
+            Some(format!("fieldpath({})", path))
         }
         _ => {
             // Unknown opcode — can't continue safely

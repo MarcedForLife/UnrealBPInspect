@@ -5,7 +5,7 @@ Standalone Rust CLI that parses Unreal Engine Blueprint `.uasset` files into rea
 ## Project structure
 
 ```
-src/main.rs          Single-file parser (~1900 lines)
+src/main.rs          Single-file parser (~2400 lines)
 skill/SKILL.md       Claude Code skill instructions
 skill/README.md      Skill install guide
 samples/             Test .uasset files (UE4.27, uncooked)
