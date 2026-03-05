@@ -1,6 +1,7 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
+use anyhow::{ensure, Context, Result};
 use clap::Parser as ClapParser;
 use serde_json::{json, Value};
 
@@ -33,63 +34,63 @@ struct Cli {
 
 type R<'a> = Cursor<&'a [u8]>;
 
-fn read_i32(c: &mut R) -> i32 {
+fn read_i32(c: &mut R) -> Result<i32> {
     let mut b = [0u8; 4];
-    c.read_exact(&mut b).unwrap();
-    i32::from_le_bytes(b)
+    c.read_exact(&mut b)?;
+    Ok(i32::from_le_bytes(b))
 }
 
-fn read_u32(c: &mut R) -> u32 {
+fn read_u32(c: &mut R) -> Result<u32> {
     let mut b = [0u8; 4];
-    c.read_exact(&mut b).unwrap();
-    u32::from_le_bytes(b)
+    c.read_exact(&mut b)?;
+    Ok(u32::from_le_bytes(b))
 }
 
-fn read_i64(c: &mut R) -> i64 {
+fn read_i64(c: &mut R) -> Result<i64> {
     let mut b = [0u8; 8];
-    c.read_exact(&mut b).unwrap();
-    i64::from_le_bytes(b)
+    c.read_exact(&mut b)?;
+    Ok(i64::from_le_bytes(b))
 }
 
-fn read_u8(c: &mut R) -> u8 {
+fn read_u8(c: &mut R) -> Result<u8> {
     let mut b = [0u8; 1];
-    c.read_exact(&mut b).unwrap();
-    b[0]
+    c.read_exact(&mut b)?;
+    Ok(b[0])
 }
 
-fn read_f32(c: &mut R) -> f32 {
+fn read_f32(c: &mut R) -> Result<f32> {
     let mut b = [0u8; 4];
-    c.read_exact(&mut b).unwrap();
-    f32::from_le_bytes(b)
+    c.read_exact(&mut b)?;
+    Ok(f32::from_le_bytes(b))
 }
 
-fn read_f64(c: &mut R) -> f64 {
+fn read_f64(c: &mut R) -> Result<f64> {
     let mut b = [0u8; 8];
-    c.read_exact(&mut b).unwrap();
-    f64::from_le_bytes(b)
+    c.read_exact(&mut b)?;
+    Ok(f64::from_le_bytes(b))
 }
 
-fn read_guid(c: &mut R) -> [u8; 16] {
+fn read_guid(c: &mut R) -> Result<[u8; 16]> {
     let mut g = [0u8; 16];
-    c.read_exact(&mut g).unwrap();
-    g
+    c.read_exact(&mut g)?;
+    Ok(g)
 }
 
-fn read_fstring(c: &mut R) -> String {
-    let len = read_i32(c);
+fn read_fstring(c: &mut R) -> Result<String> {
+    let len = read_i32(c)?;
     if len == 0 {
-        return String::new();
+        return Ok(String::new());
     }
     if len > 0 {
         let mut s = vec![0u8; len as usize];
-        c.read_exact(&mut s).unwrap();
-        String::from_utf8_lossy(&s).trim_end_matches('\0').to_string()
+        c.read_exact(&mut s)?;
+        Ok(String::from_utf8_lossy(&s).trim_end_matches('\0').to_string())
     } else {
         let count = (-len) as usize;
         let mut s = vec![0u8; count * 2];
-        c.read_exact(&mut s).unwrap();
+        c.read_exact(&mut s)?;
         let utf16: Vec<u16> = s.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        String::from_utf16_lossy(&utf16).trim_end_matches('\0').to_string()
+        Ok(String::from_utf16_lossy(&utf16).trim_end_matches('\0').to_string())
     }
 }
 
@@ -100,35 +101,35 @@ struct NameTable {
 }
 
 impl NameTable {
-    fn read(c: &mut R, count: i32, offset: i32) -> Self {
-        c.seek(SeekFrom::Start(offset as u64)).unwrap();
+    fn read(c: &mut R, count: i32, offset: i32) -> Result<Self> {
+        c.seek(SeekFrom::Start(offset as u64))?;
         let mut names = Vec::with_capacity(count as usize);
         for _ in 0..count {
-            let name = read_fstring(c);
-            let _hash = read_u32(c);
+            let name = read_fstring(c)?;
+            let _hash = read_u32(c)?;
             names.push(name);
         }
-        NameTable { names }
+        Ok(NameTable { names })
     }
 
     fn get(&self, index: i32) -> &str {
         self.names.get(index as usize).map(|s| s.as_str()).unwrap_or("?")
     }
 
-    fn fname(&self, c: &mut R) -> String {
-        let index = read_i32(c);
-        let number = read_i32(c);
+    fn fname(&self, c: &mut R) -> Result<String> {
+        let index = read_i32(c)?;
+        let number = read_i32(c)?;
         let base = self.get(index);
         if number > 0 {
-            format!("{}_{}", base, number - 1)
+            Ok(format!("{}_{}", base, number - 1))
         } else {
-            base.to_string()
+            Ok(base.to_string())
         }
     }
 
-    fn fname_is_none(&self, c: &mut R) -> (String, bool) {
-        let index = read_i32(c);
-        let number = read_i32(c);
+    fn fname_is_none(&self, c: &mut R) -> Result<(String, bool)> {
+        let index = read_i32(c)?;
+        let number = read_i32(c)?;
         let base = self.get(index);
         let is_none = base == "None" && number == 0;
         let name = if number > 0 {
@@ -136,7 +137,7 @@ impl NameTable {
         } else {
             base.to_string()
         };
-        (name, is_none)
+        Ok((name, is_none))
     }
 }
 
@@ -198,33 +199,33 @@ fn read_properties(c: &mut R, nt: &NameTable, end_offset: u64, file_ver: i32) ->
             break;
         }
         let pos_before = c.position();
-        let (prop_name, is_none) = nt.fname_is_none(c);
+        let Ok((prop_name, is_none)) = nt.fname_is_none(c) else { break };
         if is_none {
             break;
         }
         // Sanity check: need at least 16 more bytes for type_name + size + array_index
         if c.position() + 16 > end_offset {
-            c.seek(SeekFrom::Start(pos_before)).unwrap();
+            let _ = c.seek(SeekFrom::Start(pos_before));
             break;
         }
-        let type_name = nt.fname(c);
+        let Ok(type_name) = nt.fname(c) else { break };
 
         // Valid UE tagged property types always end in "Property"
         if !type_name.ends_with("Property") {
-            c.seek(SeekFrom::Start(pos_before)).unwrap();
+            let _ = c.seek(SeekFrom::Start(pos_before));
             break;
         }
 
-        let size = read_i32(c);
-        let _array_index = read_i32(c);
+        let Ok(size) = read_i32(c) else { break };
+        let Ok(_array_index) = read_i32(c) else { break };
 
         // Sanity: reject nonsensical sizes
         if size < 0 || size as u64 > end_offset - c.position() + 256 {
-            c.seek(SeekFrom::Start(pos_before)).unwrap();
+            let _ = c.seek(SeekFrom::Start(pos_before));
             break;
         }
 
-        let value = read_property_value(c, nt, &type_name, size, end_offset, file_ver);
+        let Ok(value) = read_property_value(c, nt, &type_name, size, end_offset, file_ver) else { break };
         props.push(Property { name: prop_name, value });
     }
     props
@@ -237,148 +238,145 @@ fn read_property_value(
     size: i32,
     _end_offset: u64,
     file_ver: i32,
-) -> PropValue {
+) -> Result<PropValue> {
     let data_start = c.position();
 
     match type_name {
         "BoolProperty" => {
-            let val = read_u8(c) != 0;
+            let val = read_u8(c)? != 0;
             // HasPropertyGuid
             if file_ver >= 503 {
-                let has_guid = read_u8(c);
+                let has_guid = read_u8(c)?;
                 if has_guid != 0 {
-                    let _guid = read_guid(c);
+                    let _guid = read_guid(c)?;
                 }
             }
-            PropValue::Bool(val)
+            Ok(PropValue::Bool(val))
         }
         "IntProperty" | "Int32Property" | "UInt32Property" => {
-            skip_property_guid(c, file_ver);
-            PropValue::Int(read_i32(c))
+            skip_property_guid(c, file_ver)?;
+            Ok(PropValue::Int(read_i32(c)?))
         }
         "Int64Property" | "UInt64Property" => {
-            skip_property_guid(c, file_ver);
-            PropValue::Int64(read_i64(c))
+            skip_property_guid(c, file_ver)?;
+            Ok(PropValue::Int64(read_i64(c)?))
         }
         "FloatProperty" => {
-            skip_property_guid(c, file_ver);
-            PropValue::Float(read_f32(c))
+            skip_property_guid(c, file_ver)?;
+            Ok(PropValue::Float(read_f32(c)?))
         }
         "DoubleProperty" => {
-            skip_property_guid(c, file_ver);
-            PropValue::Double(read_f64(c))
+            skip_property_guid(c, file_ver)?;
+            Ok(PropValue::Double(read_f64(c)?))
         }
         "StrProperty" | "TextProperty" => {
-            skip_property_guid(c, file_ver);
+            skip_property_guid(c, file_ver)?;
             if type_name == "TextProperty" {
-                // TextProperty has a complex format, just grab raw bytes
-                let text = read_text_property(c, size);
-                PropValue::Text(text)
+                let text = read_text_property(c, size)?;
+                Ok(PropValue::Text(text))
             } else {
-                PropValue::Str(read_fstring(c))
+                Ok(PropValue::Str(read_fstring(c)?))
             }
         }
         "NameProperty" => {
-            skip_property_guid(c, file_ver);
-            PropValue::Name(nt.fname(c))
+            skip_property_guid(c, file_ver)?;
+            Ok(PropValue::Name(nt.fname(c)?))
         }
         "ObjectProperty" | "SoftObjectProperty" => {
-            skip_property_guid(c, file_ver);
+            skip_property_guid(c, file_ver)?;
             if type_name == "SoftObjectProperty" {
-                let path = read_fstring(c);
-                let _sub = read_fstring(c);
-                PropValue::SoftObject(path)
+                let path = read_fstring(c)?;
+                let _sub = read_fstring(c)?;
+                Ok(PropValue::SoftObject(path))
             } else {
-                PropValue::Object(read_i32(c))
+                Ok(PropValue::Object(read_i32(c)?))
             }
         }
         "EnumProperty" => {
-            let enum_name = nt.fname(c);
-            skip_property_guid(c, file_ver);
-            let value = nt.fname(c);
-            PropValue::Enum { enum_type: enum_name, value }
+            let enum_name = nt.fname(c)?;
+            skip_property_guid(c, file_ver)?;
+            let value = nt.fname(c)?;
+            Ok(PropValue::Enum { enum_type: enum_name, value })
         }
         "ByteProperty" => {
-            let enum_name = nt.fname(c);
-            skip_property_guid(c, file_ver);
+            let enum_name = nt.fname(c)?;
+            skip_property_guid(c, file_ver)?;
             if size == 1 {
-                let val = read_u8(c);
-                PropValue::Byte { enum_name, value: val.to_string() }
+                let val = read_u8(c)?;
+                Ok(PropValue::Byte { enum_name, value: val.to_string() })
             } else {
-                // Enum value as FName
-                let value = nt.fname(c);
-                PropValue::Byte { enum_name, value }
+                let value = nt.fname(c)?;
+                Ok(PropValue::Byte { enum_name, value })
             }
         }
         "StructProperty" => {
-            let struct_type = nt.fname(c);
-            let _struct_guid = read_guid(c);
-            skip_property_guid(c, file_ver);
+            let struct_type = nt.fname(c)?;
+            let _struct_guid = read_guid(c)?;
+            skip_property_guid(c, file_ver)?;
             let struct_end = c.position() + size as u64;
-            let fields = read_struct_value(c, nt, &struct_type, size, struct_end, file_ver);
-            // Ensure we consumed exactly size bytes
-            c.seek(SeekFrom::Start(struct_end)).unwrap();
-            PropValue::Struct { struct_type, fields }
+            let fields = read_struct_value(c, nt, &struct_type, size, struct_end, file_ver)?;
+            c.seek(SeekFrom::Start(struct_end))?;
+            Ok(PropValue::Struct { struct_type, fields })
         }
         "ArrayProperty" => {
-            let inner_type = nt.fname(c);
-            skip_property_guid(c, file_ver);
-            let count = read_i32(c);
+            let inner_type = nt.fname(c)?;
+            skip_property_guid(c, file_ver)?;
+            let count = read_i32(c)?;
             let array_data_end = data_start + tag_overhead(type_name, file_ver) + size as u64;
-            let items = read_array_items(c, nt, &inner_type, count, array_data_end, file_ver);
-            c.seek(SeekFrom::Start(array_data_end)).unwrap();
-            PropValue::Array { inner_type, items }
+            let items = read_array_items(c, nt, &inner_type, count, array_data_end, file_ver)?;
+            c.seek(SeekFrom::Start(array_data_end))?;
+            Ok(PropValue::Array { inner_type, items })
         }
         "MapProperty" => {
-            let key_type = nt.fname(c);
-            let value_type = nt.fname(c);
-            skip_property_guid(c, file_ver);
+            let key_type = nt.fname(c)?;
+            let value_type = nt.fname(c)?;
+            skip_property_guid(c, file_ver)?;
             let map_data_end = data_start + tag_overhead(type_name, file_ver) + size as u64;
-            let _num_keys_to_remove = read_i32(c);
-            let count = read_i32(c);
+            let _num_keys_to_remove = read_i32(c)?;
+            let count = read_i32(c)?;
             let mut entries = Vec::new();
             for _ in 0..count {
                 if c.position() >= map_data_end { break; }
-                let k = read_map_item(c, nt, &key_type, map_data_end, file_ver);
-                let v = read_map_item(c, nt, &value_type, map_data_end, file_ver);
+                let k = read_map_item(c, nt, &key_type, map_data_end, file_ver)?;
+                let v = read_map_item(c, nt, &value_type, map_data_end, file_ver)?;
                 entries.push((k, v));
             }
-            c.seek(SeekFrom::Start(map_data_end)).unwrap();
-            PropValue::Map { key_type, value_type, entries }
+            c.seek(SeekFrom::Start(map_data_end))?;
+            Ok(PropValue::Map { key_type, value_type, entries })
         }
         _ => {
-            skip_property_guid(c, file_ver);
-            c.seek(SeekFrom::Current(size as i64)).unwrap();
-            PropValue::Unknown { type_name: type_name.to_string(), size }
+            skip_property_guid(c, file_ver)?;
+            c.seek(SeekFrom::Current(size as i64))?;
+            Ok(PropValue::Unknown { type_name: type_name.to_string(), size })
         }
     }
 }
 
-fn skip_property_guid(c: &mut R, file_ver: i32) {
+fn skip_property_guid(c: &mut R, file_ver: i32) -> Result<()> {
     if file_ver >= 503 {
-        let has_guid = read_u8(c);
+        let has_guid = read_u8(c)?;
         if has_guid != 0 {
-            let _guid = read_guid(c);
+            let _guid = read_guid(c)?;
         }
     }
+    Ok(())
 }
 
-fn read_map_item(c: &mut R, nt: &NameTable, type_name: &str, end_offset: u64, file_ver: i32) -> PropValue {
+fn read_map_item(c: &mut R, nt: &NameTable, type_name: &str, end_offset: u64, file_ver: i32) -> Result<PropValue> {
     match type_name {
-        "IntProperty" | "Int32Property" => PropValue::Int(read_i32(c)),
-        "Int64Property" | "UInt64Property" => PropValue::Int64(read_i64(c)),
-        "FloatProperty" => PropValue::Float(read_f32(c)),
-        "BoolProperty" => PropValue::Bool(read_u8(c) != 0),
-        "NameProperty" => PropValue::Name(nt.fname(c)),
-        "StrProperty" => PropValue::Str(read_fstring(c)),
-        "ObjectProperty" => PropValue::Object(read_i32(c)),
-        "EnumProperty" => PropValue::Name(nt.fname(c)),
+        "IntProperty" | "Int32Property" => Ok(PropValue::Int(read_i32(c)?)),
+        "Int64Property" | "UInt64Property" => Ok(PropValue::Int64(read_i64(c)?)),
+        "FloatProperty" => Ok(PropValue::Float(read_f32(c)?)),
+        "BoolProperty" => Ok(PropValue::Bool(read_u8(c)? != 0)),
+        "NameProperty" => Ok(PropValue::Name(nt.fname(c)?)),
+        "StrProperty" => Ok(PropValue::Str(read_fstring(c)?)),
+        "ObjectProperty" => Ok(PropValue::Object(read_i32(c)?)),
+        "EnumProperty" => Ok(PropValue::Name(nt.fname(c)?)),
         "StructProperty" => {
-            // Map structs use tagged properties (read until None)
             let fields = read_properties(c, nt, end_offset, file_ver);
-            PropValue::Struct { struct_type: String::new(), fields }
+            Ok(PropValue::Struct { struct_type: String::new(), fields })
         }
-        _ => PropValue::Unknown { type_name: type_name.to_string(), size: 0 },
+        _ => Ok(PropValue::Unknown { type_name: type_name.to_string(), size: 0 }),
     }
 }
 
@@ -397,18 +395,15 @@ fn tag_overhead(_type_name: &str, file_ver: i32) -> u64 {
     }
 }
 
-fn read_text_property(c: &mut R, size: i32) -> String {
-    // FText is complex (flags, history type, namespace, key, source).
-    // Just skip the raw bytes and return a placeholder.
+fn read_text_property(c: &mut R, size: i32) -> Result<String> {
     if size <= 0 {
-        return String::new();
+        return Ok(String::new());
     }
     let mut buf = vec![0u8; size as usize];
-    c.read_exact(&mut buf).unwrap();
-    // Try to extract readable strings from the raw data
+    c.read_exact(&mut buf)?;
     let text = String::from_utf8_lossy(&buf);
     let readable: String = text.chars().filter(|c| c.is_ascii_graphic() || *c == ' ').collect();
-    if readable.is_empty() { "<text>".to_string() } else { readable }
+    Ok(if readable.is_empty() { "<text>".to_string() } else { readable })
 }
 
 fn read_struct_value(
@@ -418,59 +413,57 @@ fn read_struct_value(
     _size: i32,
     end_offset: u64,
     file_ver: i32,
-) -> Vec<Property> {
-    // Known fixed-layout structs
+) -> Result<Vec<Property>> {
     match struct_type {
         "Vector" => {
-            let x = read_f32(c);
-            let y = read_f32(c);
-            let z = read_f32(c);
-            return vec![
+            let x = read_f32(c)?;
+            let y = read_f32(c)?;
+            let z = read_f32(c)?;
+            Ok(vec![
                 Property { name: "X".into(), value: PropValue::Float(x) },
                 Property { name: "Y".into(), value: PropValue::Float(y) },
                 Property { name: "Z".into(), value: PropValue::Float(z) },
-            ];
+            ])
         }
         "Rotator" => {
-            let p = read_f32(c);
-            let y = read_f32(c);
-            let r = read_f32(c);
-            return vec![
+            let p = read_f32(c)?;
+            let y = read_f32(c)?;
+            let r = read_f32(c)?;
+            Ok(vec![
                 Property { name: "Pitch".into(), value: PropValue::Float(p) },
                 Property { name: "Yaw".into(), value: PropValue::Float(y) },
                 Property { name: "Roll".into(), value: PropValue::Float(r) },
-            ];
+            ])
         }
         "Vector2D" => {
-            let x = read_f32(c);
-            let y = read_f32(c);
-            return vec![
+            let x = read_f32(c)?;
+            let y = read_f32(c)?;
+            Ok(vec![
                 Property { name: "X".into(), value: PropValue::Float(x) },
                 Property { name: "Y".into(), value: PropValue::Float(y) },
-            ];
+            ])
         }
         "LinearColor" => {
-            let r = read_f32(c);
-            let g = read_f32(c);
-            let b = read_f32(c);
-            let a = read_f32(c);
-            return vec![
+            let r = read_f32(c)?;
+            let g = read_f32(c)?;
+            let b = read_f32(c)?;
+            let a = read_f32(c)?;
+            Ok(vec![
                 Property { name: "R".into(), value: PropValue::Float(r) },
                 Property { name: "G".into(), value: PropValue::Float(g) },
                 Property { name: "B".into(), value: PropValue::Float(b) },
                 Property { name: "A".into(), value: PropValue::Float(a) },
-            ];
+            ])
         }
         "Guid" => {
-            let g = read_guid(c);
-            return vec![Property {
+            let g = read_guid(c)?;
+            Ok(vec![Property {
                 name: "Guid".into(),
                 value: PropValue::Str(format!("{:02x?}", g)),
-            }];
+            }])
         }
         _ => {
-            // Tagged property format (recursive)
-            read_properties(c, nt, end_offset, file_ver)
+            Ok(read_properties(c, nt, end_offset, file_ver))
         }
     }
 }
@@ -482,85 +475,79 @@ fn read_array_items(
     count: i32,
     end_offset: u64,
     file_ver: i32,
-) -> Vec<PropValue> {
+) -> Result<Vec<PropValue>> {
     let mut items = Vec::new();
     for _ in 0..count {
         if c.position() >= end_offset {
             break;
         }
         let item = match inner_type {
-            "IntProperty" | "Int32Property" => PropValue::Int(read_i32(c)),
-            "FloatProperty" => PropValue::Float(read_f32(c)),
-            "NameProperty" => PropValue::Name(nt.fname(c)),
-            "ObjectProperty" => PropValue::Object(read_i32(c)),
-            "StrProperty" => PropValue::Str(read_fstring(c)),
+            "IntProperty" | "Int32Property" => PropValue::Int(read_i32(c)?),
+            "FloatProperty" => PropValue::Float(read_f32(c)?),
+            "NameProperty" => PropValue::Name(nt.fname(c)?),
+            "ObjectProperty" => PropValue::Object(read_i32(c)?),
+            "StrProperty" => PropValue::Str(read_fstring(c)?),
             "SoftObjectProperty" => {
-                let path = read_fstring(c);
-                let _sub = read_fstring(c);
+                let path = read_fstring(c)?;
+                let _sub = read_fstring(c)?;
                 PropValue::SoftObject(path)
             }
             "StructProperty" => {
-                // Array of structs: read tagged properties until None
                 let fields = read_properties(c, nt, end_offset, file_ver);
                 PropValue::Struct { struct_type: "".into(), fields }
             }
             _ => {
-                // Can't determine item size, skip remaining
                 let remaining = (end_offset - c.position()) as i32;
-                c.seek(SeekFrom::Start(end_offset)).unwrap();
+                c.seek(SeekFrom::Start(end_offset))?;
                 PropValue::Unknown { type_name: inner_type.to_string(), size: remaining }
             }
         };
         items.push(item);
     }
-    items
+    Ok(items)
 }
 
 // --- Skip FField child (for ArrayProperty/MapProperty inner types) ---
 
-fn skip_ffield_child(c: &mut R, nt: &NameTable, end: u64) {
-    if c.position() + 8 > end { return; }
-    let field_class = nt.fname(c);
-    if field_class == "None" { return; }
-    let _field_name = nt.fname(c);
-    // FField::Serialize
-    let _flags = read_u32(c);
-    // Metadata (editor-only, present in uncooked assets)
-    // HasMetadata flag: 1 for class members, 0 for function params
-    let has_meta = read_i32(c);
+fn skip_ffield_child(c: &mut R, nt: &NameTable, end: u64) -> Result<()> {
+    if c.position() + 8 > end { return Ok(()); }
+    let field_class = nt.fname(c)?;
+    if field_class == "None" { return Ok(()); }
+    let _field_name = nt.fname(c)?;
+    let _flags = read_u32(c)?;
+    let has_meta = read_i32(c)?;
     if has_meta != 0 {
-        let meta_count = read_i32(c);
+        let meta_count = read_i32(c)?;
         for _ in 0..meta_count {
-            let _meta_key = nt.fname(c);
-            let meta_val_len = read_i32(c);
+            let _meta_key = nt.fname(c)?;
+            let meta_val_len = read_i32(c)?;
             if meta_val_len > 0 {
-                c.seek(SeekFrom::Current(meta_val_len as i64)).unwrap();
+                c.seek(SeekFrom::Current(meta_val_len as i64))?;
             }
         }
     }
-    // FProperty::Serialize
-    let _array_dim = read_i32(c);
-    let _elem_size = read_i32(c);
-    let _prop_flags = read_i64(c);
+    let _array_dim = read_i32(c)?;
+    let _elem_size = read_i32(c)?;
+    let _prop_flags = read_i64(c)?;
     let mut rep_bytes = [0u8; 2];
-    c.read_exact(&mut rep_bytes).unwrap();
-    let _rep_func = nt.fname(c);
-    let _bp_rep = read_u8(c);
-    // Type-specific
+    c.read_exact(&mut rep_bytes)?;
+    let _rep_func = nt.fname(c)?;
+    let _bp_rep = read_u8(c)?;
     match field_class.as_str() {
         "ObjectProperty" | "WeakObjectProperty" | "ClassProperty"
         | "SoftObjectProperty" | "SoftClassProperty" | "InterfaceProperty" => {
-            let _ref = read_i32(c);
+            let _ref = read_i32(c)?;
         }
-        "StructProperty" => { let _ref = read_i32(c); }
-        "ByteProperty" | "EnumProperty" => { let _ref = read_i32(c); }
-        "BoolProperty" => { for _ in 0..6 { read_u8(c); } }
-        "ArrayProperty" | "SetProperty" => { skip_ffield_child(c, nt, end); }
-        "MapProperty" => { skip_ffield_child(c, nt, end); skip_ffield_child(c, nt, end); }
+        "StructProperty" => { let _ref = read_i32(c)?; }
+        "ByteProperty" | "EnumProperty" => { let _ref = read_i32(c)?; }
+        "BoolProperty" => { for _ in 0..6 { read_u8(c)?; } }
+        "ArrayProperty" | "SetProperty" => { skip_ffield_child(c, nt, end)?; }
+        "MapProperty" => { skip_ffield_child(c, nt, end)?; skip_ffield_child(c, nt, end)?; }
         "DelegateProperty" | "MulticastDelegateProperty"
-        | "MulticastInlineDelegateProperty" => { let _ref = read_i32(c); }
+        | "MulticastInlineDelegateProperty" => { let _ref = read_i32(c)?; }
         _ => {}
     }
+    Ok(())
 }
 
 // --- FField type resolution (for function signatures) ---
@@ -568,62 +555,62 @@ fn skip_ffield_child(c: &mut R, nt: &NameTable, end: u64) {
 fn resolve_ffield_type(
     field_class: &str, c: &mut R, nt: &NameTable,
     imports: &[ImportEntry], export_names: &[String], end: u64,
-) -> String {
+) -> Result<String> {
     match field_class {
-        "FloatProperty" => "float".into(),
-        "DoubleProperty" => "double".into(),
-        "IntProperty" | "Int32Property" | "UInt32Property" => "int".into(),
-        "Int64Property" | "UInt64Property" => "int64".into(),
-        "Int16Property" | "UInt16Property" => "int16".into(),
-        "Int8Property" => "int8".into(),
+        "FloatProperty" => Ok("float".into()),
+        "DoubleProperty" => Ok("double".into()),
+        "IntProperty" | "Int32Property" | "UInt32Property" => Ok("int".into()),
+        "Int64Property" | "UInt64Property" => Ok("int64".into()),
+        "Int16Property" | "UInt16Property" => Ok("int16".into()),
+        "Int8Property" => Ok("int8".into()),
         "BoolProperty" => {
-            for _ in 0..6 { read_u8(c); }
-            "bool".into()
+            for _ in 0..6 { read_u8(c)?; }
+            Ok("bool".into())
         }
-        "StrProperty" => "FString".into(),
-        "NameProperty" => "FName".into(),
-        "TextProperty" => "FText".into(),
+        "StrProperty" => Ok("FString".into()),
+        "NameProperty" => Ok("FName".into()),
+        "TextProperty" => Ok("FText".into()),
         "ObjectProperty" | "WeakObjectProperty" | "LazyObjectProperty"
         | "SoftObjectProperty" | "InterfaceProperty" => {
-            let class_ref = read_i32(c);
+            let class_ref = read_i32(c)?;
             if class_ref != 0 {
-                format!("{}*", short_class(&resolve_index(imports, export_names, class_ref)))
+                Ok(format!("{}*", short_class(&resolve_index(imports, export_names, class_ref))))
             } else {
-                "UObject*".into()
+                Ok("UObject*".into())
             }
         }
         "ClassProperty" | "SoftClassProperty" => {
-            let _prop_class = read_i32(c);
-            let _meta_class = read_i32(c);
-            "UClass*".into()
+            let _prop_class = read_i32(c)?;
+            let _meta_class = read_i32(c)?;
+            Ok("UClass*".into())
         }
         "StructProperty" => {
-            let struct_ref = read_i32(c);
-            short_class(&resolve_index(imports, export_names, struct_ref))
+            let struct_ref = read_i32(c)?;
+            Ok(short_class(&resolve_index(imports, export_names, struct_ref)))
         }
         "ByteProperty" | "EnumProperty" => {
-            let enum_ref = read_i32(c);
+            let enum_ref = read_i32(c)?;
             if enum_ref != 0 {
-                short_class(&resolve_index(imports, export_names, enum_ref))
+                Ok(short_class(&resolve_index(imports, export_names, enum_ref)))
             } else {
-                "byte".into()
+                Ok("byte".into())
             }
         }
         "ArrayProperty" | "SetProperty" => {
-            skip_ffield_child(c, nt, end);
-            if field_class == "SetProperty" { "TSet<>".into() } else { "TArray<>".into() }
+            skip_ffield_child(c, nt, end)?;
+            Ok(if field_class == "SetProperty" { "TSet<>".into() } else { "TArray<>".into() })
         }
         "MapProperty" => {
-            skip_ffield_child(c, nt, end);
-            skip_ffield_child(c, nt, end);
-            "TMap<>".into()
+            skip_ffield_child(c, nt, end)?;
+            skip_ffield_child(c, nt, end)?;
+            Ok("TMap<>".into())
         }
         "DelegateProperty" | "MulticastDelegateProperty"
         | "MulticastInlineDelegateProperty" | "MulticastSparseDelegateProperty" => {
-            let _sig = read_i32(c);
-            "Delegate".into()
+            let _sig = read_i32(c)?;
+            Ok("Delegate".into())
         }
-        _ => field_class.strip_suffix("Property").unwrap_or(field_class).to_string(),
+        _ => Ok(field_class.strip_suffix("Property").unwrap_or(field_class).to_string()),
     }
 }
 
@@ -1097,50 +1084,51 @@ struct ParsedAsset {
     exports: Vec<(ExportHeader, Vec<Property>)>,
 }
 
-fn parse_asset(data: &[u8], debug: bool) -> ParsedAsset {
+fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
     let file_size = data.len();
     let mut c = Cursor::new(data);
 
     // --- Package file summary ---
-    let _magic = read_u32(&mut c);
-    let legacy_ver = read_i32(&mut c);
+    let magic = read_u32(&mut c).context("truncated file: cannot read magic")?;
+    ensure!(magic == 0x9E2A83C1, "not a valid .uasset file (magic: {:#X})", magic);
+    let legacy_ver = read_i32(&mut c)?;
     if legacy_ver < -3 && legacy_ver != -4 {
-        let _ue3_ver = read_i32(&mut c);
+        let _ue3_ver = read_i32(&mut c)?;
     }
-    let file_ver = read_i32(&mut c);
-    let _licensee_ver = read_i32(&mut c);
-    let custom_ver_count = read_i32(&mut c);
-    c.seek(SeekFrom::Current(custom_ver_count as i64 * 20)).unwrap();
-    let _total_header_size = read_i32(&mut c);
-    let _folder_name = read_fstring(&mut c);
-    let _pkg_flags = read_u32(&mut c);
-    let name_count = read_i32(&mut c);
-    let name_offset = read_i32(&mut c);
-    if file_ver >= 516 { let _loc_id = read_fstring(&mut c); }
-    if file_ver >= 459 { let _gc = read_i32(&mut c); let _go = read_i32(&mut c); }
-    let export_count = read_i32(&mut c);
-    let export_offset = read_i32(&mut c);
-    let import_count = read_i32(&mut c);
-    let import_offset = read_i32(&mut c);
+    let file_ver = read_i32(&mut c)?;
+    let _licensee_ver = read_i32(&mut c)?;
+    let custom_ver_count = read_i32(&mut c)?;
+    c.seek(SeekFrom::Current(custom_ver_count as i64 * 20))?;
+    let _total_header_size = read_i32(&mut c)?;
+    let _folder_name = read_fstring(&mut c)?;
+    let _pkg_flags = read_u32(&mut c)?;
+    let name_count = read_i32(&mut c)?;
+    let name_offset = read_i32(&mut c)?;
+    if file_ver >= 516 { let _loc_id = read_fstring(&mut c)?; }
+    if file_ver >= 459 { let _gc = read_i32(&mut c)?; let _go = read_i32(&mut c)?; }
+    let export_count = read_i32(&mut c)?;
+    let export_offset = read_i32(&mut c)?;
+    let import_count = read_i32(&mut c)?;
+    let import_offset = read_i32(&mut c)?;
 
     // --- Name table ---
-    let nt = NameTable::read(&mut c, name_count, name_offset);
+    let nt = NameTable::read(&mut c, name_count, name_offset)
+        .context("failed to read name table")?;
 
     if debug {
         eprintln!("Header: file_ver={} names={} imports={} exports={}", file_ver, name_count, import_count, export_count);
     }
 
     // --- Import table ---
-    c.seek(SeekFrom::Start(import_offset as u64)).unwrap();
+    c.seek(SeekFrom::Start(import_offset as u64))?;
     let mut imports = Vec::with_capacity(import_count as usize);
     for _ in 0..import_count {
-        let class_package = nt.fname(&mut c);
-        let class_name = nt.fname(&mut c);
-        let outer_index = read_i32(&mut c);
-        let object_name = nt.fname(&mut c);
-        // PackageName FName — present in UE4.26+ (file_ver >= 518)
+        let class_package = nt.fname(&mut c)?;
+        let class_name = nt.fname(&mut c)?;
+        let outer_index = read_i32(&mut c)?;
+        let object_name = nt.fname(&mut c)?;
         if file_ver >= 518 {
-            let _package_name = nt.fname(&mut c);
+            let _package_name = nt.fname(&mut c)?;
         }
         if debug {
             eprintln!("  Import[{}]: {}::{} outer={} name={}",
@@ -1150,30 +1138,30 @@ fn parse_asset(data: &[u8], debug: bool) -> ParsedAsset {
     }
 
     // --- Export table ---
-    c.seek(SeekFrom::Start(export_offset as u64)).unwrap();
+    c.seek(SeekFrom::Start(export_offset as u64))?;
     let mut export_headers = Vec::with_capacity(export_count as usize);
     for _ in 0..export_count {
-        let class_index = read_i32(&mut c);
-        let super_index = read_i32(&mut c);
-        if file_ver >= 459 { let _template = read_i32(&mut c); }
-        let outer_index = read_i32(&mut c);
-        let object_name = nt.fname(&mut c);
-        let _object_flags = read_u32(&mut c);
-        let serial_size = read_i64(&mut c);
-        let serial_offset = read_i64(&mut c);
-        let _forced = read_i32(&mut c);
-        let _not_client = read_i32(&mut c);
-        let _not_server = read_i32(&mut c);
-        let _guid = read_guid(&mut c);
-        let _pkg_flags = read_u32(&mut c);
-        if file_ver >= 459 { let _not_always = read_i32(&mut c); }
-        if file_ver >= 459 { let _is_asset = read_i32(&mut c); }
+        let class_index = read_i32(&mut c)?;
+        let super_index = read_i32(&mut c)?;
+        if file_ver >= 459 { let _template = read_i32(&mut c)?; }
+        let outer_index = read_i32(&mut c)?;
+        let object_name = nt.fname(&mut c)?;
+        let _object_flags = read_u32(&mut c)?;
+        let serial_size = read_i64(&mut c)?;
+        let serial_offset = read_i64(&mut c)?;
+        let _forced = read_i32(&mut c)?;
+        let _not_client = read_i32(&mut c)?;
+        let _not_server = read_i32(&mut c)?;
+        let _guid = read_guid(&mut c)?;
+        let _pkg_flags = read_u32(&mut c)?;
+        if file_ver >= 459 { let _not_always = read_i32(&mut c)?; }
+        if file_ver >= 459 { let _is_asset = read_i32(&mut c)?; }
         if file_ver >= 518 {
-            let _first_dep = read_i32(&mut c);
-            let _s_before_s = read_i32(&mut c);
-            let _c_before_s = read_i32(&mut c);
-            let _s_before_c = read_i32(&mut c);
-            let _c_before_c = read_i32(&mut c);
+            let _first_dep = read_i32(&mut c)?;
+            let _s_before_s = read_i32(&mut c)?;
+            let _c_before_s = read_i32(&mut c)?;
+            let _s_before_c = read_i32(&mut c)?;
+            let _c_before_c = read_i32(&mut c)?;
         }
         export_headers.push(ExportHeader {
             class_index, super_index, outer_index, object_name,
@@ -1189,36 +1177,36 @@ fn parse_asset(data: &[u8], debug: bool) -> ParsedAsset {
             exports.push((hdr.clone_header(), Vec::new()));
             continue;
         }
-        c.seek(SeekFrom::Start(hdr.serial_offset as u64)).unwrap();
-        let end = hdr.serial_offset as u64 + hdr.serial_size as u64;
 
-        // Detect class type for special handling
-        let class_name = resolve_index(&imports, &export_names_pre, hdr.class_index);
+        // Per-export parsing: errors here skip the export rather than aborting
+        let export_result: Result<Vec<Property>> = (|| {
+            c.seek(SeekFrom::Start(hdr.serial_offset as u64))?;
+            let end = hdr.serial_offset as u64 + hdr.serial_size as u64;
+            let class_name = resolve_index(&imports, &export_names_pre, hdr.class_index);
 
-        let is_struct = class_name.ends_with(".Function") || class_name.ends_with(".Struct")
-            || class_name.ends_with(".BlueprintGeneratedClass")
-            || class_name.ends_with(".ScriptStruct");
-        if is_struct {
+            let is_struct = class_name.ends_with(".Function") || class_name.ends_with(".Struct")
+                || class_name.ends_with(".BlueprintGeneratedClass")
+                || class_name.ends_with(".ScriptStruct");
+            if !is_struct {
+                return Ok(read_properties(&mut c, &nt, end, file_ver));
+            }
+
             let is_function = class_name.ends_with(".Function");
-            // UStruct serialization: tagged props, then SuperStruct, Children, bytecode
             let props = read_properties(&mut c, &nt, end, file_ver);
             let after_props = c.position();
 
-            // UField::Next, UStruct::SuperStruct, UStruct::Children
             let mut extra_props = props;
             if after_props + 12 <= end {
-                let _next = read_i32(&mut c);
-                let super_ref = read_i32(&mut c);
-                // Children is count + array of int32 package indices
-                let children_count = read_i32(&mut c);
+                let _next = read_i32(&mut c)?;
+                let super_ref = read_i32(&mut c)?;
+                let children_count = read_i32(&mut c)?;
                 if children_count > 0 && children_count < 1000 {
-                    c.seek(SeekFrom::Current(children_count as i64 * 4)).unwrap();
+                    c.seek(SeekFrom::Current(children_count as i64 * 4))?;
                 }
                 if debug {
                     eprintln!("  {} UStruct: after_props={} next={} super={} children={} pos={}",
                         hdr.object_name, after_props, _next, super_ref, children_count, c.position());
                 }
-
                 if super_ref != 0 {
                     let super_name = resolve_index(&imports, &export_names_pre, super_ref);
                     extra_props.push(Property {
@@ -1231,42 +1219,36 @@ fn parse_asset(data: &[u8], debug: bool) -> ParsedAsset {
             // UStruct::ChildProperties (FField children)
             let mut ffield_children: Vec<(String, String, u64)> = Vec::new();
             if c.position() + 4 <= end {
-                let child_prop_count = read_i32(&mut c);
+                let child_prop_count = read_i32(&mut c)?;
                 if debug && child_prop_count > 0 {
                     eprintln!("  {} child properties: {}", hdr.object_name, child_prop_count);
                 }
                 for _ci in 0..child_prop_count {
                     if c.position() + 16 > end { break; }
-                    let field_class = nt.fname(&mut c);
-                    let field_name = nt.fname(&mut c);
-                    // FField::Serialize
-                    let _flags = read_u32(&mut c);
-                    // Metadata (editor-only, present in uncooked assets)
-                    // HasMetadata flag: 1 for class members, 0 for function params
-                    let has_meta = read_i32(&mut c);
+                    let field_class = nt.fname(&mut c)?;
+                    let field_name = nt.fname(&mut c)?;
+                    let _flags = read_u32(&mut c)?;
+                    let has_meta = read_i32(&mut c)?;
                     if has_meta != 0 {
-                        let meta_count = read_i32(&mut c);
+                        let meta_count = read_i32(&mut c)?;
                         for _ in 0..meta_count {
-                            let _meta_key = nt.fname(&mut c);
-                            let meta_val_len = read_i32(&mut c);
+                            let _meta_key = nt.fname(&mut c)?;
+                            let meta_val_len = read_i32(&mut c)?;
                             if meta_val_len > 0 {
-                                c.seek(SeekFrom::Current(meta_val_len as i64)).unwrap();
+                                c.seek(SeekFrom::Current(meta_val_len as i64))?;
                             }
                         }
                     }
-                    // FProperty::Serialize
-                    let _array_dim = read_i32(&mut c);
-                    let _elem_size = read_i32(&mut c);
-                    let prop_flags = read_i64(&mut c) as u64;
-                    // uint16 RepIndex + FName RepNotifyFunc + uint8 BlueprintRepCondition
+                    let _array_dim = read_i32(&mut c)?;
+                    let _elem_size = read_i32(&mut c)?;
+                    let prop_flags = read_i64(&mut c)? as u64;
                     let mut rep_bytes = [0u8; 2];
-                    c.read_exact(&mut rep_bytes).unwrap();
-                    let _rep_notify_func = nt.fname(&mut c);
-                    let _bp_rep_condition = read_u8(&mut c);
-                    // Type-specific data — also resolves the type name
+                    c.read_exact(&mut rep_bytes)?;
+                    let _rep_notify_func = nt.fname(&mut c)?;
+                    let _bp_rep_condition = read_u8(&mut c)?;
                     let type_name = resolve_ffield_type(
                         &field_class, &mut c, &nt, &imports, &export_names_pre, end,
-                    );
+                    )?;
                     ffield_children.push((field_name.clone(), type_name, prop_flags));
                     if debug {
                         eprintln!("    param: {} {} flags=0x{:x} @ {}",
@@ -1275,7 +1257,6 @@ fn parse_asset(data: &[u8], debug: bool) -> ParsedAsset {
                 }
             }
 
-            // For functions: build signature from params
             if is_function && !ffield_children.is_empty() {
                 let sig = format_signature(&hdr.object_name, &ffield_children);
                 extra_props.push(Property {
@@ -1284,7 +1265,6 @@ fn parse_asset(data: &[u8], debug: bool) -> ParsedAsset {
                 });
             }
 
-            // For classes: store member variable declarations
             if !is_function && !ffield_children.is_empty() {
                 let members: Vec<PropValue> = ffield_children.iter()
                     .map(|(name, type_name, _flags)| {
@@ -1307,16 +1287,16 @@ fn parse_asset(data: &[u8], debug: bool) -> ParsedAsset {
                     let spos = c.position();
                     let peek_len = std::cmp::min(16, (end - spos) as usize);
                     let mut peek = vec![0u8; peek_len];
-                    c.read_exact(&mut peek).unwrap();
-                    c.seek(SeekFrom::Start(spos)).unwrap();
+                    c.read_exact(&mut peek)?;
+                    c.seek(SeekFrom::Start(spos))?;
                     let hex: Vec<String> = peek.iter().map(|b| format!("{:02x}", b)).collect();
                     eprintln!("  {} script @ {} (end={}) raw: {}", hdr.object_name, spos, end, hex.join(" "));
                 }
-                let bytecode_size = read_i32(&mut c);
-                let storage_size = read_i32(&mut c);
+                let bytecode_size = read_i32(&mut c)?;
+                let storage_size = read_i32(&mut c)?;
                 if storage_size > 0 && (c.position() + storage_size as u64) <= end {
                     bytecode_data = vec![0u8; storage_size as usize];
-                    c.read_exact(&mut bytecode_data).unwrap();
+                    c.read_exact(&mut bytecode_data)?;
                     if debug {
                         eprintln!("  {} bytecode: {}B mem, {}B disk",
                             hdr.object_name, bytecode_size, storage_size);
@@ -1327,7 +1307,6 @@ fn parse_asset(data: &[u8], debug: bool) -> ParsedAsset {
                 }
             }
 
-            // Decode bytecode
             if !bytecode_data.is_empty() {
                 let decoded = decode_bytecode(&bytecode_data, &nt, &imports, &export_names_pre);
                 if !decoded.is_empty() {
@@ -1341,9 +1320,8 @@ fn parse_asset(data: &[u8], debug: bool) -> ParsedAsset {
                 }
             }
 
-            // UFunction: FunctionFlags
             if is_function && c.position() + 4 <= end {
-                let func_flags = read_u32(&mut c);
+                let func_flags = read_u32(&mut c)?;
                 if func_flags != 0 {
                     extra_props.push(Property {
                         name: "FunctionFlags".into(),
@@ -1351,17 +1329,16 @@ fn parse_asset(data: &[u8], debug: bool) -> ParsedAsset {
                     });
                 }
                 if func_flags & 0x40 != 0 && c.position() + 2 <= end {
-                    let _rep_offset = read_i32(&mut c);
+                    let _rep_offset = read_i32(&mut c)?;
                 }
             }
-            exports.push((hdr.clone_header(), extra_props));
-        } else {
-            let props = read_properties(&mut c, &nt, end, file_ver);
-            exports.push((hdr.clone_header(), props));
-        }
+            Ok(extra_props)
+        })();
+
+        exports.push((hdr.clone_header(), export_result.unwrap_or_default()));
     }
 
-    ParsedAsset { imports, exports }
+    Ok(ParsedAsset { imports, exports })
 }
 
 impl ExportHeader {
@@ -2016,7 +1993,7 @@ fn summarise_node(class: &str, props: &[Property], imports: &[ImportEntry], expo
     match short.as_str() {
         "K2Node_CallFunction" => {
             let func = get_member_ref(props, imports, export_names);
-            let pure = find_prop(props, "bIsPureFunc").map_or(false, |p| matches!(p.value, PropValue::Bool(true)));
+            let pure = find_prop(props, "bIsPureFunc").is_some_and(|p| matches!(p.value, PropValue::Bool(true)));
             if pure { format!("[pure] {}", func) } else { format!("Call {}", func) }
         }
         "K2Node_CommutativeAssociativeBinaryOperator" => {
@@ -2100,7 +2077,7 @@ fn get_var_ref(props: &[Property], imports: &[ImportEntry], export_names: &[Stri
                     .unwrap_or_default();
                 let name = find_prop_str(fields, "MemberName").unwrap_or_else(|| "?".into());
                 let is_self = find_prop(fields, "bSelfContext")
-                    .map_or(false, |p| matches!(p.value, PropValue::Bool(true)));
+                    .is_some_and(|p| matches!(p.value, PropValue::Bool(true)));
                 if is_self { Some(format!("self.{}", name)) }
                 else if parent.is_empty() { Some(name) }
                 else { Some(format!("{}.{}", parent, name)) }
@@ -2120,9 +2097,14 @@ fn main() {
         std::process::exit(1);
     });
 
-    let asset = parse_asset(&data, cli.debug);
+    let asset = match parse_asset(&data, cli.debug) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("Failed to parse {}: {}", cli.path.display(), e);
+            std::process::exit(1);
+        }
+    };
 
-    // Parse filter patterns
     let filters: Vec<String> = cli.filter
         .map(|f| f.split(',').map(|s| s.trim().to_lowercase()).collect())
         .unwrap_or_default();
