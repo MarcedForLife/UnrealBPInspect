@@ -210,6 +210,7 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
                     if let PropValue::Str(decl) = item {
                         let var_name = decl.split(':').next().unwrap_or("");
                         if component_names.contains(&var_name) { continue; }
+                        if var_name == "UberGraphFrame" { continue; }
                         members.push(decl.clone());
                     }
                 }
@@ -290,6 +291,13 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
         let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
         if !class.ends_with(".Function") { continue; }
         if !matches_filter(&hdr.object_name, filters) { continue; }
+
+        // Skip stub dispatchers when ubergraph bytecode is present
+        if ubergraph_name.is_some() && !hdr.object_name.starts_with("ExecuteUbergraph_") {
+            if is_ubergraph_stub(props, ubergraph_name.as_deref().unwrap_or("")) {
+                continue;
+            }
+        }
 
         let sig = find_prop_str(props, "Signature")
             .unwrap_or_else(|| format!("{}()", hdr.object_name));
@@ -542,6 +550,39 @@ fn filter_flags_for_summary(flags: &str) -> String {
         .filter(|f| !NOISE.contains(&f.trim()))
         .collect::<Vec<_>>()
         .join("|")
+}
+
+/// Check if a function is a stub that just dispatches to the ubergraph.
+/// Stubs contain only an ExecuteUbergraph_X(N) call, plus optional return/persistent-frame lines.
+fn is_ubergraph_stub(props: &[Property], ug_name: &str) -> bool {
+    let bc_prop = find_prop(props, "BytecodeSummary")
+        .or_else(|| find_prop(props, "Bytecode"));
+    let items = match bc_prop {
+        Some(Property { value: PropValue::Array { items, .. }, .. }) => items,
+        _ => return false,
+    };
+    let meaningful: Vec<&str> = items.iter().filter_map(|item| {
+        if let PropValue::Str(line) = item {
+            // Strip hex offset prefix (e.g. "0000: ")
+            let code = if line.len() > 6 && line.as_bytes()[4] == b':' {
+                line[6..].trim()
+            } else {
+                line.trim()
+            };
+            match code {
+                "" | "return" | "return nop" => None,
+                _ => Some(code),
+            }
+        } else {
+            None
+        }
+    }).collect();
+    if meaningful.is_empty() || meaningful.len() > 2 { return false; }
+    meaningful.iter().any(|line| line.starts_with(&format!("{}(", ug_name)))
+        && meaningful.iter().all(|line| {
+            line.starts_with(&format!("{}(", ug_name))
+                || line.contains("[persistent]")
+        })
 }
 
 fn get_var_ref(props: &[Property], imports: &[ImportEntry], export_names: &[String]) -> String {
