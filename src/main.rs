@@ -1374,6 +1374,15 @@ fn parse_jump(text: &str) -> Option<usize> {
     text.strip_prefix("jump 0x").and_then(|h| usize::from_str_radix(h, 16).ok())
 }
 
+/// Parse "if !(COND) jump 0xHEX" → (condition, target offset).
+fn parse_if_jump(text: &str) -> Option<(&str, usize)> {
+    if !text.starts_with("if !(") { return None; }
+    let jump_pos = text.rfind(") jump 0x")?;
+    let cond = &text[5..jump_pos];
+    let target = usize::from_str_radix(&text[jump_pos + 9..], 16).ok()?;
+    Some((cond, target))
+}
+
 /// Reorder bytecode stmts to place sequence/loop bodies in logical execution order.
 ///
 /// UE4's bytecode compiler places loop and sequence bodies after the control structure
@@ -1469,15 +1478,21 @@ fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
         i = inline_end + 1;
     }
 
-    // --- Detect for-loops ---
-    // Pattern: if !(COND) jump END, push_flow INCR, jump BODY,
-    //          [increment stmts], back-jump, [pop_flow at ~END], [body at BODY]
+    // --- Detect for-loops (including ForEach) ---
+    // Standard for-loop pattern:
+    //   if !(COND) jump END, push_flow INCR, jump BODY,
+    //   [increment stmts], back-jump, pop_flow, [body at BODY]
+    // ForEach pattern (extra stmts between if and push_flow, no pop_flow):
+    //   if !(COND) jump END, [extra stmts], push_flow INCR, jump BODY,
+    //   [increment stmts], back-jump, [body at BODY]
     struct ForLoop {
         cond_text: String,       // the condition from the if stmt
         if_idx: usize,           // index of the if statement
+        extra_start: usize,      // first "extra" stmt between if and push_flow (== pf_idx if none)
+        extra_end: usize,        // one past last extra stmt (== pf_idx if none)
         incr_start: usize,       // first increment stmt
         back_jump_idx: usize,    // the back-jump
-        pop_flow_idx: usize,     // pop_flow after back-jump (at ~END)
+        loop_ctrl_end: usize,    // last control stmt (pop_flow or back_jump if no pop_flow)
         body_start_idx: usize,   // first body stmt
         body_end_idx: usize,     // last stmt before next structure or end
     }
@@ -1485,17 +1500,29 @@ fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
     let mut loops: Vec<ForLoop> = Vec::new();
 
     for i in 0..stmts.len() {
-        if !stmts[i].text.starts_with("if !(") { continue; }
-        let Some(jump_pos) = stmts[i].text.rfind(") jump 0x") else { continue };
-        let hex_str = &stmts[i].text[jump_pos + 9..];
-        let Ok(_end_offset) = usize::from_str_radix(hex_str, 16) else { continue };
+        let Some((_, _end_offset)) = parse_if_jump(&stmts[i].text) else { continue };
 
-        if i + 2 >= stmts.len() { continue; }
-        let Some(_incr_offset) = parse_push_flow(&stmts[i + 1].text) else { continue };
-        let Some(_body_offset) = parse_jump(&stmts[i + 2].text) else { continue };
+        // Forward scan: find push_flow + jump within up to 4 stmts after the if
+        let mut pf_idx = None;
+        for k in 1..=4usize.min(stmts.len().saturating_sub(i + 1)) {
+            if i + k + 1 >= stmts.len() { break; }
+            if parse_push_flow(&stmts[i + k].text).is_some()
+                && parse_jump(&stmts[i + k + 1].text).is_some()
+            {
+                pf_idx = Some(i + k);
+                break;
+            }
+        }
+        let Some(pf_idx) = pf_idx else { continue };
+
+        let Some(body_jump_target) = parse_jump(&stmts[pf_idx + 1].text) else { continue };
+
+        // Extra stmts between if and push_flow (e.g., index = counter in ForEach)
+        let extra_start = i + 1;
+        let extra_end = pf_idx; // exclusive
 
         // Find the increment start (stmt after the jump)
-        let incr_start = i + 3;
+        let incr_start = pf_idx + 2;
 
         // Find back-jump in the increment section
         let mut back_jump_idx = None;
@@ -1513,26 +1540,34 @@ fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
         let pop_idx = stmts[(back_jump_idx + 1)..stmts.len().min(back_jump_idx + 3)]
             .iter().position(|s| s.text == "pop_flow")
             .map(|p| p + back_jump_idx + 1);
-        let Some(pop_idx) = pop_idx else { continue };
 
-        // Body starts right after the pop_flow
-        let body_start = pop_idx + 1;
+        // Determine body start and loop control end
+        let (body_start, loop_ctrl_end) = if let Some(pop_idx) = pop_idx {
+            // Standard for-loop: body starts after pop_flow
+            (pop_idx + 1, pop_idx)
+        } else {
+            // ForEach: no pop_flow, find body via jump target offset
+            let body_idx = stmts.iter().position(|s| {
+                s.mem_offset > 0 && s.mem_offset.abs_diff(body_jump_target) < 64
+            });
+            let Some(body_idx) = body_idx else { continue };
+            (body_idx, back_jump_idx)
+        };
+
         if body_start >= stmts.len() { continue; }
 
         // Body ends at the last stmt before the next recognized structure or end of stmts.
-        // For now: scan until we hit a stmt that's part of another pattern, or end.
-        // Simple heuristic: body goes to end of stmts (or up to the next loop/sequence start).
         let mut body_end = stmts.len() - 1;
         // If there are sequences after us, the body ends before the first sequence body
         for seq in &sequences {
             for pin in &seq.pins {
-                if pin.body_start_idx > pop_idx && pin.body_start_idx <= body_end {
+                if pin.body_start_idx > loop_ctrl_end && pin.body_start_idx <= body_end {
                     body_end = pin.body_start_idx - 1;
                 }
             }
         }
 
-        let cond = stmts[i].text[5..jump_pos].to_string();
+        let cond = stmts[i].text[5..stmts[i].text.rfind(") jump 0x").unwrap()].to_string();
 
         // Check this loop doesn't overlap with a sequence
         let overlaps_sequence = sequences.iter().any(|seq| {
@@ -1543,9 +1578,11 @@ fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
         loops.push(ForLoop {
             cond_text: cond,
             if_idx: i,
+            extra_start,
+            extra_end,
             incr_start,
             back_jump_idx,
-            pop_flow_idx: pop_idx,
+            loop_ctrl_end,
             body_start_idx: body_start,
             body_end_idx: body_end,
         });
@@ -1564,7 +1601,7 @@ fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
         }
     }
     for lp in &loops {
-        used[lp.if_idx..=lp.pop_flow_idx].fill(true);
+        used[lp.if_idx..=lp.loop_ctrl_end].fill(true);
         used[lp.body_start_idx..=lp.body_end_idx].fill(true);
     }
 
@@ -1595,8 +1632,12 @@ fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
 
         // Check if a for-loop starts here
         if let Some(lp) = loops.iter().find(|l| l.if_idx == i) {
-            // Emit: while (COND) { body; increment; }
+            // Emit: while (COND) { [extra stmts] body; increment; }
             output.push(marker(&format!("while ({}) {{", lp.cond_text)));
+            // Extra stmts (e.g., ForEach index = counter)
+            if lp.extra_start < lp.extra_end {
+                output.extend_from_slice(&stmts[lp.extra_start..lp.extra_end]);
+            }
             // Body (skip trailing "return nop")
             let body_end = if stmts[lp.body_end_idx].text == "return nop" {
                 lp.body_end_idx
@@ -1611,7 +1652,7 @@ fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
             if stmts[lp.body_end_idx].text == "return nop" {
                 output.push(stmts[lp.body_end_idx].clone());
             }
-            i = lp.pop_flow_idx + 1;
+            i = lp.loop_ctrl_end + 1;
             continue;
         }
 
@@ -1631,10 +1672,32 @@ fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>) ->
 
     if stmts.is_empty() { return Vec::new(); }
 
-    // Build mem_offset -> stmt index lookup
-    let offset_to_idx: HashMap<usize, usize> = stmts.iter().enumerate()
+    // Build sorted offset → stmt index for fuzzy lookup (handles mem_adj drift)
+    let mut sorted_offsets: Vec<(usize, usize)> = stmts.iter().enumerate()
+        .filter(|(_, s)| s.mem_offset > 0)
         .map(|(i, s)| (s.mem_offset, i))
         .collect();
+    sorted_offsets.sort_by_key(|&(off, _)| off);
+
+    // Find last statement with mem_offset <= target (tolerates drift up to 64 bytes)
+    let find_target_idx = |target: usize| -> Option<usize> {
+        let pos = sorted_offsets.partition_point(|&(off, _)| off <= target);
+        if pos == 0 { return None; }
+        let (off, idx) = sorted_offsets[pos - 1];
+        if target - off > 64 { return None; }
+        Some(idx)
+    };
+
+    // Like find_target_idx but also handles target past all statements (end-of-function)
+    let find_target_idx_or_end = |target: usize| -> Option<usize> {
+        find_target_idx(target).or_else(|| {
+            if !sorted_offsets.is_empty() && target > sorted_offsets.last().unwrap().0 {
+                Some(stmts.len()) // "one past end" sentinel
+            } else {
+                None
+            }
+        })
+    };
 
     // Resolve labels to statement indices (first stmt with mem_offset >= label offset)
     let label_at: HashMap<usize, &String> = labels.iter().filter_map(|(offset, name)| {
@@ -1651,27 +1714,21 @@ fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>) ->
 
     // Phase 1: detect if/if-else patterns
     for (i, stmt) in stmts.iter().enumerate() {
-        // Match "if !(COND) jump 0xTARGET"
-        if !stmt.text.starts_with("if !(") { continue; }
-        let Some(jump_pos) = stmt.text.rfind(") jump 0x") else { continue };
-        let cond = &stmt.text[5..jump_pos];
-        let hex_str = &stmt.text[jump_pos + 9..];
-        let Ok(target) = usize::from_str_radix(hex_str, 16) else { continue };
-        let Some(&target_idx) = offset_to_idx.get(&target) else { continue };
+        let Some((cond, target)) = parse_if_jump(&stmt.text) else { continue };
+        let Some(target_idx) = find_target_idx_or_end(target) else { continue };
 
         // Check if stmt before target is an unconditional jump (if-else pattern)
-        if target_idx > 0 {
-            let prev = &stmts[target_idx - 1];
-            if prev.text.starts_with("jump 0x") {
-                if let Ok(end_target) = usize::from_str_radix(&prev.text[7..], 16) {
-                    if let Some(&end_idx) = offset_to_idx.get(&end_target) {
-                        // if/else pattern
-                        replacements.insert(i, format!("if ({}) {{", cond));
-                        skip.insert(target_idx - 1); // skip the unconditional jump
-                        events.entry(target_idx).or_default().push(BlockEvent::CloseIfOpenElse);
-                        events.entry(end_idx).or_default().push(BlockEvent::CloseElse);
-                        continue;
-                    }
+        if target_idx > 0 && target_idx <= stmts.len() {
+            let check_idx = if target_idx == stmts.len() { target_idx - 1 } else { target_idx - 1 };
+            let prev = &stmts[check_idx];
+            if let Some(end_target) = parse_jump(&prev.text) {
+                if let Some(end_idx) = find_target_idx_or_end(end_target) {
+                    // if/else pattern
+                    replacements.insert(i, format!("if ({}) {{", cond));
+                    skip.insert(check_idx); // skip the unconditional jump
+                    events.entry(target_idx).or_default().push(BlockEvent::CloseIfOpenElse);
+                    events.entry(end_idx).or_default().push(BlockEvent::CloseElse);
+                    continue;
                 }
             }
         }
@@ -1728,6 +1785,23 @@ fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>) ->
             // Clean up "return nop" → "return"
             let text = if stmt.text == "return nop" { "return" } else { &stmt.text };
             output.push(format!("{}{}", "    ".repeat(indent), text));
+        }
+    }
+
+    // Process events at "one past end" sentinel (target_idx == stmts.len())
+    if let Some(evts) = events.get(&stmts.len()) {
+        for evt in evts.iter().rev() {
+            match evt {
+                BlockEvent::CloseIf | BlockEvent::CloseElse => {
+                    indent = indent.saturating_sub(1);
+                    output.push(format!("{}}}", "    ".repeat(indent)));
+                }
+                BlockEvent::CloseIfOpenElse => {
+                    indent = indent.saturating_sub(1);
+                    output.push(format!("{}}} else {{", "    ".repeat(indent)));
+                    indent += 1;
+                }
+            }
         }
     }
 
