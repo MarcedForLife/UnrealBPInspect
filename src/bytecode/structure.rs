@@ -2,7 +2,35 @@ use std::collections::{HashMap, HashSet};
 use super::decode::BcStatement;
 use super::flow::{parse_if_jump, parse_jump, parse_push_flow, parse_pop_flow_if_not, parse_jump_computed};
 
+/// Negate a condition string, wrapping in parens if it contains operators
+/// to preserve correct precedence. `!A && B` means `(!A) && B`, not `!(A && B)`.
+fn negate_cond(cond: &str) -> String {
+    // Check if condition has infix operators at paren depth 0 (needs wrapping)
+    let mut depth = 0i32;
+    let bytes = cond.as_bytes();
+    let mut has_infix = false;
+    for i in 0..bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b' ' if depth == 0 && i > 0 && i + 1 < bytes.len() => { has_infix = true; break; }
+            _ => {}
+        }
+    }
+    if has_infix {
+        format!("!({})", cond)
+    } else {
+        format!("!{}", cond)
+    }
+}
+
 /// Convert flat bytecode statements into structured pseudo-code with if/else blocks.
+///
+/// **Condition fidelity:** `&&` and `||` in decoded bytecode are ALWAYS faithful to the
+/// original Blueprint. They come from `BooleanAND`/`BooleanOR` Kismet function calls
+/// inlined by `try_inline_operator()` in `decode.rs`. The structuring pass NEVER merges
+/// separate Branch nodes into compound conditions — it only detects if/else blocks from
+/// `JumpIfNot` opcodes and chains them into else-if when they share the same end target.
 pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>) -> Vec<String> {
     if stmts.is_empty() { return Vec::new(); }
 
@@ -153,15 +181,40 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         }
     }
 
-    // Ubergraph cleanup: suppress preamble, rewrite pop_flow
+    // Suppress push_flow and jump_computed everywhere (their semantic meaning
+    // has already been consumed by reorder_flow_patterns for sequences/loops)
     let is_ubergraph = !labels.is_empty();
-    if is_ubergraph {
-        // Suppress push_flow and jump_computed before the first label
-        let first_label_idx = label_at.keys().copied().min();
-        if let Some(first_label) = first_label_idx {
-            for i in 0..first_label {
-                if parse_push_flow(&stmts[i].text).is_some() || parse_jump_computed(&stmts[i].text) {
-                    skip.insert(i);
+    for (i, stmt) in stmts.iter().enumerate() {
+        if parse_push_flow(&stmt.text).is_some() || parse_jump_computed(&stmt.text) {
+            skip.insert(i);
+        }
+    }
+
+    // Track block types for pop_flow → break/return disambiguation
+    #[derive(Clone, Copy, PartialEq)]
+    enum BlockType { If, Loop }
+    let mut block_stack: Vec<BlockType> = Vec::new();
+
+    let in_loop = |stack: &[BlockType]| -> bool {
+        stack.iter().rev().any(|b| *b == BlockType::Loop)
+    };
+
+    // Pre-collect jump targets for label injection
+    let mut label_targets: HashMap<usize, String> = HashMap::new();
+    let mut pending_labels: HashMap<usize, String> = HashMap::new();
+    for (i, stmt) in stmts.iter().enumerate() {
+        if skip.contains(&i) || replacements.contains_key(&i) { continue; }
+        if let Some(target) = parse_jump(&stmt.text) {
+            if let Some(target_idx) = find_target_idx_or_end(target) {
+                if target_idx >= stmts.len() {
+                    // Jump to end — will be break or omitted
+                } else if let Some(lbl) = label_at.get(&target_idx) {
+                    label_targets.insert(i, format!("goto {}", lbl));
+                } else {
+                    // Generate a label for the target
+                    let label_name = format!("L_{:04x}", target);
+                    pending_labels.entry(target_idx).or_insert_with(|| label_name.clone());
+                    label_targets.insert(i, format!("goto {}", label_name));
                 }
             }
         }
@@ -170,36 +223,48 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
     let mut output = Vec::new();
     let mut indent: usize = 0;
 
-    for (i, stmt) in stmts.iter().enumerate() {
-        if let Some(evts) = events.get(&i) {
-            for evt in evts.iter().rev() {
-                match evt {
-                    BlockEvent::CloseIf => {
-                        indent = indent.saturating_sub(1);
-                        output.push(format!("{}}}", "    ".repeat(indent)));
-                    }
-                    BlockEvent::CloseIfOpenElse => {
-                        indent = indent.saturating_sub(1);
-                        output.push(format!("{}}} else {{", "    ".repeat(indent)));
-                        indent += 1;
-                    }
-                    BlockEvent::CloseIfOpenElseIf(cond) => {
-                        indent = indent.saturating_sub(1);
-                        output.push(format!("{}}} else if ({}) {{", "    ".repeat(indent), cond));
-                        indent += 1;
-                    }
-                    BlockEvent::CloseElse => {
-                        indent = indent.saturating_sub(1);
-                        output.push(format!("{}}}", "    ".repeat(indent)));
-                    }
+    let emit_block_events = |evts: &[BlockEvent], indent: &mut usize, output: &mut Vec<String>, block_stack: &mut Vec<BlockType>| {
+        for evt in evts.iter().rev() {
+            match evt {
+                BlockEvent::CloseIf => {
+                    *indent = indent.saturating_sub(1);
+                    output.push(format!("{}}}", "    ".repeat(*indent)));
+                    block_stack.pop();
+                }
+                BlockEvent::CloseIfOpenElse => {
+                    *indent = indent.saturating_sub(1);
+                    output.push(format!("{}}} else {{", "    ".repeat(*indent)));
+                    // Pop If, push If (same level)
+                    *indent += 1;
+                }
+                BlockEvent::CloseIfOpenElseIf(cond) => {
+                    *indent = indent.saturating_sub(1);
+                    output.push(format!("{}}} else if ({}) {{", "    ".repeat(*indent), cond));
+                    // Pop If, push If (same level)
+                    *indent += 1;
+                }
+                BlockEvent::CloseElse => {
+                    *indent = indent.saturating_sub(1);
+                    output.push(format!("{}}}", "    ".repeat(*indent)));
+                    block_stack.pop();
                 }
             }
+        }
+    };
+
+    for (i, stmt) in stmts.iter().enumerate() {
+        if let Some(evts) = events.get(&i) {
+            emit_block_events(evts, &mut indent, &mut output, &mut block_stack);
+        }
+
+        // Inject pending labels
+        if let Some(lbl) = pending_labels.get(&i) {
+            output.push(format!("{}:", lbl));
         }
 
         if let Some(label) = label_at.get(&i) {
             // Label orphan code before the first event label as latent resumes
             if is_ubergraph && !output.is_empty() && !output.iter().any(|l| l.starts_with("---")) {
-                // Check there's actual content (not just returns)
                 let has_content = output.iter().any(|l| {
                     let t = l.trim();
                     !t.is_empty() && t != "return"
@@ -216,20 +281,40 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         if let Some(replacement) = replacements.get(&i) {
             output.push(format!("{}{}", "    ".repeat(indent), replacement));
             indent += 1;
+            block_stack.push(BlockType::If);
         } else if stmt.text == "}" {
             indent = indent.saturating_sub(1);
             output.push(format!("{}}}", "    ".repeat(indent)));
+            block_stack.pop();
         } else if stmt.text.ends_with(" {") {
+            let is_loop = stmt.text.starts_with("while ") || stmt.text.starts_with("for ");
             output.push(format!("{}{}", "    ".repeat(indent), stmt.text));
             indent += 1;
-        } else if is_ubergraph && stmt.text == "pop_flow" {
-            output.push(format!("{}return", "    ".repeat(indent)));
-        } else if is_ubergraph {
-            if let Some(cond) = parse_pop_flow_if_not(&stmt.text) {
-                output.push(format!("{}if (!{}) return", "    ".repeat(indent), cond));
+            block_stack.push(if is_loop { BlockType::Loop } else { BlockType::If });
+        } else if stmt.text == "pop_flow" {
+            let keyword = if in_loop(&block_stack) { "break" } else { "return" };
+            output.push(format!("{}{}", "    ".repeat(indent), keyword));
+        } else if let Some(cond) = parse_pop_flow_if_not(&stmt.text) {
+            let keyword = if in_loop(&block_stack) { "break" } else { "return" };
+            let negated = negate_cond(cond);
+            output.push(format!("{}if ({}) {}", "    ".repeat(indent), negated, keyword));
+        } else if let Some(target) = parse_jump(&stmt.text) {
+            // Resolve raw jumps
+            if let Some(target_idx) = find_target_idx_or_end(target) {
+                if target_idx >= stmts.len() {
+                    // Jump past end — break or omit
+                    if in_loop(&block_stack) {
+                        output.push(format!("{}break", "    ".repeat(indent)));
+                    }
+                    // Outside loops, jump-to-end is implicit return — omit
+                } else if let Some(goto_text) = label_targets.get(&i) {
+                    output.push(format!("{}{}", "    ".repeat(indent), goto_text));
+                } else {
+                    // Fallback: keep raw jump
+                    output.push(format!("{}{}", "    ".repeat(indent), stmt.text));
+                }
             } else {
-                let text = if stmt.text == "return nop" { "return" } else { &stmt.text };
-                output.push(format!("{}{}", "    ".repeat(indent), text));
+                output.push(format!("{}{}", "    ".repeat(indent), stmt.text));
             }
         } else {
             let text = if stmt.text == "return nop" { "return" } else { &stmt.text };
@@ -238,29 +323,56 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
     }
 
     if let Some(evts) = events.get(&stmts.len()) {
-        for evt in evts.iter().rev() {
-            match evt {
-                BlockEvent::CloseIf | BlockEvent::CloseElse => {
-                    indent = indent.saturating_sub(1);
-                    output.push(format!("{}}}", "    ".repeat(indent)));
-                }
-                BlockEvent::CloseIfOpenElse => {
-                    indent = indent.saturating_sub(1);
-                    output.push(format!("{}}} else {{", "    ".repeat(indent)));
-                    indent += 1;
-                }
-                BlockEvent::CloseIfOpenElseIf(cond) => {
-                    indent = indent.saturating_sub(1);
-                    output.push(format!("{}}} else if ({}) {{", "    ".repeat(indent), cond));
-                    indent += 1;
-                }
-            }
-        }
+        emit_block_events(evts, &mut indent, &mut output, &mut block_stack);
     }
 
     while indent > 0 {
         indent -= 1;
         output.push(format!("{}}}", "    ".repeat(indent)));
+    }
+
+    // Post-process: convert "goto L_XXXX" to "break" when the label appears
+    // right after a closing "}" (indicates a post-loop/post-block target)
+    let break_labels: HashSet<String> = {
+        let mut set = HashSet::new();
+        for i in 0..output.len() {
+            let trimmed = output[i].trim();
+            if trimmed.ends_with(':') && !trimmed.starts_with("---") {
+                let label = &trimmed[..trimmed.len() - 1];
+                // Check if the previous non-empty line is a closing brace
+                if let Some(prev) = output[..i].iter().rev().find(|l| !l.trim().is_empty()) {
+                    if prev.trim() == "}" {
+                        set.insert(label.to_string());
+                    }
+                }
+            }
+        }
+        set
+    };
+    if !break_labels.is_empty() {
+        for line in output.iter_mut() {
+            let trimmed = line.trim();
+            if let Some(label) = trimmed.strip_prefix("goto ") {
+                if break_labels.contains(label) {
+                    let indent_str = &line[..line.len() - trimmed.len()];
+                    *line = format!("{}break", indent_str);
+                }
+            }
+        }
+        // Remove labels that are now only used as break targets (no remaining gotos)
+        let remaining_gotos: HashSet<String> = output.iter()
+            .filter_map(|l| l.trim().strip_prefix("goto ").map(|s| s.to_string()))
+            .collect();
+        output.retain(|line| {
+            let trimmed = line.trim();
+            if trimmed.ends_with(':') && !trimmed.starts_with("---") {
+                let label = &trimmed[..trimmed.len() - 1];
+                if break_labels.contains(label) {
+                    return remaining_gotos.contains(label);
+                }
+            }
+            true
+        });
     }
 
     output
