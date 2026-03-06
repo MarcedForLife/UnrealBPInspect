@@ -397,5 +397,113 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         });
     }
 
+    // Post-process: extract convergence code from inside blocks.
+    // When a label inside a block is targeted by 2+ gotos, the code from
+    // the label to the block boundary is shared convergence code that
+    // should appear after the enclosing block, not inside one branch.
+    extract_convergence(&mut output);
+
     output
+}
+
+fn extract_convergence(output: &mut Vec<String>) {
+    // Process one convergence label per iteration (indices shift after each)
+    loop {
+        // Collect goto targets and their line indices
+        let mut goto_map: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, line) in output.iter().enumerate() {
+            if let Some(label) = line.trim().strip_prefix("goto ") {
+                goto_map.entry(label.to_string()).or_default().push(i);
+            }
+        }
+
+        // Find first convergence label (2+ gotos)
+        let conv = goto_map.iter()
+            .find(|(_, gotos)| gotos.len() >= 2)
+            .map(|(label, gotos)| (label.clone(), gotos.clone()));
+        let Some((label_name, goto_indices)) = conv else { break };
+
+        // Find the label line
+        let label_text = format!("{}:", label_name);
+        let Some(label_idx) = output.iter().position(|l| l.trim() == label_text) else { break };
+
+        // Determine convergence code extent: from label+1 until a structural
+        // boundary (closing brace / else) at shallower indent
+        let code_start = label_idx + 1;
+        if code_start >= output.len() { break; }
+
+        let first_indent = output[code_start].len() - output[code_start].trim_start().len();
+        let mut code_end = code_start;
+        for j in code_start..output.len() {
+            let trimmed = output[j].trim();
+            if trimmed.is_empty() { code_end = j + 1; continue; }
+            let line_indent = output[j].len() - output[j].trim_start().len();
+            if line_indent < first_indent && (trimmed.starts_with('}') || trimmed.starts_with("} else")) {
+                break;
+            }
+            if j > code_start && trimmed.ends_with(':') && !trimmed.starts_with("//") && !trimmed.starts_with("---") {
+                break;
+            }
+            code_end = j + 1;
+        }
+        if code_end <= code_start { break; }
+
+        // Extract convergence content (trimmed)
+        let conv_content: Vec<String> = output[code_start..code_end]
+            .iter().map(|l| l.trim().to_string()).collect();
+
+        // Find insert point: first `}` after all gotos at indent < shallowest goto indent
+        let min_goto_indent = goto_indices.iter()
+            .map(|&i| output[i].len() - output[i].trim_start().len())
+            .min().unwrap_or(0);
+        let max_goto = goto_indices.iter().copied().max().unwrap_or(0);
+
+        let mut insert_after = None;
+        for j in (max_goto + 1)..output.len() {
+            let trimmed = output[j].trim();
+            let line_indent = output[j].len() - output[j].trim_start().len();
+            if trimmed == "}" && line_indent < min_goto_indent {
+                insert_after = Some(j);
+                break;
+            }
+        }
+        // Fallback: append at end
+        let insert_pos = insert_after.unwrap_or(output.len());
+        let target_indent = if insert_pos < output.len() {
+            output[insert_pos].len() - output[insert_pos].trim_start().len()
+        } else {
+            0
+        };
+
+        // Collect all lines to remove
+        let mut to_remove: Vec<usize> = Vec::new();
+        to_remove.push(label_idx);
+        to_remove.extend(code_start..code_end);
+        to_remove.extend(&goto_indices);
+        to_remove.sort();
+        to_remove.dedup();
+
+        // Remove in reverse order
+        for &idx in to_remove.iter().rev() {
+            if idx < output.len() {
+                output.remove(idx);
+            }
+        }
+
+        // Adjust insert position for removed lines
+        let removed_before = to_remove.iter().filter(|&&idx| idx < insert_pos).count();
+        let adjusted_pos = insert_pos.saturating_sub(removed_before);
+
+        // Insert convergence code at target indent
+        let indent_str = "    ".repeat(target_indent / 4);
+        for (i, content) in conv_content.iter().enumerate() {
+            let line = if content.is_empty() {
+                String::new()
+            } else {
+                format!("{}{}", indent_str, content)
+            };
+            let pos = (adjusted_pos + 1 + i).min(output.len());
+            output.insert(pos, line);
+        }
+    }
 }
