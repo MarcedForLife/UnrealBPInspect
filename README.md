@@ -83,13 +83,23 @@ Full structured output for programmatic use:
 bp-inspect Helm_BP.uasset --json | jq '.exports[] | select(.name == "GetSteeringAngle")'
 ```
 
+## Why bp-inspect
+
+Existing tools solve different problems:
+
+- **UAssetAPI** is a serialisation library. It round-trips the binary format faithfully but doesn't interpret it -- you get raw property trees and bytecode as byte arrays. No disassembly, no signature reconstruction. Built for modding tools that patch values and re-save, not for reading comprehension.
+- **UE4 commandlets** (`DumpBlueprintInfo`, etc.) require a full editor instance with the project loaded, all dependencies resolved, game module DLLs compiled. They can't work on standalone `.uasset` files and their output is verbose internal reflection data.
+- **NodeToCode** runs inside the editor as a plugin, translating graphs to C++ via LLM. Not usable from the command line or CI.
+
+bp-inspect works on bare `.uasset` files with zero UE4 dependency. It reconstructs function signatures from parameter properties, disassembles Kismet bytecode into readable pseudo-code, structures control flow (if/else, while loops, sequence nodes), resolves field paths, strips serialisation noise (GUID suffixes, K2Node prefixes, CallFunc wrappers), and splits ubergraph functions into labelled event handlers. The `--summary` output is designed to be handed directly to an AI and asked "what does this Blueprint do?".
+
 ## What it parses
 
 - **Package header** and name/import/export tables
 - **Tagged properties** (Bool, Int, Float, Struct, Array, Map, Enum, Object refs, Text, etc.)
 - **UStruct serialisation** (super struct, children array, FField child properties with metadata)
 - **FField types** (FloatProperty, ObjectProperty, BoolProperty, StructProperty, ArrayProperty, etc.)
-- **Kismet bytecode** decoded to structured pseudo-code with if/else blocks (arithmetic, casts, context calls, conditionals, local/instance variables)
+- **Kismet bytecode** decoded to structured pseudo-code with if/else blocks, while loops, and sequence nodes (arithmetic, casts, context calls, conditionals, local/instance variables)
 - **EdGraph nodes** (K2Node_CallFunction, VariableGet/Set, DynamicCast, FunctionEntry/Result, events, etc.)
 - **SCS component tree** with sub-object properties and child actor templates
 

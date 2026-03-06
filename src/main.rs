@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
@@ -707,7 +708,23 @@ fn format_signature(func_name: &str, params: &[(String, String, u64)]) -> String
 
 // --- Bytecode name cleanup ---
 
+fn strip_guid_suffix(name: &str) -> &str {
+    let bytes = name.as_bytes();
+    // Need at least: X_0_<32 hex chars> = 36 chars minimum
+    if bytes.len() < 36 { return name; }
+    let hex_start = bytes.len() - 32;
+    if !bytes[hex_start..].iter().all(|b| b.is_ascii_hexdigit()) { return name; }
+    if bytes[hex_start - 1] != b'_' { return name; }
+    // Walk backward past digits to find the preceding underscore
+    let mut i = hex_start - 2;
+    if !bytes[i].is_ascii_digit() { return name; }
+    while i > 0 && bytes[i - 1].is_ascii_digit() { i -= 1; }
+    if i == 0 || bytes[i - 1] != b'_' { return name; }
+    &name[..i - 1]
+}
+
 fn clean_bc_name(name: &str) -> String {
+    let name = strip_guid_suffix(name);
     // Shorten verbose Blueprint-generated local variable names
     // CallFunc_Multiply_FloatFloat_ReturnValue → $Multiply_FloatFloat
     // K2Node_DynamicCast_AsWinch_Constraint_BP → $Cast_AsWinch_Constraint_BP
@@ -1315,6 +1332,7 @@ fn decode_func_args(bc: &[u8], pos: &mut usize, nt: &NameTable,
     args
 }
 
+#[derive(Clone)]
 struct BcStatement {
     mem_offset: usize,
     text: String,
@@ -1346,8 +1364,269 @@ fn decode_bytecode(bc: &[u8], nt: &NameTable,
     stmts
 }
 
+/// Parse "push_flow 0xHEX" → target offset.
+fn parse_push_flow(text: &str) -> Option<usize> {
+    text.strip_prefix("push_flow 0x").and_then(|h| usize::from_str_radix(h, 16).ok())
+}
+
+/// Parse "jump 0xHEX" → target offset.
+fn parse_jump(text: &str) -> Option<usize> {
+    text.strip_prefix("jump 0x").and_then(|h| usize::from_str_radix(h, 16).ok())
+}
+
+/// Reorder bytecode stmts to place sequence/loop bodies in logical execution order.
+///
+/// UE4's bytecode compiler places loop and sequence bodies after the control structure
+/// in the linear byte stream. This function detects those patterns and reorders stmts
+/// so the bodies appear inline where they logically execute.
+fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
+    if stmts.is_empty() { return Vec::new(); }
+
+    // Detect sequence nodes: a chain of N × (push_flow CONT, jump BODY) pairs,
+    // followed by inline code (the last pin), then each body ending with pop_flow.
+    //
+    // Execution order: pin_0 body, pin_1 body, ..., pin_N body (inline)
+    // Linear order:    [push/jump chain] [pin_N inline] [pin_0 body] ... [pin_N-1 body]
+    //
+    // Also detect for-loops:
+    //   if !(COND) jump END, push_flow INCR, jump BODY, [incr], back-jump, pop_flow, [body]
+    //
+    // Build a plan of regions to reorder, then emit stmts in logical order.
+
+    let mut used = vec![false; stmts.len()]; // marks stmts consumed by a pattern
+    // Collected rewrite instructions: (output_position, stmts_to_insert)
+    // We'll build the output directly by iterating and inserting.
+
+    // --- Detect sequence nodes ---
+    // A sequence starts with push_flow (outer end) followed by push_flow+jump pairs.
+    struct SequencePin {
+        body_start_idx: usize,
+        body_end_idx: usize, // inclusive (the pop_flow)
+    }
+
+    struct SequenceNode {
+        chain_start: usize,   // index of first push_flow
+        chain_end: usize,     // index after last jump (= inline body start)
+        inline_end: usize,    // index of inline body's pop_flow (inclusive)
+        pins: Vec<SequencePin>, // in execution order (pin 0 = first jump target)
+    }
+
+    let mut sequences: Vec<SequenceNode> = Vec::new();
+
+    let mut i = 0;
+    while i < stmts.len() {
+        // Look for: push_flow END, then 2+ × (push_flow CONT, jump BODY)
+        let Some(_end_offset) = parse_push_flow(&stmts[i].text) else { i += 1; continue };
+
+        // Scan push_flow/jump pairs starting at i+1
+        let mut pairs: Vec<(usize, usize)> = Vec::new(); // (cont_offset, body_offset)
+        let mut j = i + 1;
+        while j + 1 < stmts.len() {
+            let Some(_cont) = parse_push_flow(&stmts[j].text) else { break };
+            let Some(body) = parse_jump(&stmts[j + 1].text) else { break };
+            pairs.push((_cont, body));
+            j += 2;
+        }
+
+        if pairs.len() < 2 {
+            // Not a sequence node (need at least 2 pins with deferred bodies)
+            i += 1;
+            continue;
+        }
+
+        // j now points to the start of the inline body (last pin)
+        let inline_start = j;
+
+        // Find inline body end: scan for pop_flow
+        let inline_end = stmts[inline_start..].iter().position(|s| s.text == "pop_flow")
+            .map(|p| p + inline_start);
+        let Some(inline_end) = inline_end else { i += 1; continue };
+
+        // Find pin bodies by locating consecutive pop_flow markers after inline_end.
+        // Each pin body runs from (previous pop_flow + 1) to the next pop_flow.
+        // The first pin body starts at inline_end + 1.
+        let mut pins: Vec<SequencePin> = Vec::new();
+        let mut body_scan = inline_end + 1;
+        for _ in 0..pairs.len() {
+            if body_scan >= stmts.len() { break; }
+            let body_start = body_scan;
+            let body_end = stmts[body_start..].iter().position(|s| s.text == "pop_flow")
+                .map(|p| p + body_start);
+            let Some(body_end) = body_end else { break };
+            pins.push(SequencePin { body_start_idx: body_start, body_end_idx: body_end });
+            body_scan = body_end + 1;
+        }
+        if pins.len() != pairs.len() { i += 1; continue; }
+
+        sequences.push(SequenceNode {
+            chain_start: i,
+            chain_end: inline_start,
+            inline_end,
+            pins,
+        });
+
+        // Skip past this sequence in the scan
+        i = inline_end + 1;
+    }
+
+    // --- Detect for-loops ---
+    // Pattern: if !(COND) jump END, push_flow INCR, jump BODY,
+    //          [increment stmts], back-jump, [pop_flow at ~END], [body at BODY]
+    struct ForLoop {
+        cond_text: String,       // the condition from the if stmt
+        if_idx: usize,           // index of the if statement
+        incr_start: usize,       // first increment stmt
+        back_jump_idx: usize,    // the back-jump
+        pop_flow_idx: usize,     // pop_flow after back-jump (at ~END)
+        body_start_idx: usize,   // first body stmt
+        body_end_idx: usize,     // last stmt before next structure or end
+    }
+
+    let mut loops: Vec<ForLoop> = Vec::new();
+
+    for i in 0..stmts.len() {
+        if !stmts[i].text.starts_with("if !(") { continue; }
+        let Some(jump_pos) = stmts[i].text.rfind(") jump 0x") else { continue };
+        let hex_str = &stmts[i].text[jump_pos + 9..];
+        let Ok(_end_offset) = usize::from_str_radix(hex_str, 16) else { continue };
+
+        if i + 2 >= stmts.len() { continue; }
+        let Some(_incr_offset) = parse_push_flow(&stmts[i + 1].text) else { continue };
+        let Some(_body_offset) = parse_jump(&stmts[i + 2].text) else { continue };
+
+        // Find the increment start (stmt after the jump)
+        let incr_start = i + 3;
+
+        // Find back-jump in the increment section
+        let mut back_jump_idx = None;
+        for j in incr_start..stmts.len() {
+            if let Some(back_target) = parse_jump(&stmts[j].text) {
+                if back_target <= stmts[i].mem_offset {
+                    back_jump_idx = Some(j);
+                    break;
+                }
+            }
+        }
+        let Some(back_jump_idx) = back_jump_idx else { continue };
+
+        // Pop_flow should be near the back-jump (allow small gap for tracepoints)
+        let pop_idx = stmts[(back_jump_idx + 1)..stmts.len().min(back_jump_idx + 3)]
+            .iter().position(|s| s.text == "pop_flow")
+            .map(|p| p + back_jump_idx + 1);
+        let Some(pop_idx) = pop_idx else { continue };
+
+        // Body starts right after the pop_flow
+        let body_start = pop_idx + 1;
+        if body_start >= stmts.len() { continue; }
+
+        // Body ends at the last stmt before the next recognized structure or end of stmts.
+        // For now: scan until we hit a stmt that's part of another pattern, or end.
+        // Simple heuristic: body goes to end of stmts (or up to the next loop/sequence start).
+        let mut body_end = stmts.len() - 1;
+        // If there are sequences after us, the body ends before the first sequence body
+        for seq in &sequences {
+            for pin in &seq.pins {
+                if pin.body_start_idx > pop_idx && pin.body_start_idx <= body_end {
+                    body_end = pin.body_start_idx - 1;
+                }
+            }
+        }
+
+        let cond = stmts[i].text[5..jump_pos].to_string();
+
+        // Check this loop doesn't overlap with a sequence
+        let overlaps_sequence = sequences.iter().any(|seq| {
+            i >= seq.chain_start && i <= seq.inline_end
+        });
+        if overlaps_sequence { continue; }
+
+        loops.push(ForLoop {
+            cond_text: cond,
+            if_idx: i,
+            incr_start,
+            back_jump_idx,
+            pop_flow_idx: pop_idx,
+            body_start_idx: body_start,
+            body_end_idx: body_end,
+        });
+    }
+
+    // If no patterns found, return stmts unchanged
+    if sequences.is_empty() && loops.is_empty() {
+        return stmts.to_vec();
+    }
+
+    // Mark all consumed stmts
+    for seq in &sequences {
+        used[seq.chain_start..=seq.inline_end].fill(true);
+        for pin in &seq.pins {
+            used[pin.body_start_idx..=pin.body_end_idx].fill(true);
+        }
+    }
+    for lp in &loops {
+        used[lp.if_idx..=lp.pop_flow_idx].fill(true);
+        used[lp.body_start_idx..=lp.body_end_idx].fill(true);
+    }
+
+    // Build output in logical order
+    let mut output: Vec<BcStatement> = Vec::new();
+    let marker = |text: &str| BcStatement { mem_offset: 0, text: text.to_string() };
+
+    let mut i = 0;
+    while i < stmts.len() {
+        // Check if a sequence starts here
+        if let Some(seq) = sequences.iter().find(|s| s.chain_start == i) {
+            // Emit pins in execution order (pin 0 first, inline body last)
+            for (pi, pin) in seq.pins.iter().enumerate() {
+                output.push(marker(&format!("// sequence [{}]:", pi)));
+                output.extend_from_slice(&stmts[pin.body_start_idx..pin.body_end_idx]);
+                // Skip the pop_flow
+            }
+            // Emit inline body (last pin)
+            output.push(marker(&format!("// sequence [{}]:", seq.pins.len())));
+            output.extend_from_slice(&stmts[seq.chain_end..seq.inline_end]);
+            // Skip the pop_flow
+
+            // Advance past all consumed stmts
+            i = seq.inline_end + 1;
+            // Also skip past the pin bodies (they come later in the array)
+            continue;
+        }
+
+        // Check if a for-loop starts here
+        if let Some(lp) = loops.iter().find(|l| l.if_idx == i) {
+            // Emit: while (COND) { body; increment; }
+            output.push(marker(&format!("while ({}) {{", lp.cond_text)));
+            // Body (skip trailing "return nop")
+            let body_end = if stmts[lp.body_end_idx].text == "return nop" {
+                lp.body_end_idx
+            } else {
+                lp.body_end_idx + 1
+            };
+            output.extend_from_slice(&stmts[lp.body_start_idx..body_end]);
+            // Increment
+            output.extend_from_slice(&stmts[lp.incr_start..lp.back_jump_idx]);
+            output.push(marker("}"));
+            // If the loop's body_end was "return nop", emit it after the loop
+            if stmts[lp.body_end_idx].text == "return nop" {
+                output.push(stmts[lp.body_end_idx].clone());
+            }
+            i = lp.pop_flow_idx + 1;
+            continue;
+        }
+
+        // Regular stmt — emit if not consumed by a pattern
+        if !used[i] {
+            output.push(stmts[i].clone());
+        }
+        i += 1;
+    }
+
+    output
+}
+
 /// Convert flat bytecode statements into structured pseudo-code with if/else blocks.
-fn structure_bytecode(stmts: &[BcStatement]) -> Vec<String> {
+fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>) -> Vec<String> {
     use std::collections::{HashMap, HashSet};
 
     if stmts.is_empty() { return Vec::new(); }
@@ -1356,6 +1635,11 @@ fn structure_bytecode(stmts: &[BcStatement]) -> Vec<String> {
     let offset_to_idx: HashMap<usize, usize> = stmts.iter().enumerate()
         .map(|(i, s)| (s.mem_offset, i))
         .collect();
+
+    // Resolve labels to statement indices (first stmt with mem_offset >= label offset)
+    let label_at: HashMap<usize, &String> = labels.iter().filter_map(|(offset, name)| {
+        stmts.iter().position(|s| s.mem_offset >= *offset).map(|idx| (idx, name))
+    }).collect();
 
     #[derive(Clone)]
     #[allow(clippy::enum_variant_names)]
@@ -1423,10 +1707,22 @@ fn structure_bytecode(stmts: &[BcStatement]) -> Vec<String> {
             }
         }
 
+        if let Some(label) = label_at.get(&i) {
+            output.push(format!("--- {} ---", label));
+        }
+
         if skip.contains(&i) { continue; }
 
         if let Some(replacement) = replacements.get(&i) {
             output.push(format!("{}{}", "    ".repeat(indent), replacement));
+            indent += 1;
+        } else if stmt.text == "}" {
+            // Synthetic close-brace from reorder pass
+            indent = indent.saturating_sub(1);
+            output.push(format!("{}}}", "    ".repeat(indent)));
+        } else if stmt.text.ends_with(" {") {
+            // Synthetic block-opener from reorder pass (e.g. "while (COND) {")
+            output.push(format!("{}{}", "    ".repeat(indent), stmt.text));
             indent += 1;
         } else {
             // Clean up "return nop" → "return"
@@ -1719,7 +2015,8 @@ fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
                         },
                     });
                     // Structured bytecode for summary mode
-                    let structured = structure_bytecode(&stmts);
+                    let reordered = reorder_flow_patterns(&stmts);
+                    let structured = structure_bytecode(&reordered, &HashMap::new());
                     if !structured.is_empty() {
                         extra_props.push(Property {
                             name: "BytecodeSummary".into(),
@@ -2234,6 +2531,43 @@ fn print_summary(asset: &ParsedAsset, filters: &[String]) {
         println!();
     }
 
+    // Collect ubergraph entry points from event stub functions
+    let ubergraph_name: Option<String> = asset.exports.iter()
+        .find(|(hdr, _)| hdr.object_name.starts_with("ExecuteUbergraph_"))
+        .map(|(hdr, _)| hdr.object_name.clone());
+    let ubergraph_labels: HashMap<usize, String> = if let Some(ref ug_name) = ubergraph_name {
+        let mut labels = HashMap::new();
+        let call_prefix = format!("{}(", ug_name);
+        for (hdr, props) in &asset.exports {
+            let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
+            if !class.ends_with(".Function") { continue; }
+            if hdr.object_name.starts_with("ExecuteUbergraph_") { continue; }
+            // Search bytecode for calls to the ubergraph
+            for prop_name in &["BytecodeSummary", "Bytecode"] {
+                if let Some(bc_prop) = find_prop(props, prop_name) {
+                    if let PropValue::Array { items, .. } = &bc_prop.value {
+                        for item in items {
+                            if let PropValue::Str(line) = item {
+                                if let Some(start) = line.find(&call_prefix) {
+                                    let after = &line[start + call_prefix.len()..];
+                                    if let Some(end) = after.find(')') {
+                                        if let Ok(offset) = after[..end].trim().parse::<usize>() {
+                                            labels.insert(offset, hdr.object_name.clone());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !labels.is_empty() { break; } // found in first prop, skip fallback
+            }
+        }
+        labels
+    } else {
+        HashMap::new()
+    };
+
     // Functions with signatures and bytecode
     let mut has_functions = false;
     let mut functions_with_bytecode: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2255,33 +2589,57 @@ fn print_summary(asset: &ParsedAsset, filters: &[String]) {
         }
         println!("  {}{}", sig, flags);
 
-        // Prefer structured bytecode, fall back to flat
-        let bc_prop_name = if find_prop(props, "BytecodeSummary").is_some() {
-            "BytecodeSummary"
-        } else {
-            "Bytecode"
-        };
-        if let Some(bc_prop) = find_prop(props, bc_prop_name) {
-            if let PropValue::Array { items, .. } = &bc_prop.value {
-                let has_bytecode = !items.is_empty();
-                for item in items {
-                    if let PropValue::Str(line) = item {
-                        if bc_prop_name == "Bytecode" {
-                            // Strip hex offset prefix (e.g. "0004: ")
-                            let code = if line.len() > 6 && line.as_bytes()[4] == b':' {
-                                &line[6..]
-                            } else {
-                                line
-                            };
-                            println!("    {}", code);
-                        } else {
-                            // BytecodeSummary lines are pre-formatted with indentation
-                            println!("    {}", line);
-                        }
+        // For ubergraph with labels: reconstruct statements and re-structure with labels
+        if hdr.object_name.starts_with("ExecuteUbergraph_") && !ubergraph_labels.is_empty() {
+            if let Some(bc_prop) = find_prop(props, "Bytecode") {
+                if let PropValue::Array { items, .. } = &bc_prop.value {
+                    let stmts: Vec<BcStatement> = items.iter().filter_map(|item| {
+                        if let PropValue::Str(line) = item {
+                            if line.len() > 6 && line.as_bytes()[4] == b':' {
+                                let offset = usize::from_str_radix(&line[..4], 16).ok()?;
+                                Some(BcStatement { mem_offset: offset, text: line[6..].to_string() })
+                            } else { None }
+                        } else { None }
+                    }).collect();
+                    let reordered = reorder_flow_patterns(&stmts);
+                    let structured = structure_bytecode(&reordered, &ubergraph_labels);
+                    for line in &structured {
+                        println!("    {}", line);
+                    }
+                    if !stmts.is_empty() {
+                        functions_with_bytecode.insert(hdr.object_name.clone());
                     }
                 }
-                if has_bytecode {
-                    functions_with_bytecode.insert(hdr.object_name.clone());
+            }
+        } else {
+            // Prefer structured bytecode, fall back to flat
+            let bc_prop_name = if find_prop(props, "BytecodeSummary").is_some() {
+                "BytecodeSummary"
+            } else {
+                "Bytecode"
+            };
+            if let Some(bc_prop) = find_prop(props, bc_prop_name) {
+                if let PropValue::Array { items, .. } = &bc_prop.value {
+                    let has_bytecode = !items.is_empty();
+                    for item in items {
+                        if let PropValue::Str(line) = item {
+                            if bc_prop_name == "Bytecode" {
+                                // Strip hex offset prefix (e.g. "0004: ")
+                                let code = if line.len() > 6 && line.as_bytes()[4] == b':' {
+                                    &line[6..]
+                                } else {
+                                    line
+                                };
+                                println!("    {}", code);
+                            } else {
+                                // BytecodeSummary lines are pre-formatted with indentation
+                                println!("    {}", line);
+                            }
+                        }
+                    }
+                    if has_bytecode {
+                        functions_with_bytecode.insert(hdr.object_name.clone());
+                    }
                 }
             }
         }
