@@ -1123,10 +1123,10 @@ fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             let struct_expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj).unwrap_or_default();
             Some(format!("{}.{}", struct_expr, prop))
         }
-        0x42 => { // EX_LetMulticastDelegate
-            let var = decode_expr(bc, pos, nt, imports, export_names, mem_adj).unwrap_or_default();
-            let val = decode_expr(bc, pos, nt, imports, export_names, mem_adj).unwrap_or_default();
-            Some(format!("{} = {}", var, val))
+        0x42 => { // EX_StructMemberContext variant (property member access, same format as 0x41)
+            let prop = read_bc_field_path(bc, pos, nt, mem_adj);
+            let struct_expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj).unwrap_or_default();
+            Some(format!("{}.{}", struct_expr, prop))
         }
         0x43 => { // EX_LetDelegate
             let var = decode_expr(bc, pos, nt, imports, export_names, mem_adj).unwrap_or_default();
@@ -1143,9 +1143,18 @@ fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             let args = decode_func_args(bc, pos, nt, imports, export_names, mem_adj);
             Some(format!("{}({})", func, args.join(", ")))
         }
+        0x46 => { // EX_FinalFunction variant (ubergraph dispatch, same format as 0x1C)
+            let func = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
+            let args = decode_func_args(bc, pos, nt, imports, export_names, mem_adj);
+            Some(format!("{}({})", func, args.join(", ")))
+        }
         0x48 => { // EX_LocalOutVariable
             let prop = read_bc_field_path(bc, pos, nt, mem_adj);
             Some(format!("out {}", prop))
+        }
+        0x4B => { // EX_InstanceDelegate
+            let name = read_bc_fname(bc, pos, nt);
+            Some(format!("delegate({})", name))
         }
         0x4C => { // EX_PushExecutionFlow
             let offset = read_bc_u32(bc, pos);
@@ -1324,7 +1333,9 @@ fn decode_bytecode(bc: &[u8], nt: &NameTable,
                 // Filter out noise (tracepoints, nops)
                 match s.as_str() {
                     "nop" | "wire_trace" | "tracepoint" | "instrumentation" => continue,
-                    _ => stmts.push(BcStatement { mem_offset: mem_start, text: s }),
+                    _ => {
+                        stmts.push(BcStatement { mem_offset: mem_start, text: s });
+                    }
                 }
             }
             None => break, // EndOfScript or end of data
