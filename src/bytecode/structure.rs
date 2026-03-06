@@ -197,6 +197,17 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         }
 
         if let Some(label) = label_at.get(&i) {
+            // Label orphan code before the first event label as latent resumes
+            if is_ubergraph && !output.is_empty() && !output.iter().any(|l| l.starts_with("---")) {
+                // Check there's actual content (not just returns)
+                let has_content = output.iter().any(|l| {
+                    let t = l.trim();
+                    !t.is_empty() && t != "return"
+                });
+                if has_content {
+                    output.insert(0, "--- (latent resume) ---".to_string());
+                }
+            }
             output.push(format!("--- {} ---", label));
         }
 

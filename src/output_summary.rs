@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::types::*;
 use crate::resolve::*;
-use crate::bytecode::{BcStatement, reorder_flow_patterns, structure_bytecode};
+use crate::bytecode::{BcStatement, reorder_flow_patterns, structure_bytecode, inline_single_use_temps};
 
 pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
     let export_names: Vec<String> = asset.exports.iter().map(|(h, _)| h.object_name.clone()).collect();
@@ -323,7 +323,8 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
                             } else { None }
                         } else { None }
                     }).collect();
-                    let reordered = reorder_flow_patterns(&stmts);
+                    let mut reordered = reorder_flow_patterns(&stmts);
+                    inline_single_use_temps(&mut reordered);
                     let structured = structure_bytecode(&reordered, &ubergraph_labels);
                     for line in &structured {
                         println!("    {}", line);

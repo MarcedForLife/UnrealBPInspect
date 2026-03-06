@@ -25,6 +25,7 @@ src/
     decode.rs          Expression decoder (~77 opcodes), BcStatement, decode_bytecode
     flow.rs            Flow pattern detection (sequences, for-loops, ForEach)
     structure.rs       If/else block structuring
+    inline.rs          Single-use temp variable inlining
 skill/SKILL.md       Claude Code skill instructions
 skill/README.md      Skill install guide
 samples/             Test .uasset files (UE4.27, uncooked)
