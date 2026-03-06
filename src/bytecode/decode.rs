@@ -59,12 +59,36 @@ fn try_inline_operator(name: &str, args: &[String]) -> Option<String> {
     }
 }
 
+fn strip_func_prefix(name: &str) -> String {
+    if let Some(dot_pos) = name.rfind('.') {
+        let prefix = &name[..dot_pos + 1];
+        let func = &name[dot_pos + 1..];
+        let stripped = func.strip_prefix("K2_")
+            .or_else(|| func.strip_prefix("Conv_"))
+            .unwrap_or(func);
+        format!("{}{}", prefix, stripped)
+    } else {
+        let stripped = name.strip_prefix("K2_")
+            .or_else(|| name.strip_prefix("Conv_"))
+            .unwrap_or(name);
+        stripped.to_string()
+    }
+}
+
 fn format_call_or_operator(name: &str, args: Vec<String>) -> String {
     if let Some(inlined) = try_inline_operator(name, &args) {
-        inlined
-    } else {
-        format!("{}({})", name, args.join(", "))
+        return inlined;
     }
+    // Strip WorldContextObject (self as first arg of global functions) and LatentActionInfo
+    let clean_args: Vec<&String> = args.iter().filter(|a| {
+        // Drop WorldContextObject — "self" as first arg of non-method calls
+        // (method calls use dot syntax so self won't appear as an arg)
+        !(a.as_str() == "self" && !name.contains('.'))
+        // Drop LatentActionInfo struct literals — internal plumbing
+        && !a.starts_with("LatentActionInfo(")
+    }).collect();
+    let clean_name = strip_func_prefix(name);
+    format!("{}({})", clean_name, clean_args.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(", "))
 }
 
 /// Decode a single Kismet expression, returning a string representation.

@@ -7,7 +7,7 @@ use crate::types::*;
 use crate::resolve::*;
 use crate::properties::read_properties;
 use crate::ffield::*;
-use crate::bytecode::{decode_bytecode, reorder_flow_patterns, structure_bytecode};
+use crate::bytecode::{decode_bytecode, reorder_flow_patterns, structure_bytecode, inline_single_use_temps};
 
 pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
     let file_size = data.len();
@@ -251,7 +251,8 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
                             )).collect(),
                         },
                     });
-                    let reordered = reorder_flow_patterns(&stmts);
+                    let mut reordered = reorder_flow_patterns(&stmts);
+                    inline_single_use_temps(&mut reordered);
                     let structured = structure_bytecode(&reordered, &HashMap::new());
                     if !structured.is_empty() {
                         extra_props.push(Property {
