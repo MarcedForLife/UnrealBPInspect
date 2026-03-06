@@ -2,3 +2,5 @@
 .DS_Store
 samples/*
 !samples/HelloWorld_BP.uasset
+
+.claude/
