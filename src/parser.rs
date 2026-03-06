@@ -7,7 +7,7 @@ use crate::types::*;
 use crate::resolve::*;
 use crate::properties::read_properties;
 use crate::ffield::*;
-use crate::bytecode::{decode_bytecode, reorder_flow_patterns, structure_bytecode, inline_single_use_temps};
+use crate::bytecode::{decode_bytecode, reorder_flow_patterns, structure_bytecode, inline_single_use_temps, discard_unused_assignments, cleanup_structured_output};
 
 pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
     let file_size = data.len();
@@ -253,7 +253,9 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
                     });
                     let mut reordered = reorder_flow_patterns(&stmts);
                     inline_single_use_temps(&mut reordered);
-                    let structured = structure_bytecode(&reordered, &HashMap::new());
+                    discard_unused_assignments(&mut reordered);
+                    let mut structured = structure_bytecode(&reordered, &HashMap::new());
+                    cleanup_structured_output(&mut structured);
                     if !structured.is_empty() {
                         extra_props.push(Property {
                             name: "BytecodeSummary".into(),
