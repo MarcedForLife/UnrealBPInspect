@@ -223,18 +223,34 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
             i += 1;
         }
     }
+
+    // Pass 3: suppress dead code after unconditional return at indent 0
+    // Only in non-ubergraph functions (no "---" labels)
+    let has_labels = lines.iter().any(|l| l.starts_with("---"));
+    if !has_labels {
+        let mut dead = false;
+        lines.retain(|line| {
+            let trimmed = line.trim();
+            if dead {
+                // Closing braces are structural, keep them
+                trimmed == "}" || trimmed.is_empty()
+            } else {
+                let indent_len = line.len() - line.trim_start().len();
+                if indent_len == 0 && trimmed == "return" {
+                    dead = true;
+                }
+                true
+            }
+        });
+    }
 }
 
 fn clean_line(text: &str) -> String {
     let mut s = text.to_string();
 
-    // Double negation: !!X → X
-    while s.contains("!!") {
-        s = s.replace("!!", "");
-    }
-
-    // !(!X) → X — but only standalone, not inside larger expressions
-    // Handle in if-conditions: "if (!(!EXPR))" → "if (EXPR)"
+    // !(!X) → X — but only when the inner ! covers the entire expression.
+    // Safe: !(!A) → A, !(!(A && B)) → (A && B)
+    // Unsafe: !(!A && B) — inner ! only negates A, not the whole expression
     loop {
         if let Some(pos) = s.find("!(") {
             // Check if the char before ! is ( or space or start — i.e. it's a prefix not
@@ -249,10 +265,13 @@ fn clean_line(text: &str) -> String {
             if let Some(inner) = find_matching_paren(&s[pos + 1..]) {
                 let inner_text = &s[inner_start..pos + 1 + inner];
                 // Only simplify if inner_text starts with ! (double negation)
+                // AND the ! covers the entire inner expression (no top-level && or ||)
                 if inner_text.starts_with('!') {
-                    let replacement = &inner_text[1..];
-                    s = format!("{}{}{}", &s[..pos], replacement, &s[pos + 2 + inner..]);
-                    continue;
+                    let after_neg = &inner_text[1..];
+                    if !has_toplevel_logical_op(after_neg) {
+                        s = format!("{}{}{}", &s[..pos], after_neg, &s[pos + 2 + inner..]);
+                        continue;
+                    }
                 }
             }
         }
@@ -277,6 +296,27 @@ fn clean_line(text: &str) -> String {
     }
 
     s
+}
+
+/// Check if a string contains ` && ` or ` || ` at paren depth 0.
+/// Used to determine if `!` only negates the first operand in a compound expression.
+fn has_toplevel_logical_op(s: &str) -> bool {
+    let mut depth = 0i32;
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    for i in 0..len {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b' ' if depth == 0 && i + 3 < len => {
+                if &s[i..i + 4] == " && " || &s[i..i + 4] == " || " {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Strip one layer of redundant outer parentheses if they match.

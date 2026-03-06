@@ -108,6 +108,9 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
         loop_ctrl_end: usize,
         body_start_idx: usize,
         body_end_idx: usize,
+        // ForEach detection: completion path between loop exit and displaced body
+        completion_start: Option<usize>,
+        completion_end: Option<usize>,
     }
 
     let mut loops: Vec<ForLoop> = Vec::new();
@@ -149,14 +152,36 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
             .iter().position(|s| s.text == "pop_flow")
             .map(|p| p + back_jump_idx + 1);
 
-        let (body_start, loop_ctrl_end) = if let Some(pop_idx) = pop_idx {
-            (pop_idx + 1, pop_idx)
-        } else {
-            let body_idx = stmts.iter().position(|s| {
+        // For ForEach loops, the body is displaced AFTER the completion path.
+        // Detect by checking if the body_jump_target lands past the control block end.
+        let (body_start, loop_ctrl_end, completion_start, completion_end) = if let Some(pop_idx) = pop_idx {
+            // Check if the actual body is displaced further (ForEach pattern)
+            let body_at_jump = stmts.iter().position(|s| {
                 s.mem_offset > 0 && s.mem_offset.abs_diff(body_jump_target) < 64
             });
+            if let Some(actual_body) = body_at_jump {
+                if actual_body > pop_idx + 1 {
+                    (actual_body, pop_idx, Some(pop_idx + 1), Some(actual_body - 1))
+                } else {
+                    (pop_idx + 1, pop_idx, None, None)
+                }
+            } else {
+                (pop_idx + 1, pop_idx, None, None)
+            }
+        } else {
+            // Find the CLOSEST matching statement (not just the first within tolerance)
+            let body_idx = stmts.iter().enumerate()
+                .filter(|(_, s)| s.mem_offset > 0 && s.mem_offset.abs_diff(body_jump_target) < 64)
+                .min_by_key(|(_, s)| s.mem_offset.abs_diff(body_jump_target))
+                .map(|(idx, _)| idx);
             let Some(body_idx) = body_idx else { continue };
-            (body_idx, back_jump_idx)
+            // If body is displaced past the back_jump, the gap is the completion path
+            let (cs, ce) = if body_idx > back_jump_idx + 1 {
+                (Some(back_jump_idx + 1), Some(body_idx - 1))
+            } else {
+                (None, None)
+            };
+            (body_idx, back_jump_idx, cs, ce)
         };
 
         if body_start >= stmts.len() { continue; }
@@ -187,6 +212,8 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
             loop_ctrl_end,
             body_start_idx: body_start,
             body_end_idx: body_end,
+            completion_start,
+            completion_end,
         });
     }
 
@@ -203,6 +230,10 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
     for lp in &loops {
         used[lp.if_idx..=lp.loop_ctrl_end].fill(true);
         used[lp.body_start_idx..=lp.body_end_idx].fill(true);
+        // Mark ForEach completion range as used (we'll emit it after the loop)
+        if let (Some(cs), Some(ce)) = (lp.completion_start, lp.completion_end) {
+            used[cs..=ce].fill(true);
+        }
     }
 
     let mut output: Vec<BcStatement> = Vec::new();
@@ -235,6 +266,17 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
             output.extend_from_slice(&stmts[lp.body_start_idx..body_end]);
             output.extend_from_slice(&stmts[lp.incr_start..lp.back_jump_idx]);
             output.push(marker("}"));
+            // Emit ForEach completion path after the loop
+            if let (Some(cs), Some(ce)) = (lp.completion_start, lp.completion_end) {
+                output.push(marker("// on loop complete:"));
+                for j in cs..=ce {
+                    // Skip push_flow/pop_flow/jump that are loop control artifacts
+                    if parse_push_flow(&stmts[j].text).is_some()
+                        || stmts[j].text == "pop_flow"
+                        || parse_jump(&stmts[j].text).is_some() { continue; }
+                    output.push(stmts[j].clone());
+                }
+            }
             if stmts[lp.body_end_idx].text == "return nop" {
                 output.push(stmts[lp.body_end_idx].clone());
             }
