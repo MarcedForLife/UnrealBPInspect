@@ -78,7 +78,8 @@ Pseudo-code conventions:
 - `ClassName::FunctionName(args)` -- static/library function call
 - `obj.FunctionName(args)` -- context call on an object
 - `if (cond) { ... }` / `if (cond) { ... } else { ... }` -- structured control flow (conditions are inverted from the raw `JumpIfNot` for readability)
-- `push_flow`/`pop_flow` -- loop boundaries (not yet structured into while/for)
+- `while (cond) { body; increment; }` -- for/ForEach loops (reordered from scattered bytecode into logical order)
+- `// sequence [N]:` -- sequence node pins in execution order
 
 ### Graph section
 
