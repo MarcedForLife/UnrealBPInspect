@@ -115,6 +115,7 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         target_idx: usize,
         jump_idx: Option<usize>,
         end_idx: Option<usize>,
+        else_close_idx: Option<usize>,
     }
     let mut if_blocks: Vec<IfBlock> = Vec::new();
 
@@ -137,7 +138,27 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
                 }
             }
         }
-        if_blocks.push(IfBlock { if_idx: i, cond: cond.to_string(), target_idx, jump_idx, end_idx });
+        if_blocks.push(IfBlock { if_idx: i, cond: cond.to_string(), target_idx, jump_idx, end_idx, else_close_idx: None });
+    }
+
+    // Pass 1.5: false-block truncation — when the false block contains an
+    // unconditional jump to end_idx, the else body ends at that jump, not at end_idx.
+    // This prevents inner else blocks from engulfing outer false blocks.
+    for blk_i in 0..if_blocks.len() {
+        let Some(end_idx) = if_blocks[blk_i].end_idx else { continue };
+        let target_idx = if_blocks[blk_i].target_idx;
+        if target_idx >= end_idx { continue; }
+        for j in target_idx..end_idx {
+            if j >= stmts.len() { break; }
+            if let Some(jt) = parse_jump(&stmts[j].text) {
+                if let Some(jt_idx) = find_target_idx_or_end(jt) {
+                    if jt_idx == end_idx {
+                        if_blocks[blk_i].else_close_idx = Some(j + 1);
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     // Pass 2: detect chains — B is chained to A when B starts at A's else
@@ -166,6 +187,8 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
     };
 
     for blk in &if_blocks {
+        let else_end = blk.else_close_idx.unwrap_or(blk.end_idx.unwrap_or(0));
+
         if chained.contains(&blk.if_idx) {
             // Chained else-if: emit } else if (cond) { at our if_idx
             events.entry(blk.if_idx).or_default().push(
@@ -179,8 +202,8 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
                 if blk.jump_idx.is_some() {
                     // Has unconditional jump → else body follows
                     events.entry(blk.target_idx).or_default().push(BlockEvent::CloseIfOpenElse);
-                    if let Some(end_idx) = blk.end_idx {
-                        events.entry(end_idx).or_default().push(BlockEvent::CloseElse);
+                    if blk.end_idx.is_some() {
+                        events.entry(else_end).or_default().push(BlockEvent::CloseElse);
                     }
                 } else {
                     // No else body
@@ -196,7 +219,7 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
                 // Head of chain — chained block handles the transition
             } else if blk.end_idx.is_some() {
                 events.entry(blk.target_idx).or_default().push(BlockEvent::CloseIfOpenElse);
-                events.entry(blk.end_idx.unwrap()).or_default().push(BlockEvent::CloseElse);
+                events.entry(else_end).or_default().push(BlockEvent::CloseElse);
             } else {
                 events.entry(blk.target_idx).or_default().push(BlockEvent::CloseIf);
             }
@@ -228,7 +251,9 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         if skip.contains(&i) || replacements.contains_key(&i) { continue; }
         if let Some(target) = parse_jump(&stmt.text) {
             if let Some(target_idx) = find_target_idx_or_end(target) {
-                if target_idx >= stmts.len() {
+                let is_jump_to_end_label = target_idx >= stmts.len()
+                    || (target_idx == stmts.len() - 1 && stmts[target_idx].text == "return nop");
+                if is_jump_to_end_label {
                     // Jump to end — will be break or omitted
                 } else if let Some(lbl) = label_at.get(&target_idx) {
                     label_targets.insert(i, format!("goto {}", lbl));
@@ -323,8 +348,10 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         } else if let Some(target) = parse_jump(&stmt.text) {
             // Resolve raw jumps
             if let Some(target_idx) = find_target_idx_or_end(target) {
-                if target_idx >= stmts.len() {
-                    // Jump past end — break or omit
+                let is_jump_to_end = target_idx >= stmts.len()
+                    || (target_idx == stmts.len() - 1 && stmts[target_idx].text == "return nop");
+                if is_jump_to_end {
+                    // Jump to end — break or omit
                     if in_loop(&block_stack) {
                         output.push(format!("{}break", "    ".repeat(indent)));
                     }
@@ -353,8 +380,8 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         output.push(format!("{}}}", "    ".repeat(indent)));
     }
 
-    // Post-process: convert "goto L_XXXX" to "break" when the label appears
-    // right after a closing "}" (indicates a post-loop/post-block target)
+    // Post-process: convert "goto L_XXXX" to "break" (in loop) or remove (outside loop)
+    // when the label appears right after a closing "}"
     let break_labels: HashSet<String> = {
         let mut set = HashSet::new();
         for i in 0..output.len() {
@@ -372,16 +399,29 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         set
     };
     if !break_labels.is_empty() {
-        for line in output.iter_mut() {
-            let trimmed = line.trim();
+        for i in 0..output.len() {
+            let trimmed = output[i].trim().to_string();
             if let Some(label) = trimmed.strip_prefix("goto ") {
                 if break_labels.contains(label) {
-                    let indent_str = &line[..line.len() - trimmed.len()];
-                    *line = format!("{}break", indent_str);
+                    let indent_str = " ".repeat(output[i].len() - trimmed.len());
+                    let line_indent = indent_str.len() / 4;
+                    // Check if we're inside a loop by scanning previous lines
+                    let in_loop = output[..i].iter().rev().any(|l| {
+                        let lt = l.trim();
+                        let li = (l.len() - l.trim_start().len()) / 4;
+                        li < line_indent && (lt.starts_with("while ") || lt.starts_with("for "))
+                    });
+                    if in_loop {
+                        output[i] = format!("{}break", indent_str);
+                    } else {
+                        // Outside loop: redundant fall-through, mark for removal
+                        output[i] = String::new();
+                    }
                 }
             }
         }
-        // Remove labels that are now only used as break targets (no remaining gotos)
+        // Remove empty lines from cleared gotos and unused labels
+        output.retain(|line| !line.is_empty());
         let remaining_gotos: HashSet<String> = output.iter()
             .filter_map(|l| l.trim().strip_prefix("goto ").map(|s| s.to_string()))
             .collect();
