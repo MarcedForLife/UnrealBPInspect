@@ -99,7 +99,7 @@ bp-inspect works on bare `.uasset` files with zero UE4 dependency. It reconstruc
 - **Tagged properties** (Bool, Int, Float, Struct, Array, Map, Enum, Object refs, Text, etc.)
 - **UStruct serialisation** (super struct, children array, FField child properties with metadata)
 - **FField types** (FloatProperty, ObjectProperty, BoolProperty, StructProperty, ArrayProperty, etc.)
-- **Kismet bytecode** decoded to structured pseudo-code with if/else blocks, while loops, and sequence nodes (arithmetic, casts, context calls, conditionals, local/instance variables)
+- **Kismet bytecode** decoded to structured pseudo-code with if/else blocks, while loops, and sequence nodes (arithmetic, casts, context calls, conditionals, local/instance variables). Accurate memory-space offset tracking for jump target resolution.
 - **EdGraph nodes** (K2Node_CallFunction, VariableGet/Set, DynamicCast, FunctionEntry/Result, events, etc.)
 - **SCS component tree** with sub-object properties and child actor templates
 
