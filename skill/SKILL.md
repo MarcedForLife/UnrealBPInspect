@@ -22,7 +22,7 @@ Use `bp-inspect` to read and understand Unreal Engine Blueprint `.uasset` files 
 bp-inspect <path>.uasset --summary
 ```
 
-Returns: class hierarchy, component tree with properties (meshes, physics, transforms), variable declarations with types, function signatures with decoded bytecode pseudo-code, and graph node summaries.
+Returns: class hierarchy, component tree with properties (meshes, physics, transforms), variable declarations with types, function signatures with structured bytecode pseudo-code (if/else blocks, indented), and graph node summaries for graphs not already shown as functions.
 
 Start here. This gives you everything you need for most questions.
 
@@ -77,10 +77,12 @@ Pseudo-code conventions:
 - `cast<Type>(expr)` -- dynamic cast
 - `ClassName::FunctionName(args)` -- static/library function call
 - `obj.FunctionName(args)` -- context call on an object
+- `if (cond) { ... }` / `if (cond) { ... } else { ... }` -- structured control flow (conditions are inverted from the raw `JumpIfNot` for readability)
+- `push_flow`/`pop_flow` -- loop boundaries (not yet structured into while/for)
 
 ### Graph section
 
-EdGraph node list showing the visual Blueprint graph structure. Less detailed than bytecode but shows node types (pure calls, events, variable gets/sets, casts).
+EdGraph node list showing the visual Blueprint graph structure. Graphs that already appear as functions with bytecode are suppressed to avoid redundancy. The EventGraph (which has no matching function) still shows. Less detailed than bytecode but shows node types (pure calls, events, variable gets/sets, casts).
 
 ## Common workflows
 

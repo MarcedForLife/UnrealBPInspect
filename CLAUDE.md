@@ -5,7 +5,7 @@ Standalone Rust CLI that parses Unreal Engine Blueprint `.uasset` files into rea
 ## Project structure
 
 ```
-src/main.rs          Single-file parser (~2400 lines)
+src/main.rs          Single-file parser (~2500 lines)
 skill/SKILL.md       Claude Code skill instructions
 skill/README.md      Skill install guide
 samples/             Test .uasset files (UE4.27, uncooked)
@@ -35,7 +35,9 @@ Everything is in `src/main.rs`. The parser reads the binary format sequentially:
 
 Key functions:
 - `read_properties()` — recursive tagged property deserialiser
-- `decode_expr()` — Kismet bytecode decoder (recursive, ~40 opcodes)
+- `decode_expr()` — Kismet bytecode decoder (recursive, ~75 opcodes)
+- `decode_bytecode()` — returns `Vec<BcStatement>` with mem-space offsets
+- `structure_bytecode()` — converts flat bytecode into structured if/else blocks
 - `resolve_ffield_type()` — maps FField class names to readable types
 - `print_summary()` — the summary view (component tree, variables, functions)
 - `skip_ffield_child()` — skips FField data in exports we don't fully parse
