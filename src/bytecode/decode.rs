@@ -75,10 +75,25 @@ fn strip_func_prefix(name: &str) -> String {
     }
 }
 
+/// Extract the resume offset (Linkage field) from a LatentActionInfo struct literal.
+/// Format: `LatentActionInfo(skip_offset(0xHEX), uuid, exec_func, callback_target)`
+/// The first field is a skip_offset containing the resume entry point in the ubergraph.
+fn extract_latent_resume_offset(lai: &str) -> Option<usize> {
+    let inner = lai.strip_prefix("LatentActionInfo(")?.strip_suffix(')')?;
+    let first = inner.split(',').next()?.trim();
+    // skip_offset(0xHEX) format
+    let hex = first.strip_prefix("skip_offset(0x")?.strip_suffix(')')?;
+    usize::from_str_radix(hex, 16).ok()
+}
+
 fn format_call_or_operator(name: &str, args: Vec<String>) -> String {
     if let Some(inlined) = try_inline_operator(name, &args) {
         return inlined;
     }
+    // Extract resume offset from LatentActionInfo before stripping
+    let resume_annotation = args.iter()
+        .find(|a| a.starts_with("LatentActionInfo("))
+        .and_then(|lai| extract_latent_resume_offset(lai));
     // Strip WorldContextObject (self as first arg of global functions) and LatentActionInfo
     let clean_args: Vec<&String> = args.iter().filter(|a| {
         // Drop WorldContextObject — "self" as first arg of non-method calls
@@ -88,7 +103,12 @@ fn format_call_or_operator(name: &str, args: Vec<String>) -> String {
         && !a.starts_with("LatentActionInfo(")
     }).collect();
     let clean_name = strip_func_prefix(name);
-    format!("{}({})", clean_name, clean_args.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(", "))
+    let call = format!("{}({})", clean_name, clean_args.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(", "));
+    if let Some(offset) = resume_annotation {
+        format!("{} /*resume:0x{:04x}*/", call, offset)
+    } else {
+        call
+    }
 }
 
 /// Decode a single Kismet expression, returning a string representation.

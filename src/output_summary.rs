@@ -306,12 +306,7 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
             .and_then(|f| if f.is_empty() { None } else { Some(format!(" [{}]", f)) })
             .unwrap_or_default();
 
-        if !has_functions {
-            println!("Functions:");
-            has_functions = true;
-        }
-        println!("  {}{}", sig, flags);
-
+        // For ubergraph: split into per-event pseudo-functions instead of one big block
         if hdr.object_name.starts_with("ExecuteUbergraph_") && !ubergraph_labels.is_empty() {
             if let Some(bc_prop) = find_prop(props, "Bytecode") {
                 if let PropValue::Array { items, .. } = &bc_prop.value {
@@ -328,40 +323,49 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
                     discard_unused_assignments(&mut reordered);
                     let mut structured = structure_bytecode(&reordered, &ubergraph_labels);
                     cleanup_structured_output(&mut structured);
-                    for line in &structured {
-                        println!("    {}", line);
+                    if !has_functions {
+                        println!("Functions:");
+                        has_functions = true;
                     }
+                    emit_ubergraph_events(&structured);
                     if !stmts.is_empty() {
                         functions_with_bytecode.insert(hdr.object_name.clone());
                     }
                 }
             }
+            continue;
+        }
+
+        if !has_functions {
+            println!("Functions:");
+            has_functions = true;
+        }
+        println!("  {}{}", sig, flags);
+
+        let bc_prop_name = if find_prop(props, "BytecodeSummary").is_some() {
+            "BytecodeSummary"
         } else {
-            let bc_prop_name = if find_prop(props, "BytecodeSummary").is_some() {
-                "BytecodeSummary"
-            } else {
-                "Bytecode"
-            };
-            if let Some(bc_prop) = find_prop(props, bc_prop_name) {
-                if let PropValue::Array { items, .. } = &bc_prop.value {
-                    let has_bytecode = !items.is_empty();
-                    for item in items {
-                        if let PropValue::Str(line) = item {
-                            if bc_prop_name == "Bytecode" {
-                                let code = if line.len() > 6 && line.as_bytes()[4] == b':' {
-                                    &line[6..]
-                                } else {
-                                    line
-                                };
-                                println!("    {}", code);
+            "Bytecode"
+        };
+        if let Some(bc_prop) = find_prop(props, bc_prop_name) {
+            if let PropValue::Array { items, .. } = &bc_prop.value {
+                let has_bytecode = !items.is_empty();
+                for item in items {
+                    if let PropValue::Str(line) = item {
+                        if bc_prop_name == "Bytecode" {
+                            let code = if line.len() > 6 && line.as_bytes()[4] == b':' {
+                                &line[6..]
                             } else {
-                                println!("    {}", line);
-                            }
+                                line
+                            };
+                            println!("    {}", code);
+                        } else {
+                            println!("    {}", line);
                         }
                     }
-                    if has_bytecode {
-                        functions_with_bytecode.insert(hdr.object_name.clone());
-                    }
+                }
+                if has_bytecode {
+                    functions_with_bytecode.insert(hdr.object_name.clone());
                 }
             }
         }
@@ -553,6 +557,132 @@ fn filter_flags_for_summary(flags: &str) -> String {
         .filter(|f| !NOISE.contains(&f.trim()))
         .collect::<Vec<_>>()
         .join("|")
+}
+
+/// Split ubergraph structured output into per-event sections and inline latent resumes.
+fn emit_ubergraph_events(lines: &[String]) {
+    // Split into sections by "--- label ---" markers
+    struct Section {
+        name: String,       // event name or "(latent resume)"
+        lines: Vec<String>, // code lines (without the marker)
+    }
+    let mut sections: Vec<Section> = Vec::new();
+    let mut current = Section { name: String::new(), lines: Vec::new() };
+
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with("--- ") && trimmed.ends_with(" ---") {
+            // Save previous section if it has content
+            if !current.lines.is_empty() || !current.name.is_empty() {
+                sections.push(current);
+            }
+            let name = trimmed[4..trimmed.len() - 4].to_string();
+            current = Section { name, lines: Vec::new() };
+        } else {
+            current.lines.push(line.clone());
+        }
+    }
+    if !current.lines.is_empty() || !current.name.is_empty() {
+        sections.push(current);
+    }
+
+    // Split latent resume sections into individual resume blocks (separated by "return")
+    // and extract their bytecode offsets from the ubergraph label map
+    struct ResumeBlock {
+        lines: Vec<String>,
+    }
+    let mut resume_blocks: Vec<ResumeBlock> = Vec::new();
+    for section in &sections {
+        if section.name != "(latent resume)" { continue; }
+        let mut block_lines: Vec<String> = Vec::new();
+        for line in &section.lines {
+            if line.trim() == "return" {
+                if !block_lines.is_empty() {
+                    resume_blocks.push(ResumeBlock { lines: block_lines });
+                    block_lines = Vec::new();
+                }
+            } else {
+                block_lines.push(line.clone());
+            }
+        }
+        if !block_lines.is_empty() {
+            resume_blocks.push(ResumeBlock { lines: block_lines });
+        }
+    }
+
+    // Collect resume offsets from Delay() calls with /*resume:0xHEX*/ annotations
+    // and match them to resume blocks by order of appearance
+    let parse_resume_offset = |line: &str| -> Option<usize> {
+        let marker = line.find("/*resume:0x")?;
+        let hex_start = marker + 11;
+        let hex_end = line[hex_start..].find("*/")? + hex_start;
+        usize::from_str_radix(&line[hex_start..hex_end], 16).ok()
+    };
+
+    // Build a map of resume_offset → resume_block_index
+    // Resume blocks appear in order at the start of the ubergraph, and offsets
+    // are the bytecode positions where each block starts
+    let mut delay_resume_map: Vec<(usize, usize)> = Vec::new(); // (section_idx, resume_block_idx)
+    let mut resume_idx = 0usize;
+    for (si, section) in sections.iter().enumerate() {
+        if section.name == "(latent resume)" { continue; }
+        for line in &section.lines {
+            if let Some(_offset) = parse_resume_offset(line) {
+                if resume_idx < resume_blocks.len() {
+                    delay_resume_map.push((si, resume_idx));
+                    resume_idx += 1;
+                }
+            }
+        }
+    }
+
+    // Emit each event section as a standalone function
+    for (si, section) in sections.iter().enumerate() {
+        if section.name == "(latent resume)" { continue; }
+        if section.name.is_empty() && section.lines.is_empty() { continue; }
+
+        // Skip empty unnamed preamble sections
+        if section.name.is_empty() {
+            let has_content = section.lines.iter().any(|l| {
+                let t = l.trim();
+                !t.is_empty() && t != "return"
+            });
+            if !has_content { continue; }
+        }
+
+        if !section.name.is_empty() {
+            println!("  {}():", section.name);
+        }
+        for line in &section.lines {
+            // Strip resume annotations from displayed output
+            let clean = strip_resume_annotation(line);
+            let trimmed = clean.trim();
+            if trimmed == "return" { continue; } // trailing returns are implicit
+            println!("    {}", clean);
+
+            // If this line had a Delay with a resume, inline the resume block
+            if parse_resume_offset(line).is_some() {
+                if let Some(&(_, ri)) = delay_resume_map.iter().find(|&&(s, _)| s == si) {
+                    if let Some(rb) = resume_blocks.get(ri) {
+                        println!("    // after delay:");
+                        for rline in &rb.lines {
+                            println!("    {}", rline);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Strip `/*resume:0xHEX*/` annotations from a line for display.
+fn strip_resume_annotation(line: &str) -> String {
+    if let Some(start) = line.find(" /*resume:0x") {
+        if let Some(end) = line[start..].find("*/") {
+            return format!("{}{}", &line[..start], &line[start + end + 2..]);
+        }
+    }
+    line.to_string()
 }
 
 /// Check if a function is a stub that just dispatches to the ubergraph.

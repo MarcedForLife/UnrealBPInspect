@@ -5,6 +5,28 @@ use super::flow::{parse_if_jump, parse_jump, parse_push_flow, parse_pop_flow_if_
 /// Negate a condition string, wrapping in parens if it contains operators
 /// to preserve correct precedence. `!A && B` means `(!A) && B`, not `!(A && B)`.
 fn negate_cond(cond: &str) -> String {
+    // Already negated simple expr: !X → X
+    if cond.starts_with('!') && !cond.starts_with("!(") {
+        let rest = &cond[1..];
+        // Only strip if rest has no top-level operators (it's a simple !ident)
+        if !rest.contains(' ') {
+            return rest.to_string();
+        }
+    }
+    // Already negated parenthesized expr: !(X) → X
+    if cond.starts_with("!(") {
+        if let Some(inner) = cond.strip_prefix("!(").and_then(|s| s.strip_suffix(')')) {
+            // Verify parens are balanced (the stripped ')' is the matching one)
+            let mut depth = 0i32;
+            let balanced = inner.chars().all(|ch| {
+                match ch { '(' => depth += 1, ')' => depth -= 1, _ => {} }
+                depth >= 0
+            }) && depth == 0;
+            if balanced {
+                return inner.to_string();
+            }
+        }
+    }
     // Check if condition has infix operators at paren depth 0 (needs wrapping)
     let mut depth = 0i32;
     let bytes = cond.as_bytes();
@@ -337,7 +359,7 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         let mut set = HashSet::new();
         for i in 0..output.len() {
             let trimmed = output[i].trim();
-            if trimmed.ends_with(':') && !trimmed.starts_with("---") {
+            if trimmed.ends_with(':') && !trimmed.starts_with("---") && !trimmed.starts_with("//") {
                 let label = &trimmed[..trimmed.len() - 1];
                 // Check if the previous non-empty line is a closing brace
                 if let Some(prev) = output[..i].iter().rev().find(|l| !l.trim().is_empty()) {
@@ -365,7 +387,7 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
             .collect();
         output.retain(|line| {
             let trimmed = line.trim();
-            if trimmed.ends_with(':') && !trimmed.starts_with("---") {
+            if trimmed.ends_with(':') && !trimmed.starts_with("---") && !trimmed.starts_with("//") {
                 let label = &trimmed[..trimmed.len() - 1];
                 if break_labels.contains(label) {
                     return remaining_gotos.contains(label);
