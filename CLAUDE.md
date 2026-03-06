@@ -36,9 +36,9 @@ Everything is in `src/main.rs`. The parser reads the binary format sequentially:
 Key functions:
 - `read_properties()` — recursive tagged property deserialiser
 - `decode_expr()` — Kismet bytecode decoder (recursive, ~77 opcodes)
-- `decode_bytecode()` — returns `Vec<BcStatement>` with mem-space offsets
+- `decode_bytecode()` — returns `(Vec<BcStatement>, i32)` with mem-space offsets and final mem_adj
 - `reorder_flow_patterns()` — detects sequence nodes, for-loops, ForEach loops; reorders bodies inline
-- `structure_bytecode()` — converts flat bytecode into structured if/else blocks (fuzzy offset matching)
+- `structure_bytecode()` — converts flat bytecode into structured if/else blocks (exact + 4-byte tolerance offset matching)
 - `resolve_ffield_type()` — maps FField class names to readable types
 - `print_summary()` — the summary view (component tree, variables, functions)
 - `skip_ffield_child()` — skips FField data in exports we don't fully parse
@@ -49,7 +49,7 @@ Key things to know:
 
 - **FField metadata** has a `HasMetadata` gate: int32 = 1 means metadata block follows (MetadataCount + entries), 0 means nothing. Class members have metadata, function params don't.
 - **UStruct::Children** is `int32 count + int32[count]` (array of package indices), not a single pointer.
-- All FName references on disk are 8 bytes (int32 index + int32 instance number).
+- All FName references on disk are 8 bytes (int32 index + int32 instance number). In memory with `WITH_CASE_PRESERVING_NAME` (typical for uncooked), FName is 12 bytes (adds DisplayIndex). This +4 difference affects mem_adj for bytecode FName operands.
 - Uncooked assets have everything in one `.uasset` file. Cooked assets split into `.uasset` header + `.uexp` data (not yet supported).
 
 ## Conventions

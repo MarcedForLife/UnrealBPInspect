@@ -953,6 +953,7 @@ fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
         }
         0x1B => { // EX_VirtualFunction
             let name = read_bc_fname(bc, pos, nt);
+            *mem_adj += 4; // disk: FName (8 bytes), mem: UFunction* resolved pointer (8+4 alignment)
             let args = decode_func_args(bc, pos, nt, imports, export_names, mem_adj);
             Some(format!("{}({})", name, args.join(", ")))
         }
@@ -970,6 +971,7 @@ fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
         }
         0x21 => { // EX_NameConst
             let name = read_bc_fname(bc, pos, nt);
+            *mem_adj += 4; // disk: FName (8 bytes), mem: FName (12 bytes with DisplayIndex)
             Some(format!("'{}'", name))
         }
         0x22 => { // EX_RotationConst
@@ -1152,11 +1154,13 @@ fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
         }
         0x44 => { // EX_LocalVirtualFunction
             let name = read_bc_fname(bc, pos, nt);
+            *mem_adj += 4; // disk: FName (8 bytes), mem: UFunction* resolved pointer (8+4 alignment)
             let args = decode_func_args(bc, pos, nt, imports, export_names, mem_adj);
             Some(format!("{}({})", name, args.join(", ")))
         }
         0x45 => { // EX_LocalFinalFunction
             let func = read_bc_fname(bc, pos, nt);
+            *mem_adj += 4; // disk: FName (8 bytes), mem: UFunction* resolved pointer (8+4 alignment)
             let args = decode_func_args(bc, pos, nt, imports, export_names, mem_adj);
             Some(format!("{}({})", func, args.join(", ")))
         }
@@ -1171,6 +1175,7 @@ fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
         }
         0x4B => { // EX_InstanceDelegate
             let name = read_bc_fname(bc, pos, nt);
+            *mem_adj += 4; // disk: FName (8 bytes), mem: resolved delegate pointer
             Some(format!("delegate({})", name))
         }
         0x4C => { // EX_PushExecutionFlow
@@ -1234,6 +1239,7 @@ fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
         }
         0x61 => { // EX_BindDelegate
             let name = read_bc_fname(bc, pos, nt);
+            *mem_adj += 4; // disk: FName (8 bytes), mem: resolved delegate pointer
             let delegate = decode_expr(bc, pos, nt, imports, export_names, mem_adj).unwrap_or_default();
             let obj = decode_expr(bc, pos, nt, imports, export_names, mem_adj).unwrap_or_default();
             Some(format!("bind({}, {}, {})", name, delegate, obj))
@@ -1295,6 +1301,7 @@ fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             let event_type = read_bc_u8(bc, pos);
             if event_type == 4 { // InlineEvent
                 let _name = read_bc_fname(bc, pos, nt);
+                *mem_adj += 4; // disk: FName (8 bytes), mem: FName (12 bytes with DisplayIndex)
             }
             Some("instrumentation".into())
         }
@@ -1339,7 +1346,7 @@ struct BcStatement {
 }
 
 fn decode_bytecode(bc: &[u8], nt: &NameTable,
-                   imports: &[ImportEntry], export_names: &[String]) -> Vec<BcStatement> {
+                   imports: &[ImportEntry], export_names: &[String]) -> (Vec<BcStatement>, i32) {
     let mut pos = 0;
     let mut mem_adj: i32 = 0;
     let mut stmts = Vec::new();
@@ -1361,7 +1368,7 @@ fn decode_bytecode(bc: &[u8], nt: &NameTable,
         // Safety: if we haven't advanced, break to avoid infinite loop
         if pos == start { break; }
     }
-    stmts
+    (stmts, mem_adj)
 }
 
 /// Parse "push_flow 0xHEX" → target offset.
@@ -1672,20 +1679,37 @@ fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>) ->
 
     if stmts.is_empty() { return Vec::new(); }
 
-    // Build sorted offset → stmt index for fuzzy lookup (handles mem_adj drift)
-    let mut sorted_offsets: Vec<(usize, usize)> = stmts.iter().enumerate()
+    // Build exact offset → stmt index map, with sorted fallback for small drift
+    let exact_map: HashMap<usize, usize> = stmts.iter().enumerate()
         .filter(|(_, s)| s.mem_offset > 0)
         .map(|(i, s)| (s.mem_offset, i))
         .collect();
+    let mut sorted_offsets: Vec<(usize, usize)> = exact_map.iter()
+        .map(|(&off, &idx)| (off, idx))
+        .collect();
     sorted_offsets.sort_by_key(|&(off, _)| off);
 
-    // Find last statement with mem_offset <= target (tolerates drift up to 64 bytes)
+    // Exact lookup first, then fuzzy fallback (tight 4-byte tolerance, both directions)
     let find_target_idx = |target: usize| -> Option<usize> {
+        if let Some(&idx) = exact_map.get(&target) { return Some(idx); }
         let pos = sorted_offsets.partition_point(|&(off, _)| off <= target);
-        if pos == 0 { return None; }
-        let (off, idx) = sorted_offsets[pos - 1];
-        if target - off > 64 { return None; }
-        Some(idx)
+        // Check nearest below and above, pick closest within tolerance
+        let below = if pos > 0 { Some(sorted_offsets[pos - 1]) } else { None };
+        let above = if pos < sorted_offsets.len() { Some(sorted_offsets[pos]) } else { None };
+        let best = match (below, above) {
+            (Some((bo, bi)), Some((ao, ai))) => {
+                let bd = target.saturating_sub(bo);
+                let ad = ao.saturating_sub(target);
+                if bd <= ad { Some((bd, bi)) } else { Some((ad, ai)) }
+            }
+            (Some((bo, bi)), None) => Some((target.saturating_sub(bo), bi)),
+            (None, Some((ao, ai))) => Some((ao.saturating_sub(target), ai)),
+            (None, None) => None,
+        };
+        match best {
+            Some((dist, idx)) if dist <= 4 => Some(idx),
+            _ => None,
+        }
     };
 
     // Like find_target_idx but also handles target past all statements (end-of-function)
@@ -2050,6 +2074,8 @@ fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
 
             // Script bytecode
             let mut bytecode_data: Vec<u8> = Vec::new();
+            let mut bytecode_size: i32 = 0;
+            let mut storage_size: i32 = 0;
             if c.position() + 8 <= end {
                 if debug {
                     let spos = c.position();
@@ -2060,8 +2086,8 @@ fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
                     let hex: Vec<String> = peek.iter().map(|b| format!("{:02x}", b)).collect();
                     eprintln!("  {} script @ {} (end={}) raw: {}", hdr.object_name, spos, end, hex.join(" "));
                 }
-                let bytecode_size = read_i32(&mut c)?;
-                let storage_size = read_i32(&mut c)?;
+                bytecode_size = read_i32(&mut c)?;
+                storage_size = read_i32(&mut c)?;
                 if storage_size > 0 && (c.position() + storage_size as u64) <= end {
                     bytecode_data = vec![0u8; storage_size as usize];
                     c.read_exact(&mut bytecode_data)?;
@@ -2076,7 +2102,13 @@ fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
             }
 
             if !bytecode_data.is_empty() {
-                let stmts = decode_bytecode(&bytecode_data, &nt, &imports, &export_names_pre);
+                let (stmts, final_mem_adj) = decode_bytecode(&bytecode_data, &nt, &imports, &export_names_pre);
+                if debug {
+                    let expected = bytecode_size - storage_size;
+                    let drift = final_mem_adj - expected;
+                    eprintln!("  {} mem_adj: final={} expected={} drift={}",
+                        hdr.object_name, final_mem_adj, expected, drift);
+                }
                 if !stmts.is_empty() {
                     // Flat bytecode for text/json (existing format with mem offsets)
                     extra_props.push(Property {
