@@ -1,4 +1,4 @@
-# unreal-bp-inspect
+# Unreal Blueprint Inspect
 
 A CLI tool that extracts readable structure and logic from Unreal Engine Blueprint `.uasset` files without requiring the UE editor.
 
@@ -8,25 +8,25 @@ Built primarily for use with AI coding assistants (Claude Code, etc.) to enable 
 
 ## Usage
 
-```
+```sh
 bp-inspect [OPTIONS] <PATH>
 ```
 
 ### Options
 
-| Flag                     | Description                                                                                   |
-| ------------------------ | --------------------------------------------------------------------------------------------- |
-| `--summary`              | Concise logical structure: class hierarchy, components, variables, functions with pseudo-code |
-| `--json`                 | Full structured output as JSON                                                                |
-| `--filter <name>`        | Filter exports by name (substring match, comma-separated)                                     |
-| `--debug`                | Dump raw table data for format investigation                                                  |
-| `-V` / `--version`       | Print version                                                                                 |
+| Flag               | Description                                                                                   |
+| ------------------ | --------------------------------------------------------------------------------------------- |
+| `--summary`        | Concise logical structure: class hierarchy, components, variables, functions with pseudo-code |
+| `--json`           | Full structured output as JSON                                                                |
+| `--filter <name>`  | Filter exports by name (substring match, comma-separated)                                     |
+| `--debug`          | Dump raw table data for format investigation                                                  |
+| `-V` / `--version` | Print version                                                                                 |
 
 ### Summary mode
 
 The default debugging view. Shows the Blueprint as a single readable document.
 
-```
+```sh
 $ bp-inspect Helm_BP.uasset --summary
 
 Blueprint: Helm_BP (extends Actor)
@@ -57,26 +57,30 @@ Functions:
     $Multiply_FloatFloat = Multiply_FloatFloat($GetRotationAlpha_RotationAlpha, 2.0000)
     $Subtract_FloatFloat = Subtract_FloatFloat($Multiply_FloatFloat, 1.0000)
     out SteeringAngle = $Subtract_FloatFloat
-    return nop
+    return
   UserConstructionScript() [Event|Public|BlueprintPure]
     $Cast_AsWinch_Constraint_BP = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)
-    ...
+    $Cast_bSuccess = cast_71($Cast_AsWinch_Constraint_BP)
+    if ($Cast_bSuccess) {
+        self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP
+    }
+    return
 ```
 
 ### Filtering
 
 Drill into a specific function while keeping class context:
 
-```
-$ bp-inspect Helm_BP.uasset --summary --filter GetSteeringAngle
+```sh
+bp-inspect Helm_BP.uasset --summary --filter GetSteeringAngle
 ```
 
 ### JSON mode
 
 Full structured output for programmatic use:
 
-```
-$ bp-inspect Helm_BP.uasset --json | jq '.exports[] | select(.name == "GetSteeringAngle")'
+```sh
+bp-inspect Helm_BP.uasset --json | jq '.exports[] | select(.name == "GetSteeringAngle")'
 ```
 
 ## What it parses
@@ -85,7 +89,7 @@ $ bp-inspect Helm_BP.uasset --json | jq '.exports[] | select(.name == "GetSteeri
 - **Tagged properties** (Bool, Int, Float, Struct, Array, Map, Enum, Object refs, Text, etc.)
 - **UStruct serialisation** (super struct, children array, FField child properties with metadata)
 - **FField types** (FloatProperty, ObjectProperty, BoolProperty, StructProperty, ArrayProperty, etc.)
-- **Kismet bytecode** decoded to pseudo-code (arithmetic, casts, context calls, conditionals, local/instance variables)
+- **Kismet bytecode** decoded to structured pseudo-code with if/else blocks (arithmetic, casts, context calls, conditionals, local/instance variables)
 - **EdGraph nodes** (K2Node_CallFunction, VariableGet/Set, DynamicCast, FunctionEntry/Result, events, etc.)
 - **SCS component tree** with sub-object properties and child actor templates
 
@@ -105,13 +109,13 @@ Download a prebuilt binary from [Releases](../../releases) for your platform.
 
 Requires [Rust](https://rustup.rs/) 1.70+.
 
-```
+```sh
 cargo install --path .
 ```
 
 Or build directly:
 
-```
+```sh
 cargo build --release
 # Binary at target/release/bp-inspect
 ```
