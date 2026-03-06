@@ -35,7 +35,7 @@ Everything is in `src/main.rs`. The parser reads the binary format sequentially:
 
 Key functions:
 - `read_properties()` — recursive tagged property deserialiser
-- `decode_expr()` — Kismet bytecode decoder (recursive, ~75 opcodes)
+- `decode_expr()` — Kismet bytecode decoder (recursive, ~77 opcodes)
 - `decode_bytecode()` — returns `Vec<BcStatement>` with mem-space offsets
 - `structure_bytecode()` — converts flat bytecode into structured if/else blocks
 - `resolve_ffield_type()` — maps FField class names to readable types
