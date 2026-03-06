@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use super::decode::BcStatement;
 
 /// Inline single-use `$temp` variables to reduce noise.
@@ -160,4 +161,156 @@ fn used_in_operator_context(text: &str, pos: usize, after: usize) -> bool {
         || after_text.trim_start().starts_with("> ")
         || after_text.trim_start().starts_with("< ");
     op_before || op_after
+}
+
+/// Discard assignments to `$temp` variables that are never referenced.
+/// Keeps the RHS call (side effects) but drops the `$var = ` prefix.
+pub fn discard_unused_assignments(stmts: &mut Vec<BcStatement>) {
+    // Count how many times each var is assigned
+    let mut assign_counts: HashMap<String, usize> = HashMap::new();
+    for s in stmts.iter() {
+        if let Some((var, _)) = parse_temp_assignment(&s.text) {
+            *assign_counts.entry(var.to_string()).or_default() += 1;
+        }
+    }
+
+    // For each uniquely-assigned $var, count total refs across all statements
+    let mut ref_counts: HashMap<String, usize> = HashMap::new();
+    for (var, ac) in &assign_counts {
+        if *ac != 1 { continue; }
+        let mut total = 0usize;
+        for s in stmts.iter() {
+            total += count_var_refs(&s.text, var);
+        }
+        // total includes the assignment LHS itself (1 occurrence)
+        ref_counts.insert(var.clone(), total.saturating_sub(1));
+    }
+
+    for s in stmts.iter_mut() {
+        if let Some((var, expr)) = parse_temp_assignment(&s.text) {
+            if ref_counts.get(var).copied() == Some(0) {
+                // Drop the assignment, keep just the expression (function call)
+                s.text = expr.to_string();
+            }
+        }
+    }
+}
+
+/// Clean up structured output lines: double negation, extra parens, trailing returns.
+pub fn cleanup_structured_output(lines: &mut Vec<String>) {
+    // Pass 1: clean each line in place
+    for line in lines.iter_mut() {
+        let indent_len = line.len() - line.trim_start().len();
+        let indent = &line[..indent_len];
+        let trimmed = line[indent_len..].to_string();
+        let cleaned = clean_line(&trimmed);
+        if cleaned != trimmed {
+            *line = format!("{}{}", indent, cleaned);
+        }
+    }
+
+    // Pass 2: strip trailing returns
+    // Remove "return" as the very last line (it's implicit)
+    while lines.last().map(|l| l.trim()) == Some("return") {
+        lines.pop();
+    }
+    // Remove duplicate "return\nreturn" sequences (common at ubergraph section boundaries)
+    let mut i = 0;
+    while i + 1 < lines.len() {
+        if lines[i].trim() == "return" && lines[i + 1].trim() == "return" {
+            lines.remove(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn clean_line(text: &str) -> String {
+    let mut s = text.to_string();
+
+    // Double negation: !!X → X
+    while s.contains("!!") {
+        s = s.replace("!!", "");
+    }
+
+    // !(!X) → X — but only standalone, not inside larger expressions
+    // Handle in if-conditions: "if (!(!EXPR))" → "if (EXPR)"
+    loop {
+        if let Some(pos) = s.find("!(") {
+            // Check if the char before ! is ( or space or start — i.e. it's a prefix not
+            if pos > 0 {
+                let prev = s.as_bytes()[pos - 1];
+                if prev != b'(' && prev != b' ' && prev != b'!' {
+                    break;
+                }
+            }
+            // Find matching close paren
+            let inner_start = pos + 2;
+            if let Some(inner) = find_matching_paren(&s[pos + 1..]) {
+                let inner_text = &s[inner_start..pos + 1 + inner];
+                // Only simplify if inner_text starts with ! (double negation)
+                if inner_text.starts_with('!') {
+                    let replacement = &inner_text[1..];
+                    s = format!("{}{}{}", &s[..pos], replacement, &s[pos + 2 + inner..]);
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+
+    // Outer extra parens in if-conditions: "if ((EXPR)) {" → "if (EXPR) {"
+    // Also handles "if ((EXPR)) return"
+    for prefix in &["if (", "} else if ("] {
+        if !s.starts_with(prefix) { continue; }
+        let after_prefix = prefix.len();
+        // Find the matching ')' for the '(' at the end of prefix
+        if let Some(close) = find_matching_paren(&s[after_prefix - 1..]) {
+            let cond = &s[after_prefix..after_prefix - 1 + close];
+            let unwrapped = strip_outer_parens(cond);
+            if unwrapped.len() < cond.len() {
+                let rest = &s[after_prefix + close..];
+                s = format!("{}{}){}", prefix, unwrapped, rest);
+            }
+        }
+        break;
+    }
+
+    s
+}
+
+/// Strip one layer of redundant outer parentheses if they match.
+fn strip_outer_parens(s: &str) -> &str {
+    if !s.starts_with('(') || !s.ends_with(')') { return s; }
+    // Verify the open paren at 0 matches the close at end
+    let inner = &s[1..s.len() - 1];
+    let mut depth = 0i32;
+    for ch in inner.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth < 0 { return s; } // close paren matched the outer open
+            }
+            _ => {}
+        }
+    }
+    if depth == 0 { inner } else { s }
+}
+
+/// Find the position of the closing ')' matching the '(' at position 0.
+fn find_matching_paren(s: &str) -> Option<usize> {
+    if !s.starts_with('(') { return None; }
+    let mut depth = 0i32;
+    for (i, ch) in s.chars().enumerate() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 { return Some(i); }
+            }
+            _ => {}
+        }
+    }
+    None
 }

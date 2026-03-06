@@ -15,6 +15,8 @@ pub fn clean_bc_name(name: &str) -> String {
     let name = strip_guid_suffix(name);
     if let Some(rest) = name.strip_prefix("CallFunc_") {
         let rest = rest.strip_suffix("_ReturnValue").unwrap_or(rest);
+        // Strip K2_ from function-derived variable names
+        let rest = rest.strip_prefix("K2_").unwrap_or(rest);
         return format!("${}", rest);
     }
     if let Some(rest) = name.strip_prefix("K2Node_DynamicCast_") {
