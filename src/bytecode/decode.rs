@@ -95,14 +95,15 @@ fn format_call_or_operator(name: &str, args: Vec<String>) -> String {
         .find(|a| a.starts_with("LatentActionInfo("))
         .and_then(|lai| extract_latent_resume_offset(lai));
     // Strip WorldContextObject (self as first arg of global functions) and LatentActionInfo
-    let clean_args: Vec<&String> = args.iter().filter(|a| {
+    let mut clean_args: Vec<String> = args.iter().filter(|a| {
         // Drop WorldContextObject — "self" as first arg of non-method calls
         // (method calls use dot syntax so self won't appear as an arg)
         !(a.as_str() == "self" && !name.contains('.'))
         // Drop LatentActionInfo struct literals — internal plumbing
         && !a.starts_with("LatentActionInfo(")
-    }).collect();
+    }).cloned().collect();
     let clean_name = strip_func_prefix(name);
+    crate::enums::resolve_enum_args(&clean_name, &mut clean_args);
     let call = format!("{}({})", clean_name, clean_args.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(", "));
     if let Some(offset) = resume_annotation {
         format!("{} /*resume:0x{:04x}*/", call, offset)
