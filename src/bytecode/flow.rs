@@ -292,3 +292,165 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
 
     output
 }
+
+/// Reorder displaced if/else branches caused by convergence inlining.
+///
+/// The UE4 compiler sometimes inlines shared "convergence" code after one branch,
+/// then uses backward jumps from other branches to reach it. This produces:
+///   [inner-true] [convergence] [outer-false → backward jump] [inner-false → backward jump]
+/// We reorder to:
+///   [inner-true] [synthetic jump] [inner-false] [outer-false] [convergence]
+/// so all jumps become forward and structure_bytecode can detect if/else correctly.
+pub fn reorder_convergence(stmts: &mut Vec<BcStatement>) {
+    if stmts.len() < 4 { return; }
+
+    // Build offset → index map with 4-byte tolerance
+    let exact_map: std::collections::HashMap<usize, usize> = stmts.iter().enumerate()
+        .filter(|(_, s)| s.mem_offset > 0)
+        .map(|(i, s)| (s.mem_offset, i))
+        .collect();
+    let mut sorted_offsets: Vec<(usize, usize)> = exact_map.iter()
+        .map(|(&off, &idx)| (off, idx))
+        .collect();
+    sorted_offsets.sort_by_key(|&(off, _)| off);
+
+    let find_idx = |target: usize| -> Option<usize> {
+        if let Some(&idx) = exact_map.get(&target) { return Some(idx); }
+        let pos = sorted_offsets.partition_point(|&(off, _)| off <= target);
+        let below = if pos > 0 { Some(sorted_offsets[pos - 1]) } else { None };
+        let above = if pos < sorted_offsets.len() { Some(sorted_offsets[pos]) } else { None };
+        let best = match (below, above) {
+            (Some((bo, bi)), Some((ao, ai))) => {
+                let bd = target.saturating_sub(bo);
+                let ad = ao.saturating_sub(target);
+                if bd <= ad { Some((bd, bi)) } else { Some((ad, ai)) }
+            }
+            (Some((bo, bi)), None) => Some((target.saturating_sub(bo), bi)),
+            (None, Some((ao, ai))) => Some((ao.saturating_sub(target), ai)),
+            (None, None) => None,
+        };
+        match best {
+            Some((dist, idx)) if dist <= 4 => Some(idx),
+            _ => None,
+        }
+    };
+
+    // Find backward unconditional jumps (target resolves to earlier index)
+    let mut backward_jumps: Vec<(usize, usize)> = Vec::new(); // (jump_idx, target_idx)
+    for (i, stmt) in stmts.iter().enumerate() {
+        if let Some(target) = parse_jump(&stmt.text) {
+            if let Some(target_idx) = find_idx(target) {
+                if target_idx < i {
+                    backward_jumps.push((i, target_idx));
+                }
+            }
+        }
+    }
+
+    // Group by target — need 2+ backward jumps to same target
+    let mut target_groups: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    for &(jump_idx, target_idx) in &backward_jumps {
+        target_groups.entry(target_idx).or_default().push(jump_idx);
+    }
+
+    // Find the first convergence group (process one at a time since indices shift)
+    let mut conv = None;
+    for (&target_idx, jump_indices) in &target_groups {
+        if jump_indices.len() < 2 { continue; }
+        conv = Some((target_idx, jump_indices.clone()));
+        break;
+    }
+    let Some((conv_target_idx, mut jump_indices)) = conv else { return };
+    jump_indices.sort();
+
+    // Find the convergence code extent: from target_idx through the next forward jump (inclusive)
+    let mut conv_end = conv_target_idx;
+    for j in conv_target_idx..stmts.len() {
+        conv_end = j;
+        if let Some(jt) = parse_jump(&stmts[j].text) {
+            if let Some(jt_idx) = find_idx(jt) {
+                if jt_idx > j { break; }
+            }
+            // Jump past end of stmts
+            if jt > stmts.last().map(|s| s.mem_offset).unwrap_or(0) { break; }
+        }
+    }
+
+    // Each backward jump terminates a displaced block. Find which if-statement's false
+    // target starts each displaced block.
+    struct DisplacedBlock {
+        if_idx: usize,
+        block_start: usize,
+        block_end: usize, // inclusive (the backward jump itself)
+    }
+    let mut displaced: Vec<DisplacedBlock> = Vec::new();
+    for &jump_idx in &jump_indices {
+        // Search through if-statements for one whose target matches block start
+        for i in 0..conv_target_idx {
+            if let Some((_, target)) = parse_if_jump(&stmts[i].text) {
+                if let Some(target_idx) = find_idx(target) {
+                    // Check if target_idx is the start of this displaced block
+                    let expected_start = if let Some(prev_jump) = jump_indices.iter().filter(|&&j| j < jump_idx).max() {
+                        prev_jump + 1
+                    } else {
+                        conv_end + 1
+                    };
+                    if target_idx == expected_start {
+                        displaced.push(DisplacedBlock {
+                            if_idx: i,
+                            block_start: expected_start,
+                            block_end: jump_idx,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort displaced blocks by if_idx descending (deeper nested first)
+    displaced.sort_by(|a, b| b.if_idx.cmp(&a.if_idx));
+
+    if displaced.is_empty() { return; }
+
+    // Build the reordered output:
+    // [before convergence] [synthetic jump] [displaced blocks deepest-first] [convergence] [after]
+    let mut output: Vec<BcStatement> = Vec::new();
+
+    // Emit everything before convergence
+    output.extend_from_slice(&stmts[..conv_target_idx]);
+
+    // Insert synthetic jump to convergence (so structure.rs sees a forward jump)
+    let conv_offset = stmts[conv_target_idx].mem_offset;
+    output.push(BcStatement {
+        mem_offset: 0,
+        text: format!("jump 0x{:x}", conv_offset),
+    });
+
+    // Emit displaced blocks (deepest if_idx first = inner-false before outer-false)
+    for db in &displaced {
+        // Emit the block content without the backward jump at the end
+        for j in db.block_start..db.block_end {
+            output.push(stmts[j].clone());
+        }
+        // Replace backward jump with forward jump to convergence
+        output.push(BcStatement {
+            mem_offset: stmts[db.block_end].mem_offset,
+            text: format!("jump 0x{:x}", conv_offset),
+        });
+    }
+
+    // Emit convergence code
+    output.extend_from_slice(&stmts[conv_target_idx..=conv_end]);
+
+    // Emit anything after convergence that isn't a displaced block
+    let displaced_range: std::collections::HashSet<usize> = displaced.iter()
+        .flat_map(|db| db.block_start..=db.block_end)
+        .collect();
+    for j in (conv_end + 1)..stmts.len() {
+        if !displaced_range.contains(&j) {
+            output.push(stmts[j].clone());
+        }
+    }
+
+    *stmts = output;
+}
