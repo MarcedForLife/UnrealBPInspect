@@ -5,7 +5,26 @@ Standalone Rust CLI that parses Unreal Engine Blueprint `.uasset` files into rea
 ## Project structure
 
 ```
-src/main.rs          Single-file parser (~3000 lines)
+src/
+  main.rs              CLI entry point (~55 lines)
+  lib.rs               Module declarations
+  types.rs             Core data types (ImportEntry, ExportHeader, PropValue, Property, ParsedAsset)
+  binary.rs            Binary reading helpers (R<'a>, read_*, NameTable)
+  resolve.rs           Index resolution, property lookup helpers, format_func_flags
+  properties.rs        Tagged property deserialiser
+  ffield.rs            FField type resolution, function signatures
+  parser.rs            Asset parser orchestrator (parse_asset)
+  output_text.rs       Text output mode
+  output_json.rs       JSON output mode
+  output_summary.rs    Summary output mode (component tree, variables, functions)
+  bytecode/
+    mod.rs             Sub-module re-exports
+    readers.rs         Bytecode binary stream readers (read_bc_*)
+    names.rs           GUID stripping, name cleanup
+    resolve.rs         Bytecode reference resolution (obj refs, field paths)
+    decode.rs          Expression decoder (~77 opcodes), BcStatement, decode_bytecode
+    flow.rs            Flow pattern detection (sequences, for-loops, ForEach)
+    structure.rs       If/else block structuring
 skill/SKILL.md       Claude Code skill instructions
 skill/README.md      Skill install guide
 samples/             Test .uasset files (UE4.27, uncooked)
@@ -24,24 +43,16 @@ No test suite yet. Validate changes by running against sample files and checking
 
 ## Architecture
 
-Everything is in `src/main.rs`. The parser reads the binary format sequentially:
+The parser reads the binary format sequentially through these modules:
 
-1. **Package header** — magic, version, name/import/export table offsets
-2. **Name table** — FString entries used as keys throughout
-3. **Import table** — external class/object references with outer_index chain
-4. **Export table** — headers with serial offset/size, then per-export data
-5. **Export data** — tagged properties, then type-specific: UStruct children, FField metadata, bytecode
-6. **Output** — text (default), `--json`, or `--summary`
+1. **binary.rs** — Low-level I/O helpers and NameTable
+2. **properties.rs** — Tagged property deserialisation (recursive)
+3. **ffield.rs** — FField child property parsing, type resolution, function signatures
+4. **bytecode/** — Kismet bytecode: expression decoding (~77 opcodes), flow pattern detection, if/else structuring
+5. **parser.rs** — Orchestrates all parsing: header, name/import/export tables, export data, bytecode
+6. **output_*.rs** — Three output modes: text, JSON, summary
 
-Key functions:
-- `read_properties()` — recursive tagged property deserialiser
-- `decode_expr()` — Kismet bytecode decoder (recursive, ~77 opcodes)
-- `decode_bytecode()` — returns `(Vec<BcStatement>, i32)` with mem-space offsets and final mem_adj
-- `reorder_flow_patterns()` — detects sequence nodes, for-loops, ForEach loops; reorders bodies inline
-- `structure_bytecode()` — converts flat bytecode into structured if/else blocks (exact + 4-byte tolerance offset matching)
-- `resolve_ffield_type()` — maps FField class names to readable types
-- `print_summary()` — the summary view (component tree, variables, functions)
-- `skip_ffield_child()` — skips FField data in exports we don't fully parse
+Key dependency flow: `types` + `binary` → `resolve` → `properties` + `ffield` → `bytecode` → `parser` → `output_*`
 
 ## Binary format notes
 
@@ -54,8 +65,8 @@ Key things to know:
 
 ## Conventions
 
-- No external dependencies beyond `clap` and `serde_json`
-- Single-file architecture — don't split into modules unless it gets unmanageable
+- No external dependencies beyond `clap`, `serde_json`, and `anyhow`
+- Modular architecture: `lib.rs` + `main.rs` pattern with focused modules
 - `--summary` is the primary output mode for AI assistant use
 - `--json` is for programmatic access and should always be valid JSON
 - Sample files in `samples/` are from a UE4.27 project called "LastResort" (gitignored, not in repo)
