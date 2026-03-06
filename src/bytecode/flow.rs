@@ -19,6 +19,18 @@ pub fn parse_if_jump(text: &str) -> Option<(&str, usize)> {
     Some((cond, target))
 }
 
+/// Parse "pop_flow_if_not(COND)" → condition string.
+pub fn parse_pop_flow_if_not(text: &str) -> Option<&str> {
+    let inner = text.strip_prefix("pop_flow_if_not(")?;
+    let cond = inner.strip_suffix(')')?;
+    Some(cond)
+}
+
+/// Parse "jump_computed(EXPR)" → true if it's a computed jump.
+pub fn parse_jump_computed(text: &str) -> bool {
+    text.starts_with("jump_computed(")
+}
+
 /// Reorder bytecode stmts to place sequence/loop bodies in logical execution order.
 pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
     if stmts.is_empty() { return Vec::new(); }
