@@ -294,7 +294,8 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
         let sig = find_prop_str(props, "Signature")
             .unwrap_or_else(|| format!("{}()", hdr.object_name));
         let flags = find_prop_str(props, "FunctionFlags")
-            .map(|f| format!(" [{}]", f))
+            .map(|f| filter_flags_for_summary(&f))
+            .and_then(|f| if f.is_empty() { None } else { Some(format!(" [{}]", f)) })
             .unwrap_or_default();
 
         if !has_functions {
@@ -367,11 +368,13 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
         }
     }
 
+    let has_ubergraph_bytecode = functions_with_bytecode.iter().any(|f| f.starts_with("ExecuteUbergraph_"));
     for (hdr, props) in &asset.exports {
         let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
         if !class.ends_with(".EdGraph") { continue; }
         if !matches_filter(&hdr.object_name, filters) { continue; }
         if functions_with_bytecode.contains(&hdr.object_name) { continue; }
+        if hdr.object_name == "EventGraph" && has_ubergraph_bytecode { continue; }
         let graph_name = &hdr.object_name;
 
         let node_indices: Vec<i32> = find_prop(props, "Nodes")
@@ -386,7 +389,10 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
 
         if node_indices.is_empty() { continue; }
 
-        let flags = func_flags.get(graph_name.as_str()).map(|f| format!(" [{}]", f)).unwrap_or_default();
+        let flags = func_flags.get(graph_name.as_str())
+            .map(|f| filter_flags_for_summary(f))
+            .and_then(|f| if f.is_empty() { None } else { Some(format!(" [{}]", f)) })
+            .unwrap_or_default();
         println!("Graph: {}{}", graph_name, flags);
 
         let mut nodes: Vec<(i32, String)> = Vec::new();
@@ -446,13 +452,19 @@ fn summarise_node(class: &str, props: &[Property], imports: &[ImportEntry], expo
                 .unwrap_or_else(|| "?".into());
             format!("Cast to {}", target)
         }
-        "K2Node_Event" | "K2Node_CustomEvent" => {
-            let name = get_member_name(props);
+        "K2Node_Event" => {
+            let name = get_event_name(props);
+            format!("Event: {}", name)
+        }
+        "K2Node_CustomEvent" => {
+            let name = find_prop_str(props, "CustomFunctionName")
+                .or_else(|| get_event_name_opt(props))
+                .unwrap_or_else(|| "?".into());
             format!("Event: {}", name)
         }
         "K2Node_IfThenElse" => "Branch".into(),
         "K2Node_MacroInstance" => {
-            let name = get_member_name(props);
+            let name = get_macro_name(props, imports, export_names);
             format!("Macro: {}", name)
         }
         _ => short.to_string(),
@@ -484,6 +496,52 @@ fn get_member_name(props: &[Property]) -> String {
             _ => None,
         })
         .unwrap_or_else(|| "?".into())
+}
+
+fn get_event_name(props: &[Property]) -> String {
+    get_event_name_opt(props).unwrap_or_else(|| "?".into())
+}
+
+fn get_event_name_opt(props: &[Property]) -> Option<String> {
+    // Try EventReference.MemberName first, then FunctionReference.MemberName
+    for ref_name in &["EventReference", "FunctionReference"] {
+        if let Some(p) = find_prop(props, ref_name) {
+            if let PropValue::Struct { fields, .. } = &p.value {
+                if let Some(name) = find_prop_str(fields, "MemberName") {
+                    return Some(name);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn get_macro_name(props: &[Property], imports: &[ImportEntry], export_names: &[String]) -> String {
+    // MacroGraphReference.MacroGraph — can be object ref or string path
+    if let Some(p) = find_prop(props, "MacroGraphReference") {
+        if let PropValue::Struct { fields, .. } = &p.value {
+            if let Some(mg) = find_prop(fields, "MacroGraph") {
+                match &mg.value {
+                    PropValue::Object(idx) => {
+                        return short_class(&resolve_index(imports, export_names, *idx));
+                    }
+                    PropValue::Str(path) | PropValue::Name(path) => {
+                        return short_class(path);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    get_member_name(props)
+}
+
+fn filter_flags_for_summary(flags: &str) -> String {
+    const NOISE: &[&str] = &["BlueprintCallable"];
+    flags.split('|')
+        .filter(|f| !NOISE.contains(&f.trim()))
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 fn get_var_ref(props: &[Property], imports: &[ImportEntry], export_names: &[String]) -> String {

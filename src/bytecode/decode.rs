@@ -217,7 +217,8 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
         0x38 => { // EX_PrimitiveCast
             let cast_type = read_bc_u8(bc, pos);
             let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj).unwrap_or_default();
-            Some(format!("cast_{}({})", cast_type, expr))
+            let name = primitive_cast_name(cast_type);
+            Some(format!("{}({})", name, expr))
         }
         0x39 => { // EX_SetSet
             let target = decode_expr(bc, pos, nt, imports, export_names, mem_adj).unwrap_or_default();
@@ -477,6 +478,15 @@ fn decode_func_args(bc: &[u8], pos: &mut usize, nt: &NameTable,
         }
     }
     args
+}
+
+fn primitive_cast_name(cast_type: u8) -> String {
+    match cast_type {
+        0x41 => "iface_to_obj".into(),  // CST_InterfaceToObject
+        0x46 => "obj_to_iface".into(),  // CST_ObjectToInterface
+        0x47 => "bool".into(),          // CST_ObjectToBool
+        _ => format!("cast_{}", cast_type),
+    }
 }
 
 pub fn decode_bytecode(bc: &[u8], nt: &NameTable,

@@ -70,6 +70,7 @@ Key things to know:
 - `--summary` is the primary output mode for AI assistant use
 - `--json` is for programmatic access and should always be valid JSON
 - Sample files in `samples/` are from a UE4.27 project called "LastResort" (gitignored, not in repo)
+- Always check if the `README.md`, `CLAUDE.md`, and other documentation files need updating
 
 ## Release process
 
