@@ -9,6 +9,64 @@ pub struct BcStatement {
     pub text: String,
 }
 
+/// Check if an expression contains an infix operator and needs parenthesization.
+fn needs_parens(expr: &str) -> bool {
+    const TOKENS: &[&str] = &[
+        " && ", " || ", " + ", " - ", " * ", " / ", " % ",
+        " < ", " <= ", " > ", " >= ", " == ", " != ",
+    ];
+    TOKENS.iter().any(|tok| expr.contains(tok)) || expr.starts_with('!')
+}
+
+fn maybe_paren(expr: &str) -> String {
+    if needs_parens(expr) { format!("({})", expr) } else { expr.to_string() }
+}
+
+/// Try to inline a Kismet math/logic function as an operator expression.
+fn try_inline_operator(name: &str, args: &[String]) -> Option<String> {
+    let short = name.rsplit('.').next().unwrap_or(name);
+    // Unary prefix
+    if short == "Not_PreBool" {
+        if let Some(a) = args.first() {
+            return Some(format!("!{}", maybe_paren(a)));
+        }
+    }
+    // Binary operators
+    let op = match short {
+        "Add_IntInt" | "Add_FloatFloat" | "Concat_StrStr" => "+",
+        "Subtract_IntInt" | "Subtract_FloatFloat" | "Subtract_VectorVector" => "-",
+        "Multiply_IntInt" | "Multiply_FloatFloat" => "*",
+        "Divide_IntInt" | "Divide_FloatFloat" => "/",
+        "Percent_IntInt" | "Percent_FloatFloat" => "%",
+        "Less_IntInt" | "Less_FloatFloat" => "<",
+        "LessEqual_IntInt" | "LessEqual_FloatFloat" => "<=",
+        "Greater_IntInt" | "Greater_FloatFloat" => ">",
+        "GreaterEqual_IntInt" | "GreaterEqual_FloatFloat" => ">=",
+        "EqualEqual_IntInt" | "EqualEqual_FloatFloat" | "EqualEqual_ObjectObject"
+            | "EqualEqual_ByteByte" | "EqualEqual_NameName" | "EqualEqual_BoolBool" => "==",
+        "NotEqual_IntInt" | "NotEqual_FloatFloat" | "NotEqual_ObjectObject"
+            | "NotEqual_ByteByte" | "NotEqual_BoolBool" => "!=",
+        "BooleanAND" => "&&",
+        "BooleanOR" => "||",
+        _ => return None,
+    };
+    if args.len() >= 2 {
+        let lhs = maybe_paren(&args[0]);
+        let rhs = maybe_paren(&args[1]);
+        Some(format!("{} {} {}", lhs, op, rhs))
+    } else {
+        None
+    }
+}
+
+fn format_call_or_operator(name: &str, args: Vec<String>) -> String {
+    if let Some(inlined) = try_inline_operator(name, &args) {
+        inlined
+    } else {
+        format!("{}({})", name, args.join(", "))
+    }
+}
+
 /// Decode a single Kismet expression, returning a string representation.
 /// Returns None if at end of script or unknown opcode.
 pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
@@ -96,12 +154,12 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             let name = read_bc_fname(bc, pos, nt);
             *mem_adj += 4; // disk: FName (8 bytes), mem: UFunction* resolved pointer (8+4 alignment)
             let args = decode_func_args(bc, pos, nt, imports, export_names, mem_adj);
-            Some(format!("{}({})", name, args.join(", ")))
+            Some(format_call_or_operator(&name, args))
         }
         0x1C => { // EX_FinalFunction
             let func = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
             let args = decode_func_args(bc, pos, nt, imports, export_names, mem_adj);
-            Some(format!("{}({})", func, args.join(", ")))
+            Some(format_call_or_operator(&func, args))
         }
         0x1D => Some(format!("{}", read_bc_i32(bc, pos))),    // EX_IntConst
         0x1E => Some(format!("{:.4}", read_bc_f32(bc, pos))), // EX_FloatConst
@@ -298,18 +356,18 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             let name = read_bc_fname(bc, pos, nt);
             *mem_adj += 4;
             let args = decode_func_args(bc, pos, nt, imports, export_names, mem_adj);
-            Some(format!("{}({})", name, args.join(", ")))
+            Some(format_call_or_operator(&name, args))
         }
         0x45 => { // EX_LocalFinalFunction
             let func = read_bc_fname(bc, pos, nt);
             *mem_adj += 4;
             let args = decode_func_args(bc, pos, nt, imports, export_names, mem_adj);
-            Some(format!("{}({})", func, args.join(", ")))
+            Some(format_call_or_operator(&func, args))
         }
         0x46 => { // EX_FinalFunction variant (ubergraph dispatch)
             let func = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
             let args = decode_func_args(bc, pos, nt, imports, export_names, mem_adj);
-            Some(format!("{}({})", func, args.join(", ")))
+            Some(format_call_or_operator(&func, args))
         }
         0x48 => { // EX_LocalOutVariable
             let prop = read_bc_field_path(bc, pos, nt, mem_adj);
@@ -423,7 +481,7 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
         0x68 => { // EX_CallMath
             let func = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
             let args = decode_func_args(bc, pos, nt, imports, export_names, mem_adj);
-            Some(format!("{}({})", func, args.join(", ")))
+            Some(format_call_or_operator(&func, args))
         }
         0x69 => { // EX_SwitchValue
             let num_cases = read_bc_u16(bc, pos);
