@@ -3,6 +3,7 @@ pub mod binary;
 pub mod resolve;
 pub mod properties;
 pub mod ffield;
+pub mod enums;
 pub mod bytecode;
 pub mod parser;
 pub mod output_text;

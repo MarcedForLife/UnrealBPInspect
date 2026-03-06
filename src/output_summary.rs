@@ -387,6 +387,146 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
         }
     }
 
+    // Build call graph: collect local function names and scan bytecodes for cross-references
+    let local_functions: HashSet<String> = {
+        let mut names: HashSet<String> = asset.exports.iter()
+            .filter(|(hdr, _)| {
+                let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
+                class.ends_with(".Function") && !hdr.object_name.starts_with("ExecuteUbergraph_")
+            })
+            .map(|(hdr, _)| hdr.object_name.clone())
+            .collect();
+        // Include ubergraph event names
+        for event_name in ubergraph_labels.values() {
+            names.insert(event_name.clone());
+        }
+        names
+    };
+
+    // Sort ubergraph labels by offset for attributing statements to events
+    let mut ug_label_offsets: Vec<(usize, &str)> = ubergraph_labels.iter()
+        .map(|(off, name)| (*off, name.as_str()))
+        .collect();
+    ug_label_offsets.sort_by_key(|(off, _)| *off);
+
+    let mut callees_map: HashMap<String, Vec<String>> = HashMap::new();
+    let mut callers_map: HashMap<String, Vec<String>> = HashMap::new();
+
+    // Helper: check if a bytecode line calls a local function
+    let find_local_calls = |line: &str, local_fns: &HashSet<String>| -> Vec<String> {
+        let mut found = Vec::new();
+        for func in local_fns {
+            // Look for FuncName( with word boundary before it
+            let pattern = format!("{}(", func);
+            if let Some(pos) = line.find(&pattern) {
+                // Check word boundary: char before must not be alphanumeric or underscore
+                let is_boundary = pos == 0 || {
+                    let prev = line.as_bytes()[pos - 1];
+                    !(prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'.')
+                };
+                if is_boundary {
+                    found.push(func.clone());
+                }
+            }
+        }
+        found
+    };
+
+    // Scan all function exports for calls to local functions
+    // Scan non-ubergraph functions for calls to local functions
+    // (ubergraph is scanned later via structured output to catch latent resume blocks)
+    for (hdr, props) in &asset.exports {
+        let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
+        if !class.ends_with(".Function") { continue; }
+        if hdr.object_name.starts_with("ExecuteUbergraph_") { continue; }
+
+        // Skip ubergraph stubs
+        if ubergraph_name.is_some()
+            && is_ubergraph_stub(props, ubergraph_name.as_deref().unwrap_or(""))
+        {
+            continue;
+        }
+
+        let bc_prop = find_prop(props, "Bytecode")
+            .or_else(|| find_prop(props, "BytecodeSummary"));
+        let items = match bc_prop {
+            Some(Property { value: PropValue::Array { items, .. }, .. }) => items,
+            _ => continue,
+        };
+
+        for item in items {
+            let line = match item {
+                PropValue::Str(s) => s.as_str(),
+                _ => continue,
+            };
+            let code = if line.len() > 6 && line.as_bytes()[4] == b':' {
+                &line[6..]
+            } else {
+                line
+            };
+
+            let calls = find_local_calls(code, &local_functions);
+            for callee in &calls {
+                if *callee == hdr.object_name { continue; }
+                let entry = callees_map.entry(hdr.object_name.clone()).or_default();
+                if !entry.contains(callee) {
+                    entry.push(callee.clone());
+                }
+                let entry = callers_map.entry(callee.clone()).or_default();
+                if !entry.contains(&hdr.object_name) {
+                    entry.push(hdr.object_name.clone());
+                }
+            }
+        }
+    }
+
+    // Pre-compute structured ubergraph output for call graph scanning
+    let ubergraph_structured: Option<Vec<String>> = if !ubergraph_labels.is_empty() {
+        asset.exports.iter()
+            .find(|(hdr, _)| hdr.object_name.starts_with("ExecuteUbergraph_"))
+            .and_then(|(_, props)| find_prop(props, "Bytecode"))
+            .and_then(|bc_prop| {
+                if let PropValue::Array { items, .. } = &bc_prop.value {
+                    let stmts: Vec<BcStatement> = items.iter().filter_map(|item| {
+                        if let PropValue::Str(line) = item {
+                            if line.len() > 6 && line.as_bytes()[4] == b':' {
+                                let offset = usize::from_str_radix(&line[..4], 16).ok()?;
+                                Some(BcStatement { mem_offset: offset, text: line[6..].to_string() })
+                            } else { None }
+                        } else { None }
+                    }).collect();
+                    if stmts.is_empty() { return None; }
+                    let mut reordered = reorder_flow_patterns(&stmts);
+                    reorder_convergence(&mut reordered);
+                    inline_single_use_temps(&mut reordered);
+                    discard_unused_assignments(&mut reordered);
+                    let mut structured = structure_bytecode(&reordered, &ubergraph_labels);
+                    cleanup_structured_output(&mut structured);
+                    Some(structured)
+                } else {
+                    None
+                }
+            })
+    } else {
+        None
+    };
+
+    // Scan structured ubergraph output for local calls per event section
+    if let Some(ref structured) = ubergraph_structured {
+        scan_structured_calls(structured, &local_functions, &mut callees_map, &mut callers_map);
+    }
+
+    // Emit call graph section (only functions with local callees)
+    if !callees_map.is_empty() {
+        let mut entries: Vec<(&String, &Vec<String>)> = callees_map.iter().collect();
+        entries.sort_by_key(|(name, _)| name.to_string());
+        println!("Call graph:");
+        for (caller, callees) in &entries {
+            println!("  {} \u{2192} {}", caller, callees.join(", "));
+        }
+        println!();
+    }
+
     // Functions with signatures and bytecode
     let mut has_functions = false;
     let mut functions_with_bytecode: HashSet<String> = HashSet::new();
@@ -409,34 +549,16 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
             .and_then(|f| if f.is_empty() { None } else { Some(format!(" [{}]", f)) })
             .unwrap_or_default();
 
-        // For ubergraph: split into per-event pseudo-functions instead of one big block
+        // For ubergraph: use pre-computed structured output
         if hdr.object_name.starts_with("ExecuteUbergraph_") && !ubergraph_labels.is_empty() {
-            if let Some(bc_prop) = find_prop(props, "Bytecode") {
-                if let PropValue::Array { items, .. } = &bc_prop.value {
-                    let stmts: Vec<BcStatement> = items.iter().filter_map(|item| {
-                        if let PropValue::Str(line) = item {
-                            if line.len() > 6 && line.as_bytes()[4] == b':' {
-                                let offset = usize::from_str_radix(&line[..4], 16).ok()?;
-                                Some(BcStatement { mem_offset: offset, text: line[6..].to_string() })
-                            } else { None }
-                        } else { None }
-                    }).collect();
-                    let mut reordered = reorder_flow_patterns(&stmts);
-                    reorder_convergence(&mut reordered);
-                    inline_single_use_temps(&mut reordered);
-                    discard_unused_assignments(&mut reordered);
-                    let mut structured = structure_bytecode(&reordered, &ubergraph_labels);
-                    cleanup_structured_output(&mut structured);
-                    if !has_functions {
-                        println!("Functions:");
-                        has_functions = true;
-                    }
-                    let ug_comments = graph_comments.get("EventGraph").map(|v| v.as_slice());
-                    emit_ubergraph_events(&structured, ug_comments, &event_positions);
-                    if !stmts.is_empty() {
-                        functions_with_bytecode.insert(hdr.object_name.clone());
-                    }
+            if let Some(ref structured) = ubergraph_structured {
+                if !has_functions {
+                    println!("Functions:");
+                    has_functions = true;
                 }
+                let ug_comments = graph_comments.get("EventGraph").map(|v| v.as_slice());
+                emit_ubergraph_events(structured, ug_comments, &event_positions, &callers_map);
+                functions_with_bytecode.insert(hdr.object_name.clone());
             }
             continue;
         }
@@ -446,6 +568,9 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
             has_functions = true;
         }
         println!("  {}{}", sig, flags);
+        if let Some(callers) = callers_map.get(&hdr.object_name) {
+            println!("    // called by: {}", callers.join(", "));
+        }
 
         if let Some(comments) = graph_comments.get(&hdr.object_name) {
             let mut sorted: Vec<&CommentBox> = comments.iter().collect();
@@ -677,6 +802,7 @@ fn emit_ubergraph_events(
     lines: &[String],
     comments: Option<&[CommentBox]>,
     event_positions: &HashMap<String, (i32, i32)>,
+    callers_map: &HashMap<String, Vec<String>>,
 ) {
     // Split into sections by "--- label ---" markers
     struct Section {
@@ -769,6 +895,9 @@ fn emit_ubergraph_events(
 
         if !section.name.is_empty() {
             println!("  {}():", section.name);
+            if let Some(callers) = callers_map.get(&section.name) {
+                println!("    // called by: {}", callers.join(", "));
+            }
             if let (Some(cbs), Some(&(ex, ey))) = (comments, event_positions.get(&section.name)) {
                 let mut matching: Vec<&CommentBox> = cbs.iter()
                     .filter(|c| ex >= c.x && ey >= c.y && ex <= c.x + c.width && ey <= c.y + c.height)
@@ -795,6 +924,118 @@ fn emit_ubergraph_events(
                             println!("    {}", rline);
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/// Scan structured ubergraph output for calls to local functions.
+/// Splits by `--- EventName ---` markers and attributes calls to the current event.
+/// Also handles latent resume blocks: Delay() with `/*resume:0xHEX*/` annotations
+/// trigger resume blocks from `(latent resume)` sections.
+fn scan_structured_calls(
+    lines: &[String],
+    local_functions: &HashSet<String>,
+    callees_map: &mut HashMap<String, Vec<String>>,
+    callers_map: &mut HashMap<String, Vec<String>>,
+) {
+    // First, split into sections and collect resume blocks (same logic as emit_ubergraph_events)
+    struct Section { name: String, lines: Vec<String> }
+    let mut sections: Vec<Section> = Vec::new();
+    let mut current = Section { name: String::new(), lines: Vec::new() };
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with("--- ") && trimmed.ends_with(" ---") {
+            if !current.lines.is_empty() || !current.name.is_empty() {
+                sections.push(current);
+            }
+            current = Section { name: trimmed[4..trimmed.len() - 4].to_string(), lines: Vec::new() };
+        } else {
+            current.lines.push(line.clone());
+        }
+    }
+    if !current.lines.is_empty() || !current.name.is_empty() {
+        sections.push(current);
+    }
+
+    // Collect resume blocks from (latent resume) sections
+    let mut resume_blocks: Vec<Vec<String>> = Vec::new();
+    for section in &sections {
+        if section.name != "(latent resume)" { continue; }
+        let mut block: Vec<String> = Vec::new();
+        for line in &section.lines {
+            if line.trim() == "return" {
+                if !block.is_empty() {
+                    resume_blocks.push(block);
+                    block = Vec::new();
+                }
+            } else {
+                block.push(line.clone());
+            }
+        }
+        if !block.is_empty() { resume_blocks.push(block); }
+    }
+
+    // Build resume mapping: for each event section with a Delay()+resume annotation,
+    // associate the resume block with that event
+    let mut resume_idx = 0usize;
+    let mut event_resume_lines: HashMap<String, Vec<String>> = HashMap::new();
+    for section in &sections {
+        if section.name.is_empty() || section.name == "(latent resume)" { continue; }
+        for line in &section.lines {
+            if line.contains("/*resume:0x") {
+                if resume_idx < resume_blocks.len() {
+                    event_resume_lines.entry(section.name.clone()).or_default()
+                        .extend(resume_blocks[resume_idx].iter().cloned());
+                    resume_idx += 1;
+                }
+            }
+        }
+    }
+
+    // Helper to record a caller→callee edge
+    let mut record_call = |caller: &str, callee: &str| {
+        let entry = callees_map.entry(caller.to_string()).or_default();
+        if !entry.contains(&callee.to_string()) {
+            entry.push(callee.to_string());
+        }
+        let entry = callers_map.entry(callee.to_string()).or_default();
+        if !entry.contains(&caller.to_string()) {
+            entry.push(caller.to_string());
+        }
+    };
+
+    // Scan each event section + its resume blocks for local function calls
+    let find_calls = |line: &str, local_fns: &HashSet<String>| -> Vec<String> {
+        let trimmed = line.trim();
+        let mut found = Vec::new();
+        for func in local_fns {
+            let pattern = format!("{}(", func);
+            if let Some(pos) = trimmed.find(&pattern) {
+                let is_boundary = pos == 0 || {
+                    let prev = trimmed.as_bytes()[pos - 1];
+                    !(prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'.')
+                };
+                if is_boundary { found.push(func.clone()); }
+            }
+        }
+        found
+    };
+
+    for section in &sections {
+        if section.name.is_empty() || section.name == "(latent resume)" { continue; }
+        // Scan main section lines
+        for line in &section.lines {
+            for callee in find_calls(line, local_functions) {
+                if callee != section.name { record_call(&section.name, &callee); }
+            }
+        }
+        // Scan associated resume block lines
+        if let Some(resume_lines) = event_resume_lines.get(&section.name) {
+            for line in resume_lines {
+                for callee in find_calls(line, local_functions) {
+                    if callee != section.name { record_call(&section.name, &callee); }
                 }
             }
         }

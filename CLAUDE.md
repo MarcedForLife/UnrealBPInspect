@@ -11,6 +11,7 @@ src/
   types.rs             Core data types (ImportEntry, ExportHeader, PropValue, Property, ParsedAsset)
   binary.rs            Binary reading helpers (R<'a>, read_*, NameTable)
   resolve.rs           Index resolution, property lookup helpers, format_func_flags
+  enums.rs             Common UE4 enum argument resolution (ECollisionEnabled, EAttachmentRule, etc.)
   properties.rs        Tagged property deserialiser
   ffield.rs            FField type resolution, function signatures
   parser.rs            Asset parser orchestrator (parse_asset)
