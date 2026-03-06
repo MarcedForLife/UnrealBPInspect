@@ -243,6 +243,9 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
             }
         });
     }
+
+    // Pass 4: rewrite negated guards with compound conditions
+    rewrite_negated_guards(lines);
 }
 
 fn clean_line(text: &str) -> String {
@@ -353,4 +356,67 @@ fn find_matching_paren(s: &str) -> Option<usize> {
         }
     }
     None
+}
+
+/// Rewrite `if (!(COMPOUND)) return` → `if (COMPOUND) { body }` when the
+/// condition contains `&&` or `||` and the remaining body is ≤ 8 lines.
+fn rewrite_negated_guards(lines: &mut Vec<String>) {
+    let mut i = lines.len();
+    while i > 0 {
+        i -= 1;
+        let line = &lines[i];
+        let indent_len = line.len() - line.trim_start().len();
+        let trimmed = &line[indent_len..];
+
+        if !trimmed.starts_with("if (") { continue; }
+
+        // Find matching ) for the ( after "if "
+        let after_if = &trimmed[3..];
+        let Some(close) = find_matching_paren(after_if) else { continue };
+        let rest = after_if[close + 1..].trim();
+        if rest != "return" { continue; }
+
+        let cond = after_if[1..close].trim();
+
+        // Must be !(COMPOUND)
+        if !cond.starts_with("!(") { continue; }
+        let Some(inner_close) = find_matching_paren(&cond[1..]) else { continue };
+        if 1 + inner_close + 1 != cond.len() { continue; }
+
+        let compound = &cond[2..1 + inner_close];
+
+        // Only rewrite compound conditions
+        if !compound.contains(" && ") && !compound.contains(" || ") { continue; }
+
+        // Find body extent
+        let guard_indent = indent_len;
+        let mut body_end = i + 1;
+        while body_end < lines.len() {
+            let t = lines[body_end].trim();
+            if t.starts_with("--- ") && t.ends_with(" ---") { break; }
+            if t.is_empty() { body_end += 1; continue; }
+            let li = lines[body_end].len() - lines[body_end].trim_start().len();
+            if li < guard_indent { break; }
+            if li == guard_indent && t == "}" { break; }
+            body_end += 1;
+        }
+
+        // Trim trailing returns and empty lines from body
+        let mut effective_end = body_end;
+        while effective_end > i + 1 {
+            let t = lines[effective_end - 1].trim();
+            if t == "return" || t.is_empty() { effective_end -= 1; } else { break; }
+        }
+
+        let body_count = effective_end - (i + 1);
+        if body_count == 0 || body_count > 8 { continue; }
+
+        // Rewrite: replace guard with positive if + wrapped body
+        let indent_str = lines[i][..indent_len].to_string();
+        lines[i] = format!("{}if ({}) {{", indent_str, compound);
+        for j in (i + 1)..effective_end {
+            lines[j] = format!("    {}", lines[j]);
+        }
+        lines.insert(effective_end, format!("{}}}", indent_str));
+    }
 }

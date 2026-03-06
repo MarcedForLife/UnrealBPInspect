@@ -4,6 +4,51 @@ use crate::types::*;
 use crate::resolve::*;
 use crate::bytecode::{BcStatement, reorder_flow_patterns, reorder_convergence, structure_bytecode, inline_single_use_temps, discard_unused_assignments, cleanup_structured_output};
 
+struct CommentBox {
+    text: String,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+fn emit_comment(text: &str, indent: &str) {
+    let prefix = format!("{}// ", indent);
+    let avail = 100usize.saturating_sub(prefix.len() + 1);
+    for paragraph in text.lines() {
+        let para = paragraph.trim();
+        if para.is_empty() { continue; }
+        let mut wrapped: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        for word in para.split_whitespace() {
+            if cur.is_empty() {
+                cur = word.to_string();
+            } else if cur.len() + 1 + word.len() <= avail {
+                cur.push(' ');
+                cur.push_str(word);
+            } else {
+                wrapped.push(cur);
+                cur = word.to_string();
+            }
+        }
+        if !cur.is_empty() { wrapped.push(cur); }
+        match wrapped.len() {
+            0 => {}
+            1 => println!("{}\"{}\"", prefix, wrapped[0]),
+            n => {
+                println!("{}\"{}", prefix, wrapped[0]);
+                for i in 1..n {
+                    if i == n - 1 {
+                        println!("{} {}\"", prefix, wrapped[i]);
+                    } else {
+                        println!("{} {}", prefix, wrapped[i]);
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
     let export_names: Vec<String> = asset.exports.iter().map(|(h, _)| h.object_name.clone()).collect();
 
@@ -284,6 +329,64 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
         HashMap::new()
     };
 
+    // Collect blueprint comment boxes and event node positions from EdGraph exports
+    let mut graph_comments: HashMap<String, Vec<CommentBox>> = HashMap::new();
+    let mut event_positions: HashMap<String, (i32, i32)> = HashMap::new();
+
+    for (hdr, props) in &asset.exports {
+        let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
+        if !class.ends_with(".EdGraph") { continue; }
+        let graph_name = &hdr.object_name;
+
+        let node_indices: Vec<i32> = find_prop(props, "Nodes")
+            .or_else(|| find_prop(props, "AllNodes"))
+            .map(|p| match &p.value {
+                PropValue::Array { items, .. } => items.iter().filter_map(|item| {
+                    if let PropValue::Object(idx) = item { Some(*idx) } else { None }
+                }).collect(),
+                _ => Vec::new(),
+            })
+            .unwrap_or_default();
+
+        for idx in &node_indices {
+            if *idx <= 0 { continue; }
+            let export_idx = (*idx - 1) as usize;
+            let Some((node_hdr, node_props)) = asset.exports.get(export_idx) else { continue };
+            let node_class = resolve_index(&asset.imports, &export_names, node_hdr.class_index);
+            let short = short_class(&node_class);
+
+            if short == "EdGraphNode_Comment" {
+                let comment_text = find_prop(node_props, "NodeComment").and_then(|p| match &p.value {
+                    PropValue::Str(s) | PropValue::Name(s) | PropValue::Text(s) => Some(s.clone()),
+                    _ => None,
+                });
+                if let Some(text) = comment_text {
+                    let x = find_prop_i32(node_props, "NodePosX").unwrap_or(0);
+                    let y = find_prop_i32(node_props, "NodePosY").unwrap_or(0);
+                    let w = find_prop_i32(node_props, "NodeWidth").unwrap_or(0);
+                    let h = find_prop_i32(node_props, "NodeHeight").unwrap_or(0);
+                    graph_comments.entry(graph_name.clone()).or_default().push(CommentBox {
+                        text, x, y, width: w, height: h,
+                    });
+                }
+            }
+
+            if graph_name == "EventGraph" && (short == "K2Node_Event" || short == "K2Node_CustomEvent") {
+                let event_name = if short == "K2Node_CustomEvent" {
+                    find_prop_str(node_props, "CustomFunctionName")
+                        .or_else(|| get_event_name_opt(node_props))
+                } else {
+                    get_event_name_opt(node_props)
+                };
+                if let Some(name) = event_name {
+                    let x = find_prop_i32(node_props, "NodePosX").unwrap_or(0);
+                    let y = find_prop_i32(node_props, "NodePosY").unwrap_or(0);
+                    event_positions.insert(name, (x, y));
+                }
+            }
+        }
+    }
+
     // Functions with signatures and bytecode
     let mut has_functions = false;
     let mut functions_with_bytecode: HashSet<String> = HashSet::new();
@@ -328,7 +431,8 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
                         println!("Functions:");
                         has_functions = true;
                     }
-                    emit_ubergraph_events(&structured);
+                    let ug_comments = graph_comments.get("EventGraph").map(|v| v.as_slice());
+                    emit_ubergraph_events(&structured, ug_comments, &event_positions);
                     if !stmts.is_empty() {
                         functions_with_bytecode.insert(hdr.object_name.clone());
                     }
@@ -342,6 +446,14 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
             has_functions = true;
         }
         println!("  {}{}", sig, flags);
+
+        if let Some(comments) = graph_comments.get(&hdr.object_name) {
+            let mut sorted: Vec<&CommentBox> = comments.iter().collect();
+            sorted.sort_by_key(|c| c.x);
+            for cb in &sorted {
+                emit_comment(&cb.text, "    ");
+            }
+        }
 
         let bc_prop_name = if find_prop(props, "BytecodeSummary").is_some() {
             "BytecodeSummary"
@@ -561,7 +673,11 @@ fn filter_flags_for_summary(flags: &str) -> String {
 }
 
 /// Split ubergraph structured output into per-event sections and inline latent resumes.
-fn emit_ubergraph_events(lines: &[String]) {
+fn emit_ubergraph_events(
+    lines: &[String],
+    comments: Option<&[CommentBox]>,
+    event_positions: &HashMap<String, (i32, i32)>,
+) {
     // Split into sections by "--- label ---" markers
     struct Section {
         name: String,       // event name or "(latent resume)"
@@ -653,6 +769,15 @@ fn emit_ubergraph_events(lines: &[String]) {
 
         if !section.name.is_empty() {
             println!("  {}():", section.name);
+            if let (Some(cbs), Some(&(ex, ey))) = (comments, event_positions.get(&section.name)) {
+                let mut matching: Vec<&CommentBox> = cbs.iter()
+                    .filter(|c| ex >= c.x && ey >= c.y && ex <= c.x + c.width && ey <= c.y + c.height)
+                    .collect();
+                matching.sort_by_key(|c| (c.width as i64) * (c.height as i64));
+                for cb in matching.iter().take(2) {
+                    emit_comment(&cb.text, "    ");
+                }
+            }
         }
         for line in &section.lines {
             // Strip resume annotations from displayed output
