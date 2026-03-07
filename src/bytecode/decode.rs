@@ -77,18 +77,34 @@ fn try_inline_operator(name: &str, args: &[String]) -> Option<String> {
 
 fn strip_func_prefix(name: &str) -> String {
     if let Some(dot_pos) = name.rfind('.') {
-        let prefix = &name[..dot_pos + 1];
+        let class_part = &name[..dot_pos];
         let func = &name[dot_pos + 1..];
         let stripped = func.strip_prefix("K2_")
             .or_else(|| func.strip_prefix("Conv_"))
             .unwrap_or(func);
-        format!("{}{}", prefix, stripped)
+        if is_ue4_library_class(class_part) {
+            stripped.to_string()
+        } else {
+            format!("{}.{}", class_part, stripped)
+        }
     } else {
         let stripped = name.strip_prefix("K2_")
             .or_else(|| name.strip_prefix("Conv_"))
             .unwrap_or(name);
         stripped.to_string()
     }
+}
+
+fn is_ue4_library_class(name: &str) -> bool {
+    let short = name.rsplit('.').next().unwrap_or(name);
+    matches!(short,
+        "KismetArrayLibrary" | "KismetMathLibrary" | "KismetSystemLibrary"
+        | "KismetStringLibrary" | "KismetTextLibrary" | "KismetInputLibrary"
+        | "KismetMaterialLibrary" | "KismetNodeHelperLibrary"
+        | "KismetRenderingLibrary" | "KismetGuidLibrary"
+        | "GameplayStatics" | "HeadMountedDisplayFunctionLibrary"
+        | "BlueprintMapLibrary" | "BlueprintSetLibrary"
+    )
 }
 
 /// Extract the resume offset (Linkage field) from a LatentActionInfo struct literal.
@@ -202,14 +218,22 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             read_bc_context_rvalue(bc, pos, nt, mem_adj);
             let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj).unwrap_or_default();
             let expr = expr.strip_prefix("self.").unwrap_or(&expr);
-            Some(format!("{}.{}", obj, expr))
+            if is_ue4_library_class(&obj) {
+                Some(expr.to_string())
+            } else {
+                Some(format!("{}.{}", obj, expr))
+            }
         }
         0x1A => { // EX_Context_FailSilent
             let obj = decode_expr(bc, pos, nt, imports, export_names, mem_adj).unwrap_or_default();
             read_bc_context_rvalue(bc, pos, nt, mem_adj);
             let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj).unwrap_or_default();
             let expr = expr.strip_prefix("self.").unwrap_or(&expr);
-            Some(format!("{}?.{}", obj, expr))
+            if is_ue4_library_class(&obj) {
+                Some(expr.to_string())
+            } else {
+                Some(format!("{}?.{}", obj, expr))
+            }
         }
         0x1B => { // EX_VirtualFunction
             let name = read_bc_fname(bc, pos, nt);
