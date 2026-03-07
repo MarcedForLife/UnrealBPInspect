@@ -1,5 +1,11 @@
 /// Resolve known UE4 enum integer arguments to their symbolic names.
 ///
+/// Only covers core engine enums whose integer values have been ABI-stable since UE4.0
+/// (or since introduction, e.g. EAttachmentRule in 4.12). Epic can't change these without
+/// breaking every serialized asset, so version-specific tables aren't needed. If a future
+/// engine version adds new values at the end of an enum, we'll simply leave those as raw
+/// integers — same as any unknown value. To extend coverage, add a const slice + match arm.
+///
 /// Only touches plain integer literal args — variables, expressions, bools are left alone.
 /// Indices are relative to the displayed argument list (after WorldContextObject/LatentActionInfo
 /// filtering in `format_call_or_operator`).
@@ -12,7 +18,8 @@ pub fn resolve_enum_args(func_name: &str, args: &mut [String]) {
 
     let mappings: &[(usize, &[&str])] = match stripped {
         "SetCollisionEnabled" => &[(0, ECOLLISION_ENABLED)],
-        "SetCollisionResponseToChannel" => &[(0, ECOLLISION_CHANNEL)],
+        "SetCollisionResponseToChannel" => &[(0, ECOLLISION_CHANNEL), (1, ECOLLISION_RESPONSE)],
+        "SetCollisionResponseToAllChannels" => &[(0, ECOLLISION_RESPONSE)],
         "AttachToComponent" | "AttachRootComponentTo" | "AttachToActor" => {
             &[(2, EATTACHMENT_RULE), (3, EATTACHMENT_RULE), (4, EATTACHMENT_RULE)]
         }
@@ -21,6 +28,11 @@ pub fn resolve_enum_args(func_name: &str, args: &mut [String]) {
         }
         "GetSocketTransform" | "GetRelativeTransform" => &[(1, ERELATIVE_TRANSFORM_SPACE)],
         "SetTickGroup" => &[(0, ETICKING_GROUP)],
+        "SetMobility" => &[(0, ECOMPONENT_MOBILITY)],
+        "SetMovementMode" => &[(0, EMOVEMENT_MODE)],
+        "SetCollisionObjectType" => &[(0, ECOLLISION_CHANNEL)],
+        "GetInputAxisKeyValue" | "GetInputVectorKeyState" |
+        "GetKey" | "InputKey" | "InputAction" => &[(1, EINPUT_EVENT)],
         _ => {
             // Trace functions: SphereTraceSingle, LineTraceSingleForObjects, etc.
             if is_trace_function(stripped) {
@@ -98,4 +110,34 @@ const ETICKING_GROUP: &[&str] = &[
     "DuringPhysics",    // 1
     "PostPhysics",      // 2
     "PostUpdateWork",   // 3
+];
+
+const ECOLLISION_RESPONSE: &[&str] = &[
+    "Ignore",           // 0
+    "Overlap",          // 1
+    "Block",            // 2
+];
+
+const ECOMPONENT_MOBILITY: &[&str] = &[
+    "Static",           // 0
+    "Stationary",       // 1
+    "Movable",          // 2
+];
+
+const EMOVEMENT_MODE: &[&str] = &[
+    "None",             // 0
+    "Walking",          // 1
+    "NavWalking",       // 2
+    "Falling",          // 3
+    "Swimming",         // 4
+    "Flying",           // 5
+    "Custom",           // 6
+];
+
+const EINPUT_EVENT: &[&str] = &[
+    "Pressed",          // 0
+    "Released",         // 1
+    "Repeat",           // 2
+    "DoubleClick",      // 3
+    "Axis",             // 4
 ];
