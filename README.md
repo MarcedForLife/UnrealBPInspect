@@ -137,4 +137,4 @@ The `skill/` directory contains a Claude Code skill that teaches Claude how to u
 
 ## License
 
-MIT
+Apache-2.0
