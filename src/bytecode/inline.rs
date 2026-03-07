@@ -87,9 +87,10 @@ pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
     }
 }
 
-/// Parse `$VarName = expression` assignments. Returns (var_name, expression).
+/// Parse `$VarName = expression` or `Temp_* = expression` assignments.
+/// Returns (var_name, expression).
 fn parse_temp_assignment(text: &str) -> Option<(&str, &str)> {
-    if !text.starts_with('$') { return None; }
+    if !text.starts_with('$') && !text.starts_with("Temp_") { return None; }
     let eq_pos = text.find(" = ")?;
     let var = &text[..eq_pos];
     // Must be a simple $name (no dots, brackets, etc.)
@@ -121,19 +122,29 @@ fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
-/// Substitute `$VarName` with `expr` in `text`, adding parens if needed.
+/// Substitute `$VarName` or `Temp_*` with `expr` in `text`, adding parens if needed.
+/// Only replaces at word boundaries (first match).
 fn substitute_var(text: &str, var: &str, expr: &str) -> String {
-    let Some(pos) = text.find(var) else { return text.to_string() };
-    let after = pos + var.len();
-    let needs_wrap = expr_is_compound(expr) && used_in_operator_context(text, pos, after);
-    let sub = if needs_wrap { format!("({})", expr) } else { expr.to_string() };
-    format!("{}{}{}", &text[..pos], sub, &text[after..])
+    let mut start = 0;
+    while let Some(rel) = text[start..].find(var) {
+        let pos = start + rel;
+        let after = pos + var.len();
+        let at_boundary = after >= text.len() || !is_ident_char(text.as_bytes()[after]);
+        if at_boundary {
+            let needs_wrap = expr_is_compound(expr) && used_in_operator_context(text, pos, after);
+            let sub = if needs_wrap { format!("({})", expr) } else { expr.to_string() };
+            return format!("{}{}{}", &text[..pos], sub, &text[after..]);
+        }
+        start = after;
+    }
+    text.to_string()
 }
 
 fn expr_is_compound(expr: &str) -> bool {
     const TOKENS: &[&str] = &[
         " && ", " || ", " + ", " - ", " * ", " / ", " % ",
         " < ", " <= ", " > ", " >= ", " == ", " != ",
+        " >> ", " << ",
     ];
     TOKENS.iter().any(|tok| expr.contains(tok)) || expr.starts_with('!')
 }
@@ -147,6 +158,7 @@ fn used_in_operator_context(text: &str, pos: usize, after: usize) -> bool {
         || before.trim_end().ends_with('*') || before.trim_end().ends_with('/')
         || before.trim_end().ends_with(">=") || before.trim_end().ends_with("<=")
         || before.trim_end().ends_with("==") || before.trim_end().ends_with("!=")
+        || before.trim_end().ends_with(">>") || before.trim_end().ends_with("<<")
         || before.trim_end().ends_with('>') || before.trim_end().ends_with('<');
     let op_after = after_text.trim_start().starts_with("&&")
         || after_text.trim_start().starts_with("||")
@@ -158,6 +170,8 @@ fn used_in_operator_context(text: &str, pos: usize, after: usize) -> bool {
         || after_text.trim_start().starts_with("<= ")
         || after_text.trim_start().starts_with("== ")
         || after_text.trim_start().starts_with("!= ")
+        || after_text.trim_start().starts_with(">> ")
+        || after_text.trim_start().starts_with("<< ")
         || after_text.trim_start().starts_with("> ")
         || after_text.trim_start().starts_with("< ");
     op_before || op_after

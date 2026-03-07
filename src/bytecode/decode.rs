@@ -14,6 +14,7 @@ fn needs_parens(expr: &str) -> bool {
     const TOKENS: &[&str] = &[
         " && ", " || ", " + ", " - ", " * ", " / ", " % ",
         " < ", " <= ", " > ", " >= ", " == ", " != ",
+        " >> ", " << ",
     ];
     TOKENS.iter().any(|tok| expr.contains(tok)) || expr.starts_with('!')
 }
@@ -31,24 +32,39 @@ fn try_inline_operator(name: &str, args: &[String]) -> Option<String> {
             return Some(format!("!{}", maybe_paren(a)));
         }
     }
-    // Binary operators
-    let op = match short {
-        "Add_IntInt" | "Add_FloatFloat" | "Concat_StrStr" => "+",
-        "Subtract_IntInt" | "Subtract_FloatFloat" | "Subtract_VectorVector" => "-",
-        "Multiply_IntInt" | "Multiply_FloatFloat" => "*",
-        "Divide_IntInt" | "Divide_FloatFloat" => "/",
-        "Percent_IntInt" | "Percent_FloatFloat" => "%",
-        "Less_IntInt" | "Less_FloatFloat" => "<",
-        "LessEqual_IntInt" | "LessEqual_FloatFloat" => "<=",
-        "Greater_IntInt" | "Greater_FloatFloat" => ">",
-        "GreaterEqual_IntInt" | "GreaterEqual_FloatFloat" => ">=",
-        "EqualEqual_IntInt" | "EqualEqual_FloatFloat" | "EqualEqual_ObjectObject"
-            | "EqualEqual_ByteByte" | "EqualEqual_NameName" | "EqualEqual_BoolBool" => "==",
-        "NotEqual_IntInt" | "NotEqual_FloatFloat" | "NotEqual_ObjectObject"
-            | "NotEqual_ByteByte" | "NotEqual_BoolBool" => "!=",
-        "BooleanAND" => "&&",
-        "BooleanOR" => "||",
-        _ => return None,
+    // Binary operators — prefix matching covers all type combinations
+    let op = if short.starts_with("Add_") || short == "Concat_StrStr" {
+        "+"
+    } else if short.starts_with("Subtract_") {
+        "-"
+    } else if short.starts_with("Multiply_") {
+        "*"
+    } else if short.starts_with("Divide_") {
+        "/"
+    } else if short.starts_with("Percent_") {
+        "%"
+    } else if short.starts_with("EqualEqual_") {
+        "=="
+    } else if short.starts_with("NotEqual_") {
+        "!="
+    } else if short.starts_with("LessEqual_") {
+        "<="
+    } else if short.starts_with("GreaterEqual_") {
+        ">="
+    } else if short.starts_with("Less_") {
+        "<"
+    } else if short.starts_with("Greater_") {
+        ">"
+    } else if short == "BooleanAND" {
+        "&&"
+    } else if short == "BooleanOR" {
+        "||"
+    } else if short.starts_with("GreaterGreater_") {
+        ">>"
+    } else if short.starts_with("LessLess_") {
+        "<<"
+    } else {
+        return None;
     };
     if args.len() >= 2 {
         let lhs = maybe_paren(&args[0]);
