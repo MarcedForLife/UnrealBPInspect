@@ -70,7 +70,10 @@ pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
 
             let replacement = substitute_var(&stmts[target_idx].text, var_name, &current_expr);
 
-            if replacement.len() > MAX_LINE { continue; }
+            // Bypass MAX_LINE when expression (even with parens) is shorter than the variable —
+            // the resulting line can only get shorter or stay the same length.
+            let shortens = current_expr.len() + 2 <= var_name.len(); // +2 for possible (...)
+            if !shortens && replacement.len() > MAX_LINE { continue; }
 
             stmts[target_idx].text = replacement;
             removed.push(*assign_idx);
@@ -510,6 +513,8 @@ pub fn fold_summary_patterns(lines: &mut Vec<String>) {
 fn process_section(lines: &mut Vec<String>) {
     fold_break_patterns(lines);
     fold_struct_construction(lines);
+    dedup_completion_paths(lines);
+    fold_section_temps(lines);
     suppress_unused_outparams(lines);
 }
 
@@ -676,6 +681,165 @@ fn rename_make_functions(lines: &mut [String]) {
         if changed.as_str() != content {
             *line = format!("{}{}", &line[..indent_len], changed);
         }
+    }
+}
+
+/// Per-section inlining of single-use temp variables in structured output.
+/// Runs on `Vec<String>` (indented lines) after structuring, catching temps
+/// that survived pre-structure inlining due to cross-section ref counts.
+fn fold_section_temps(lines: &mut Vec<String>) {
+    const MAX_LINE: usize = 120;
+    const MAX_PASSES: usize = 4;
+
+    for _ in 0..MAX_PASSES {
+        let mut inlined_any = false;
+
+        // Collect assignments: (index, var_name, expr)
+        let assignments: Vec<(usize, String, String)> = lines.iter().enumerate()
+            .filter_map(|(i, line)| {
+                let trimmed = line.trim_start();
+                let (var, expr) = parse_temp_assignment(trimmed)?;
+                Some((i, var.to_string(), expr.to_string()))
+            })
+            .collect();
+
+        // Count assignments per var (skip multi-assigned)
+        let mut assign_counts: HashMap<&str, usize> = HashMap::new();
+        for (_, var, _) in &assignments {
+            *assign_counts.entry(var.as_str()).or_default() += 1;
+        }
+
+        // Find single-use vars within this section
+        let mut to_inline = Vec::new();
+        for (idx, var, expr) in &assignments {
+            if assign_counts.get(var.as_str()).copied().unwrap_or(0) != 1 { continue; }
+            let mut ref_count = 0usize;
+            for (i, line) in lines.iter().enumerate() {
+                if i == *idx { continue; }
+                ref_count += count_var_refs(line.trim(), var);
+            }
+            if ref_count == 1 {
+                to_inline.push((*idx, var.clone(), expr.clone()));
+            }
+        }
+
+        // Apply substitutions with re-verification
+        let mut removed = Vec::new();
+        for (assign_idx, var_name, _) in &to_inline {
+            if removed.contains(assign_idx) { continue; }
+            let current_expr = match parse_temp_assignment(lines[*assign_idx].trim_start()) {
+                Some((v, e)) if v == var_name => e.to_string(),
+                _ => continue,
+            };
+            let mut refs = 0usize;
+            let mut target = None;
+            for (i, line) in lines.iter().enumerate() {
+                if i == *assign_idx || removed.contains(&i) { continue; }
+                let r = count_var_refs(line.trim(), var_name);
+                refs += r;
+                if r == 1 && target.is_none() { target = Some(i); }
+            }
+            if refs != 1 { continue; }
+            let Some(target_idx) = target else { continue };
+
+            let indent_len = lines[target_idx].len() - lines[target_idx].trim_start().len();
+            let content = &lines[target_idx][indent_len..];
+            let replacement = substitute_var(content, var_name, &current_expr);
+
+            let shortens = current_expr.len() + 2 <= var_name.len();
+            if !shortens && (indent_len + replacement.len()) > MAX_LINE { continue; }
+
+            lines[target_idx] = format!("{}{}", &lines[target_idx][..indent_len], replacement);
+            removed.push(*assign_idx);
+            inlined_any = true;
+        }
+
+        removed.sort_unstable();
+        for idx in removed.into_iter().rev() { lines.remove(idx); }
+        if !inlined_any { break; }
+    }
+}
+
+/// Deduplicate ForEach completion paths that repeat pre-loop setup code.
+/// Removes lines from the completion block that are exact duplicates of
+/// pre-loop lines, keeping only unique (non-duplicated) lines.
+fn dedup_completion_paths(lines: &mut Vec<String>) {
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].trim() != "// on loop complete:" { i += 1; continue; }
+
+        let marker_idx = i;
+        let marker_indent = lines[i].len() - lines[i].trim_start().len();
+
+        // Collect completion block lines (until next structural boundary)
+        let comp_start = marker_idx + 1;
+        let mut comp_end = comp_start;
+        while comp_end < lines.len() {
+            let t = lines[comp_end].trim();
+            if t.is_empty() { comp_end += 1; continue; }
+            let li = lines[comp_end].len() - lines[comp_end].trim_start().len();
+            if li <= marker_indent && (t.starts_with('}') || t.starts_with("---")) { break; }
+            comp_end += 1;
+        }
+        if comp_end <= comp_start { i += 1; continue; }
+
+        // Find the while/for loop above
+        let while_idx = (0..marker_idx).rev()
+            .find(|&j| {
+                let t = lines[j].trim();
+                t.starts_with("while ") || t.starts_with("for ")
+            });
+        let Some(while_idx) = while_idx else { i = comp_end; continue; };
+
+        // Collect pre-loop lines at same indent level
+        let while_indent = lines[while_idx].len() - lines[while_idx].trim_start().len();
+        let mut pre_start = while_idx;
+        for j in (0..while_idx).rev() {
+            let t = lines[j].trim();
+            if t.is_empty() { continue; }
+            let li = lines[j].len() - lines[j].trim_start().len();
+            if li == while_indent && !t.starts_with('}') && !t.starts_with("//") {
+                pre_start = j;
+            } else { break; }
+        }
+
+        // Build set of pre-loop lines (trimmed) for duplicate detection
+        let pre_set: HashSet<&str> = lines[pre_start..while_idx]
+            .iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+
+        // Check each completion line: is it a duplicate of a pre-loop line?
+        let mut matched_count = 0usize;
+        let mut total_count = 0usize;
+        let mut unique_indices: Vec<usize> = Vec::new();
+        for j in comp_start..comp_end {
+            let t = lines[j].trim();
+            if t.is_empty() { continue; }
+            total_count += 1;
+            if pre_set.contains(t) {
+                matched_count += 1;
+            } else {
+                unique_indices.push(j);
+            }
+        }
+
+        // Need at least 3 duplicated lines covering majority of completion
+        if matched_count >= 3 && matched_count * 2 >= total_count {
+            let indent = &lines[marker_idx][..marker_indent];
+            let mut replacement: Vec<String> = Vec::new();
+            if unique_indices.is_empty() {
+                replacement.push(format!(
+                    "{}// on loop complete: (same as pre-loop setup)", indent));
+            } else {
+                replacement.push(format!(
+                    "{}// on loop complete: (repeats pre-loop setup)", indent));
+                for &j in &unique_indices {
+                    replacement.push(lines[j].clone());
+                }
+            }
+            lines.splice(marker_idx..comp_end, replacement);
+        }
+
+        i += 1;
     }
 }
 
