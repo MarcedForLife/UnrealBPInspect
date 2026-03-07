@@ -32,7 +32,6 @@ $ bp-inspect Helm_BP.uasset --summary
 Blueprint: Helm_BP (extends Actor)
 
 Components:
-  DefaultSceneRoot (SceneComponent)
   Scene (SceneComponent)
     Stand (StaticMeshComponent)
       StaticMesh: helm_elemnt_02
@@ -47,6 +46,7 @@ Components:
         WinchMesh: helm_elemnt_01
         WinchComponentName: "Wheel"
         InitialRotationAlpha: 0.5000
+  DefaultSceneRoot (SceneComponent)
 
 Variables:
   WinchConstraintInstance: WinchConstraint_BP_C*
@@ -54,17 +54,12 @@ Variables:
 Functions:
   GetSteeringAngle(out SteeringAngle: float) [Public|HasOutParms|BlueprintPure|Const]
     self.WinchConstraintInstance.GetRotationAlpha($GetRotationAlpha_RotationAlpha)
-    $Multiply_FloatFloat = Multiply_FloatFloat($GetRotationAlpha_RotationAlpha, 2.0000)
-    $Subtract_FloatFloat = Subtract_FloatFloat($Multiply_FloatFloat, 1.0000)
-    out SteeringAngle = $Subtract_FloatFloat
-    return
+    out SteeringAngle = ($GetRotationAlpha_RotationAlpha * 2.0000) - 1.0000
   UserConstructionScript() [Event|Public|BlueprintPure]
     $Cast_AsWinch_Constraint_BP = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)
-    $Cast_bSuccess = cast_71($Cast_AsWinch_Constraint_BP)
-    if ($Cast_bSuccess) {
+    if ($Cast_AsWinch_Constraint_BP) {
         self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP
     }
-    return
 ```
 
 ### Filtering
@@ -91,7 +86,7 @@ Existing tools solve different problems:
 - **UE4 commandlets** (`DumpBlueprintInfo`, etc.) require a full editor instance with the project loaded, all dependencies resolved, game module DLLs compiled. They can't work on standalone `.uasset` files and their output is verbose internal reflection data.
 - **NodeToCode** runs inside the editor as a plugin, translating graphs to C++ via LLM. Not usable from the command line or CI.
 
-bp-inspect works on bare `.uasset` files with zero UE4 dependency. It reconstructs function signatures from parameter properties, disassembles Kismet bytecode into readable pseudo-code, structures control flow (if/else, while loops, sequence nodes), resolves field paths, strips serialisation noise (GUID suffixes, K2Node prefixes, CallFunc wrappers), and splits ubergraph functions into labelled event handlers. The `--summary` output is designed to be handed directly to an AI and asked "what does this Blueprint do?".
+bp-inspect works on bare `.uasset` files with zero UE4 dependency. It reconstructs function signatures from parameter properties, disassembles Kismet bytecode into readable pseudo-code, structures control flow (if/else, while/for loops, ForEach, sequence nodes), inlines single-use temporaries and operators, resolves enum arguments to readable names, folds struct Break/Make patterns, strips serialisation noise (GUID suffixes, K2Node prefixes, library prefixes), and splits ubergraph functions into labelled event handlers with latent resume inlining. The `--summary` output is designed to be handed directly to an AI and asked "what does this Blueprint do?".
 
 ## What it parses
 

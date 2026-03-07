@@ -511,11 +511,254 @@ pub fn fold_summary_patterns(lines: &mut Vec<String>) {
 }
 
 fn process_section(lines: &mut Vec<String>) {
+    rewrite_foreach_loops(lines);
+    fold_delegate_bindings(lines);
     fold_break_patterns(lines);
     fold_struct_construction(lines);
     dedup_completion_paths(lines);
     fold_section_temps(lines);
     suppress_unused_outparams(lines);
+}
+
+/// Rewrite ForEach loop boilerplate into `for (ITEM in ARRAY)`.
+/// Detects the pattern: counter/index init, while(COUNTER < Array_Length(ARRAY)),
+/// index assignment, Array_Get, body, increment.
+fn rewrite_foreach_loops(lines: &mut Vec<String>) {
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        let indent_len = lines[i].len() - trimmed.len();
+
+        // Step 1: Match "while (COUNTER < Array_Length(ARRAY)) {"
+        let Some((counter, array)) = parse_foreach_while(trimmed) else {
+            i += 1;
+            continue;
+        };
+
+        // Step 2: Find two init lines before the while at same indent
+        let Some((counter_idx, index_idx, index_var)) =
+            find_foreach_init(lines, i, indent_len, &counter)
+        else {
+            i += 1;
+            continue;
+        };
+
+        // Step 3: Validate body start: INDEX = COUNTER, then Array_Get(ARRAY, INDEX, ITEM)
+        let body_indent = indent_len + 4;
+        let Some((assign_idx, get_idx, item)) =
+            validate_body_start(lines, i + 1, body_indent, &index_var, &counter, &array)
+        else {
+            i += 1;
+            continue;
+        };
+
+        // Step 4: Find closing } and validate increment as last body line
+        let Some((close_idx, incr_idx)) =
+            find_close_and_increment(lines, i, indent_len, &counter)
+        else {
+            i += 1;
+            continue;
+        };
+
+        // All checks passed — rewrite
+        let indent_str = &lines[i][..indent_len];
+        lines[i] = format!("{}for ({} in {}) {{", indent_str, item, array);
+
+        // Remove lines in reverse order to preserve indices
+        let mut to_remove = vec![incr_idx, get_idx, assign_idx, index_idx, counter_idx];
+        to_remove.sort_unstable();
+        to_remove.dedup();
+        for idx in to_remove.into_iter().rev() {
+            // Don't remove lines past close_idx (shouldn't happen, but safety)
+            if idx < close_idx {
+                lines.remove(idx);
+            }
+        }
+
+        // Don't advance — recheck in case of nested loops
+        i = 0;
+    }
+}
+
+/// Parse "while (COUNTER < Array_Length(ARRAY)) {" → Some((counter, array))
+fn parse_foreach_while(trimmed: &str) -> Option<(String, String)> {
+    let rest = trimmed.strip_prefix("while (")?;
+    let rest = rest.strip_suffix(") {")?;
+    // Pattern: COUNTER < Array_Length(ARRAY)
+    let lt_pos = rest.find(" < ")?;
+    let counter = &rest[..lt_pos];
+    let rhs = &rest[lt_pos + 3..];
+    let inner = rhs.strip_prefix("Array_Length(")?;
+    let array = inner.strip_suffix(')')?;
+    Some((counter.to_string(), array.to_string()))
+}
+
+/// Scan backward from while_idx for COUNTER = 0 and INDEX = 0 init lines.
+fn find_foreach_init(
+    lines: &[String], while_idx: usize, indent_len: usize, counter: &str,
+) -> Option<(usize, usize, String)> {
+    // Look at up to 4 lines before while for the two inits (may have blank lines)
+    let start = while_idx.saturating_sub(4);
+    let mut counter_idx = None;
+    let mut index_idx = None;
+    let mut index_var = None;
+
+    for j in (start..while_idx).rev() {
+        let t = lines[j].trim();
+        if t.is_empty() { continue; }
+        let li = lines[j].len() - t.len();
+        if li != indent_len { break; }
+
+        if t == format!("{} = 0", counter) {
+            counter_idx = Some(j);
+        } else if t.ends_with(" = 0") && t.starts_with("Temp_int_") {
+            let var = &t[..t.len() - 4]; // strip " = 0"
+            index_var = Some(var.to_string());
+            index_idx = Some(j);
+        }
+    }
+
+    Some((counter_idx?, index_idx?, index_var?))
+}
+
+/// Validate first two body lines: INDEX = COUNTER, then Array_Get(ARRAY, INDEX, ITEM).
+fn validate_body_start(
+    lines: &[String], start: usize, body_indent: usize,
+    index: &str, counter: &str, array: &str,
+) -> Option<(usize, usize, String)> {
+    // Find the first two non-empty body lines
+    let mut body_lines = Vec::new();
+    let mut j = start;
+    while j < lines.len() && body_lines.len() < 2 {
+        let t = lines[j].trim();
+        if t.is_empty() { j += 1; continue; }
+        let li = lines[j].len() - t.len();
+        if li < body_indent { return None; }
+        body_lines.push((j, t.to_string()));
+        j += 1;
+    }
+    if body_lines.len() < 2 { return None; }
+
+    // Line 1: INDEX = COUNTER
+    let expected_assign = format!("{} = {}", index, counter);
+    if body_lines[0].1 != expected_assign { return None; }
+    let assign_idx = body_lines[0].0;
+
+    // Line 2: Array_Get(ARRAY, INDEX, ITEM)
+    let t = &body_lines[1].1;
+    let rest = t.strip_prefix("Array_Get(")?;
+    let rest = rest.strip_suffix(')')?;
+    let args = split_args(rest);
+    if args.len() != 3 { return None; }
+    if args[0] != array || args[1] != index { return None; }
+    let item = args[2].to_string();
+    let get_idx = body_lines[1].0;
+
+    Some((assign_idx, get_idx, item))
+}
+
+/// Find closing `}` and validate COUNTER = COUNTER + 1 as the last body line before it.
+fn find_close_and_increment(
+    lines: &[String], while_idx: usize, indent_len: usize, counter: &str,
+) -> Option<(usize, usize)> {
+    // Find the closing } at the same indent as while
+    let mut depth = 0i32;
+    let mut close_idx = None;
+    for j in while_idx..lines.len() {
+        let t = lines[j].trim();
+        if t.ends_with('{') { depth += 1; }
+        if t == "}" {
+            let li = lines[j].len() - t.len();
+            if li == indent_len {
+                depth -= 1;
+                if depth == 0 {
+                    close_idx = Some(j);
+                    break;
+                }
+            }
+        }
+    }
+    let close_idx = close_idx?;
+
+    // Last non-empty body line before close should be the increment
+    let expected_incr = format!("{} = {} + 1", counter, counter);
+    let mut incr_idx = None;
+    for j in (while_idx + 1..close_idx).rev() {
+        let t = lines[j].trim();
+        if t.is_empty() { continue; }
+        if t == expected_incr {
+            incr_idx = Some(j);
+        }
+        break; // only check the last non-empty line
+    }
+
+    Some((close_idx, incr_idx?))
+}
+
+/// Fold `bind(FUNC, $DELEGATE, OBJ)` + `TARGET +=/-= $DELEGATE` into `TARGET +=/-= OBJ.FUNC`.
+fn fold_delegate_bindings(lines: &mut Vec<String>) {
+    let mut i = 0;
+    while i + 1 < lines.len() {
+        let trimmed = lines[i].trim();
+        let Some((func, delegate, obj)) = parse_bind_call(trimmed) else {
+            i += 1;
+            continue;
+        };
+        let next_trimmed = lines[i + 1].trim();
+        let Some((target, op, used_delegate)) = parse_delegate_op(next_trimmed) else {
+            i += 1;
+            continue;
+        };
+        if used_delegate != delegate {
+            i += 1;
+            continue;
+        }
+
+        // Verify delegate is not used elsewhere (expect exactly 1 ref outside bind line)
+        let mut total_refs = 0;
+        for (j, line) in lines.iter().enumerate() {
+            if j == i { continue; } // skip the bind line itself
+            total_refs += count_var_refs(line.trim(), &delegate);
+        }
+        if total_refs != 1 {
+            i += 1;
+            continue;
+        }
+
+        // Rewrite
+        let indent = &lines[i][..lines[i].len() - trimmed.len()];
+        lines[i] = format!("{}{} {} {}.{}", indent, target, op, obj, func);
+        lines.remove(i + 1);
+        // Don't advance — recheck current position
+    }
+}
+
+/// Parse `bind(FUNC, $VAR, OBJ)` → Some((func, delegate_var, obj))
+fn parse_bind_call(text: &str) -> Option<(String, String, String)> {
+    let rest = text.strip_prefix("bind(")?;
+    let rest = rest.strip_suffix(')')?;
+    let args = split_args(rest);
+    if args.len() != 3 { return None; }
+    let func = args[0];
+    let delegate = args[1];
+    let obj = args[2];
+    // Delegate must be a $temp variable
+    if !delegate.starts_with('$') { return None; }
+    Some((func.to_string(), delegate.to_string(), obj.to_string()))
+}
+
+/// Parse `TARGET += $VAR` or `TARGET -= $VAR` → Some((target, op, delegate_var))
+fn parse_delegate_op(text: &str) -> Option<(String, String, String)> {
+    for op in &[" += ", " -= "] {
+        if let Some(pos) = text.find(op) {
+            let target = &text[..pos];
+            let var = &text[pos + op.len()..];
+            if var.starts_with('$') {
+                return Some((target.to_string(), op.trim().to_string(), var.to_string()));
+            }
+        }
+    }
+    None
 }
 
 /// Fold small-struct Break patterns into field accessors.
