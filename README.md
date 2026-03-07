@@ -82,11 +82,13 @@ Blueprint `.uasset` files are binary — opaque to git diff, code review, CI pip
 
 **How it compares to existing tools:**
 
-- **UAssetAPI** is a serialisation library for modding tools. It round-trips the binary format faithfully but doesn't interpret it — you get raw property trees and bytecode as byte arrays. No disassembly, no signature reconstruction.
+- **UAssetAPI** is a serialisation library for modding tools. It round-trips the binary format faithfully but doesn't interpret it — you get raw property trees and bytecode as byte arrays. No disassembly, no signature reconstruction, no readable output.
 - **UE commandlets** (`DumpBlueprintInfo`, etc.) require a full editor instance with the project loaded, all dependencies resolved, game module DLLs compiled. They can't work on standalone `.uasset` files.
-- **[NodeToCode](https://github.com/protospatial/NodeToCode)** is an editor plugin that translates Blueprint visual graphs to C++ via LLM. Great for code migration, but requires the editor running and an AI API key. It reads the live graph through the editor API, not the binary file — so it can't work in terminals, CI, or code review.
+- **[NodeToCode](https://github.com/protospatial/NodeToCode)** is an editor plugin that translates Blueprint visual graphs to C++ via LLM. Great for interactive code migration inside the editor, but requires the editor running and an AI API key. It reads the live graph through the editor API, not the binary file — so it can't work in terminals, CI, or code review. The two tools are complementary: NodeToCode for editor-based interactive work, bp-inspect for everything outside the editor.
 
-bp-inspect takes a different approach: it reads the compiled bytecode from the binary file directly, with zero UE dependency. A 1MB Blueprint with 18 functions parses in ~15ms — the entire Blueprint (all functions, components, variables), not one graph at a time. No API calls, no editor, no network. It reconstructs function signatures from parameter properties, disassembles Kismet bytecode into readable pseudo-code, structures control flow (if/else, while/for loops, ForEach, sequence nodes), inlines single-use temporaries and operators, resolves enum arguments to readable names, folds struct Break/Make patterns, strips serialisation noise (GUID suffixes, K2Node prefixes, library prefixes), and splits ubergraph functions into labelled event handlers with latent resume inlining.
+bp-inspect takes a different approach: it reads the compiled bytecode from the binary file directly, with zero UE dependency. A 1MB Blueprint with 18 functions parses in ~15ms — the entire Blueprint (all functions, components, variables), not one graph at a time. No API calls, no editor, no network.
+
+The raw bytecode is not the hard part — making it *readable* is. bp-inspect reconstructs function signatures from parameter properties, disassembles Kismet bytecode into structured pseudo-code, detects and structures control flow (if/else, while/for loops, ForEach, sequence nodes), reorders displaced convergence blocks from the UE4 compiler, inlines single-use temporaries and operators, resolves enum arguments to readable names, dynamically infers and folds struct Break/Make patterns, strips serialisation noise (GUID suffixes, K2Node prefixes, library prefixes), splits ubergraph functions into labelled event handlers, and inlines latent resume blocks after their corresponding Delay() calls. The goal is output that reads like hand-written pseudocode, not a bytecode dump.
 
 The `--summary` output is designed to be handed directly to an AI assistant and asked "what does this Blueprint do?".
 
@@ -131,10 +133,19 @@ cargo build --release
 
 The `skill/` directory contains a Claude Code skill that teaches Claude how to use `bp-inspect` for Blueprint debugging, logic review, and BP-to-C++ migration. See [skill/README.md](skill/README.md) for install instructions.
 
+## Testing
+
+```sh
+cargo test                         # run all tests (101 tests)
+UPDATE_SNAPSHOTS=1 cargo test      # update snapshot files after intentional output changes
+```
+
+The test suite includes 88 unit tests for bytecode helpers, 10 integration tests with snapshot regression for summary/text/JSON output, and 3 extended tests for additional sample files.
+
 ## Limitations
 
 - UE5 assets and cooked (split `.uasset`/`.uexp`) files are not yet supported
-- Bytecode decoder covers common opcodes but some complex expressions may show as `??(0xNN)`
+- Bytecode decoder covers ~77 of ~120+ Kismet opcodes; uncommon expressions may show as `??(0xNN)`
 - Unversioned properties (UE5 IoStore) require `.usmap` mappings, which are not implemented
 
 ## License
