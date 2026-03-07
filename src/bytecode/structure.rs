@@ -547,3 +547,33 @@ fn extract_convergence(output: &mut Vec<String>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn negate_simple_not() {
+        assert_eq!(negate_cond("!X"), "X");
+    }
+
+    #[test]
+    fn negate_parenthesized_not() {
+        assert_eq!(negate_cond("!(A && B)"), "A && B");
+    }
+
+    #[test]
+    fn negate_simple_var() {
+        assert_eq!(negate_cond("X"), "!X");
+    }
+
+    #[test]
+    fn negate_compound() {
+        assert_eq!(negate_cond("A && B"), "!(A && B)");
+    }
+
+    #[test]
+    fn negate_self_member() {
+        assert_eq!(negate_cond("!self.GrippingActor"), "self.GrippingActor");
+    }
+}

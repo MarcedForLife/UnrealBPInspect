@@ -1441,3 +1441,280 @@ fn extract_containing_func_name(before_text: &str) -> Option<String> {
     let name = &trimmed[name_start..paren];
     if name.is_empty() { None } else { Some(name.to_string()) }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // split_args
+    #[test]
+    fn split_args_empty() {
+        assert_eq!(split_args(""), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn split_args_single() {
+        assert_eq!(split_args("foo"), vec!["foo"]);
+    }
+
+    #[test]
+    fn split_args_multiple() {
+        assert_eq!(split_args("a, b, c"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn split_args_nested_parens() {
+        assert_eq!(split_args("foo(a, b), bar"), vec!["foo(a, b)", "bar"]);
+    }
+
+    #[test]
+    fn split_args_nested_brackets() {
+        assert_eq!(split_args("a[0, 1], b"), vec!["a[0, 1]", "b"]);
+    }
+
+    #[test]
+    fn split_args_whitespace_trimmed() {
+        assert_eq!(split_args(" a , b "), vec!["a", "b"]);
+    }
+
+    // detect_common_suffix
+    #[test]
+    fn detect_suffix_shared() {
+        let fields = vec!["Location_1", "Rotation_1", "Scale_1"];
+        assert_eq!(detect_common_suffix(&fields), Some("_1"));
+    }
+
+    #[test]
+    fn detect_suffix_mixed() {
+        let fields = vec!["Location_1", "Rotation_2"];
+        assert_eq!(detect_common_suffix(&fields), None);
+    }
+
+    #[test]
+    fn detect_suffix_none() {
+        let fields = vec!["Location", "Rotation"];
+        assert_eq!(detect_common_suffix(&fields), None);
+    }
+
+    #[test]
+    fn detect_suffix_empty() {
+        let fields: Vec<&str> = vec![];
+        assert_eq!(detect_common_suffix(&fields), None);
+    }
+
+    // strip_make_prefix
+    #[test]
+    fn strip_make_vector() {
+        assert_eq!(strip_make_prefix("MakeVector(1, 2, 3)"), "Vector(1, 2, 3)");
+    }
+
+    #[test]
+    fn strip_make_no_uppercase() {
+        // "Makefile" — no uppercase after "Make"
+        assert_eq!(strip_make_prefix("Makefile"), "Makefile");
+    }
+
+    #[test]
+    fn strip_make_preceded_by_dollar() {
+        assert_eq!(strip_make_prefix("$MakeStruct_Foo"), "$MakeStruct_Foo");
+    }
+
+    #[test]
+    fn strip_make_preceded_by_ident() {
+        assert_eq!(strip_make_prefix("SomeMakeVector(x)"), "SomeMakeVector(x)");
+    }
+
+    #[test]
+    fn strip_make_mid_line() {
+        assert_eq!(
+            strip_make_prefix("x = MakeRotator(1, 2, 3)"),
+            "x = Rotator(1, 2, 3)"
+        );
+    }
+
+    #[test]
+    fn strip_make_no_paren() {
+        assert_eq!(strip_make_prefix("MakeVector"), "MakeVector");
+    }
+
+    // clean_line
+    #[test]
+    fn clean_line_bool_strip() {
+        assert_eq!(clean_line("bool(X)"), "X");
+    }
+
+    #[test]
+    fn clean_line_bool_compound() {
+        assert_eq!(clean_line("bool(A && B)"), "A && B");
+    }
+
+    #[test]
+    fn clean_line_double_negation() {
+        assert_eq!(clean_line("!(!X)"), "X");
+    }
+
+    #[test]
+    fn clean_line_negation_compound_inner_safe() {
+        // !(!A && B) — inner ! only negates A, should NOT simplify
+        assert_eq!(clean_line("!(!A && B)"), "!(!A && B)");
+    }
+
+    #[test]
+    fn clean_line_outer_parens_if() {
+        assert_eq!(clean_line("if ((X)) {"), "if (X) {");
+    }
+
+    #[test]
+    fn clean_line_no_change() {
+        assert_eq!(clean_line("self.Foo.Bar()"), "self.Foo.Bar()");
+    }
+
+    // has_toplevel_logical_op
+    #[test]
+    fn toplevel_op_simple_and() {
+        assert!(has_toplevel_logical_op("A && B"));
+    }
+
+    #[test]
+    fn toplevel_op_inside_parens() {
+        assert!(!has_toplevel_logical_op("(A && B)"));
+    }
+
+    #[test]
+    fn toplevel_op_none() {
+        assert!(!has_toplevel_logical_op("A"));
+    }
+
+    #[test]
+    fn toplevel_op_mixed() {
+        assert!(has_toplevel_logical_op("A || (B && C)"));
+    }
+
+    // parse_temp_assignment
+    #[test]
+    fn parse_temp_dollar_var() {
+        assert_eq!(parse_temp_assignment("$Foo = bar"), Some(("$Foo", "bar")));
+    }
+
+    #[test]
+    fn parse_temp_with_dot() {
+        assert_eq!(parse_temp_assignment("$Foo.bar = x"), None);
+    }
+
+    #[test]
+    fn parse_temp_non_temp() {
+        assert_eq!(parse_temp_assignment("x = y"), None);
+    }
+
+    #[test]
+    fn parse_temp_persistent() {
+        assert_eq!(parse_temp_assignment("$X = foo [persistent]"), None);
+    }
+
+    #[test]
+    fn parse_temp_underscore_var() {
+        assert_eq!(parse_temp_assignment("Temp_0 = x"), Some(("Temp_0", "x")));
+    }
+
+    // count_var_refs
+    #[test]
+    fn count_refs_zero() {
+        assert_eq!(count_var_refs("hello world", "$Foo"), 0);
+    }
+
+    #[test]
+    fn count_refs_one() {
+        assert_eq!(count_var_refs("$Foo + 1", "$Foo"), 1);
+    }
+
+    #[test]
+    fn count_refs_multiple() {
+        assert_eq!(count_var_refs("$Foo + $Foo", "$Foo"), 2);
+    }
+
+    #[test]
+    fn count_refs_partial_no_match() {
+        // $Foo in $FooBar should not match
+        assert_eq!(count_var_refs("$FooBar + 1", "$Foo"), 0);
+    }
+
+    // substitute_var
+    #[test]
+    fn substitute_simple() {
+        assert_eq!(substitute_var("$X + 1", "$X", "42"), "42 + 1");
+    }
+
+    #[test]
+    fn substitute_compound_gets_parens() {
+        assert_eq!(substitute_var("$X + 1", "$X", "A + B"), "(A + B) + 1");
+    }
+
+    #[test]
+    fn substitute_no_match() {
+        assert_eq!(substitute_var("$Y + 1", "$X", "42"), "$Y + 1");
+    }
+
+    // expr_is_compound
+    #[test]
+    fn compound_addition() {
+        assert!(expr_is_compound("A + B"));
+    }
+
+    #[test]
+    fn compound_negation() {
+        assert!(expr_is_compound("!X"));
+    }
+
+    #[test]
+    fn compound_function_call() {
+        assert!(!expr_is_compound("foo()"));
+    }
+
+    #[test]
+    fn compound_simple_var() {
+        assert!(!expr_is_compound("$X"));
+    }
+
+    // find_matching_paren
+    #[test]
+    fn paren_balanced() {
+        assert_eq!(find_matching_paren("(abc)"), Some(4));
+    }
+
+    #[test]
+    fn paren_nested() {
+        assert_eq!(find_matching_paren("(a(b)c)"), Some(6));
+    }
+
+    #[test]
+    fn paren_no_open() {
+        assert_eq!(find_matching_paren("abc"), None);
+    }
+
+    #[test]
+    fn paren_unbalanced() {
+        assert_eq!(find_matching_paren("(abc"), None);
+    }
+
+    // strip_outer_parens
+    #[test]
+    fn outer_parens_simple() {
+        assert_eq!(strip_outer_parens("(X)"), "X");
+    }
+
+    #[test]
+    fn outer_parens_double() {
+        assert_eq!(strip_outer_parens("((X))"), "(X)");
+    }
+
+    #[test]
+    fn outer_parens_not_matching() {
+        // (A)(B) — the outer ( doesn't match the outer )
+        assert_eq!(strip_outer_parens("(A)(B)"), "(A)(B)");
+    }
+
+    #[test]
+    fn outer_parens_not_wrapped() {
+        assert_eq!(strip_outer_parens("A + B"), "A + B");
+    }
+}

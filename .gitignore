@@ -2,5 +2,6 @@
 .DS_Store
 samples/*
 !samples/HelloWorld_BP.uasset
+!samples/Helm_BP.uasset
 
 .claude/
