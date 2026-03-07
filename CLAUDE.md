@@ -29,19 +29,34 @@ src/
     inline.rs          Temp inlining, ForEach rewriting, delegate folding, cast guard folding, Break/Make folding, summary pattern folding
 skill/SKILL.md       Claude Code skill instructions
 skill/README.md      Skill install guide
-samples/             Test .uasset files (UE4.27, uncooked)
+samples/             Test .uasset files (UE4.27, uncooked); Helm_BP.uasset is committed as test fixture
+tests/
+  common/mod.rs      Test utilities (fixture loading, snapshot comparison)
+  integration.rs     Snapshot and structural tests using Helm_BP.uasset
+  extended.rs        Optional tests using gitignored sample files (auto-skip when absent)
+  snapshots/         Expected output files for regression detection
 ```
 
 ## Building and testing
 
 ```bash
 cargo build                                    # dev build
-cargo run -- samples/<file>.uasset --summary  # test summary output
-cargo run -- samples/<file>.uasset --json     # test JSON output
+cargo test                                     # run all tests
+cargo test -- --nocapture                      # run with stdout visible
+UPDATE_SNAPSHOTS=1 cargo test                  # update snapshot files after intentional changes
+cargo run -- samples/<file>.uasset --summary   # test summary output
+cargo run -- samples/<file>.uasset --json      # test JSON output
 cargo build --release                          # release build
 ```
 
-No test suite yet. Validate changes by running against sample files and checking output makes sense. JSON mode should always produce valid JSON (`| python3 -m json.tool`).
+### Test structure
+- `src/**/*.rs` — inline `#[cfg(test)]` unit tests for private helpers (inline.rs, structure.rs, names.rs, flow.rs, resolve.rs)
+- `tests/integration.rs` — snapshot and structural tests using `samples/Helm_BP.uasset`
+- `tests/extended.rs` — optional tests using gitignored sample files (auto-skip when absent)
+- `tests/snapshots/` — expected output for regression detection
+- `tests/common/mod.rs` — test utilities (fixture loading, snapshot comparison)
+
+JSON mode should always produce valid JSON (`| python3 -m json.tool`).
 
 ## Architecture
 

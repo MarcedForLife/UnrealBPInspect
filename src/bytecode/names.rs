@@ -27,3 +27,57 @@ pub fn clean_bc_name(name: &str) -> String {
     }
     name.to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_guid_with_suffix() {
+        // Format: NAME_DIGITS_32HEXCHARS
+        assert_eq!(
+            strip_guid_suffix("SomeVar_42_0123456789ABCDEF0123456789ABCDEF"),
+            "SomeVar"
+        );
+    }
+
+    #[test]
+    fn strip_guid_short_name() {
+        assert_eq!(strip_guid_suffix("Foo"), "Foo");
+    }
+
+    #[test]
+    fn strip_guid_no_hex() {
+        assert_eq!(strip_guid_suffix("Foo_42_notahexstring_notahex_pad_"), "Foo_42_notahexstring_notahex_pad_");
+    }
+
+    #[test]
+    fn clean_callfunc() {
+        assert_eq!(clean_bc_name("CallFunc_Foo_ReturnValue"), "$Foo");
+    }
+
+    #[test]
+    fn clean_callfunc_no_retval() {
+        assert_eq!(clean_bc_name("CallFunc_Bar"), "$Bar");
+    }
+
+    #[test]
+    fn clean_dynamic_cast() {
+        assert_eq!(clean_bc_name("K2Node_DynamicCast_SomeClass"), "$Cast_SomeClass");
+    }
+
+    #[test]
+    fn clean_k2node() {
+        assert_eq!(clean_bc_name("K2Node_SomeThing"), "$SomeThing");
+    }
+
+    #[test]
+    fn clean_plain_name() {
+        assert_eq!(clean_bc_name("MyVariable"), "MyVariable");
+    }
+
+    #[test]
+    fn clean_k2_prefix_in_callfunc() {
+        assert_eq!(clean_bc_name("CallFunc_K2_SetWorldLocationAndRotation_ReturnValue"), "$SetWorldLocationAndRotation");
+    }
+}
