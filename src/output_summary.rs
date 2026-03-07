@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::types::*;
 use crate::resolve::*;
-use crate::bytecode::{BcStatement, reorder_flow_patterns, reorder_convergence, structure_bytecode, inline_single_use_temps, discard_unused_assignments, cleanup_structured_output};
+use crate::bytecode::{BcStatement, reorder_flow_patterns, reorder_convergence, structure_bytecode, inline_single_use_temps, discard_unused_assignments, cleanup_structured_output, fold_summary_patterns};
 
 struct CommentBox {
     text: String,
@@ -502,6 +502,7 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
                     discard_unused_assignments(&mut reordered);
                     let mut structured = structure_bytecode(&reordered, &ubergraph_labels);
                     cleanup_structured_output(&mut structured);
+                    fold_summary_patterns(&mut structured);
                     Some(structured)
                 } else {
                     None

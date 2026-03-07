@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use super::decode::BcStatement;
 
 /// Inline single-use `$temp` variables to reduce noise.
@@ -251,6 +251,25 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
 fn clean_line(text: &str) -> String {
     let mut s = text.to_string();
 
+    // Strip bool(expr) → expr (Kismet cast-to-bool is redundant in pseudocode)
+    let mut bstart = 0;
+    while bstart < s.len() {
+        let Some(rel_pos) = s[bstart..].find("bool(") else { break };
+        let pos = bstart + rel_pos;
+        if pos > 0 && is_ident_char(s.as_bytes()[pos - 1]) {
+            bstart = pos + 5;
+            continue;
+        }
+        let paren_start = pos + 4;
+        if let Some(close) = find_matching_paren(&s[paren_start..]) {
+            let inner = s[paren_start + 1..paren_start + close].to_string();
+            s = format!("{}{}{}", &s[..pos], inner, &s[paren_start + close + 1..]);
+            bstart = 0; // restart — string changed
+        } else {
+            break;
+        }
+    }
+
     // !(!X) → X — but only when the inner ! covers the entire expression.
     // Safe: !(!A) → A, !(!(A && B)) → (A && B)
     // Unsafe: !(!A && B) — inner ! only negates A, not the whole expression
@@ -419,4 +438,409 @@ fn rewrite_negated_guards(lines: &mut Vec<String>) {
         }
         lines.insert(effective_end, format!("{}}}", indent_str));
     }
+}
+
+// ============================================================
+// Summary pattern folding (Break/Make, struct construction,
+// unused out-param suppression, Make→short name renaming)
+// ============================================================
+
+/// Small struct field mappings for Break pattern folding.
+/// These are universally known structs with ≤3 fields — always fold.
+const BREAK_FIELD_MAP: &[(&str, &[&str])] = &[
+    ("BreakTransform", &["Location", "Rotation", "Scale"]),
+    ("BreakVector", &["X", "Y", "Z"]),
+    ("BreakVector2D", &["X", "Y"]),
+    ("BreakRotator", &["Roll", "Pitch", "Yaw"]),
+];
+
+/// Make function cosmetic renames.
+const MAKE_RENAMES: &[(&str, &str)] = &[
+    ("MakeVector", "Vector"),
+    ("MakeVector2D", "Vector2D"),
+    ("MakeRotator", "Rotator"),
+    ("MakeTransform", "Transform"),
+];
+
+/// Post-processing pass on structured output lines.
+/// Folds Break/Make struct patterns, collapses struct construction,
+/// suppresses unused out-params, and renames Make functions.
+pub fn fold_summary_patterns(lines: &mut Vec<String>) {
+    // Process each section independently (sections separated by --- markers)
+    let mut result: Vec<String> = Vec::new();
+    let mut section: Vec<String> = Vec::new();
+
+    for line in lines.drain(..) {
+        let trimmed = line.trim();
+        if trimmed.starts_with("---") && trimmed.ends_with("---") {
+            if !section.is_empty() {
+                process_section(&mut section);
+                result.append(&mut section);
+            }
+            result.push(line);
+        } else {
+            section.push(line);
+        }
+    }
+    if !section.is_empty() {
+        process_section(&mut section);
+        result.append(&mut section);
+    }
+
+    // Global pass: rename Make functions (cosmetic, scope-independent)
+    rename_make_functions(&mut result);
+
+    *lines = result;
+}
+
+fn process_section(lines: &mut Vec<String>) {
+    fold_break_patterns(lines);
+    fold_struct_construction(lines);
+    suppress_unused_outparams(lines);
+}
+
+/// Fold small-struct Break patterns into field accessors.
+/// `BreakTransform($src, $loc, $rot, $scale)` → replace `$loc` with `$src.Location` etc.
+fn fold_break_patterns(lines: &mut Vec<String>) {
+    let mut to_remove: Vec<usize> = Vec::new();
+
+    for i in 0..lines.len() {
+        let trimmed = lines[i].trim().to_string();
+
+        // Match against known small-struct Break functions
+        let mut matched = None;
+        for &(name, fields) in BREAK_FIELD_MAP {
+            let prefix = format!("{}(", name);
+            if trimmed.starts_with(&prefix) && trimmed.ends_with(')') {
+                matched = Some((name, fields));
+                break;
+            }
+        }
+        let Some((_name, fields)) = matched else { continue };
+
+        // Parse arguments
+        let paren_start = trimmed.find('(').unwrap();
+        let args_str = &trimmed[paren_start + 1..trimmed.len() - 1];
+        let args = split_args(args_str);
+
+        // First arg is source, rest are output vars
+        if args.len() != fields.len() + 1 { continue; }
+
+        let source = args[0].to_string();
+
+        // All output vars must be $temp
+        if !args[1..].iter().all(|a| a.starts_with('$')) { continue; }
+
+        // Replace each output var in subsequent lines with $source.FieldName
+        for (field_idx, &field_name) in fields.iter().enumerate() {
+            let out_var = args[field_idx + 1];
+            let replacement = format!("{}.{}", source, field_name);
+
+            for j in (i + 1)..lines.len() {
+                let line = &lines[j];
+                let indent_len = line.len() - line.trim_start().len();
+                let content = &line[indent_len..];
+                if count_var_refs(content, out_var) > 0 {
+                    let new_content = replace_all_var_refs(content, out_var, &replacement);
+                    lines[j] = format!("{}{}", &line[..indent_len], new_content);
+                }
+            }
+        }
+
+        to_remove.push(i);
+    }
+
+    for idx in to_remove.into_iter().rev() {
+        lines.remove(idx);
+    }
+}
+
+/// Collapse `$MakeStruct_TYPE.Field = Value` runs into `TARGET = TYPE(fields...)`.
+fn fold_struct_construction(lines: &mut Vec<String>) {
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+
+        let Some((struct_var, _, _)) = parse_make_struct_field(trimmed) else {
+            i += 1;
+            continue;
+        };
+
+        let run_start = i;
+        let indent_str = lines[i][..lines[i].len() - trimmed.len()].to_string();
+        let expected_var = struct_var.to_string();
+
+        // Collect consecutive field assignments
+        let mut fields: Vec<(String, String)> = Vec::new();
+        while i < lines.len() {
+            let t = lines[i].trim();
+            if let Some((sv, field, value)) = parse_make_struct_field(t) {
+                if sv == expected_var {
+                    fields.push((field.to_string(), value.to_string()));
+                    i += 1;
+                    continue;
+                }
+            }
+            break;
+        }
+
+        if fields.is_empty() {
+            i += 1;
+            continue;
+        }
+
+        // Check if next line is TARGET = $MakeStruct_TYPE
+        if i < lines.len() {
+            let t = lines[i].trim();
+            if let Some(eq_pos) = t.find(" = ") {
+                let target = &t[..eq_pos];
+                let src = &t[eq_pos + 3..];
+                if src == expected_var {
+                    let type_name = expected_var.strip_prefix("$MakeStruct_")
+                        .unwrap_or(&expected_var);
+
+                    let args: Vec<String> = fields.iter().map(|(field, value)| {
+                        if field == value {
+                            value.clone()
+                        } else {
+                            format!("{}: {}", field, value)
+                        }
+                    }).collect();
+
+                    let new_line = format!("{}{} = {}({})",
+                        indent_str, target, type_name, args.join(", "));
+
+                    let run_end = i + 1;
+                    lines.splice(run_start..run_end, std::iter::once(new_line));
+                    i = run_start + 1;
+                    continue;
+                }
+            }
+        }
+        // No matching assignment — skip past collected fields
+    }
+}
+
+/// Replace unused `$temp` out-params with `_` in function calls.
+/// A var is "unused" if it only ever appears as a simple argument in calls
+/// to exactly one function name (i.e., it's never read by any other code).
+fn suppress_unused_outparams(lines: &mut Vec<String>) {
+    let mut all_vars: Vec<String> = Vec::new();
+    for line in lines.iter() {
+        for var in extract_dollar_vars(line.trim()) {
+            if !all_vars.contains(&var) {
+                all_vars.push(var);
+            }
+        }
+    }
+
+    let to_suppress: Vec<String> = all_vars.into_iter()
+        .filter(|var| is_unused_outparam(lines, var))
+        .collect();
+
+    for var in &to_suppress {
+        for line in lines.iter_mut() {
+            let indent_len = line.len() - line.trim_start().len();
+            let content = &line[indent_len..];
+            if count_var_refs(content, var) > 0 {
+                let new_content = replace_all_var_refs(content, var, "_");
+                *line = format!("{}{}", &line[..indent_len], new_content);
+            }
+        }
+    }
+}
+
+/// Rename Make functions cosmetically: MakeVector → Vector, etc.
+fn rename_make_functions(lines: &mut [String]) {
+    for line in lines.iter_mut() {
+        let indent_len = line.len() - line.trim_start().len();
+        let content = &line[indent_len..];
+        let mut changed = content.to_string();
+        for &(old, new) in MAKE_RENAMES {
+            changed = rename_func_in_text(&changed, old, new);
+        }
+        if changed.as_str() != content {
+            *line = format!("{}{}", &line[..indent_len], changed);
+        }
+    }
+}
+
+// ============================================================
+// Helpers for summary pattern folding
+// ============================================================
+
+/// Split comma-separated arguments respecting nested parentheses.
+fn split_args(s: &str) -> Vec<&str> {
+    let mut args = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            ',' if depth == 0 => {
+                args.push(s[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let last = s[start..].trim();
+    if !last.is_empty() {
+        args.push(last);
+    }
+    args
+}
+
+/// Parse `$MakeStruct_TYPE.FIELD = VALUE`.
+fn parse_make_struct_field(text: &str) -> Option<(&str, &str, &str)> {
+    if !text.starts_with("$MakeStruct_") { return None; }
+    let dot_pos = text.find('.')?;
+    let struct_var = &text[..dot_pos];
+    let rest = &text[dot_pos + 1..];
+    let eq_pos = rest.find(" = ")?;
+    let field = &rest[..eq_pos];
+    let value = &rest[eq_pos + 3..];
+    Some((struct_var, field, value))
+}
+
+/// Replace all occurrences of `$VarName` in text (word-boundary aware).
+fn replace_all_var_refs(text: &str, var: &str, replacement: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut start = 0;
+    while let Some(pos) = text[start..].find(var) {
+        let abs_pos = start + pos;
+        let after = abs_pos + var.len();
+        let at_boundary = after >= text.len() || !is_ident_char(text.as_bytes()[after]);
+        if at_boundary {
+            result.push_str(&text[start..abs_pos]);
+            result.push_str(replacement);
+        } else {
+            result.push_str(&text[start..after]);
+        }
+        start = after;
+    }
+    result.push_str(&text[start..]);
+    result
+}
+
+/// Extract all `$VarName` tokens from text.
+fn extract_dollar_vars(text: &str) -> Vec<String> {
+    let mut vars = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && is_ident_char(bytes[i]) {
+                i += 1;
+            }
+            if i > start + 1 {
+                let var = text[start..i].to_string();
+                if !vars.contains(&var) {
+                    vars.push(var);
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    vars
+}
+
+/// Check if a `$temp` var is an unused output parameter.
+/// True when every occurrence is a simple comma-separated argument in calls
+/// to exactly one function name, meaning it's never read by other code.
+fn is_unused_outparam(lines: &[String], var: &str) -> bool {
+    let mut func_names: HashSet<String> = HashSet::new();
+
+    for line in lines {
+        let trimmed = line.trim();
+        let mut start = 0;
+        while let Some(pos) = trimmed[start..].find(var) {
+            let abs_pos = start + pos;
+            let after = abs_pos + var.len();
+            // Check word boundary
+            if after < trimmed.len() && is_ident_char(trimmed.as_bytes()[after]) {
+                start = after;
+                continue;
+            }
+            // Check simple arg position: preceded by ( or , and followed by , or )
+            let before = trimmed[..abs_pos].trim_end();
+            let after_text = trimmed[after..].trim_start();
+            let ok_before = before.ends_with('(') || before.ends_with(',');
+            let ok_after = after_text.starts_with(',') || after_text.starts_with(')');
+            if !ok_before || !ok_after {
+                return false;
+            }
+            // Extract containing function name
+            if let Some(func_name) = extract_containing_func_name(before) {
+                func_names.insert(func_name);
+            }
+            start = after;
+        }
+    }
+
+    // Must appear in exactly one function (all occurrences are out-params of same function)
+    func_names.len() == 1
+}
+
+/// From the text before a function argument, find the name of the containing function.
+/// Scans backward for the opening `(` at the right paren depth, then extracts
+/// the identifier immediately before it.
+fn extract_containing_func_name(before_text: &str) -> Option<String> {
+    let trimmed = before_text.trim_end();
+    let bytes = trimmed.as_bytes();
+    let mut depth = 0i32;
+    let mut paren_pos = None;
+
+    for i in (0..bytes.len()).rev() {
+        match bytes[i] {
+            b')' | b']' => depth += 1,
+            b'(' | b'[' => {
+                if depth == 0 {
+                    paren_pos = Some(i);
+                    break;
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+
+    let paren = paren_pos?;
+    if paren == 0 { return None; }
+    let before_paren = &trimmed[..paren];
+    let name_start = before_paren
+        .rfind(|c: char| !c.is_alphanumeric() && c != '_')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    let name = &trimmed[name_start..paren];
+    if name.is_empty() { None } else { Some(name.to_string()) }
+}
+
+/// Rename a function call in text: `OldName(` → `NewName(`.
+/// Skips occurrences preceded by an ident char or `$` (part of a variable name).
+fn rename_func_in_text(text: &str, old_name: &str, new_name: &str) -> String {
+    let pattern = format!("{}(", old_name);
+    let mut result = String::with_capacity(text.len());
+    let mut start = 0;
+    while let Some(pos) = text[start..].find(&pattern) {
+        let abs_pos = start + pos;
+        if abs_pos > 0 {
+            let prev = text.as_bytes()[abs_pos - 1];
+            if is_ident_char(prev) || prev == b'$' {
+                result.push_str(&text[start..abs_pos + pattern.len()]);
+                start = abs_pos + pattern.len();
+                continue;
+            }
+        }
+        result.push_str(&text[start..abs_pos]);
+        result.push_str(new_name);
+        result.push('(');
+        start = abs_pos + pattern.len();
+    }
+    result.push_str(&text[start..]);
+    result
 }
