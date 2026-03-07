@@ -67,7 +67,7 @@ Key things to know:
 
 ## Conventions
 
-- No external dependencies beyond `clap`, `serde_json`, and `anyhow`
+- No external dependencies beyond `clap`, `serde_json`, and `anyhow`. ~15ms to parse a 1MB Blueprint
 - Modular architecture: `lib.rs` + `main.rs` pattern with focused modules
 - `--summary` is the primary output mode for AI assistant use
 - `--json` is for programmatic access and should always be valid JSON
