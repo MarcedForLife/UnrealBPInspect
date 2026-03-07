@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write;
 
 use crate::types::*;
 use crate::resolve::*;
@@ -12,7 +13,7 @@ struct CommentBox {
     height: i32,
 }
 
-fn emit_comment(text: &str, indent: &str) {
+fn emit_comment(buf: &mut String, text: &str, indent: &str) {
     let prefix = format!("{}// ", indent);
     let avail = 100usize.saturating_sub(prefix.len() + 1);
     for paragraph in text.lines() {
@@ -34,14 +35,14 @@ fn emit_comment(text: &str, indent: &str) {
         if !cur.is_empty() { wrapped.push(cur); }
         match wrapped.len() {
             0 => {}
-            1 => println!("{}\"{}\"", prefix, wrapped[0]),
+            1 => writeln!(buf, "{}\"{}\"", prefix, wrapped[0]).unwrap(),
             n => {
-                println!("{}\"{}", prefix, wrapped[0]);
+                writeln!(buf, "{}\"{}", prefix, wrapped[0]).unwrap();
                 for i in 1..n {
                     if i == n - 1 {
-                        println!("{} {}\"", prefix, wrapped[i]);
+                        writeln!(buf, "{} {}\"", prefix, wrapped[i]).unwrap();
                     } else {
-                        println!("{} {}", prefix, wrapped[i]);
+                        writeln!(buf, "{} {}", prefix, wrapped[i]).unwrap();
                     }
                 }
             }
@@ -49,7 +50,8 @@ fn emit_comment(text: &str, indent: &str) {
     }
 }
 
-pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
+pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
+    let mut buf = String::new();
     let export_names: Vec<String> = asset.exports.iter().map(|(h, _)| h.object_name.clone()).collect();
 
     let mut bp_name = String::new();
@@ -72,8 +74,8 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
         }
     }
 
-    println!("Blueprint: {} (extends {})", bp_name, short_class(&bp_parent));
-    println!();
+    writeln!(buf, "Blueprint: {} (extends {})", bp_name, short_class(&bp_parent)).unwrap();
+    writeln!(buf).unwrap();
 
     // Components from SCS_Node exports
     let mut scs_nodes: HashMap<String, (String, String, Vec<String>)> = HashMap::new();
@@ -114,10 +116,11 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
     let all_children: Vec<String> = scs_nodes.values()
         .flat_map(|(_, _, children)| children.iter().cloned())
         .collect();
-    let root_nodes: Vec<String> = scs_nodes.keys()
+    let mut root_nodes: Vec<String> = scs_nodes.keys()
         .filter(|k| !all_children.contains(k))
         .cloned()
         .collect();
+    root_nodes.sort();
 
     let mut comp_props: HashMap<String, &[Property]> = HashMap::new();
     for (hdr, props) in &asset.exports {
@@ -139,7 +142,8 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
         "CreationMethod",
     ];
 
-    fn print_comp_props(
+    fn fmt_comp_props(
+        buf: &mut String,
         name: &str, class: &str, depth: usize,
         comp_props: &HashMap<String, &[Property]>,
         cat_exports: &HashMap<String, (String, &[Property])>,
@@ -147,7 +151,7 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
     ) {
         let indent = "  ".repeat(depth + 1);
         let prop_indent = "  ".repeat(depth + 2);
-        println!("{}{} ({})", indent, name, class);
+        writeln!(buf, "{}{} ({})", indent, name, class).unwrap();
         if let Some(props) = comp_props.get(name) {
             let mut child_actor_tpl: Option<String> = None;
             for prop in *props {
@@ -163,7 +167,7 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
                     match struct_type.as_str() {
                         "Vector" | "Rotator" => {
                             let val = prop_value_short(&prop.value, imports, export_names);
-                            println!("{}{}: {}", prop_indent, prop.name, val);
+                            writeln!(buf, "{}{}: {}", prop_indent, prop.name, val).unwrap();
                         }
                         _ => {
                             let summary: Vec<String> = fields.iter().filter_map(|f| {
@@ -176,24 +180,24 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
                                 }
                             }).collect();
                             if !summary.is_empty() {
-                                println!("{}{}: {}", prop_indent, prop.name, summary.join(", "));
+                                writeln!(buf, "{}{}: {}", prop_indent, prop.name, summary.join(", ")).unwrap();
                             }
                         }
                     }
                     continue;
                 }
                 let val = prop_value_short(&prop.value, imports, export_names);
-                println!("{}{}: {}", prop_indent, prop.name, val);
+                writeln!(buf, "{}{}: {}", prop_indent, prop.name, val).unwrap();
             }
             if let Some(tpl_name) = child_actor_tpl {
                 if let Some((tpl_class, tpl_props)) = cat_exports.get(&tpl_name) {
-                    println!("{}[template: {}]", prop_indent, tpl_class);
+                    writeln!(buf, "{}[template: {}]", prop_indent, tpl_class).unwrap();
                     for prop in *tpl_props {
                         if let PropValue::Struct { struct_type, fields } = &prop.value {
                             match struct_type.as_str() {
                                 "Vector" | "Rotator" => {
                                     let val = prop_value_short(&prop.value, imports, export_names);
-                                    println!("{}  {}: {}", prop_indent, prop.name, val);
+                                    writeln!(buf, "{}  {}: {}", prop_indent, prop.name, val).unwrap();
                                 }
                                 _ => {
                                     let summary: Vec<String> = fields.iter().filter_map(|f| {
@@ -206,21 +210,22 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
                                         }
                                     }).collect();
                                     if !summary.is_empty() {
-                                        println!("{}  {}: {}", prop_indent, prop.name, summary.join(", "));
+                                        writeln!(buf, "{}  {}: {}", prop_indent, prop.name, summary.join(", ")).unwrap();
                                     }
                                 }
                             }
                             continue;
                         }
                         let val = prop_value_short(&prop.value, imports, export_names);
-                        println!("{}  {}: {}", prop_indent, prop.name, val);
+                        writeln!(buf, "{}  {}: {}", prop_indent, prop.name, val).unwrap();
                     }
                 }
             }
         }
     }
 
-    fn print_comp_tree(
+    fn fmt_comp_tree(
+        buf: &mut String,
         node_name: &str, depth: usize,
         scs_nodes: &HashMap<String, (String, String, Vec<String>)>,
         comp_props: &HashMap<String, &[Property]>,
@@ -228,19 +233,19 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
         imports: &[ImportEntry], export_names: &[String],
     ) {
         if let Some((comp_name, comp_class, children)) = scs_nodes.get(node_name) {
-            print_comp_props(comp_name, comp_class, depth, comp_props, cat_exports, imports, export_names);
+            fmt_comp_props(buf, comp_name, comp_class, depth, comp_props, cat_exports, imports, export_names);
             for child in children {
-                print_comp_tree(child, depth + 1, scs_nodes, comp_props, cat_exports, imports, export_names);
+                fmt_comp_tree(buf, child, depth + 1, scs_nodes, comp_props, cat_exports, imports, export_names);
             }
         }
     }
 
     if !components.is_empty() {
-        println!("Components:");
+        writeln!(buf, "Components:").unwrap();
         for root in &root_nodes {
-            print_comp_tree(root, 0, &scs_nodes, &comp_props, &cat_exports, &asset.imports, &export_names);
+            fmt_comp_tree(&mut buf, root, 0, &scs_nodes, &comp_props, &cat_exports, &asset.imports, &export_names);
         }
-        println!();
+        writeln!(buf).unwrap();
     }
 
     // Member variables
@@ -275,22 +280,22 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
     }
 
     if !members.is_empty() {
-        println!("Variables:");
+        writeln!(buf, "Variables:").unwrap();
         for decl in &members {
             let var_name = decl.split(':').next().unwrap_or("");
             if let Some((_, val)) = defaults.iter().find(|(n, _)| n == var_name) {
-                println!("  {} = {}", decl, val);
+                writeln!(buf, "  {} = {}", decl, val).unwrap();
             } else {
-                println!("  {}", decl);
+                writeln!(buf, "  {}", decl).unwrap();
             }
         }
-        println!();
+        writeln!(buf).unwrap();
     } else if !defaults.is_empty() {
-        println!("Default values:");
+        writeln!(buf, "Default values:").unwrap();
         for (name, val) in &defaults {
-            println!("  {} = {}", name, val);
+            writeln!(buf, "  {} = {}", name, val).unwrap();
         }
-        println!();
+        writeln!(buf).unwrap();
     }
 
     // Ubergraph entry points
@@ -521,11 +526,11 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
     if !callees_map.is_empty() {
         let mut entries: Vec<(&String, &Vec<String>)> = callees_map.iter().collect();
         entries.sort_by_key(|(name, _)| name.to_string());
-        println!("Call graph:");
+        writeln!(buf, "Call graph:").unwrap();
         for (caller, callees) in &entries {
-            println!("  {} \u{2192} {}", caller, callees.join(", "));
+            writeln!(buf, "  {} \u{2192} {}", caller, callees.join(", ")).unwrap();
         }
-        println!();
+        writeln!(buf).unwrap();
     }
 
     // Functions with signatures and bytecode
@@ -554,30 +559,30 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
         if hdr.object_name.starts_with("ExecuteUbergraph_") && !ubergraph_labels.is_empty() {
             if let Some(ref structured) = ubergraph_structured {
                 if !has_functions {
-                    println!("Functions:");
+                    writeln!(buf, "Functions:").unwrap();
                     has_functions = true;
                 }
                 let ug_comments = graph_comments.get("EventGraph").map(|v| v.as_slice());
-                emit_ubergraph_events(structured, ug_comments, &event_positions, &callers_map);
+                emit_ubergraph_events(&mut buf, structured, ug_comments, &event_positions, &callers_map);
                 functions_with_bytecode.insert(hdr.object_name.clone());
             }
             continue;
         }
 
         if !has_functions {
-            println!("Functions:");
+            writeln!(buf, "Functions:").unwrap();
             has_functions = true;
         }
-        println!("  {}{}", sig, flags);
+        writeln!(buf, "  {}{}", sig, flags).unwrap();
         if let Some(callers) = callers_map.get(&hdr.object_name) {
-            println!("    // called by: {}", callers.join(", "));
+            writeln!(buf, "    // called by: {}", callers.join(", ")).unwrap();
         }
 
         if let Some(comments) = graph_comments.get(&hdr.object_name) {
             let mut sorted: Vec<&CommentBox> = comments.iter().collect();
             sorted.sort_by_key(|c| c.x);
             for cb in &sorted {
-                emit_comment(&cb.text, "    ");
+                emit_comment(&mut buf, &cb.text, "    ");
             }
         }
 
@@ -597,9 +602,9 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
                             } else {
                                 line
                             };
-                            println!("    {}", code);
+                            writeln!(buf, "    {}", code).unwrap();
                         } else {
-                            println!("    {}", line);
+                            writeln!(buf, "    {}", line).unwrap();
                         }
                     }
                 }
@@ -609,7 +614,7 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
             }
         }
     }
-    if has_functions { println!(); }
+    if has_functions { writeln!(buf).unwrap(); }
 
     // Graphs
     let mut func_flags: HashMap<String, String> = HashMap::new();
@@ -647,7 +652,7 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
             .map(|f| filter_flags_for_summary(f))
             .and_then(|f| if f.is_empty() { None } else { Some(format!(" [{}]", f)) })
             .unwrap_or_default();
-        println!("Graph: {}{}", graph_name, flags);
+        writeln!(buf, "Graph: {}{}", graph_name, flags).unwrap();
 
         let mut nodes: Vec<(i32, String)> = Vec::new();
         for idx in &node_indices {
@@ -663,10 +668,16 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
         }
         nodes.sort_by_key(|(x, _)| *x);
         for (_, desc) in &nodes {
-            println!("  {}", desc);
+            writeln!(buf, "  {}", desc).unwrap();
         }
-        println!();
+        writeln!(buf).unwrap();
     }
+
+    buf
+}
+
+pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
+    print!("{}", format_summary(asset, filters));
 }
 
 fn summarise_node(class: &str, props: &[Property], imports: &[ImportEntry], export_names: &[String]) -> String {
@@ -800,6 +811,7 @@ fn filter_flags_for_summary(flags: &str) -> String {
 
 /// Split ubergraph structured output into per-event sections and inline latent resumes.
 fn emit_ubergraph_events(
+    buf: &mut String,
     lines: &[String],
     comments: Option<&[CommentBox]>,
     event_positions: &HashMap<String, (i32, i32)>,
@@ -895,9 +907,9 @@ fn emit_ubergraph_events(
         }
 
         if !section.name.is_empty() {
-            println!("  {}():", section.name);
+            writeln!(buf, "  {}():", section.name).unwrap();
             if let Some(callers) = callers_map.get(&section.name) {
-                println!("    // called by: {}", callers.join(", "));
+                writeln!(buf, "    // called by: {}", callers.join(", ")).unwrap();
             }
             if let (Some(cbs), Some(&(ex, ey))) = (comments, event_positions.get(&section.name)) {
                 let mut matching: Vec<&CommentBox> = cbs.iter()
@@ -905,7 +917,7 @@ fn emit_ubergraph_events(
                     .collect();
                 matching.sort_by_key(|c| (c.width as i64) * (c.height as i64));
                 for cb in matching.iter().take(2) {
-                    emit_comment(&cb.text, "    ");
+                    emit_comment(buf, &cb.text, "    ");
                 }
             }
         }
@@ -914,15 +926,15 @@ fn emit_ubergraph_events(
             let clean = strip_resume_annotation(line);
             let trimmed = clean.trim();
             if trimmed == "return" { continue; } // trailing returns are implicit
-            println!("    {}", clean);
+            writeln!(buf, "    {}", clean).unwrap();
 
             // If this line had a Delay with a resume, inline the resume block
             if parse_resume_offset(line).is_some() {
                 if let Some(&(_, ri)) = delay_resume_map.iter().find(|&&(s, _)| s == si) {
                     if let Some(rb) = resume_blocks.get(ri) {
-                        println!("    // after delay:");
+                        writeln!(buf, "    // after delay:").unwrap();
                         for rline in &rb.lines {
-                            println!("    {}", rline);
+                            writeln!(buf, "    {}", rline).unwrap();
                         }
                     }
                 }
