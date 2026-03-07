@@ -1,10 +1,8 @@
 # Unreal Blueprint Inspect
 
-A CLI tool that extracts readable structure and logic from Unreal Engine Blueprint `.uasset` files without requiring the UE editor.
+A standalone CLI that makes Unreal Engine Blueprint `.uasset` files readable outside the editor — in terminals, AI assistants, code review, CI pipelines, and documentation.
 
-Parses the binary format directly and outputs component trees, variable declarations, function signatures, decoded bytecode pseudo-code, and graph node summaries.
-
-Built primarily for use with AI coding assistants (Claude Code, etc.) to enable Blueprint debugging, logic review, and BP-to-C++ migration from the command line.
+Parses the binary format directly and outputs component trees, variable declarations, function signatures, decoded bytecode pseudo-code, and graph node summaries. No editor, no project context, no dependencies.
 
 ## Usage
 
@@ -80,13 +78,17 @@ bp-inspect Helm_BP.uasset --json | jq '.exports[] | select(.name == "GetSteering
 
 ## Why bp-inspect
 
-Existing tools solve different problems:
+Blueprint `.uasset` files are binary — opaque to git diff, code review, CI pipelines, AI assistants, and every other text-based tool. The editor is the only way to read them. bp-inspect changes that.
 
-- **UAssetAPI** is a serialisation library. It round-trips the binary format faithfully but doesn't interpret it -- you get raw property trees and bytecode as byte arrays. No disassembly, no signature reconstruction. Built for modding tools that patch values and re-save, not for reading comprehension.
-- **UE4 commandlets** (`DumpBlueprintInfo`, etc.) require a full editor instance with the project loaded, all dependencies resolved, game module DLLs compiled. They can't work on standalone `.uasset` files and their output is verbose internal reflection data.
-- **NodeToCode** runs inside the editor as a plugin, translating graphs to C++ via LLM. Not usable from the command line or CI.
+**How it compares to existing tools:**
 
-bp-inspect works on bare `.uasset` files with zero UE4 dependency. It reconstructs function signatures from parameter properties, disassembles Kismet bytecode into readable pseudo-code, structures control flow (if/else, while/for loops, ForEach, sequence nodes), inlines single-use temporaries and operators, resolves enum arguments to readable names, folds struct Break/Make patterns, strips serialisation noise (GUID suffixes, K2Node prefixes, library prefixes), and splits ubergraph functions into labelled event handlers with latent resume inlining. The `--summary` output is designed to be handed directly to an AI and asked "what does this Blueprint do?".
+- **UAssetAPI** is a serialisation library for modding tools. It round-trips the binary format faithfully but doesn't interpret it — you get raw property trees and bytecode as byte arrays. No disassembly, no signature reconstruction.
+- **UE commandlets** (`DumpBlueprintInfo`, etc.) require a full editor instance with the project loaded, all dependencies resolved, game module DLLs compiled. They can't work on standalone `.uasset` files.
+- **[NodeToCode](https://github.com/protospatial/NodeToCode)** is an editor plugin that translates Blueprint visual graphs to C++ via LLM. Great for code migration, but requires the editor running and an AI API key. It reads the live graph through the editor API, not the binary file — so it can't work in terminals, CI, or code review.
+
+bp-inspect takes a different approach: it reads the compiled bytecode from the binary file directly, with zero UE dependency. It reconstructs function signatures from parameter properties, disassembles Kismet bytecode into readable pseudo-code, structures control flow (if/else, while/for loops, ForEach, sequence nodes), inlines single-use temporaries and operators, resolves enum arguments to readable names, folds struct Break/Make patterns, strips serialisation noise (GUID suffixes, K2Node prefixes, library prefixes), and splits ubergraph functions into labelled event handlers with latent resume inlining.
+
+The `--summary` output is designed to be handed directly to an AI assistant and asked "what does this Blueprint do?".
 
 ## What it parses
 
