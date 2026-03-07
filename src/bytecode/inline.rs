@@ -462,22 +462,9 @@ fn rewrite_negated_guards(lines: &mut Vec<String>) {
 // unused out-param suppression, Make→short name renaming)
 // ============================================================
 
-/// Small struct field mappings for Break pattern folding.
-/// These are universally known structs with ≤3 fields — always fold.
-const BREAK_FIELD_MAP: &[(&str, &[&str])] = &[
-    ("BreakTransform", &["Location", "Rotation", "Scale"]),
-    ("BreakVector", &["X", "Y", "Z"]),
-    ("BreakVector2D", &["X", "Y"]),
-    ("BreakRotator", &["Roll", "Pitch", "Yaw"]),
-];
-
-/// Make function cosmetic renames.
-const MAKE_RENAMES: &[(&str, &str)] = &[
-    ("MakeVector", "Vector"),
-    ("MakeVector2D", "Vector2D"),
-    ("MakeRotator", "Rotator"),
-    ("MakeTransform", "Transform"),
-];
+/// Max output args for a Break* call to be fully inlined (replaced with dot access).
+/// Above this threshold, the call is compacted instead (named params, skip underscores).
+const BREAK_INLINE_MAX_ARGS: usize = 4;
 
 /// Post-processing pass on structured output lines.
 /// Folds Break/Make struct patterns, collapses struct construction,
@@ -853,42 +840,54 @@ fn parse_cast_assignment(text: &str) -> Option<(&str, &str)> {
     }
 }
 
-/// Fold small-struct Break patterns into field accessors.
-/// `BreakTransform($src, $loc, $rot, $scale)` → replace `$loc` with `$src.Location` etc.
+/// Fold small Break* calls into field accessors using dynamic field name inference.
+/// `BreakTransform($src, $BreakTransform_Location, ...)` → replace with `$src.Location` etc.
+/// Only applies when output arg count ≤ BREAK_INLINE_MAX_ARGS and all outputs are `$temp`.
 fn fold_break_patterns(lines: &mut Vec<String>) {
     let mut to_remove: Vec<usize> = Vec::new();
 
     for i in 0..lines.len() {
         let trimmed = lines[i].trim().to_string();
 
-        // Match against known small-struct Break functions
-        let mut matched = None;
-        for &(name, fields) in BREAK_FIELD_MAP {
-            let prefix = format!("{}(", name);
-            if trimmed.starts_with(&prefix) && trimmed.ends_with(')') {
-                matched = Some((name, fields));
-                break;
-            }
-        }
-        let Some((_name, fields)) = matched else { continue };
+        // Match Break* function calls at start of line
+        let Some(paren_start) = trimmed.find('(') else { continue };
+        let func_name = &trimmed[..paren_start];
+        if !func_name.starts_with("Break") || !trimmed.ends_with(')') { continue; }
 
-        // Parse arguments
-        let paren_start = trimmed.find('(').unwrap();
         let args_str = &trimmed[paren_start + 1..trimmed.len() - 1];
         let args = split_args(args_str);
 
         // First arg is source, rest are output vars
-        if args.len() != fields.len() + 1 { continue; }
-
-        let source = args[0].to_string();
+        if args.len() < 2 { continue; }
+        let output_args = &args[1..];
+        if output_args.len() > BREAK_INLINE_MAX_ARGS { continue; }
 
         // All output vars must be $temp
-        if !args[1..].iter().all(|a| a.starts_with('$')) { continue; }
+        if !output_args.iter().all(|a| a.starts_with('$')) { continue; }
 
-        // Replace each output var in subsequent lines with $source.FieldName
-        for (field_idx, &field_name) in fields.iter().enumerate() {
-            let out_var = args[field_idx + 1];
-            let replacement = format!("{}.{}", source, field_name);
+        let source = args[0].to_string();
+        let prefix = format!("${}_", func_name);
+
+        // Infer field names from $BreakName_FieldName convention
+        let raw_fields: Vec<Option<&str>> = output_args.iter()
+            .map(|a| a.strip_prefix(&prefix))
+            .collect();
+
+        // If any arg can't be resolved, skip this Break call
+        if raw_fields.iter().any(|f| f.is_none()) { continue; }
+        let raw_fields: Vec<&str> = raw_fields.into_iter().map(|f| f.unwrap()).collect();
+
+        // Detect shared disambiguation suffix (_1, _2, etc.)
+        // If all fields end with the same _N, strip it
+        let fields: Vec<&str> = if let Some(common_suffix) = detect_common_suffix(&raw_fields) {
+            raw_fields.iter().map(|f| &f[..f.len() - common_suffix.len()]).collect()
+        } else {
+            raw_fields
+        };
+
+        // Replace each output var in subsequent lines with source.FieldName
+        for (idx, &out_var) in output_args.iter().enumerate() {
+            let replacement = format!("{}.{}", source, fields[idx]);
 
             for j in (i + 1)..lines.len() {
                 let line = &lines[j];
@@ -1015,15 +1014,10 @@ fn compact_large_break_calls(lines: &mut Vec<String>) {
         let trimmed = lines[i].trim();
         let indent_len = lines[i].len() - trimmed.len();
 
-        // Match Break* calls (but not small ones handled by BREAK_FIELD_MAP)
+        // Match Break* calls above the inline threshold (small ones handled by fold_break_patterns)
         let Some(paren_start) = trimmed.find('(') else { i += 1; continue };
         let func_name = &trimmed[..paren_start];
         if !func_name.starts_with("Break") || !trimmed.ends_with(')') {
-            i += 1;
-            continue;
-        }
-        // Skip small structs already handled by fold_break_patterns
-        if BREAK_FIELD_MAP.iter().any(|&(n, _)| n == func_name) {
             i += 1;
             continue;
         }
@@ -1031,8 +1025,10 @@ fn compact_large_break_calls(lines: &mut Vec<String>) {
         let args_str = &trimmed[paren_start + 1..trimmed.len() - 1];
         let args = split_args(args_str);
 
-        // Need at least source + 6 output args, with ≥50% underscores
-        if args.len() < 7 { i += 1; continue; }
+        // Skip small Break calls (handled by fold_break_patterns) and need ≥50% underscores
+        if args.len() < 2 { i += 1; continue; }
+        let output_count = args.len() - 1;
+        if output_count <= BREAK_INLINE_MAX_ARGS { i += 1; continue; }
         let underscore_count = args[1..].iter().filter(|a| **a == "_").count();
         if underscore_count * 2 < args.len() - 1 { i += 1; continue; }
 
@@ -1058,19 +1054,58 @@ fn compact_large_break_calls(lines: &mut Vec<String>) {
     }
 }
 
-/// Rename Make functions cosmetically: MakeVector → Vector, etc.
+/// Rename Make* functions by stripping the `Make` prefix: MakeVector → Vector, etc.
 fn rename_make_functions(lines: &mut [String]) {
     for line in lines.iter_mut() {
         let indent_len = line.len() - line.trim_start().len();
         let content = &line[indent_len..];
-        let mut changed = content.to_string();
-        for &(old, new) in MAKE_RENAMES {
-            changed = rename_func_in_text(&changed, old, new);
-        }
-        if changed.as_str() != content {
+        let changed = strip_make_prefix(content);
+        if changed != content {
             *line = format!("{}{}", &line[..indent_len], changed);
         }
     }
+}
+
+/// Find `Make<Name>(` patterns and strip the `Make` prefix.
+/// Only matches when preceded by a non-ident char (or start of string),
+/// and when the char after `Make` is uppercase (avoids false positives).
+fn strip_make_prefix(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut start = 0;
+    while let Some(pos) = text[start..].find("Make") {
+        let abs_pos = start + pos;
+        // Must not be preceded by ident char or $
+        if abs_pos > 0 {
+            let prev = text.as_bytes()[abs_pos - 1];
+            if is_ident_char(prev) || prev == b'$' {
+                result.push_str(&text[start..abs_pos + 4]);
+                start = abs_pos + 4;
+                continue;
+            }
+        }
+        // Char after "Make" must be uppercase (MakeVector yes, Makefile no)
+        let after_make = abs_pos + 4;
+        if after_make >= text.len() || !text.as_bytes()[after_make].is_ascii_uppercase() {
+            result.push_str(&text[start..abs_pos + 4]);
+            start = abs_pos + 4;
+            continue;
+        }
+        // Must be followed by `(` eventually (it's a function call)
+        let rest = &text[after_make..];
+        let has_paren = rest.find('(').map_or(false, |p| {
+            rest[..p].chars().all(|c| c.is_alphanumeric() || c == '_')
+        });
+        if !has_paren {
+            result.push_str(&text[start..abs_pos + 4]);
+            start = abs_pos + 4;
+            continue;
+        }
+        // Strip "Make" — keep everything after it
+        result.push_str(&text[start..abs_pos]);
+        start = after_make;
+    }
+    result.push_str(&text[start..]);
+    result
 }
 
 /// Per-section inlining of single-use temp variables in structured output.
@@ -1236,6 +1271,26 @@ fn dedup_completion_paths(lines: &mut Vec<String>) {
 // Helpers for summary pattern folding
 // ============================================================
 
+/// Detect a shared `_N` disambiguation suffix across all field names.
+/// Returns Some("_1") if all fields end with "_1", etc.
+fn detect_common_suffix<'a>(fields: &[&'a str]) -> Option<&'a str> {
+    if fields.is_empty() { return None; }
+    // Find the last '_' in the first field
+    let first = fields[0];
+    let last_underscore = first.rfind('_')?;
+    let suffix = &first[last_underscore..];
+    // Suffix must be _N (underscore + all digits)
+    if suffix.len() < 2 || !suffix[1..].chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    // All fields must share this suffix
+    if fields.iter().all(|f| f.ends_with(suffix) && f.len() > suffix.len()) {
+        Some(suffix)
+    } else {
+        None
+    }
+}
+
 /// Split comma-separated arguments respecting nested parentheses.
 fn split_args(s: &str) -> Vec<&str> {
     let mut args = Vec::new();
@@ -1385,29 +1440,4 @@ fn extract_containing_func_name(before_text: &str) -> Option<String> {
         .unwrap_or(0);
     let name = &trimmed[name_start..paren];
     if name.is_empty() { None } else { Some(name.to_string()) }
-}
-
-/// Rename a function call in text: `OldName(` → `NewName(`.
-/// Skips occurrences preceded by an ident char or `$` (part of a variable name).
-fn rename_func_in_text(text: &str, old_name: &str, new_name: &str) -> String {
-    let pattern = format!("{}(", old_name);
-    let mut result = String::with_capacity(text.len());
-    let mut start = 0;
-    while let Some(pos) = text[start..].find(&pattern) {
-        let abs_pos = start + pos;
-        if abs_pos > 0 {
-            let prev = text.as_bytes()[abs_pos - 1];
-            if is_ident_char(prev) || prev == b'$' {
-                result.push_str(&text[start..abs_pos + pattern.len()]);
-                start = abs_pos + pattern.len();
-                continue;
-            }
-        }
-        result.push_str(&text[start..abs_pos]);
-        result.push_str(new_name);
-        result.push('(');
-        start = abs_pos + pattern.len();
-    }
-    result.push_str(&text[start..]);
-    result
 }
