@@ -6,7 +6,7 @@ Standalone Rust CLI that parses Unreal Engine Blueprint `.uasset` files into rea
 
 ```
 src/
-  main.rs              CLI entry point (~55 lines)
+  main.rs              CLI entry point (~60 lines)
   lib.rs               Module declarations
   types.rs             Core data types (ImportEntry, ExportHeader, PropValue, Property, ParsedAsset)
   binary.rs            Binary reading helpers (R<'a>, read_*, NameTable)
@@ -26,7 +26,7 @@ src/
     decode.rs          Expression decoder (~77 opcodes), BcStatement, decode_bytecode
     flow.rs            Flow pattern detection (sequences, for-loops, ForEach, convergence reorder)
     structure.rs       If/else block structuring, false-block truncation
-    inline.rs          Single-use temp variable inlining
+    inline.rs          Temp inlining, ForEach rewriting, delegate folding, summary pattern folding
 skill/SKILL.md       Claude Code skill instructions
 skill/README.md      Skill install guide
 samples/             Test .uasset files (UE4.27, uncooked)

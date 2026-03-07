@@ -580,7 +580,11 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
                 cases.push(format!("{}: {}", case_val, result));
             }
             let default = decode_expr(bc, pos, nt, imports, export_names, mem_adj).unwrap_or_default();
-            Some(format!("switch({}) {{ {}, default: {} }}", index, cases.join(", "), default))
+            if default.starts_with("$Select_Default") {
+                Some(format!("switch({}) {{ {} }}", index, cases.join(", ")))
+            } else {
+                Some(format!("switch({}) {{ {}, default: {} }}", index, cases.join(", "), default))
+            }
         }
         0x6A => { // EX_InstrumentationEvent
             let event_type = read_bc_u8(bc, pos);
