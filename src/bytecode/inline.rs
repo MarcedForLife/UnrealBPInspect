@@ -513,11 +513,13 @@ pub fn fold_summary_patterns(lines: &mut Vec<String>) {
 fn process_section(lines: &mut Vec<String>) {
     rewrite_foreach_loops(lines);
     fold_delegate_bindings(lines);
+    fold_cast_guards(lines);
     fold_break_patterns(lines);
     fold_struct_construction(lines);
     dedup_completion_paths(lines);
     fold_section_temps(lines);
     suppress_unused_outparams(lines);
+    compact_large_break_calls(lines);
 }
 
 /// Rewrite ForEach loop boilerplate into `for (ITEM in ARRAY)`.
@@ -568,10 +570,49 @@ fn rewrite_foreach_loops(lines: &mut Vec<String>) {
         let mut to_remove = vec![incr_idx, get_idx, assign_idx, index_idx, counter_idx];
         to_remove.sort_unstable();
         to_remove.dedup();
+        let removed_before_i = to_remove.iter().filter(|&&idx| idx < i).count();
         for idx in to_remove.into_iter().rev() {
             // Don't remove lines past close_idx (shouldn't happen, but safety)
             if idx < close_idx {
                 lines.remove(idx);
+            }
+        }
+
+        // Post-rewrite cleanup: remove redundant Array_Get re-fetches inside the loop body.
+        // These reference the now-stale index variable and fetch into the same item variable
+        // that the `for` header already provides.
+        {
+            // Adjust for_idx since lines before `i` were removed
+            let for_idx = i - removed_before_i;
+            let mut depth = 0i32;
+            let mut new_close = for_idx;
+            for j in for_idx..lines.len() {
+                let t = lines[j].trim();
+                if t.ends_with('{') { depth += 1; }
+                if t == "}" {
+                    depth -= 1;
+                    if depth == 0 { new_close = j; break; }
+                }
+            }
+            // Scan body for Array_Get(ARRAY, INDEX_VAR, ITEM) and remove
+            let mut j = for_idx + 1;
+            while j < new_close {
+                let t = lines[j].trim();
+                if let Some(rest) = t.strip_prefix("Array_Get(") {
+                    if let Some(inner) = rest.strip_suffix(')') {
+                        let ag_args = split_args(inner);
+                        if ag_args.len() == 3
+                            && ag_args[0] == array
+                            && ag_args[1] == index_var
+                            && ag_args[2] == item
+                        {
+                            lines.remove(j);
+                            new_close -= 1;
+                            continue; // don't advance j
+                        }
+                    }
+                }
+                j += 1;
             }
         }
 
@@ -761,6 +802,57 @@ fn parse_delegate_op(text: &str) -> Option<(String, String, String)> {
     None
 }
 
+/// Fold `$X = cast<T>(expr)` + `if (!$X) return` into `$X = cast<T>(expr) else return`.
+fn fold_cast_guards(lines: &mut Vec<String>) {
+    let mut i = 0;
+    while i + 1 < lines.len() {
+        let trimmed_a = lines[i].trim();
+        let indent_a = lines[i].len() - trimmed_a.len();
+
+        // Line A: $VAR = cast<...>(...) or icast<...>(...) or obj_cast<...>(...)
+        let Some((var, _rhs)) = parse_cast_assignment(trimmed_a) else {
+            i += 1;
+            continue;
+        };
+
+        let trimmed_b = lines[i + 1].trim();
+        let indent_b = lines[i + 1].len() - trimmed_b.len();
+
+        // Same indent
+        if indent_a != indent_b {
+            i += 1;
+            continue;
+        }
+
+        // Line B: exactly "if (!$VAR) return"
+        let expected = format!("if (!{}) return", var);
+        if trimmed_b != expected {
+            i += 1;
+            continue;
+        }
+
+        // Rewrite: append " else return" to line A, remove line B
+        let indent_str = &lines[i][..indent_a];
+        lines[i] = format!("{}{} else return", indent_str, trimmed_a);
+        lines.remove(i + 1);
+        // Don't advance — recheck
+    }
+}
+
+/// Parse `$VAR = cast<...>(...)` assignment where RHS starts with cast</icast</obj_cast<.
+fn parse_cast_assignment(text: &str) -> Option<(&str, &str)> {
+    if !text.starts_with('$') { return None; }
+    let eq_pos = text.find(" = ")?;
+    let var = &text[..eq_pos];
+    if var.contains('.') || var.contains('[') { return None; }
+    let rhs = &text[eq_pos + 3..];
+    if rhs.starts_with("cast<") || rhs.starts_with("icast<") || rhs.starts_with("obj_cast<") {
+        Some((var, rhs))
+    } else {
+        None
+    }
+}
+
 /// Fold small-struct Break patterns into field accessors.
 /// `BreakTransform($src, $loc, $rot, $scale)` → replace `$loc` with `$src.Location` etc.
 fn fold_break_patterns(lines: &mut Vec<String>) {
@@ -909,6 +1001,60 @@ fn suppress_unused_outparams(lines: &mut Vec<String>) {
                 *line = format!("{}{}", &line[..indent_len], new_content);
             }
         }
+    }
+}
+
+/// Compact Break struct calls that have many `_` args by keeping only used params.
+/// Field names are inferred from the `$BreakName_FieldName` variable naming convention.
+/// `BreakHitResult(src, _, _, _, $BreakHitResult_Location, ...)` →
+///   `BreakHitResult(src, Location: $BreakHitResult_Location, ...)`
+/// Triggers when a Break call has ≥6 output args and ≥50% are `_`.
+fn compact_large_break_calls(lines: &mut Vec<String>) {
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        let indent_len = lines[i].len() - trimmed.len();
+
+        // Match Break* calls (but not small ones handled by BREAK_FIELD_MAP)
+        let Some(paren_start) = trimmed.find('(') else { i += 1; continue };
+        let func_name = &trimmed[..paren_start];
+        if !func_name.starts_with("Break") || !trimmed.ends_with(')') {
+            i += 1;
+            continue;
+        }
+        // Skip small structs already handled by fold_break_patterns
+        if BREAK_FIELD_MAP.iter().any(|&(n, _)| n == func_name) {
+            i += 1;
+            continue;
+        }
+
+        let args_str = &trimmed[paren_start + 1..trimmed.len() - 1];
+        let args = split_args(args_str);
+
+        // Need at least source + 6 output args, with ≥50% underscores
+        if args.len() < 7 { i += 1; continue; }
+        let underscore_count = args[1..].iter().filter(|a| **a == "_").count();
+        if underscore_count * 2 < args.len() - 1 { i += 1; continue; }
+
+        let source = args[0];
+        let indent_str = lines[i][..indent_len].to_string();
+        let prefix = format!("${}_", func_name);
+
+        // Build compacted params: source first, then named used params
+        let mut parts = vec![source.to_string()];
+        for &arg in &args[1..] {
+            if arg == "_" { continue; }
+            // Infer field name from $BreakName_FieldName pattern
+            if let Some(field) = arg.strip_prefix(&prefix) {
+                parts.push(format!("{}: {}", field, arg));
+            } else {
+                parts.push(arg.to_string());
+            }
+        }
+
+        let new_call = format!("{}{}({})", indent_str, func_name, parts.join(", "));
+        lines[i] = new_call;
+        i += 1;
     }
 }
 
