@@ -142,6 +142,40 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
         "CreationMethod",
     ];
 
+    fn fmt_prop_list(
+        buf: &mut String, indent: &str, props: &[Property],
+        skip: &[&str], imports: &[ImportEntry], export_names: &[String],
+    ) {
+        for prop in props {
+            if skip.contains(&prop.name.as_str()) { continue; }
+            if let PropValue::Struct { struct_type, fields } = &prop.value {
+                match struct_type.as_str() {
+                    "Vector" | "Rotator" => {
+                        let val = prop_value_short(&prop.value, imports, export_names);
+                        writeln!(buf, "{}{}: {}", indent, prop.name, val).unwrap();
+                    }
+                    _ => {
+                        let summary: Vec<String> = fields.iter().filter_map(|f| {
+                            match &f.value {
+                                PropValue::Struct { .. } | PropValue::Array { .. } | PropValue::Map { .. } => None,
+                                _ => {
+                                    let v = prop_value_short(&f.value, imports, export_names);
+                                    Some(format!("{}: {}", f.name, v))
+                                }
+                            }
+                        }).collect();
+                        if !summary.is_empty() {
+                            writeln!(buf, "{}{}: {}", indent, prop.name, summary.join(", ")).unwrap();
+                        }
+                    }
+                }
+                continue;
+            }
+            let val = prop_value_short(&prop.value, imports, export_names);
+            writeln!(buf, "{}{}: {}", indent, prop.name, val).unwrap();
+        }
+    }
+
     fn fmt_comp_props(
         buf: &mut String,
         name: &str, class: &str, depth: usize,
@@ -153,72 +187,22 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
         let prop_indent = "  ".repeat(depth + 2);
         writeln!(buf, "{}{} ({})", indent, name, class).unwrap();
         if let Some(props) = comp_props.get(name) {
-            let mut child_actor_tpl: Option<String> = None;
-            for prop in *props {
-                if COMP_SKIP_PROPS.contains(&prop.name.as_str()) { continue; }
-                if prop.name == "ChildActorTemplate" {
-                    if let PropValue::Object(idx) = &prop.value {
-                        let tpl_name = resolve_index(imports, export_names, *idx);
-                        child_actor_tpl = Some(tpl_name);
+            let skip = &["ChildActorTemplate", COMP_SKIP_PROPS[0], COMP_SKIP_PROPS[1], COMP_SKIP_PROPS[2]];
+            fmt_prop_list(buf, &prop_indent, props, skip, imports, export_names);
+            // Handle ChildActorTemplate
+            let child_actor_tpl = props.iter().find_map(|p| {
+                if p.name == "ChildActorTemplate" {
+                    if let PropValue::Object(idx) = &p.value {
+                        return Some(resolve_index(imports, export_names, *idx));
                     }
-                    continue;
                 }
-                if let PropValue::Struct { struct_type, fields } = &prop.value {
-                    match struct_type.as_str() {
-                        "Vector" | "Rotator" => {
-                            let val = prop_value_short(&prop.value, imports, export_names);
-                            writeln!(buf, "{}{}: {}", prop_indent, prop.name, val).unwrap();
-                        }
-                        _ => {
-                            let summary: Vec<String> = fields.iter().filter_map(|f| {
-                                match &f.value {
-                                    PropValue::Struct { .. } | PropValue::Array { .. } | PropValue::Map { .. } => None,
-                                    _ => {
-                                        let v = prop_value_short(&f.value, imports, export_names);
-                                        Some(format!("{}: {}", f.name, v))
-                                    }
-                                }
-                            }).collect();
-                            if !summary.is_empty() {
-                                writeln!(buf, "{}{}: {}", prop_indent, prop.name, summary.join(", ")).unwrap();
-                            }
-                        }
-                    }
-                    continue;
-                }
-                let val = prop_value_short(&prop.value, imports, export_names);
-                writeln!(buf, "{}{}: {}", prop_indent, prop.name, val).unwrap();
-            }
+                None
+            });
             if let Some(tpl_name) = child_actor_tpl {
                 if let Some((tpl_class, tpl_props)) = cat_exports.get(&tpl_name) {
                     writeln!(buf, "{}[template: {}]", prop_indent, tpl_class).unwrap();
-                    for prop in *tpl_props {
-                        if let PropValue::Struct { struct_type, fields } = &prop.value {
-                            match struct_type.as_str() {
-                                "Vector" | "Rotator" => {
-                                    let val = prop_value_short(&prop.value, imports, export_names);
-                                    writeln!(buf, "{}  {}: {}", prop_indent, prop.name, val).unwrap();
-                                }
-                                _ => {
-                                    let summary: Vec<String> = fields.iter().filter_map(|f| {
-                                        match &f.value {
-                                            PropValue::Struct { .. } | PropValue::Array { .. } | PropValue::Map { .. } => None,
-                                            _ => {
-                                                let v = prop_value_short(&f.value, imports, export_names);
-                                                Some(format!("{}: {}", f.name, v))
-                                            }
-                                        }
-                                    }).collect();
-                                    if !summary.is_empty() {
-                                        writeln!(buf, "{}  {}: {}", prop_indent, prop.name, summary.join(", ")).unwrap();
-                                    }
-                                }
-                            }
-                            continue;
-                        }
-                        let val = prop_value_short(&prop.value, imports, export_names);
-                        writeln!(buf, "{}  {}: {}", prop_indent, prop.name, val).unwrap();
-                    }
+                    let tpl_indent = format!("{}  ", prop_indent);
+                    fmt_prop_list(buf, &tpl_indent, tpl_props, COMP_SKIP_PROPS, imports, export_names);
                 }
             }
         }

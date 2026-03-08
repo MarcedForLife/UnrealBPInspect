@@ -156,8 +156,8 @@ fn read_property_value(
             let mut entries = Vec::new();
             for _ in 0..count {
                 if c.position() >= map_data_end { break; }
-                let k = read_map_item(c, nt, &key_type, map_data_end, ver)?;
-                let v = read_map_item(c, nt, &value_type, map_data_end, ver)?;
+                let k = read_typed_value(c, nt, &key_type, map_data_end, ver)?;
+                let v = read_typed_value(c, nt, &value_type, map_data_end, ver)?;
                 entries.push((k, v));
             }
             c.seek(SeekFrom::Start(map_data_end))?;
@@ -211,7 +211,7 @@ fn skip_property_guid(c: &mut R, file_ver: i32) -> Result<()> {
     Ok(())
 }
 
-fn read_map_item(c: &mut R, nt: &NameTable, type_name: &str, end_offset: u64, ver: AssetVersion) -> Result<PropValue> {
+fn read_typed_value(c: &mut R, nt: &NameTable, type_name: &str, end_offset: u64, ver: AssetVersion) -> Result<PropValue> {
     match type_name {
         "IntProperty" | "Int32Property" | "UInt32Property" => Ok(PropValue::Int(read_i32(c)?)),
         "Int8Property" => Ok(PropValue::Int(read_u8(c)? as i8 as i32)),
@@ -224,10 +224,9 @@ fn read_map_item(c: &mut R, nt: &NameTable, type_name: &str, end_offset: u64, ve
         "DoubleProperty" => Ok(PropValue::Double(read_f64(c)?)),
         "BoolProperty" => Ok(PropValue::Bool(read_u8(c)? != 0)),
         "ByteProperty" => Ok(PropValue::Int(read_u8(c)? as i32)),
-        "NameProperty" => Ok(PropValue::Name(nt.fname(c)?)),
+        "NameProperty" | "EnumProperty" => Ok(PropValue::Name(nt.fname(c)?)),
         "StrProperty" => Ok(PropValue::Str(read_fstring(c)?)),
         "ObjectProperty" => Ok(PropValue::Object(read_i32(c)?)),
-        "EnumProperty" => Ok(PropValue::Name(nt.fname(c)?)),
         "SoftObjectProperty" => {
             let path = read_fstring(c)?;
             let _sub = read_fstring(c)?;
@@ -265,6 +264,19 @@ fn read_text_property(c: &mut R, size: i32) -> Result<String> {
     Ok(if readable.is_empty() { "<text>".to_string() } else { readable })
 }
 
+fn read_lwc_components(c: &mut R, lwc: bool, names: &[&str]) -> Result<Vec<Property>> {
+    let mut props = Vec::new();
+    for name in names {
+        let value = if lwc {
+            PropValue::Double(read_f64(c)?)
+        } else {
+            PropValue::Float(read_f32(c)?)
+        };
+        props.push(Property { name: name.to_string(), value });
+    }
+    Ok(props)
+}
+
 fn read_struct_value(
     c: &mut R,
     nt: &NameTable,
@@ -275,65 +287,9 @@ fn read_struct_value(
 ) -> Result<Vec<Property>> {
     let lwc = ver.file_ver_ue5 >= 1004; // LARGE_WORLD_COORDINATES
     match struct_type {
-        "Vector" => {
-            if lwc {
-                let x = read_f64(c)?;
-                let y = read_f64(c)?;
-                let z = read_f64(c)?;
-                Ok(vec![
-                    Property { name: "X".into(), value: PropValue::Double(x) },
-                    Property { name: "Y".into(), value: PropValue::Double(y) },
-                    Property { name: "Z".into(), value: PropValue::Double(z) },
-                ])
-            } else {
-                let x = read_f32(c)?;
-                let y = read_f32(c)?;
-                let z = read_f32(c)?;
-                Ok(vec![
-                    Property { name: "X".into(), value: PropValue::Float(x) },
-                    Property { name: "Y".into(), value: PropValue::Float(y) },
-                    Property { name: "Z".into(), value: PropValue::Float(z) },
-                ])
-            }
-        }
-        "Rotator" => {
-            if lwc {
-                let p = read_f64(c)?;
-                let y = read_f64(c)?;
-                let r = read_f64(c)?;
-                Ok(vec![
-                    Property { name: "Pitch".into(), value: PropValue::Double(p) },
-                    Property { name: "Yaw".into(), value: PropValue::Double(y) },
-                    Property { name: "Roll".into(), value: PropValue::Double(r) },
-                ])
-            } else {
-                let p = read_f32(c)?;
-                let y = read_f32(c)?;
-                let r = read_f32(c)?;
-                Ok(vec![
-                    Property { name: "Pitch".into(), value: PropValue::Float(p) },
-                    Property { name: "Yaw".into(), value: PropValue::Float(y) },
-                    Property { name: "Roll".into(), value: PropValue::Float(r) },
-                ])
-            }
-        }
-        "Vector2D" => {
-            if lwc {
-                let x = read_f64(c)?;
-                let y = read_f64(c)?;
-                Ok(vec![
-                    Property { name: "X".into(), value: PropValue::Double(x) },
-                    Property { name: "Y".into(), value: PropValue::Double(y) },
-                ])
-            } else {
-                let x = read_f32(c)?;
-                let y = read_f32(c)?;
-                Ok(vec![
-                    Property { name: "X".into(), value: PropValue::Float(x) },
-                    Property { name: "Y".into(), value: PropValue::Float(y) },
-                ])
-            }
-        }
+        "Vector" => read_lwc_components(c, lwc, &["X", "Y", "Z"]),
+        "Rotator" => read_lwc_components(c, lwc, &["Pitch", "Yaw", "Roll"]),
+        "Vector2D" => read_lwc_components(c, lwc, &["X", "Y"]),
         "LinearColor" => {
             let r = read_f32(c)?;
             let g = read_f32(c)?;
@@ -372,37 +328,13 @@ fn read_array_items(
         if c.position() >= end_offset {
             break;
         }
-        let item = match inner_type {
-            "IntProperty" | "Int32Property" | "UInt32Property" => PropValue::Int(read_i32(c)?),
-            "Int8Property" => PropValue::Int(read_u8(c)? as i8 as i32),
-            "Int16Property" | "UInt16Property" => {
-                let mut b = [0u8; 2]; c.read_exact(&mut b)?;
-                PropValue::Int(i16::from_le_bytes(b) as i32)
-            }
-            "Int64Property" | "UInt64Property" => PropValue::Int64(read_i64(c)?),
-            "FloatProperty" => PropValue::Float(read_f32(c)?),
-            "DoubleProperty" => PropValue::Double(read_f64(c)?),
-            "BoolProperty" => PropValue::Bool(read_u8(c)? != 0),
-            "ByteProperty" => PropValue::Int(read_u8(c)? as i32),
-            "NameProperty" => PropValue::Name(nt.fname(c)?),
-            "EnumProperty" => PropValue::Name(nt.fname(c)?),
-            "ObjectProperty" => PropValue::Object(read_i32(c)?),
-            "StrProperty" => PropValue::Str(read_fstring(c)?),
-            "SoftObjectProperty" => {
-                let path = read_fstring(c)?;
-                let _sub = read_fstring(c)?;
-                PropValue::SoftObject(path)
-            }
-            "StructProperty" => {
-                let fields = read_properties(c, nt, end_offset, ver);
-                PropValue::Struct { struct_type: "".into(), fields }
-            }
-            _ => {
-                let remaining = (end_offset - c.position()) as i32;
-                c.seek(SeekFrom::Start(end_offset))?;
-                PropValue::Unknown { type_name: inner_type.to_string(), size: remaining }
-            }
-        };
+        let item = read_typed_value(c, nt, inner_type, end_offset, ver)?;
+        // Unknown type in array context: consume remaining bytes
+        if matches!(&item, PropValue::Unknown { .. }) {
+            c.seek(SeekFrom::Start(end_offset))?;
+            items.push(item);
+            break;
+        }
         items.push(item);
     }
     Ok(items)
