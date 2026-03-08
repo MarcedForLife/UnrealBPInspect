@@ -1,8 +1,8 @@
 mod common;
 
-use unreal_bp_inspect::parser::parse_asset;
 use unreal_bp_inspect::output_json::to_json;
 use unreal_bp_inspect::output_summary::format_summary;
+use unreal_bp_inspect::parser::parse_asset;
 
 #[test]
 fn vrhand_parses_without_error() {

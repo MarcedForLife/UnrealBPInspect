@@ -1,5 +1,5 @@
-use std::io::{Cursor, Read, Seek, SeekFrom};
 use anyhow::Result;
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 pub type R<'a> = Cursor<&'a [u8]>;
 
@@ -54,13 +54,20 @@ pub fn read_fstring(c: &mut R) -> Result<String> {
     if len > 0 {
         let mut s = vec![0u8; len as usize];
         c.read_exact(&mut s)?;
-        Ok(String::from_utf8_lossy(&s).trim_end_matches('\0').to_string())
+        Ok(String::from_utf8_lossy(&s)
+            .trim_end_matches('\0')
+            .to_string())
     } else {
         let count = (-len) as usize;
         let mut s = vec![0u8; count * 2];
         c.read_exact(&mut s)?;
-        let utf16: Vec<u16> = s.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        Ok(String::from_utf16_lossy(&utf16).trim_end_matches('\0').to_string())
+        let utf16: Vec<u16> = s
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        Ok(String::from_utf16_lossy(&utf16)
+            .trim_end_matches('\0')
+            .to_string())
     }
 }
 
@@ -81,7 +88,10 @@ impl NameTable {
     }
 
     pub fn get(&self, index: i32) -> &str {
-        self.names.get(index as usize).map(|s| s.as_str()).unwrap_or("?")
+        self.names
+            .get(index as usize)
+            .map(|s| s.as_str())
+            .unwrap_or("?")
     }
 
     /// Read an FName (8 bytes on disk): name table index + instance number.

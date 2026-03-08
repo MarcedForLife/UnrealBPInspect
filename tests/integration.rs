@@ -1,9 +1,9 @@
 mod common;
 
-use unreal_bp_inspect::parser::parse_asset;
 use unreal_bp_inspect::output_json::to_json;
 use unreal_bp_inspect::output_summary::format_summary;
 use unreal_bp_inspect::output_text::format_text;
+use unreal_bp_inspect::parser::parse_asset;
 
 #[test]
 fn helm_parses_without_error() {
@@ -17,7 +17,9 @@ fn helm_parses_without_error() {
 fn helm_structural_checks() {
     let data = common::load_fixture("Helm_BP.uasset");
     let asset = parse_asset(&data, false).unwrap();
-    let has_blueprint = asset.exports.iter()
+    let has_blueprint = asset
+        .exports
+        .iter()
         .any(|(h, _)| h.object_name == "Helm_BP");
     assert!(has_blueprint, "Should have Helm_BP export");
 }
@@ -64,9 +66,18 @@ fn helm_filter_works() {
     let full = format_summary(&asset, &[]);
     let filtered = format_summary(&asset, &["getsteeringangle".to_string()]);
     assert!(!filtered.is_empty());
-    assert!(filtered.len() < full.len(), "Filtered output should be shorter");
-    assert!(filtered.contains("GetSteeringAngle"), "Filtered output should contain GetSteeringAngle");
-    assert!(!filtered.contains("UserConstructionScript"), "Filtered output should not contain other functions");
+    assert!(
+        filtered.len() < full.len(),
+        "Filtered output should be shorter"
+    );
+    assert!(
+        filtered.contains("GetSteeringAngle"),
+        "Filtered output should contain GetSteeringAngle"
+    );
+    assert!(
+        !filtered.contains("UserConstructionScript"),
+        "Filtered output should not contain other functions"
+    );
 }
 
 #[test]

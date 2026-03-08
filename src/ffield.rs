@@ -1,14 +1,18 @@
-use std::io::Read;
 use anyhow::Result;
+use std::io::Read;
 
 use crate::binary::*;
-use crate::types::*;
 use crate::resolve::*;
+use crate::types::*;
 
 pub fn skip_ffield_child(c: &mut R, nt: &NameTable, end: u64) -> Result<()> {
-    if c.position() + 8 > end { return Ok(()); }
+    if c.position() + 8 > end {
+        return Ok(());
+    }
     let field_class = nt.fname(c)?;
-    if field_class == "None" { return Ok(()); }
+    if field_class == "None" {
+        return Ok(());
+    }
     let _field_name = nt.fname(c)?;
     let _flags = read_u32(c)?;
     let has_meta = read_i32(c)?;
@@ -27,25 +31,43 @@ pub fn skip_ffield_child(c: &mut R, nt: &NameTable, end: u64) -> Result<()> {
     let _rep_func = nt.fname(c)?;
     let _bp_rep = read_u8(c)?;
     match field_class.as_str() {
-        "ObjectProperty" | "WeakObjectProperty" | "ClassProperty"
-        | "SoftObjectProperty" | "SoftClassProperty" | "InterfaceProperty" => {
+        "ObjectProperty" | "WeakObjectProperty" | "ClassProperty" | "SoftObjectProperty"
+        | "SoftClassProperty" | "InterfaceProperty" => {
             let _ref = read_i32(c)?;
         }
-        "StructProperty" => { let _ref = read_i32(c)?; }
-        "ByteProperty" | "EnumProperty" => { let _ref = read_i32(c)?; }
-        "BoolProperty" => { for _ in 0..6 { read_u8(c)?; } }
-        "ArrayProperty" | "SetProperty" => { skip_ffield_child(c, nt, end)?; }
-        "MapProperty" => { skip_ffield_child(c, nt, end)?; skip_ffield_child(c, nt, end)?; }
-        "DelegateProperty" | "MulticastDelegateProperty"
-        | "MulticastInlineDelegateProperty" => { let _ref = read_i32(c)?; }
+        "StructProperty" => {
+            let _ref = read_i32(c)?;
+        }
+        "ByteProperty" | "EnumProperty" => {
+            let _ref = read_i32(c)?;
+        }
+        "BoolProperty" => {
+            for _ in 0..6 {
+                read_u8(c)?;
+            }
+        }
+        "ArrayProperty" | "SetProperty" => {
+            skip_ffield_child(c, nt, end)?;
+        }
+        "MapProperty" => {
+            skip_ffield_child(c, nt, end)?;
+            skip_ffield_child(c, nt, end)?;
+        }
+        "DelegateProperty" | "MulticastDelegateProperty" | "MulticastInlineDelegateProperty" => {
+            let _ref = read_i32(c)?;
+        }
         _ => {}
     }
     Ok(())
 }
 
 pub fn resolve_ffield_type(
-    field_class: &str, c: &mut R, nt: &NameTable,
-    imports: &[ImportEntry], export_names: &[String], end: u64,
+    field_class: &str,
+    c: &mut R,
+    nt: &NameTable,
+    imports: &[ImportEntry],
+    export_names: &[String],
+    end: u64,
 ) -> Result<String> {
     match field_class {
         "FloatProperty" => Ok("float".into()),
@@ -55,17 +77,22 @@ pub fn resolve_ffield_type(
         "Int16Property" | "UInt16Property" => Ok("int16".into()),
         "Int8Property" => Ok("int8".into()),
         "BoolProperty" => {
-            for _ in 0..6 { read_u8(c)?; }
+            for _ in 0..6 {
+                read_u8(c)?;
+            }
             Ok("bool".into())
         }
         "StrProperty" => Ok("FString".into()),
         "NameProperty" => Ok("FName".into()),
         "TextProperty" => Ok("FText".into()),
-        "ObjectProperty" | "WeakObjectProperty" | "LazyObjectProperty"
-        | "SoftObjectProperty" | "InterfaceProperty" => {
+        "ObjectProperty" | "WeakObjectProperty" | "LazyObjectProperty" | "SoftObjectProperty"
+        | "InterfaceProperty" => {
             let class_ref = read_i32(c)?;
             if class_ref != 0 {
-                Ok(format!("{}*", short_class(&resolve_index(imports, export_names, class_ref))))
+                Ok(format!(
+                    "{}*",
+                    short_class(&resolve_index(imports, export_names, class_ref))
+                ))
             } else {
                 Ok("UObject*".into())
             }
@@ -77,7 +104,11 @@ pub fn resolve_ffield_type(
         }
         "StructProperty" => {
             let struct_ref = read_i32(c)?;
-            Ok(short_class(&resolve_index(imports, export_names, struct_ref)))
+            Ok(short_class(&resolve_index(
+                imports,
+                export_names,
+                struct_ref,
+            )))
         }
         "ByteProperty" | "EnumProperty" => {
             let enum_ref = read_i32(c)?;
@@ -89,19 +120,28 @@ pub fn resolve_ffield_type(
         }
         "ArrayProperty" | "SetProperty" => {
             skip_ffield_child(c, nt, end)?;
-            Ok(if field_class == "SetProperty" { "TSet<>".into() } else { "TArray<>".into() })
+            Ok(if field_class == "SetProperty" {
+                "TSet<>".into()
+            } else {
+                "TArray<>".into()
+            })
         }
         "MapProperty" => {
             skip_ffield_child(c, nt, end)?;
             skip_ffield_child(c, nt, end)?;
             Ok("TMap<>".into())
         }
-        "DelegateProperty" | "MulticastDelegateProperty"
-        | "MulticastInlineDelegateProperty" | "MulticastSparseDelegateProperty" => {
+        "DelegateProperty"
+        | "MulticastDelegateProperty"
+        | "MulticastInlineDelegateProperty"
+        | "MulticastSparseDelegateProperty" => {
             let _sig = read_i32(c)?;
             Ok("Delegate".into())
         }
-        _ => Ok(field_class.strip_suffix("Property").unwrap_or(field_class).to_string()),
+        _ => Ok(field_class
+            .strip_suffix("Property")
+            .unwrap_or(field_class)
+            .to_string()),
     }
 }
 

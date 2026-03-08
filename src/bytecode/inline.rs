@@ -1,5 +1,5 @@
-use std::collections::{HashMap, HashSet};
 use super::decode::BcStatement;
+use std::collections::{HashMap, HashSet};
 
 /// Inline single-use `$temp` variables to reduce noise.
 /// Only inlines vars that:
@@ -8,14 +8,16 @@ use super::decode::BcStatement;
 /// - Are referenced exactly once in a later statement
 /// - Would not produce a line longer than MAX_LINE chars
 pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
-    const MAX_LINE: usize = 120;  // Skip inlining if result would exceed this (readability cap)
-    const MAX_PASSES: usize = 6;  // Iterative: inlining one temp may expose further inlines
+    const MAX_LINE: usize = 120; // Skip inlining if result would exceed this (readability cap)
+    const MAX_PASSES: usize = 6; // Iterative: inlining one temp may expose further inlines
 
     for _ in 0..MAX_PASSES {
         let mut inlined_any = false;
 
         // Collect assignments: (index, var_name, expr)
-        let assignments: Vec<(usize, String, String)> = stmts.iter().enumerate()
+        let assignments: Vec<(usize, String, String)> = stmts
+            .iter()
+            .enumerate()
             .filter_map(|(i, s)| {
                 let (var, expr) = parse_temp_assignment(&s.text)?;
                 Some((i, var.to_string(), expr.to_string()))
@@ -23,7 +25,8 @@ pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
             .collect();
 
         // Count how many times each var name is assigned
-        let mut assign_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        let mut assign_counts: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
         for (_, var_name, _) in &assignments {
             *assign_counts.entry(var_name.as_str()).or_default() += 1;
         }
@@ -37,7 +40,9 @@ pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
             }
             let mut ref_count = 0usize;
             for (i, s) in stmts.iter().enumerate() {
-                if i == *assign_idx { continue; }
+                if i == *assign_idx {
+                    continue;
+                }
                 ref_count += count_var_refs(&s.text, var_name);
             }
             if ref_count == 1 {
@@ -48,7 +53,9 @@ pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
         // Apply substitutions — re-verify and re-read expr after each change
         let mut removed: Vec<usize> = Vec::new();
         for (assign_idx, var_name, _) in &to_inline {
-            if removed.contains(assign_idx) { continue; }
+            if removed.contains(assign_idx) {
+                continue;
+            }
 
             // Re-read the current expr (may have been modified by earlier inlines)
             let current_expr = match parse_temp_assignment(&stmts[*assign_idx].text) {
@@ -60,20 +67,30 @@ pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
             let mut current_refs = 0usize;
             let mut target_idx = None;
             for (i, s) in stmts.iter().enumerate() {
-                if i == *assign_idx || removed.contains(&i) { continue; }
+                if i == *assign_idx || removed.contains(&i) {
+                    continue;
+                }
                 let refs = count_var_refs(&s.text, var_name);
                 current_refs += refs;
-                if refs == 1 && target_idx.is_none() { target_idx = Some(i); }
+                if refs == 1 && target_idx.is_none() {
+                    target_idx = Some(i);
+                }
             }
-            if current_refs != 1 { continue; }
-            let Some(target_idx) = target_idx else { continue };
+            if current_refs != 1 {
+                continue;
+            }
+            let Some(target_idx) = target_idx else {
+                continue;
+            };
 
             let replacement = substitute_var(&stmts[target_idx].text, var_name, &current_expr);
 
             // Bypass MAX_LINE when expression (even with parens) is shorter than the variable —
             // the resulting line can only get shorter or stay the same length.
             let shortens = current_expr.len() + 2 <= var_name.len(); // +2 for possible (...)
-            if !shortens && replacement.len() > MAX_LINE { continue; }
+            if !shortens && replacement.len() > MAX_LINE {
+                continue;
+            }
 
             stmts[target_idx].text = replacement;
             removed.push(*assign_idx);
@@ -86,21 +103,29 @@ pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
             stmts.remove(idx);
         }
 
-        if !inlined_any { break; }
+        if !inlined_any {
+            break;
+        }
     }
 }
 
 /// Parse `$VarName = expression` or `Temp_* = expression` assignments.
 /// Returns (var_name, expression).
 fn parse_temp_assignment(text: &str) -> Option<(&str, &str)> {
-    if !text.starts_with('$') && !text.starts_with("Temp_") { return None; }
+    if !text.starts_with('$') && !text.starts_with("Temp_") {
+        return None;
+    }
     let eq_pos = text.find(" = ")?;
     let var = &text[..eq_pos];
     // Must be a simple $name (no dots, brackets, etc.)
-    if var.contains('.') || var.contains('[') { return None; }
+    if var.contains('.') || var.contains('[') {
+        return None;
+    }
     let expr = &text[eq_pos + 3..];
     // Must not be a persistent frame assignment
-    if expr.ends_with("[persistent]") { return None; }
+    if expr.ends_with("[persistent]") {
+        return None;
+    }
     Some((var, expr))
 }
 
@@ -113,7 +138,8 @@ fn count_var_refs(text: &str, var: &str) -> usize {
     while let Some(pos) = text[start..].find(var) {
         let abs_pos = start + pos;
         let after = abs_pos + var.len();
-        let at_start = !needs_start_check || abs_pos == 0 || !is_ident_char(text.as_bytes()[abs_pos - 1]);
+        let at_start =
+            !needs_start_check || abs_pos == 0 || !is_ident_char(text.as_bytes()[abs_pos - 1]);
         let at_end = after >= text.len() || !is_ident_char(text.as_bytes()[after]);
         if at_start && at_end {
             count += 1;
@@ -139,7 +165,11 @@ fn substitute_var(text: &str, var: &str, expr: &str) -> String {
         let at_end = after >= text.len() || !is_ident_char(text.as_bytes()[after]);
         if at_start && at_end {
             let needs_wrap = expr_is_compound(expr) && used_in_operator_context(text, pos, after);
-            let sub = if needs_wrap { format!("({})", expr) } else { expr.to_string() };
+            let sub = if needs_wrap {
+                format!("({})", expr)
+            } else {
+                expr.to_string()
+            };
             return format!("{}{}{}", &text[..pos], sub, &text[after..]);
         }
         start = after;
@@ -149,9 +179,8 @@ fn substitute_var(text: &str, var: &str, expr: &str) -> String {
 
 fn expr_is_compound(expr: &str) -> bool {
     const TOKENS: &[&str] = &[
-        " && ", " || ", " + ", " - ", " * ", " / ", " % ",
-        " < ", " <= ", " > ", " >= ", " == ", " != ",
-        " >> ", " << ",
+        " && ", " || ", " + ", " - ", " * ", " / ", " % ", " < ", " <= ", " > ", " >= ", " == ",
+        " != ", " >> ", " << ",
     ];
     TOKENS.iter().any(|tok| expr.contains(tok)) || expr.starts_with('!')
 }
@@ -159,14 +188,22 @@ fn expr_is_compound(expr: &str) -> bool {
 fn used_in_operator_context(text: &str, pos: usize, after: usize) -> bool {
     let before = &text[..pos];
     let after_text = &text[after..];
-    let op_before = before.ends_with("!(") || before.ends_with("! ")
-        || before.trim_end().ends_with("&&") || before.trim_end().ends_with("||")
-        || before.trim_end().ends_with('+') || before.trim_end().ends_with('-')
-        || before.trim_end().ends_with('*') || before.trim_end().ends_with('/')
-        || before.trim_end().ends_with(">=") || before.trim_end().ends_with("<=")
-        || before.trim_end().ends_with("==") || before.trim_end().ends_with("!=")
-        || before.trim_end().ends_with(">>") || before.trim_end().ends_with("<<")
-        || before.trim_end().ends_with('>') || before.trim_end().ends_with('<');
+    let op_before = before.ends_with("!(")
+        || before.ends_with("! ")
+        || before.trim_end().ends_with("&&")
+        || before.trim_end().ends_with("||")
+        || before.trim_end().ends_with('+')
+        || before.trim_end().ends_with('-')
+        || before.trim_end().ends_with('*')
+        || before.trim_end().ends_with('/')
+        || before.trim_end().ends_with(">=")
+        || before.trim_end().ends_with("<=")
+        || before.trim_end().ends_with("==")
+        || before.trim_end().ends_with("!=")
+        || before.trim_end().ends_with(">>")
+        || before.trim_end().ends_with("<<")
+        || before.trim_end().ends_with('>')
+        || before.trim_end().ends_with('<');
     let op_after = after_text.trim_start().starts_with("&&")
         || after_text.trim_start().starts_with("||")
         || after_text.trim_start().starts_with("+ ")
@@ -186,7 +223,7 @@ fn used_in_operator_context(text: &str, pos: usize, after: usize) -> bool {
 
 /// Discard assignments to `$temp` variables that are never referenced.
 /// Keeps the RHS call (side effects) but drops the `$var = ` prefix.
-pub fn discard_unused_assignments(stmts: &mut Vec<BcStatement>) {
+pub fn discard_unused_assignments(stmts: &mut [BcStatement]) {
     // Count how many times each var is assigned
     let mut assign_counts: HashMap<String, usize> = HashMap::new();
     for s in stmts.iter() {
@@ -198,7 +235,9 @@ pub fn discard_unused_assignments(stmts: &mut Vec<BcStatement>) {
     // For each uniquely-assigned $var, count total refs across all statements
     let mut ref_counts: HashMap<String, usize> = HashMap::new();
     for (var, ac) in &assign_counts {
-        if *ac != 1 { continue; }
+        if *ac != 1 {
+            continue;
+        }
         let mut total = 0usize;
         for s in stmts.iter() {
             total += count_var_refs(&s.text, var);
@@ -275,7 +314,9 @@ fn clean_line(text: &str) -> String {
     // Strip bool(expr) → expr (Kismet cast-to-bool is redundant in pseudocode)
     let mut bstart = 0;
     while bstart < s.len() {
-        let Some(rel_pos) = s[bstart..].find("bool(") else { break };
+        let Some(rel_pos) = s[bstart..].find("bool(") else {
+            break;
+        };
         let pos = bstart + rel_pos;
         if pos > 0 && is_ident_char(s.as_bytes()[pos - 1]) {
             bstart = pos + 5;
@@ -309,8 +350,7 @@ fn clean_line(text: &str) -> String {
                 let inner_text = &s[inner_start..pos + 1 + inner];
                 // Only simplify if inner_text starts with ! (double negation)
                 // AND the ! covers the entire inner expression (no top-level && or ||)
-                if inner_text.starts_with('!') {
-                    let after_neg = &inner_text[1..];
+                if let Some(after_neg) = inner_text.strip_prefix('!') {
                     if !has_toplevel_logical_op(after_neg) {
                         s = format!("{}{}{}", &s[..pos], after_neg, &s[pos + 2 + inner..]);
                         continue;
@@ -324,7 +364,9 @@ fn clean_line(text: &str) -> String {
     // Outer extra parens in if-conditions: "if ((EXPR)) {" → "if (EXPR) {"
     // Also handles "if ((EXPR)) return"
     for prefix in &["if (", "} else if ("] {
-        if !s.starts_with(prefix) { continue; }
+        if !s.starts_with(prefix) {
+            continue;
+        }
         let after_prefix = prefix.len();
         // Find the matching ')' for the '(' at the end of prefix
         if let Some(close) = find_matching_paren(&s[after_prefix - 1..]) {
@@ -364,7 +406,9 @@ fn has_toplevel_logical_op(s: &str) -> bool {
 
 /// Strip one layer of redundant outer parentheses if they match.
 fn strip_outer_parens(s: &str) -> &str {
-    if !s.starts_with('(') || !s.ends_with(')') { return s; }
+    if !s.starts_with('(') || !s.ends_with(')') {
+        return s;
+    }
     // Verify the open paren at 0 matches the close at end
     let inner = &s[1..s.len() - 1];
     let mut depth = 0i32;
@@ -373,24 +417,34 @@ fn strip_outer_parens(s: &str) -> &str {
             '(' => depth += 1,
             ')' => {
                 depth -= 1;
-                if depth < 0 { return s; } // close paren matched the outer open
+                if depth < 0 {
+                    return s;
+                } // close paren matched the outer open
             }
             _ => {}
         }
     }
-    if depth == 0 { inner } else { s }
+    if depth == 0 {
+        inner
+    } else {
+        s
+    }
 }
 
 /// Find the position of the closing ')' matching the '(' at position 0.
 fn find_matching_paren(s: &str) -> Option<usize> {
-    if !s.starts_with('(') { return None; }
+    if !s.starts_with('(') {
+        return None;
+    }
     let mut depth = 0i32;
     for (i, ch) in s.chars().enumerate() {
         match ch {
             '(' => depth += 1,
             ')' => {
                 depth -= 1;
-                if depth == 0 { return Some(i); }
+                if depth == 0 {
+                    return Some(i);
+                }
             }
             _ => {}
         }
@@ -408,36 +462,59 @@ fn rewrite_negated_guards(lines: &mut Vec<String>) {
         let indent_len = line.len() - line.trim_start().len();
         let trimmed = &line[indent_len..];
 
-        if !trimmed.starts_with("if (") { continue; }
+        if !trimmed.starts_with("if (") {
+            continue;
+        }
 
         // Find matching ) for the ( after "if "
         let after_if = &trimmed[3..];
-        let Some(close) = find_matching_paren(after_if) else { continue };
+        let Some(close) = find_matching_paren(after_if) else {
+            continue;
+        };
         let rest = after_if[close + 1..].trim();
-        if rest != "return" { continue; }
+        if rest != "return" {
+            continue;
+        }
 
         let cond = after_if[1..close].trim();
 
         // Must be !(COMPOUND)
-        if !cond.starts_with("!(") { continue; }
-        let Some(inner_close) = find_matching_paren(&cond[1..]) else { continue };
-        if 1 + inner_close + 1 != cond.len() { continue; }
+        if !cond.starts_with("!(") {
+            continue;
+        }
+        let Some(inner_close) = find_matching_paren(&cond[1..]) else {
+            continue;
+        };
+        if 1 + inner_close + 1 != cond.len() {
+            continue;
+        }
 
         let compound = &cond[2..1 + inner_close];
 
         // Only rewrite compound conditions
-        if !compound.contains(" && ") && !compound.contains(" || ") { continue; }
+        if !compound.contains(" && ") && !compound.contains(" || ") {
+            continue;
+        }
 
         // Find body extent
         let guard_indent = indent_len;
         let mut body_end = i + 1;
         while body_end < lines.len() {
             let t = lines[body_end].trim();
-            if t.starts_with("--- ") && t.ends_with(" ---") { break; }
-            if t.is_empty() { body_end += 1; continue; }
+            if t.starts_with("--- ") && t.ends_with(" ---") {
+                break;
+            }
+            if t.is_empty() {
+                body_end += 1;
+                continue;
+            }
             let li = lines[body_end].len() - lines[body_end].trim_start().len();
-            if li < guard_indent { break; }
-            if li == guard_indent && t == "}" { break; }
+            if li < guard_indent {
+                break;
+            }
+            if li == guard_indent && t == "}" {
+                break;
+            }
             body_end += 1;
         }
 
@@ -445,17 +522,23 @@ fn rewrite_negated_guards(lines: &mut Vec<String>) {
         let mut effective_end = body_end;
         while effective_end > i + 1 {
             let t = lines[effective_end - 1].trim();
-            if t == "return" || t.is_empty() { effective_end -= 1; } else { break; }
+            if t == "return" || t.is_empty() {
+                effective_end -= 1;
+            } else {
+                break;
+            }
         }
 
         let body_count = effective_end - (i + 1);
-        if body_count == 0 || body_count > 8 { continue; }
+        if body_count == 0 || body_count > 8 {
+            continue;
+        }
 
         // Rewrite: replace guard with positive if + wrapped body
         let indent_str = lines[i][..indent_len].to_string();
         lines[i] = format!("{}if ({}) {{", indent_str, compound);
-        for j in (i + 1)..effective_end {
-            lines[j] = format!("    {}", lines[j]);
+        for line in lines.iter_mut().take(effective_end).skip(i + 1) {
+            *line = format!("    {}", line);
         }
         lines.insert(effective_end, format!("{}}}", indent_str));
     }
@@ -546,8 +629,7 @@ fn rewrite_foreach_loops(lines: &mut Vec<String>) {
         };
 
         // Step 4: Find closing } and validate increment as last body line
-        let Some((close_idx, incr_idx)) =
-            find_close_and_increment(lines, i, indent_len, &counter)
+        let Some((close_idx, incr_idx)) = find_close_and_increment(lines, i, indent_len, &counter)
         else {
             i += 1;
             continue;
@@ -577,12 +659,17 @@ fn rewrite_foreach_loops(lines: &mut Vec<String>) {
             let for_idx = i - removed_before_i;
             let mut depth = 0i32;
             let mut new_close = for_idx;
-            for j in for_idx..lines.len() {
-                let t = lines[j].trim();
-                if t.ends_with('{') { depth += 1; }
+            for (j, line) in lines.iter().enumerate().skip(for_idx) {
+                let t = line.trim();
+                if t.ends_with('{') {
+                    depth += 1;
+                }
                 if t == "}" {
                     depth -= 1;
-                    if depth == 0 { new_close = j; break; }
+                    if depth == 0 {
+                        new_close = j;
+                        break;
+                    }
                 }
             }
             // Scan body for Array_Get(ARRAY, INDEX_VAR, ITEM) and remove
@@ -627,7 +714,10 @@ fn parse_foreach_while(trimmed: &str) -> Option<(String, String)> {
 
 /// Scan backward from while_idx for COUNTER = 0 and INDEX = 0 init lines.
 fn find_foreach_init(
-    lines: &[String], while_idx: usize, indent_len: usize, counter: &str,
+    lines: &[String],
+    while_idx: usize,
+    indent_len: usize,
+    counter: &str,
 ) -> Option<(usize, usize, String)> {
     // Look at up to 4 lines before while for counter=0 and index=0 (compiler may insert gaps)
     let start = while_idx.saturating_sub(4);
@@ -637,9 +727,13 @@ fn find_foreach_init(
 
     for j in (start..while_idx).rev() {
         let t = lines[j].trim();
-        if t.is_empty() { continue; }
+        if t.is_empty() {
+            continue;
+        }
         let li = lines[j].len() - t.len();
-        if li != indent_len { break; }
+        if li != indent_len {
+            break;
+        }
 
         if t == format!("{} = 0", counter) {
             counter_idx = Some(j);
@@ -655,25 +749,38 @@ fn find_foreach_init(
 
 /// Validate first two body lines: INDEX = COUNTER, then Array_Get(ARRAY, INDEX, ITEM).
 fn validate_body_start(
-    lines: &[String], start: usize, body_indent: usize,
-    index: &str, counter: &str, array: &str,
+    lines: &[String],
+    start: usize,
+    body_indent: usize,
+    index: &str,
+    counter: &str,
+    array: &str,
 ) -> Option<(usize, usize, String)> {
     // Find the first two non-empty body lines
     let mut body_lines = Vec::new();
     let mut j = start;
     while j < lines.len() && body_lines.len() < 2 {
         let t = lines[j].trim();
-        if t.is_empty() { j += 1; continue; }
+        if t.is_empty() {
+            j += 1;
+            continue;
+        }
         let li = lines[j].len() - t.len();
-        if li < body_indent { return None; }
+        if li < body_indent {
+            return None;
+        }
         body_lines.push((j, t.to_string()));
         j += 1;
     }
-    if body_lines.len() < 2 { return None; }
+    if body_lines.len() < 2 {
+        return None;
+    }
 
     // Line 1: INDEX = COUNTER
     let expected_assign = format!("{} = {}", index, counter);
-    if body_lines[0].1 != expected_assign { return None; }
+    if body_lines[0].1 != expected_assign {
+        return None;
+    }
     let assign_idx = body_lines[0].0;
 
     // Line 2: Array_Get(ARRAY, INDEX, ITEM)
@@ -681,8 +788,12 @@ fn validate_body_start(
     let rest = t.strip_prefix("Array_Get(")?;
     let rest = rest.strip_suffix(')')?;
     let args = split_args(rest);
-    if args.len() != 3 { return None; }
-    if args[0] != array || args[1] != index { return None; }
+    if args.len() != 3 {
+        return None;
+    }
+    if args[0] != array || args[1] != index {
+        return None;
+    }
     let item = args[2].to_string();
     let get_idx = body_lines[1].0;
 
@@ -691,16 +802,21 @@ fn validate_body_start(
 
 /// Find closing `}` and validate COUNTER = COUNTER + 1 as the last body line before it.
 fn find_close_and_increment(
-    lines: &[String], while_idx: usize, indent_len: usize, counter: &str,
+    lines: &[String],
+    while_idx: usize,
+    indent_len: usize,
+    counter: &str,
 ) -> Option<(usize, usize)> {
     // Find the closing } at the same indent as while
     let mut depth = 0i32;
     let mut close_idx = None;
-    for j in while_idx..lines.len() {
-        let t = lines[j].trim();
-        if t.ends_with('{') { depth += 1; }
+    for (j, line) in lines.iter().enumerate().skip(while_idx) {
+        let t = line.trim();
+        if t.ends_with('{') {
+            depth += 1;
+        }
         if t == "}" {
-            let li = lines[j].len() - t.len();
+            let li = line.len() - t.len();
             if li == indent_len {
                 depth -= 1;
                 if depth == 0 {
@@ -717,7 +833,9 @@ fn find_close_and_increment(
     let mut incr_idx = None;
     for j in (while_idx + 1..close_idx).rev() {
         let t = lines[j].trim();
-        if t.is_empty() { continue; }
+        if t.is_empty() {
+            continue;
+        }
         if t == expected_incr {
             incr_idx = Some(j);
         }
@@ -749,7 +867,9 @@ fn fold_delegate_bindings(lines: &mut Vec<String>) {
         // Verify delegate is not used elsewhere (expect exactly 1 ref outside bind line)
         let mut total_refs = 0;
         for (j, line) in lines.iter().enumerate() {
-            if j == i { continue; } // skip the bind line itself
+            if j == i {
+                continue;
+            } // skip the bind line itself
             total_refs += count_var_refs(line.trim(), &delegate);
         }
         if total_refs != 1 {
@@ -770,12 +890,16 @@ fn parse_bind_call(text: &str) -> Option<(String, String, String)> {
     let rest = text.strip_prefix("bind(")?;
     let rest = rest.strip_suffix(')')?;
     let args = split_args(rest);
-    if args.len() != 3 { return None; }
+    if args.len() != 3 {
+        return None;
+    }
     let func = args[0];
     let delegate = args[1];
     let obj = args[2];
     // Delegate must be a $temp variable
-    if !delegate.starts_with('$') { return None; }
+    if !delegate.starts_with('$') {
+        return None;
+    }
     Some((func.to_string(), delegate.to_string(), obj.to_string()))
 }
 
@@ -832,10 +956,14 @@ fn fold_cast_guards(lines: &mut Vec<String>) {
 
 /// Parse `$VAR = cast<...>(...)` assignment where RHS starts with cast</icast</obj_cast<.
 fn parse_cast_assignment(text: &str) -> Option<(&str, &str)> {
-    if !text.starts_with('$') { return None; }
+    if !text.starts_with('$') {
+        return None;
+    }
     let eq_pos = text.find(" = ")?;
     let var = &text[..eq_pos];
-    if var.contains('.') || var.contains('[') { return None; }
+    if var.contains('.') || var.contains('[') {
+        return None;
+    }
     let rhs = &text[eq_pos + 3..];
     if rhs.starts_with("cast<") || rhs.starts_with("icast<") || rhs.starts_with("obj_cast<") {
         Some((var, rhs))
@@ -854,37 +982,53 @@ fn fold_break_patterns(lines: &mut Vec<String>) {
         let trimmed = lines[i].trim().to_string();
 
         // Match Break* function calls at start of line
-        let Some(paren_start) = trimmed.find('(') else { continue };
+        let Some(paren_start) = trimmed.find('(') else {
+            continue;
+        };
         let func_name = &trimmed[..paren_start];
-        if !func_name.starts_with("Break") || !trimmed.ends_with(')') { continue; }
+        if !func_name.starts_with("Break") || !trimmed.ends_with(')') {
+            continue;
+        }
 
         let args_str = &trimmed[paren_start + 1..trimmed.len() - 1];
         let args = split_args(args_str);
 
         // First arg is source, rest are output vars
-        if args.len() < 2 { continue; }
+        if args.len() < 2 {
+            continue;
+        }
         let output_args = &args[1..];
-        if output_args.len() > BREAK_INLINE_MAX_ARGS { continue; }
+        if output_args.len() > BREAK_INLINE_MAX_ARGS {
+            continue;
+        }
 
         // All output vars must be $temp
-        if !output_args.iter().all(|a| a.starts_with('$')) { continue; }
+        if !output_args.iter().all(|a| a.starts_with('$')) {
+            continue;
+        }
 
         let source = args[0].to_string();
         let prefix = format!("${}_", func_name);
 
         // Infer field names from $BreakName_FieldName convention
-        let raw_fields: Vec<Option<&str>> = output_args.iter()
+        let raw_fields: Vec<Option<&str>> = output_args
+            .iter()
             .map(|a| a.strip_prefix(&prefix))
             .collect();
 
         // If any arg can't be resolved, skip this Break call
-        if raw_fields.iter().any(|f| f.is_none()) { continue; }
+        if raw_fields.iter().any(|f| f.is_none()) {
+            continue;
+        }
         let raw_fields: Vec<&str> = raw_fields.into_iter().map(|f| f.unwrap()).collect();
 
         // Detect shared disambiguation suffix (_1, _2, etc.)
         // If all fields end with the same _N, strip it
         let fields: Vec<&str> = if let Some(common_suffix) = detect_common_suffix(&raw_fields) {
-            raw_fields.iter().map(|f| &f[..f.len() - common_suffix.len()]).collect()
+            raw_fields
+                .iter()
+                .map(|f| &f[..f.len() - common_suffix.len()])
+                .collect()
         } else {
             raw_fields
         };
@@ -893,13 +1037,12 @@ fn fold_break_patterns(lines: &mut Vec<String>) {
         for (idx, &out_var) in output_args.iter().enumerate() {
             let replacement = format!("{}.{}", source, fields[idx]);
 
-            for j in (i + 1)..lines.len() {
-                let line = &lines[j];
+            for line in lines.iter_mut().skip(i + 1) {
                 let indent_len = line.len() - line.trim_start().len();
                 let content = &line[indent_len..];
                 if count_var_refs(content, out_var) > 0 {
                     let new_content = replace_all_var_refs(content, out_var, &replacement);
-                    lines[j] = format!("{}{}", &line[..indent_len], new_content);
+                    *line = format!("{}{}", &line[..indent_len], new_content);
                 }
             }
         }
@@ -953,19 +1096,28 @@ fn fold_struct_construction(lines: &mut Vec<String>) {
                 let target = &t[..eq_pos];
                 let src = &t[eq_pos + 3..];
                 if src == expected_var {
-                    let type_name = expected_var.strip_prefix("$MakeStruct_")
+                    let type_name = expected_var
+                        .strip_prefix("$MakeStruct_")
                         .unwrap_or(&expected_var);
 
-                    let args: Vec<String> = fields.iter().map(|(field, value)| {
-                        if field == value {
-                            value.clone()
-                        } else {
-                            format!("{}: {}", field, value)
-                        }
-                    }).collect();
+                    let args: Vec<String> = fields
+                        .iter()
+                        .map(|(field, value)| {
+                            if field == value {
+                                value.clone()
+                            } else {
+                                format!("{}: {}", field, value)
+                            }
+                        })
+                        .collect();
 
-                    let new_line = format!("{}{} = {}({})",
-                        indent_str, target, type_name, args.join(", "));
+                    let new_line = format!(
+                        "{}{} = {}({})",
+                        indent_str,
+                        target,
+                        type_name,
+                        args.join(", ")
+                    );
 
                     let run_end = i + 1;
                     lines.splice(run_start..run_end, std::iter::once(new_line));
@@ -981,7 +1133,7 @@ fn fold_struct_construction(lines: &mut Vec<String>) {
 /// Replace unused `$temp` out-params with `_` in function calls.
 /// A var is "unused" if it only ever appears as a simple argument in calls
 /// to exactly one function name (i.e., it's never read by any other code).
-fn suppress_unused_outparams(lines: &mut Vec<String>) {
+fn suppress_unused_outparams(lines: &mut [String]) {
     let mut all_vars: Vec<String> = Vec::new();
     for line in lines.iter() {
         for var in extract_dollar_vars(line.trim()) {
@@ -991,7 +1143,8 @@ fn suppress_unused_outparams(lines: &mut Vec<String>) {
         }
     }
 
-    let to_suppress: Vec<String> = all_vars.into_iter()
+    let to_suppress: Vec<String> = all_vars
+        .into_iter()
         .filter(|var| is_unused_outparam(lines, var))
         .collect();
 
@@ -1012,14 +1165,17 @@ fn suppress_unused_outparams(lines: &mut Vec<String>) {
 /// `BreakHitResult(src, _, _, _, $BreakHitResult_Location, ...)` →
 ///   `BreakHitResult(src, Location: $BreakHitResult_Location, ...)`
 /// Triggers when a Break call has ≥6 output args and ≥50% are `_`.
-fn compact_large_break_calls(lines: &mut Vec<String>) {
+fn compact_large_break_calls(lines: &mut [String]) {
     let mut i = 0;
     while i < lines.len() {
         let trimmed = lines[i].trim();
         let indent_len = lines[i].len() - trimmed.len();
 
         // Match Break* calls above the inline threshold (small ones handled by fold_break_patterns)
-        let Some(paren_start) = trimmed.find('(') else { i += 1; continue };
+        let Some(paren_start) = trimmed.find('(') else {
+            i += 1;
+            continue;
+        };
         let func_name = &trimmed[..paren_start];
         if !func_name.starts_with("Break") || !trimmed.ends_with(')') {
             i += 1;
@@ -1030,11 +1186,20 @@ fn compact_large_break_calls(lines: &mut Vec<String>) {
         let args = split_args(args_str);
 
         // Skip small Break calls (handled by fold_break_patterns) and need ≥50% underscores
-        if args.len() < 2 { i += 1; continue; }
+        if args.len() < 2 {
+            i += 1;
+            continue;
+        }
         let output_count = args.len() - 1;
-        if output_count <= BREAK_INLINE_MAX_ARGS { i += 1; continue; }
+        if output_count <= BREAK_INLINE_MAX_ARGS {
+            i += 1;
+            continue;
+        }
         let underscore_count = args[1..].iter().filter(|a| **a == "_").count();
-        if underscore_count * 2 < args.len() - 1 { i += 1; continue; }
+        if underscore_count * 2 < args.len() - 1 {
+            i += 1;
+            continue;
+        }
 
         let source = args[0];
         let indent_str = lines[i][..indent_len].to_string();
@@ -1043,7 +1208,9 @@ fn compact_large_break_calls(lines: &mut Vec<String>) {
         // Build compacted params: source first, then named used params
         let mut parts = vec![source.to_string()];
         for &arg in &args[1..] {
-            if arg == "_" { continue; }
+            if arg == "_" {
+                continue;
+            }
             // Infer field name from $BreakName_FieldName pattern
             if let Some(field) = arg.strip_prefix(&prefix) {
                 parts.push(format!("{}: {}", field, arg));
@@ -1096,9 +1263,9 @@ fn strip_make_prefix(text: &str) -> String {
         }
         // Must be followed by `(` eventually (it's a function call)
         let rest = &text[after_make..];
-        let has_paren = rest.find('(').map_or(false, |p| {
-            rest[..p].chars().all(|c| c.is_alphanumeric() || c == '_')
-        });
+        let has_paren = rest
+            .find('(')
+            .is_some_and(|p| rest[..p].chars().all(|c| c.is_alphanumeric() || c == '_'));
         if !has_paren {
             result.push_str(&text[start..abs_pos + 4]);
             start = abs_pos + 4;
@@ -1123,7 +1290,9 @@ fn fold_section_temps(lines: &mut Vec<String>) {
         let mut inlined_any = false;
 
         // Collect assignments: (index, var_name, expr)
-        let assignments: Vec<(usize, String, String)> = lines.iter().enumerate()
+        let assignments: Vec<(usize, String, String)> = lines
+            .iter()
+            .enumerate()
             .filter_map(|(i, line)| {
                 let trimmed = line.trim_start();
                 let (var, expr) = parse_temp_assignment(trimmed)?;
@@ -1140,10 +1309,14 @@ fn fold_section_temps(lines: &mut Vec<String>) {
         // Find single-use vars within this section
         let mut to_inline = Vec::new();
         for (idx, var, expr) in &assignments {
-            if assign_counts.get(var.as_str()).copied().unwrap_or(0) != 1 { continue; }
+            if assign_counts.get(var.as_str()).copied().unwrap_or(0) != 1 {
+                continue;
+            }
             let mut ref_count = 0usize;
             for (i, line) in lines.iter().enumerate() {
-                if i == *idx { continue; }
+                if i == *idx {
+                    continue;
+                }
                 ref_count += count_var_refs(line.trim(), var);
             }
             if ref_count == 1 {
@@ -1154,7 +1327,9 @@ fn fold_section_temps(lines: &mut Vec<String>) {
         // Apply substitutions with re-verification
         let mut removed = Vec::new();
         for (assign_idx, var_name, _) in &to_inline {
-            if removed.contains(assign_idx) { continue; }
+            if removed.contains(assign_idx) {
+                continue;
+            }
             let current_expr = match parse_temp_assignment(lines[*assign_idx].trim_start()) {
                 Some((v, e)) if v == var_name => e.to_string(),
                 _ => continue,
@@ -1162,12 +1337,18 @@ fn fold_section_temps(lines: &mut Vec<String>) {
             let mut refs = 0usize;
             let mut target = None;
             for (i, line) in lines.iter().enumerate() {
-                if i == *assign_idx || removed.contains(&i) { continue; }
+                if i == *assign_idx || removed.contains(&i) {
+                    continue;
+                }
                 let r = count_var_refs(line.trim(), var_name);
                 refs += r;
-                if r == 1 && target.is_none() { target = Some(i); }
+                if r == 1 && target.is_none() {
+                    target = Some(i);
+                }
             }
-            if refs != 1 { continue; }
+            if refs != 1 {
+                continue;
+            }
             let Some(target_idx) = target else { continue };
 
             let indent_len = lines[target_idx].len() - lines[target_idx].trim_start().len();
@@ -1175,7 +1356,9 @@ fn fold_section_temps(lines: &mut Vec<String>) {
             let replacement = substitute_var(content, var_name, &current_expr);
 
             let shortens = current_expr.len() + 2 <= var_name.len();
-            if !shortens && (indent_len + replacement.len()) > MAX_LINE { continue; }
+            if !shortens && (indent_len + replacement.len()) > MAX_LINE {
+                continue;
+            }
 
             lines[target_idx] = format!("{}{}", &lines[target_idx][..indent_len], replacement);
             removed.push(*assign_idx);
@@ -1183,8 +1366,12 @@ fn fold_section_temps(lines: &mut Vec<String>) {
         }
 
         removed.sort_unstable();
-        for idx in removed.into_iter().rev() { lines.remove(idx); }
-        if !inlined_any { break; }
+        for idx in removed.into_iter().rev() {
+            lines.remove(idx);
+        }
+        if !inlined_any {
+            break;
+        }
     }
 }
 
@@ -1194,7 +1381,10 @@ fn fold_section_temps(lines: &mut Vec<String>) {
 fn dedup_completion_paths(lines: &mut Vec<String>) {
     let mut i = 0;
     while i < lines.len() {
-        if lines[i].trim() != "// on loop complete:" { i += 1; continue; }
+        if lines[i].trim() != "// on loop complete:" {
+            i += 1;
+            continue;
+        }
 
         let marker_idx = i;
         let marker_indent = lines[i].len() - lines[i].trim_start().len();
@@ -1204,44 +1394,63 @@ fn dedup_completion_paths(lines: &mut Vec<String>) {
         let mut comp_end = comp_start;
         while comp_end < lines.len() {
             let t = lines[comp_end].trim();
-            if t.is_empty() { comp_end += 1; continue; }
+            if t.is_empty() {
+                comp_end += 1;
+                continue;
+            }
             let li = lines[comp_end].len() - lines[comp_end].trim_start().len();
-            if li <= marker_indent && (t.starts_with('}') || t.starts_with("---")) { break; }
+            if li <= marker_indent && (t.starts_with('}') || t.starts_with("---")) {
+                break;
+            }
             comp_end += 1;
         }
-        if comp_end <= comp_start { i += 1; continue; }
+        if comp_end <= comp_start {
+            i += 1;
+            continue;
+        }
 
         // Find the while/for loop above
-        let while_idx = (0..marker_idx).rev()
-            .find(|&j| {
-                let t = lines[j].trim();
-                t.starts_with("while ") || t.starts_with("for ")
-            });
-        let Some(while_idx) = while_idx else { i = comp_end; continue; };
+        let while_idx = (0..marker_idx).rev().find(|&j| {
+            let t = lines[j].trim();
+            t.starts_with("while ") || t.starts_with("for ")
+        });
+        let Some(while_idx) = while_idx else {
+            i = comp_end;
+            continue;
+        };
 
         // Collect pre-loop lines at same indent level
         let while_indent = lines[while_idx].len() - lines[while_idx].trim_start().len();
         let mut pre_start = while_idx;
         for j in (0..while_idx).rev() {
             let t = lines[j].trim();
-            if t.is_empty() { continue; }
+            if t.is_empty() {
+                continue;
+            }
             let li = lines[j].len() - lines[j].trim_start().len();
             if li == while_indent && !t.starts_with('}') && !t.starts_with("//") {
                 pre_start = j;
-            } else { break; }
+            } else {
+                break;
+            }
         }
 
         // Build set of pre-loop lines (trimmed) for duplicate detection
         let pre_set: HashSet<&str> = lines[pre_start..while_idx]
-            .iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+            .iter()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .collect();
 
         // Check each completion line: is it a duplicate of a pre-loop line?
         let mut matched_count = 0usize;
         let mut total_count = 0usize;
         let mut unique_indices: Vec<usize> = Vec::new();
-        for j in comp_start..comp_end {
-            let t = lines[j].trim();
-            if t.is_empty() { continue; }
+        for (j, line) in lines.iter().enumerate().take(comp_end).skip(comp_start) {
+            let t = line.trim();
+            if t.is_empty() {
+                continue;
+            }
             total_count += 1;
             if pre_set.contains(t) {
                 matched_count += 1;
@@ -1256,10 +1465,14 @@ fn dedup_completion_paths(lines: &mut Vec<String>) {
             let mut replacement: Vec<String> = Vec::new();
             if unique_indices.is_empty() {
                 replacement.push(format!(
-                    "{}// on loop complete: (same as pre-loop setup)", indent));
+                    "{}// on loop complete: (same as pre-loop setup)",
+                    indent
+                ));
             } else {
                 replacement.push(format!(
-                    "{}// on loop complete: (repeats pre-loop setup)", indent));
+                    "{}// on loop complete: (repeats pre-loop setup)",
+                    indent
+                ));
                 for &j in &unique_indices {
                     replacement.push(lines[j].clone());
                 }
@@ -1278,7 +1491,9 @@ fn dedup_completion_paths(lines: &mut Vec<String>) {
 /// Detect a shared `_N` disambiguation suffix across all field names.
 /// Returns Some("_1") if all fields end with "_1", etc.
 fn detect_common_suffix<'a>(fields: &[&'a str]) -> Option<&'a str> {
-    if fields.is_empty() { return None; }
+    if fields.is_empty() {
+        return None;
+    }
     // Find the last '_' in the first field
     let first = fields[0];
     let last_underscore = first.rfind('_')?;
@@ -1288,7 +1503,10 @@ fn detect_common_suffix<'a>(fields: &[&'a str]) -> Option<&'a str> {
         return None;
     }
     // All fields must share this suffix
-    if fields.iter().all(|f| f.ends_with(suffix) && f.len() > suffix.len()) {
+    if fields
+        .iter()
+        .all(|f| f.ends_with(suffix) && f.len() > suffix.len())
+    {
         Some(suffix)
     } else {
         None
@@ -1320,7 +1538,9 @@ fn split_args(s: &str) -> Vec<&str> {
 
 /// Parse `$MakeStruct_TYPE.FIELD = VALUE`.
 fn parse_make_struct_field(text: &str) -> Option<(&str, &str, &str)> {
-    if !text.starts_with("$MakeStruct_") { return None; }
+    if !text.starts_with("$MakeStruct_") {
+        return None;
+    }
     let dot_pos = text.find('.')?;
     let struct_var = &text[..dot_pos];
     let rest = &text[dot_pos + 1..];
@@ -1436,14 +1656,20 @@ fn extract_containing_func_name(before_text: &str) -> Option<String> {
     }
 
     let paren = paren_pos?;
-    if paren == 0 { return None; }
+    if paren == 0 {
+        return None;
+    }
     let before_paren = &trimmed[..paren];
     let name_start = before_paren
         .rfind(|c: char| !c.is_alphanumeric() && c != '_')
         .map(|p| p + 1)
         .unwrap_or(0);
     let name = &trimmed[name_start..paren];
-    if name.is_empty() { None } else { Some(name.to_string()) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -1735,7 +1961,10 @@ mod tests {
 
     #[test]
     fn substitute_temp_no_prefix_match() {
-        assert_eq!(substitute_var("SomeTemp_0 + 1", "Temp_0", "42"), "SomeTemp_0 + 1");
+        assert_eq!(
+            substitute_var("SomeTemp_0 + 1", "Temp_0", "42"),
+            "SomeTemp_0 + 1"
+        );
     }
 
     #[test]
