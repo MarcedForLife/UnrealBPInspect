@@ -1,4 +1,4 @@
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use anyhow::Result;
 
 use crate::binary::*;
@@ -16,10 +16,7 @@ pub fn skip_ffield_child(c: &mut R, nt: &NameTable, end: u64) -> Result<()> {
         let meta_count = read_i32(c)?;
         for _ in 0..meta_count {
             let _meta_key = nt.fname(c)?;
-            let meta_val_len = read_i32(c)?;
-            if meta_val_len > 0 {
-                c.seek(SeekFrom::Current(meta_val_len as i64))?;
-            }
+            let _meta_val = read_fstring(c)?;
         }
     }
     let _array_dim = read_i32(c)?;

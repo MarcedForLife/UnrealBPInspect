@@ -21,6 +21,12 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
         let _ue3_ver = read_i32(&mut c)?;
     }
     let file_ver = read_i32(&mut c)?;
+    let file_ver_ue5: i32 = if legacy_ver <= -8 {
+        read_i32(&mut c)?
+    } else {
+        0
+    };
+    let ver = AssetVersion { file_ver, file_ver_ue5 };
     let _licensee_ver = read_i32(&mut c)?;
     let custom_ver_count = read_i32(&mut c)?;
     c.seek(SeekFrom::Current(custom_ver_count as i64 * 20))?;
@@ -29,6 +35,10 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
     let _pkg_flags = read_u32(&mut c)?;
     let name_count = read_i32(&mut c)?;
     let name_offset = read_i32(&mut c)?;
+    if file_ver_ue5 >= 1007 { // ADD_SOFTOBJECTPATH_LIST
+        let _soft_count = read_i32(&mut c)?;
+        let _soft_offset = read_i32(&mut c)?;
+    }
     if file_ver >= 516 { let _loc_id = read_fstring(&mut c)?; }
     if file_ver >= 459 { let _gc = read_i32(&mut c)?; let _go = read_i32(&mut c)?; }
     let export_count = read_i32(&mut c)?;
@@ -41,7 +51,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
         .context("failed to read name table")?;
 
     if debug {
-        eprintln!("Header: file_ver={} names={} imports={} exports={}", file_ver, name_count, import_count, export_count);
+        eprintln!("Header: file_ver={} ue5_ver={} names={} imports={} exports={}", file_ver, file_ver_ue5, name_count, import_count, export_count);
     }
 
     // --- Import table ---
@@ -54,6 +64,9 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
         let object_name = nt.fname(&mut c)?;
         if file_ver >= 518 {
             let _package_name = nt.fname(&mut c)?;
+        }
+        if file_ver_ue5 >= 1003 { // OPTIONAL_RESOURCES
+            let _import_optional = read_i32(&mut c)?;
         }
         if debug {
             eprintln!("  Import[{}]: {}::{} outer={} name={}",
@@ -77,16 +90,28 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
         let _forced = read_i32(&mut c)?;
         let _not_client = read_i32(&mut c)?;
         let _not_server = read_i32(&mut c)?;
-        let _guid = read_guid(&mut c)?;
+        if file_ver_ue5 < 1005 { // PackageGuid removed at REMOVE_OBJECT_EXPORT_PACKAGE_GUID
+            let _guid = read_guid(&mut c)?;
+        }
+        if file_ver_ue5 >= 1006 { // TRACK_OBJECT_EXPORT_IS_INHERITED
+            let _is_inherited = read_i32(&mut c)?;
+        }
         let _pkg_flags = read_u32(&mut c)?;
         if file_ver >= 459 { let _not_always = read_i32(&mut c)?; }
         if file_ver >= 459 { let _is_asset = read_i32(&mut c)?; }
+        if file_ver_ue5 >= 1003 { // OPTIONAL_RESOURCES
+            let _gen_public_hash = read_i32(&mut c)?;
+        }
         if file_ver >= 518 {
             let _first_dep = read_i32(&mut c)?;
             let _s_before_s = read_i32(&mut c)?;
             let _c_before_s = read_i32(&mut c)?;
             let _s_before_c = read_i32(&mut c)?;
             let _c_before_c = read_i32(&mut c)?;
+        }
+        if file_ver_ue5 >= 1010 { // SCRIPT_SERIALIZATION_OFFSET
+            let _script_start = read_i64(&mut c)?;
+            let _script_end = read_i64(&mut c)?;
         }
         export_headers.push(ExportHeader {
             class_index, super_index, outer_index, object_name,
@@ -112,11 +137,11 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
                 || class_name.ends_with(".BlueprintGeneratedClass")
                 || class_name.ends_with(".ScriptStruct");
             if !is_struct {
-                return Ok(read_properties(&mut c, &nt, end, file_ver));
+                return Ok(read_properties(&mut c, &nt, end, ver));
             }
 
             let is_function = class_name.ends_with(".Function");
-            let props = read_properties(&mut c, &nt, end, file_ver);
+            let props = read_properties(&mut c, &nt, end, ver);
             let after_props = c.position();
 
             let mut extra_props = props;
@@ -157,10 +182,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
                         let meta_count = read_i32(&mut c)?;
                         for _ in 0..meta_count {
                             let _meta_key = nt.fname(&mut c)?;
-                            let meta_val_len = read_i32(&mut c)?;
-                            if meta_val_len > 0 {
-                                c.seek(SeekFrom::Current(meta_val_len as i64))?;
-                            }
+                            let _meta_val = read_fstring(&mut c)?;
                         }
                     }
                     let _array_dim = read_i32(&mut c)?;
@@ -234,7 +256,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
             }
 
             if !bytecode_data.is_empty() {
-                let (stmts, final_mem_adj) = decode_bytecode(&bytecode_data, &nt, &imports, &export_names_pre);
+                let (stmts, final_mem_adj) = decode_bytecode(&bytecode_data, &nt, &imports, &export_names_pre, ver.file_ver_ue5);
                 if debug {
                     let expected = bytecode_size - storage_size;
                     let drift = final_mem_adj - expected;

@@ -107,13 +107,15 @@ fn parse_temp_assignment(text: &str) -> Option<(&str, &str)> {
 /// Count non-overlapping occurrences of `$VarName` in text,
 /// only at word boundaries (not part of a longer $name).
 fn count_var_refs(text: &str, var: &str) -> usize {
+    let needs_start_check = !var.starts_with('$');
     let mut count = 0;
     let mut start = 0;
     while let Some(pos) = text[start..].find(var) {
         let abs_pos = start + pos;
         let after = abs_pos + var.len();
-        let at_boundary = after >= text.len() || !is_ident_char(text.as_bytes()[after]);
-        if at_boundary {
+        let at_start = !needs_start_check || abs_pos == 0 || !is_ident_char(text.as_bytes()[abs_pos - 1]);
+        let at_end = after >= text.len() || !is_ident_char(text.as_bytes()[after]);
+        if at_start && at_end {
             count += 1;
         }
         start = after;
@@ -128,12 +130,14 @@ fn is_ident_char(b: u8) -> bool {
 /// Substitute `$VarName` or `Temp_*` with `expr` in `text`, adding parens if needed.
 /// Only replaces at word boundaries (first match).
 fn substitute_var(text: &str, var: &str, expr: &str) -> String {
+    let needs_start_check = !var.starts_with('$');
     let mut start = 0;
     while let Some(rel) = text[start..].find(var) {
         let pos = start + rel;
         let after = pos + var.len();
-        let at_boundary = after >= text.len() || !is_ident_char(text.as_bytes()[after]);
-        if at_boundary {
+        let at_start = !needs_start_check || pos == 0 || !is_ident_char(text.as_bytes()[pos - 1]);
+        let at_end = after >= text.len() || !is_ident_char(text.as_bytes()[after]);
+        if at_start && at_end {
             let needs_wrap = expr_is_compound(expr) && used_in_operator_context(text, pos, after);
             let sub = if needs_wrap { format!("({})", expr) } else { expr.to_string() };
             return format!("{}{}{}", &text[..pos], sub, &text[after..]);
@@ -1716,5 +1720,26 @@ mod tests {
     #[test]
     fn outer_parens_not_wrapped() {
         assert_eq!(strip_outer_parens("A + B"), "A + B");
+    }
+
+    // preceding boundary checks
+    #[test]
+    fn count_refs_temp_no_prefix_match() {
+        assert_eq!(count_var_refs("SomeTemp_0 + 1", "Temp_0"), 0);
+    }
+
+    #[test]
+    fn count_refs_temp_standalone() {
+        assert_eq!(count_var_refs("Temp_0 + 1", "Temp_0"), 1);
+    }
+
+    #[test]
+    fn substitute_temp_no_prefix_match() {
+        assert_eq!(substitute_var("SomeTemp_0 + 1", "Temp_0", "42"), "SomeTemp_0 + 1");
+    }
+
+    #[test]
+    fn count_refs_dollar_prefix_safe() {
+        assert_eq!(count_var_refs("pre$Foo + 1", "$Foo"), 1);
     }
 }
