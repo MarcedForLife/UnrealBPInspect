@@ -30,7 +30,8 @@ pub fn read_bc_obj_ref(
     mem_adj: &mut i32,
 ) -> String {
     let index = read_bc_i32(bc, pos);
-    *mem_adj += 4; // disk: 4 bytes (int32), mem: 8 bytes (pointer)
+    // Object references are int32 (FPackageIndex) on disk but 8-byte pointers in memory
+    *mem_adj += 4;
     resolve_bc_obj(index, imports, export_names)
 }
 

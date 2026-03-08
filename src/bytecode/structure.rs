@@ -5,10 +5,14 @@ use super::flow::{
 use std::collections::{HashMap, HashSet};
 
 /// Negate a condition string for if/else inversion.
-/// Rules: `!X` → `X`, `!(expr)` → `expr` (if balanced), otherwise `!(cond)`.
-/// Wraps in parens when infix operators are present to preserve precedence
-/// (`!A && B` means `(!A) && B`, not `!(A && B)`) — depth tracking avoids
-/// wrapping operators inside nested parentheses.
+///
+/// Three cases:
+/// - `!X` → `X` (strip simple negation, but only if X has no spaces/operators)
+/// - `!(expr)` → `expr` (strip negated parens, but only if parens are balanced)
+/// - Otherwise → `!(cond)` (wraps compound conditions to preserve precedence)
+///
+/// The wrapping is critical: `!A && B` means `(!A) && B`, not `!(A && B)`,
+/// so compound conditions must get `!()` not just `!` prefix.
 fn negate_cond(cond: &str) -> String {
     // Already negated simple expr: !X → X
     if cond.starts_with('!') && !cond.starts_with("!(") {
@@ -70,6 +74,8 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         return Vec::new();
     }
 
+    // Build offset → index map with 4-byte tolerance fallback (same rationale as flow.rs:
+    // skipped opcodes like wire_trace/tracepoint cause jump targets to be slightly off)
     let exact_map: HashMap<usize, usize> = stmts
         .iter()
         .enumerate()
@@ -192,9 +198,11 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         });
     }
 
-    // Pass 1.5: false-block truncation — when the false block contains an
-    // unconditional jump to end_idx, the else body ends at that jump, not at end_idx.
-    // This prevents inner else blocks from engulfing outer false blocks.
+    // Pass 1.5: false-block truncation.
+    // In nested convergence patterns, an inner else block's end_idx can be the same as
+    // an outer block's end_idx, making the inner else appear to span all the way to the
+    // outer block's end. Fix: scan the false block for an unconditional jump targeting
+    // end_idx — that jump is where the else body actually ends.
     for blk in &mut if_blocks {
         let Some(end_idx) = blk.end_idx else {
             continue;

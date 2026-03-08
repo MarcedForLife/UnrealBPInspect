@@ -132,19 +132,14 @@ fn parse_temp_assignment(text: &str) -> Option<(&str, &str)> {
 /// Count non-overlapping occurrences of `$VarName` in text,
 /// only at word boundaries (not part of a longer $name).
 fn count_var_refs(text: &str, var: &str) -> usize {
-    let needs_start_check = !var.starts_with('$');
     let mut count = 0;
     let mut start = 0;
     while let Some(pos) = text[start..].find(var) {
         let abs_pos = start + pos;
-        let after = abs_pos + var.len();
-        let at_start =
-            !needs_start_check || abs_pos == 0 || !is_ident_char(text.as_bytes()[abs_pos - 1]);
-        let at_end = after >= text.len() || !is_ident_char(text.as_bytes()[after]);
-        if at_start && at_end {
+        if is_var_boundary(text, abs_pos, var) {
             count += 1;
         }
-        start = after;
+        start = abs_pos + var.len();
     }
     count
 }
@@ -153,17 +148,23 @@ fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+/// Check if `var` appears at a word boundary at position `pos` in `text`.
+/// For `$`-prefixed vars, the start boundary is always satisfied ($ isn't an ident char).
+fn is_var_boundary(text: &str, pos: usize, var: &str) -> bool {
+    let after = pos + var.len();
+    let at_start = var.starts_with('$') || pos == 0 || !is_ident_char(text.as_bytes()[pos - 1]);
+    let at_end = after >= text.len() || !is_ident_char(text.as_bytes()[after]);
+    at_start && at_end
+}
+
 /// Substitute `$VarName` or `Temp_*` with `expr` in `text`, adding parens if needed.
 /// Only replaces at word boundaries (first match).
 fn substitute_var(text: &str, var: &str, expr: &str) -> String {
-    let needs_start_check = !var.starts_with('$');
     let mut start = 0;
     while let Some(rel) = text[start..].find(var) {
         let pos = start + rel;
         let after = pos + var.len();
-        let at_start = !needs_start_check || pos == 0 || !is_ident_char(text.as_bytes()[pos - 1]);
-        let at_end = after >= text.len() || !is_ident_char(text.as_bytes()[after]);
-        if at_start && at_end {
+        if is_var_boundary(text, pos, var) {
             let needs_wrap = expr_is_compound(expr) && used_in_operator_context(text, pos, after);
             let sub = if needs_wrap {
                 format!("({})", expr)
@@ -332,9 +333,12 @@ fn clean_line(text: &str) -> String {
         }
     }
 
-    // !(!X) → X — but only when the inner ! covers the entire expression.
-    // Safe: !(!A) → A, !(!(A && B)) → (A && B)
-    // Unsafe: !(!A && B) — inner ! only negates A, not the whole expression
+    // Double negation elimination: !(!X) → X
+    // Only safe when the inner ! covers the entire expression:
+    //   !(!A)         → A           (single identifier — safe)
+    //   !(!(A && B))  → (A && B)    (inner ! wraps full parens — safe)
+    //   !(!A && B)    → UNSAFE      (inner ! only negates A, not the compound)
+    // We use has_toplevel_logical_op() to verify no bare && or || at paren depth 0.
     loop {
         if let Some(pos) = s.find("!(") {
             // Check if the char before ! is ( or space or start — i.e. it's a prefix not

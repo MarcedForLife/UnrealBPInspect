@@ -295,12 +295,13 @@ fn read_typed_value(
     }
 }
 
-/// Bytes between the tag's Size field and the start of actual data.
-/// Each FName = 8 bytes, GUID = 16 bytes, guid_byte = HasPropertyGuid flag (v503+),
-/// extra int32s for element counts (Array=4, Set/Map=8 for remove+count).
-fn tag_overhead(_type_name: &str, file_ver: i32) -> u64 {
+/// Bytes between the tag's Size field and the start of actual value data.
+/// The property tag's Size field measures only the value payload, so to find where
+/// the value data starts we must skip past any type-specific tag fields:
+/// FName = 8 bytes (index + instance), GUID = 16 bytes, HasPropertyGuid flag = 1 byte (v503+).
+fn tag_overhead(type_name: &str, file_ver: i32) -> u64 {
     let guid_byte: u64 = if file_ver >= 503 { 1 } else { 0 };
-    match _type_name {
+    match type_name {
         "ArrayProperty" => 8 + guid_byte + 4, // InnerType FName + guid + Size
         "SetProperty" => 8 + guid_byte + 8,   // InnerType FName + guid + remove + count
         "MapProperty" => 16 + guid_byte + 8,  // Key+Value FNames + guid + remove + count

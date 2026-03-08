@@ -19,7 +19,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
     // --- Package file summary ---
     let magic = read_u32(&mut c).context("truncated file: cannot read magic")?;
     ensure!(
-        magic == 0x9E2A83C1,
+        magic == 0x9E2A83C1, // UE4 package signature (PACKAGE_FILE_TAG)
         "not a valid .uasset file (magic: {:#X})",
         magic
     );
@@ -38,8 +38,9 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
         file_ver_ue5,
     };
     let _licensee_ver = read_i32(&mut c)?;
+    // Custom versions: each entry is 16-byte GUID + int32 version = 20 bytes
     let custom_ver_count = read_i32(&mut c)?;
-    c.seek(SeekFrom::Current(custom_ver_count as i64 * 20))?; // each custom version: 16-byte GUID + int32
+    c.seek(SeekFrom::Current(custom_ver_count as i64 * 20))?;
     let _total_header_size = read_i32(&mut c)?;
     let _folder_name = read_fstring(&mut c)?;
     let _pkg_flags = read_u32(&mut c)?;
@@ -200,9 +201,11 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
             if after_props + 12 <= end {
                 let _next = read_i32(&mut c)?;
                 let super_ref = read_i32(&mut c)?;
+                // UStruct::Children: array of export indices for child UField objects.
+                // Separate from FField child properties below — these reference sub-structs
+                // and functions, not the parameters/member variables parsed via FField.
                 let children_count = read_i32(&mut c)?;
                 if children_count > 0 && children_count < 1000 {
-                    // sanity cap: skip if count looks malformed
                     c.seek(SeekFrom::Current(children_count as i64 * 4))?;
                 }
                 if debug {
@@ -242,7 +245,9 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
                     let field_class = nt.fname(&mut c)?;
                     let field_name = nt.fname(&mut c)?;
                     let _flags = read_u32(&mut c)?;
-                    let has_meta = read_i32(&mut c)?; // FField metadata gate: 1 = metadata follows, 0 = skip
+                    // FField metadata gate: 1 = metadata block follows (MetadataCount + key/value
+                    // entries), 0 = no metadata. Class members have metadata, function params don't.
+                    let has_meta = read_i32(&mut c)?;
                     if has_meta != 0 {
                         let meta_count = read_i32(&mut c)?;
                         for _ in 0..meta_count {
@@ -351,6 +356,10 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
                     ver.file_ver_ue5,
                 );
                 if debug {
+                    // Drift validation: bytecodeSize is in-memory size, storageSize is on-disk.
+                    // The difference should equal cumulative mem_adj (all +4/-N adjustments for
+                    // FName, obj-ref, and FFieldPath size differences). Non-zero drift indicates
+                    // a missed or incorrect mem_adj in the decoder.
                     let expected = bytecode_size - storage_size;
                     let drift = final_mem_adj - expected;
                     eprintln!(

@@ -1,3 +1,11 @@
+/// Tracks the .uasset file format version across UE4 and UE5.
+///
+/// Epic added a separate UE5 version track in the binary header rather than
+/// continuing to increment the UE4 version number. `file_ver_ue5` is only
+/// present in the file when `legacy_ver <= -8` (UE5-era); for UE4 assets
+/// it defaults to 0. Each field gates different format variations:
+/// - `file_ver`: property GUIDs (>=503), template indices (>=459), localization IDs (>=516)
+/// - `file_ver_ue5`: LWC/f64 vectors (>=1004), removed export GUIDs (>=1005), optional resources (>=1003)
 #[derive(Clone, Copy)]
 pub struct AssetVersion {
     pub file_ver: i32,     // UE4 version (e.g. 522 for UE4.27)
