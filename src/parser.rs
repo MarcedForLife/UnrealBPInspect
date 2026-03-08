@@ -29,7 +29,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
     let ver = AssetVersion { file_ver, file_ver_ue5 };
     let _licensee_ver = read_i32(&mut c)?;
     let custom_ver_count = read_i32(&mut c)?;
-    c.seek(SeekFrom::Current(custom_ver_count as i64 * 20))?;
+    c.seek(SeekFrom::Current(custom_ver_count as i64 * 20))?; // each custom version: 16-byte GUID + int32
     let _total_header_size = read_i32(&mut c)?;
     let _folder_name = read_fstring(&mut c)?;
     let _pkg_flags = read_u32(&mut c)?;
@@ -149,7 +149,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
                 let _next = read_i32(&mut c)?;
                 let super_ref = read_i32(&mut c)?;
                 let children_count = read_i32(&mut c)?;
-                if children_count > 0 && children_count < 1000 {
+                if children_count > 0 && children_count < 1000 { // sanity cap: skip if count looks malformed
                     c.seek(SeekFrom::Current(children_count as i64 * 4))?;
                 }
                 if debug {
@@ -177,7 +177,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
                     let field_class = nt.fname(&mut c)?;
                     let field_name = nt.fname(&mut c)?;
                     let _flags = read_u32(&mut c)?;
-                    let has_meta = read_i32(&mut c)?;
+                    let has_meta = read_i32(&mut c)?; // FField metadata gate: 1 = metadata follows, 0 = skip
                     if has_meta != 0 {
                         let meta_count = read_i32(&mut c)?;
                         for _ in 0..meta_count {

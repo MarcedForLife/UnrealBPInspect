@@ -1,5 +1,6 @@
 use crate::types::*;
 
+/// UE "package index" convention: negative = import table (1-based), positive = export table (1-based), zero = null.
 pub fn resolve_import_path(imports: &[ImportEntry], index: i32) -> String {
     if index >= 0 {
         return "?".to_string();

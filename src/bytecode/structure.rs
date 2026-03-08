@@ -2,8 +2,11 @@ use std::collections::{HashMap, HashSet};
 use super::decode::BcStatement;
 use super::flow::{parse_if_jump, parse_jump, parse_push_flow, parse_pop_flow_if_not, parse_jump_computed};
 
-/// Negate a condition string, wrapping in parens if it contains operators
-/// to preserve correct precedence. `!A && B` means `(!A) && B`, not `!(A && B)`.
+/// Negate a condition string for if/else inversion.
+/// Rules: `!X` → `X`, `!(expr)` → `expr` (if balanced), otherwise `!(cond)`.
+/// Wraps in parens when infix operators are present to preserve precedence
+/// (`!A && B` means `(!A) && B`, not `!(A && B)`) — depth tracking avoids
+/// wrapping operators inside nested parentheses.
 fn negate_cond(cond: &str) -> String {
     // Already negated simple expr: !X → X
     if cond.starts_with('!') && !cond.starts_with("!(") {
@@ -404,7 +407,7 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
             if let Some(label) = trimmed.strip_prefix("goto ") {
                 if break_labels.contains(label) {
                     let indent_str = " ".repeat(output[i].len() - trimmed.len());
-                    let line_indent = indent_str.len() / 4;
+                    let line_indent = indent_str.len() / 4; // 4 spaces per indent level
                     // Check if we're inside a loop by scanning previous lines
                     let in_loop = output[..i].iter().rev().any(|l| {
                         let lt = l.trim();

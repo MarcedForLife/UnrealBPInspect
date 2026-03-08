@@ -72,7 +72,8 @@ pub fn read_bc_f64(bc: &[u8], pos: &mut usize) -> f64 {
     v
 }
 
-/// Read 3 floats (f32 or f64 depending on LWC) as f64 values.
+/// Read 3 floats as f64 values. `lwc` = Large World Coordinates (UE5 >= 1004):
+/// vectors/rotators are serialized as f64 instead of f32.
 pub fn read_bc_xyz(bc: &[u8], pos: &mut usize, lwc: bool) -> (f64, f64, f64) {
     if lwc {
         (read_bc_f64(bc, pos), read_bc_f64(bc, pos), read_bc_f64(bc, pos))

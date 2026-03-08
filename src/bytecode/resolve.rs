@@ -23,8 +23,10 @@ pub fn read_bc_obj_ref(bc: &[u8], pos: &mut usize, imports: &[ImportEntry], expo
     resolve_bc_obj(index, imports, export_names)
 }
 
-/// Read an FField* reference from serialized bytecode (FFieldPath format for UE4.25+)
-/// Format: int32 PathNum + FName[PathNum] + int32 ResolvedOwner
+/// Read an FField* reference from serialized bytecode (FFieldPath format for UE4.25+).
+/// Format: int32 PathNum + FName[PathNum] + int32 ResolvedOwner.
+/// On disk this is variable-length (8 + N*8 bytes), but in memory it's a single 8-byte
+/// pointer — so mem_adj tracks the cumulative size difference for code-offset mapping.
 pub fn read_bc_field_path(bc: &[u8], pos: &mut usize, nt: &NameTable, mem_adj: &mut i32) -> String {
     let path_num = read_bc_i32(bc, pos);
     if path_num <= 0 {

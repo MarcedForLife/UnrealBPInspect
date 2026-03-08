@@ -240,15 +240,18 @@ fn read_typed_value(c: &mut R, nt: &NameTable, type_name: &str, end_offset: u64,
     }
 }
 
+/// Bytes between the tag's Size field and the start of actual data.
+/// Each FName = 8 bytes, GUID = 16 bytes, guid_byte = HasPropertyGuid flag (v503+),
+/// extra int32s for element counts (Array=4, Set/Map=8 for remove+count).
 fn tag_overhead(_type_name: &str, file_ver: i32) -> u64 {
     let guid_byte: u64 = if file_ver >= 503 { 1 } else { 0 };
     match _type_name {
-        "ArrayProperty" => 8 + guid_byte + 4,
-        "SetProperty" => 8 + guid_byte + 8,
-        "MapProperty" => 16 + guid_byte + 8,
-        "EnumProperty" => 8 + guid_byte,
-        "ByteProperty" => 8 + guid_byte,
-        "StructProperty" => 8 + 16 + guid_byte,
+        "ArrayProperty" => 8 + guid_byte + 4,       // InnerType FName + guid + Size
+        "SetProperty" => 8 + guid_byte + 8,          // InnerType FName + guid + remove + count
+        "MapProperty" => 16 + guid_byte + 8,          // Key+Value FNames + guid + remove + count
+        "EnumProperty" => 8 + guid_byte,              // EnumName FName + guid
+        "ByteProperty" => 8 + guid_byte,              // EnumName FName + guid
+        "StructProperty" => 8 + 16 + guid_byte,       // StructName FName + GUID + guid
         _ => guid_byte,
     }
 }

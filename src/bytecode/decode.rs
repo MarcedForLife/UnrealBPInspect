@@ -168,6 +168,7 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
     if *pos >= bc.len() { return None; }
     let opcode = read_bc_u8(bc, pos);
     match opcode {
+        // --- Variables (local, instance, default, out) ---
         0x00 => { // EX_LocalVariable
             let prop = read_bc_field_path(bc, pos, nt, mem_adj);
             Some(prop)
@@ -180,6 +181,7 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             let prop = read_bc_field_path(bc, pos, nt, mem_adj);
             Some(format!("default.{}", prop))
         }
+        // --- Control flow (return, jump, assert, switch, flow stack) ---
         0x04 => { // EX_Return
             let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("return {}", expr))
@@ -204,6 +206,7 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             let _ = read_bc_i32(bc, pos);
             Some("nop".into())
         }
+        // --- Assignment (Let variants) ---
         0x0F | 0x43 | 0x44 => { // EX_Let / EX_LetMulticastDelegate / EX_LetDelegate
             let _prop = read_bc_field_path(bc, pos, nt, mem_adj);
             let var = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
@@ -215,6 +218,7 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("bitfield({}, {})", path, expr))
         }
+        // --- Context / member access ---
         0x12 => { // EX_ClassContext
             let obj = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             read_bc_context_rvalue(bc, pos, nt, mem_adj);
@@ -222,6 +226,7 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             let expr = expr.strip_prefix("self.").unwrap_or(&expr);
             Some(format!("{}.{}", obj, expr))
         }
+        // --- Casts ---
         0x13 | 0x2E => { // EX_MetaCast / EX_DynamicCast
             let class = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
             let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
@@ -261,6 +266,7 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
                 Some(format!("{}?.{}", obj, expr))
             }
         }
+        // --- Function calls ---
         0x1B | 0x45 => { // EX_VirtualFunction / EX_LocalVirtualFunction
             let name = read_bc_fname(bc, pos, nt);
             *mem_adj += 4; // disk: FName (8 bytes), mem: UFunction* resolved pointer (8+4 alignment)
@@ -272,6 +278,7 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             let args = decode_func_args(bc, pos, nt, imports, export_names, mem_adj, ue5);
             Some(format_call_or_operator(&func, args))
         }
+        // --- Constants (int, float, string, name, vector, struct, text, containers) ---
         0x1D => Some(format!("{}", read_bc_i32(bc, pos))),    // EX_IntConst
         0x1E => Some(format!("{:.4}", read_bc_f32(bc, pos))), // EX_FloatConst
         0x1F => Some(format!("\"{}\"", read_bc_string(bc, pos))), // EX_StringConst
@@ -419,6 +426,7 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             let prop = read_bc_field_path(bc, pos, nt, mem_adj);
             Some(format!("out {}", prop))
         }
+        // --- Delegates ---
         0x4B => { // EX_InstanceDelegate
             let name = read_bc_fname(bc, pos, nt);
             *mem_adj += 4;

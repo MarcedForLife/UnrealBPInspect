@@ -1,3 +1,5 @@
+/// Strip UE compiler-generated GUID suffixes: `VarName_42_A1B2C3D4E5F6...` → `VarName`.
+/// The compiler appends `_<digits>_<32 hex chars>` to disambiguate generated names.
 pub fn strip_guid_suffix(name: &str) -> &str {
     let bytes = name.as_bytes();
     if bytes.len() < 36 { return name; }
