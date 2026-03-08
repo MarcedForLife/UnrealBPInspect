@@ -80,6 +80,38 @@ fn try_inline_operator(name: &str, args: &[String]) -> Option<String> {
     }
 }
 
+/// Decode EX_CONTEXT / EX_CLASS_CONTEXT / EX_CONTEXT_FAIL_SILENT.
+/// All three read object + rvalue info + member expression, then format as `obj.member`.
+/// `sep` is the separator ("." or "?."), `elide_library` controls whether UE4 library
+/// classes (KismetMathLibrary, etc.) are stripped from the output.
+#[allow(clippy::too_many_arguments)]
+fn decode_context(
+    bc: &[u8],
+    pos: &mut usize,
+    nt: &NameTable,
+    imports: &[ImportEntry],
+    export_names: &[String],
+    mem_adj: &mut i32,
+    ue5: i32,
+    sep: &str,
+    elide_library: bool,
+) -> Option<String> {
+    macro_rules! decode_next {
+        () => {
+            decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default()
+        };
+    }
+    let obj = decode_next!();
+    read_bc_context_rvalue(bc, pos, nt, mem_adj);
+    let expr = decode_next!();
+    let expr = expr.strip_prefix("self.").unwrap_or(&expr);
+    if elide_library && is_ue4_library_class(&obj) {
+        Some(expr.to_string())
+    } else {
+        Some(format!("{}{}{}", obj, sep, expr))
+    }
+}
+
 fn strip_func_prefix(name: &str) -> String {
     if let Some(dot_pos) = name.rfind('.') {
         let class_part = &name[..dot_pos];
@@ -123,9 +155,13 @@ fn is_ue4_library_class(name: &str) -> bool {
     )
 }
 
-/// Extract the resume offset (Linkage field) from a LatentActionInfo struct literal.
-/// Format: `LatentActionInfo(skip_offset(0xHEX), uuid, exec_func, callback_target)`
-/// The first field is a skip_offset containing the resume entry point in the ubergraph.
+/// Extract the resume offset from a LatentActionInfo struct literal.
+///
+/// Latent actions (e.g. Delay, MoveTo) pause Blueprint execution and resume later.
+/// The `skip_offset` field in LatentActionInfo is the bytecode address where execution
+/// resumes — the engine jumps directly to this offset in the ubergraph when the latent
+/// action completes. We extract it here so `output_summary.rs` can match resume blocks
+/// to their originating Delay() calls via `/*resume:0xHEX*/` annotations.
 fn extract_latent_resume_offset(lai: &str) -> Option<usize> {
     let inner = lai.strip_prefix("LatentActionInfo(")?.strip_suffix(')')?;
     let first = inner.split(',').next()?.trim();
@@ -215,6 +251,16 @@ pub fn decode_expr(
     if *pos >= bc.len() {
         return None;
     }
+    // Shorthand for recursive decode_expr calls — all pass the same 7 arguments.
+    // A closure can't work here because pos and mem_adj are &mut (multiple borrows).
+    macro_rules! decode_next {
+        () => {
+            decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default()
+        };
+        (opt) => {
+            decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
+        };
+    }
     let opcode = read_bc_u8(bc, pos);
     match opcode {
         // --- Variables (local, instance, default, out) ---
@@ -232,8 +278,7 @@ pub fn decode_expr(
         }
         // --- Control flow (return, jump, assert, switch, flow stack) ---
         EX_RETURN => {
-            let expr =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr = decode_next!();
             Some(format!("return {}", expr))
         }
         EX_JUMP => {
@@ -242,15 +287,13 @@ pub fn decode_expr(
         }
         EX_JUMP_IF_NOT => {
             let offset = read_bc_u32(bc, pos);
-            let cond =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let cond = decode_next!();
             Some(format!("if !({}) jump 0x{:x}", cond, offset))
         }
         EX_ASSERT => {
             let _line = read_bc_u16(bc, pos);
             let _debug_only = read_bc_u8(bc, pos);
-            let expr =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr = decode_next!();
             Some(format!("assert({})", expr))
         }
         EX_NOTHING => Some("nop".into()),
@@ -261,40 +304,28 @@ pub fn decode_expr(
         // --- Assignment (Let variants) ---
         EX_LET | EX_LET_MULTICAST_DELEGATE | EX_LET_DELEGATE => {
             let _prop = read_bc_field_path(bc, pos, nt, mem_adj);
-            let var =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            let val =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let var = decode_next!();
+            let val = decode_next!();
             Some(format!("{} = {}", var, val))
         }
         EX_BITFIELD_CONST => {
             let path = read_bc_field_path(bc, pos, nt, mem_adj);
-            let expr =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr = decode_next!();
             Some(format!("bitfield({}, {})", path, expr))
         }
         // --- Context / member access ---
         EX_CLASS_CONTEXT => {
-            let obj =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            read_bc_context_rvalue(bc, pos, nt, mem_adj);
-            let expr =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            let expr = expr.strip_prefix("self.").unwrap_or(&expr);
-            Some(format!("{}.{}", obj, expr))
+            decode_context(bc, pos, nt, imports, export_names, mem_adj, ue5, ".", false)
         }
         // --- Casts ---
         EX_META_CAST | EX_DYNAMIC_CAST => {
             let class = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
-            let expr =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr = decode_next!();
             Some(format!("cast<{}>({})", class, expr))
         }
         EX_LET_BOOL | EX_LET_OBJ => {
-            let var =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            let val =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let var = decode_next!();
+            let val = decode_next!();
             Some(format!("{} = {}", var, val))
         }
         EX_END_PARM_VALUE => Some("end_param".into()),
@@ -302,38 +333,17 @@ pub fn decode_expr(
         EX_SELF => Some("self".into()),
         EX_SKIP => {
             let _skip = read_bc_u32(bc, pos);
-            decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
+            decode_next!(opt)
         }
-        EX_CONTEXT => {
-            let obj =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            read_bc_context_rvalue(bc, pos, nt, mem_adj);
-            let expr =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            let expr = expr.strip_prefix("self.").unwrap_or(&expr);
-            if is_ue4_library_class(&obj) {
-                Some(expr.to_string())
-            } else {
-                Some(format!("{}.{}", obj, expr))
-            }
-        }
+        EX_CONTEXT => decode_context(bc, pos, nt, imports, export_names, mem_adj, ue5, ".", true),
         EX_CONTEXT_FAIL_SILENT => {
-            let obj =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            read_bc_context_rvalue(bc, pos, nt, mem_adj);
-            let expr =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            let expr = expr.strip_prefix("self.").unwrap_or(&expr);
-            if is_ue4_library_class(&obj) {
-                Some(expr.to_string())
-            } else {
-                Some(format!("{}?.{}", obj, expr))
-            }
+            decode_context(bc, pos, nt, imports, export_names, mem_adj, ue5, "?.", true)
         }
         // --- Function calls ---
         EX_VIRTUAL_FUNCTION | EX_LOCAL_VIRTUAL_FUNCTION => {
             let name = read_bc_fname(bc, pos, nt);
-            *mem_adj += 4; // disk: FName (8 bytes), mem: UFunction* resolved pointer (8+4 alignment)
+            // FName is 8 bytes on disk but 12 in memory (WITH_CASE_PRESERVING_NAME adds DisplayIndex)
+            *mem_adj += 4;
             let args = decode_func_args(bc, pos, nt, imports, export_names, mem_adj, ue5);
             Some(format_call_or_operator(&name, args))
         }
@@ -352,7 +362,8 @@ pub fn decode_expr(
         }
         EX_NAME_CONST => {
             let name = read_bc_fname(bc, pos, nt);
-            *mem_adj += 4; // disk: FName (8 bytes), mem: FName (12 bytes with DisplayIndex)
+            // FName: 8 bytes on disk, 12 in memory (WITH_CASE_PRESERVING_NAME adds DisplayIndex)
+            *mem_adj += 4;
             Some(format!("'{}'", name))
         }
         EX_ROTATION_CONST => {
@@ -373,23 +384,18 @@ pub fn decode_expr(
             match text_type {
                 0 => Some("\"\"".into()),
                 1 => {
-                    let _ns = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
-                        .unwrap_or_default();
-                    let _key = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
-                        .unwrap_or_default();
-                    let val = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
-                        .unwrap_or_default();
+                    let _ns = decode_next!();
+                    let _key = decode_next!();
+                    let val = decode_next!();
                     Some(format!("LOCTEXT({})", val))
                 }
                 2 | 3 => {
-                    let val = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
-                        .unwrap_or_default();
+                    let val = decode_next!();
                     Some(val)
                 }
                 4 => {
                     let _table = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
-                    let key = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
-                        .unwrap_or_default();
+                    let key = decode_next!();
                     Some(format!("STRTABLE({})", key))
                 }
                 0xFF => Some("\"\"".into()),
@@ -424,8 +430,7 @@ pub fn decode_expr(
         }
         EX_END_STRUCT_CONST => None,
         EX_SET_ARRAY => {
-            let target =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let target = decode_next!();
             let items = decode_expr_list(
                 bc,
                 pos,
@@ -461,14 +466,12 @@ pub fn decode_expr(
         EX_DOUBLE_CONST => Some(format!("{:.4}", read_bc_f64(bc, pos))),
         EX_PRIMITIVE_CAST => {
             let cast_type = read_bc_u8(bc, pos);
-            let expr =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr = decode_next!();
             let name = primitive_cast_name(cast_type);
             Some(format!("{}({})", name, expr))
         }
         EX_SET_SET => {
-            let target =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let target = decode_next!();
             let _count = read_bc_i32(bc, pos);
             let items =
                 decode_expr_list(bc, pos, nt, imports, export_names, mem_adj, ue5, EX_END_SET);
@@ -476,8 +479,7 @@ pub fn decode_expr(
         }
         EX_END_SET => None,
         EX_SET_MAP => {
-            let target =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let target = decode_next!();
             let _count = read_bc_i32(bc, pos);
             let items =
                 decode_expr_list(bc, pos, nt, imports, export_names, mem_adj, ue5, EX_END_MAP);
@@ -527,15 +529,13 @@ pub fn decode_expr(
             } else {
                 // UE4: unused opcode, treat as StructMemberContext fallback
                 let prop = read_bc_field_path(bc, pos, nt, mem_adj);
-                let struct_expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
-                    .unwrap_or_default();
+                let struct_expr = decode_next!();
                 Some(format!("{}.{}", struct_expr, prop))
             }
         }
         EX_STRUCT_MEMBER_CONTEXT => {
             let prop = read_bc_field_path(bc, pos, nt, mem_adj);
-            let struct_expr =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let struct_expr = decode_next!();
             Some(format!("{}.{}", struct_expr, prop))
         }
         EX_LOCAL_OUT_VARIABLE => {
@@ -545,7 +545,7 @@ pub fn decode_expr(
         // --- Delegates ---
         EX_INSTANCE_DELEGATE => {
             let name = read_bc_fname(bc, pos, nt);
-            *mem_adj += 4;
+            *mem_adj += 4; // FName disk/mem size difference (see EX_VIRTUAL_FUNCTION)
             Some(format!("delegate({})", name))
         }
         EX_PUSH_EXECUTION_FLOW => {
@@ -554,32 +554,27 @@ pub fn decode_expr(
         }
         EX_POP_EXECUTION_FLOW => Some("pop_flow".into()),
         EX_COMPUTED_JUMP => {
-            let expr =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr = decode_next!();
             Some(format!("jump_computed({})", expr))
         }
         EX_POP_FLOW_IF_NOT => {
-            let cond =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let cond = decode_next!();
             Some(format!("pop_flow_if_not({})", cond))
         }
         EX_BREAKPOINT => Some("breakpoint".into()),
         EX_INTERFACE_CONTEXT => {
-            let expr =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr = decode_next!();
             Some(format!("iface({})", expr))
         }
         EX_OBJ_TO_IFACE_CAST | EX_CROSS_IFACE_CAST => {
             let class = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
-            let expr =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr = decode_next!();
             Some(format!("icast<{}>({})", class, expr))
         }
         EX_END_OF_SCRIPT => None,
         EX_IFACE_TO_OBJ_CAST => {
             let class = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
-            let expr =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr = decode_next!();
             Some(format!("obj_cast<{}>({})", class, expr))
         }
         EX_WIRE_TRACEPOINT => Some("wire_trace".into()),
@@ -588,39 +583,30 @@ pub fn decode_expr(
             Some(format!("skip_offset(0x{:x})", offset))
         }
         EX_ADD_MULTICAST_DELEGATE => {
-            let delegate =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            let func =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let delegate = decode_next!();
+            let func = decode_next!();
             Some(format!("{} += {}", delegate, func))
         }
         EX_CLEAR_MULTICAST_DELEGATE => {
-            let delegate =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let delegate = decode_next!();
             Some(format!("{}.Clear()", delegate))
         }
         EX_TRACEPOINT => Some("tracepoint".into()),
         EX_LET_WEAK_OBJ_PTR => {
-            let var =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            let val =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let var = decode_next!();
+            let val = decode_next!();
             Some(format!("{} = weak({})", var, val))
         }
         EX_BIND_DELEGATE => {
             let name = read_bc_fname(bc, pos, nt);
-            *mem_adj += 4;
-            let delegate =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            let obj =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            *mem_adj += 4; // FName disk/mem size difference (see EX_VIRTUAL_FUNCTION)
+            let delegate = decode_next!();
+            let obj = decode_next!();
             Some(format!("bind({}, {}, {})", name, delegate, obj))
         }
         EX_REMOVE_MULTICAST_DELEGATE => {
-            let delegate =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            let func =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let delegate = decode_next!();
+            let func = decode_next!();
             Some(format!("{} -= {}", delegate, func))
         }
         EX_CALL_MULTICAST_DELEGATE => {
@@ -629,9 +615,11 @@ pub fn decode_expr(
             Some(format!("{}.Broadcast({})", func, args.join(", ")))
         }
         EX_LET_VALUE_ON_PERSISTENT_FRAME => {
+            // Persistent frame vars live on the ubergraph's persistent stack frame, surviving
+            // across latent action resumes (e.g. Delay). The [persistent] marker prevents
+            // inlining since their value must persist across event boundaries.
             let prop = read_bc_field_path(bc, pos, nt, mem_adj);
-            let val =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let val = decode_next!();
             Some(format!("{} = {} [persistent]", prop, val))
         }
         EX_ARRAY_CONST => {
@@ -651,8 +639,7 @@ pub fn decode_expr(
         }
         EX_END_ARRAY_CONST => None,
         EX_SOFT_OBJECT_CONST => {
-            let path =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let path = decode_next!();
             Some(format!("soft({})", path))
         }
         EX_CALL_MATH => {
@@ -663,19 +650,15 @@ pub fn decode_expr(
         EX_SWITCH_VALUE => {
             let num_cases = read_bc_u16(bc, pos);
             let _end_offset = read_bc_u32(bc, pos);
-            let index =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let index = decode_next!();
             let mut cases = Vec::new();
             for _ in 0..num_cases {
-                let case_val = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
-                    .unwrap_or_default();
+                let case_val = decode_next!();
                 let _next_offset = read_bc_u32(bc, pos);
-                let result = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
-                    .unwrap_or_default();
+                let result = decode_next!();
                 cases.push(format!("{}: {}", case_val, result));
             }
-            let default =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let default = decode_next!();
             if default.starts_with("$Select_Default") {
                 Some(format!("switch({}) {{ {} }}", index, cases.join(", ")))
             } else {
@@ -691,15 +674,13 @@ pub fn decode_expr(
             let event_type = read_bc_u8(bc, pos);
             if event_type == 4 {
                 let _name = read_bc_fname(bc, pos, nt);
-                *mem_adj += 4;
+                *mem_adj += 4; // FName disk/mem size difference (see EX_VIRTUAL_FUNCTION)
             }
             Some("instrumentation".into())
         }
         EX_ARRAY_GET_BY_REF => {
-            let array =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            let index =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let array = decode_next!();
+            let index = decode_next!();
             Some(format!("{}[{}]", array, index))
         }
         EX_CLASS_SPARSE_DATA_VARIABLE => {
@@ -711,8 +692,7 @@ pub fn decode_expr(
             Some(format!("fieldpath({})", path))
         }
         EX_AUTO_RTFM_TRANSACT => {
-            let expr =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr = decode_next!();
             Some(format!("rtfm_transact({})", expr))
         }
         EX_AUTO_RTFM_STOP_TRANSACT => {
@@ -720,8 +700,7 @@ pub fn decode_expr(
             Some("rtfm_stop".into())
         }
         EX_AUTO_RTFM_ABORT_IF_NOT => {
-            let expr =
-                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr = decode_next!();
             Some(format!("rtfm_abort_if_not({})", expr))
         }
         _ => Some(format!("???(0x{:02x})", opcode)),

@@ -42,6 +42,7 @@ pub fn skip_ffield_child(c: &mut R, nt: &NameTable, end: u64) -> Result<()> {
             let _ref = read_i32(c)?;
         }
         "BoolProperty" => {
+            // 6 bytes: FieldSize(1) + ByteOffset(1) + ByteMask(1) + FieldMask(1) + NativeBool(1) + Value(1)
             for _ in 0..6 {
                 read_u8(c)?;
             }
@@ -77,6 +78,7 @@ pub fn resolve_ffield_type(
         "Int16Property" | "UInt16Property" => Ok("int16".into()),
         "Int8Property" => Ok("int8".into()),
         "BoolProperty" => {
+            // 6 bytes: FieldSize, ByteOffset, ByteMask, FieldMask, NativeBool, Value
             for _ in 0..6 {
                 read_u8(c)?;
             }

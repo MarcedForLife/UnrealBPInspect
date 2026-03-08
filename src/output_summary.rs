@@ -1088,8 +1088,11 @@ fn emit_ubergraph_events(
         }
     }
 
-    // Collect resume offsets from Delay() calls with /*resume:0xHEX*/ annotations
-    // and match them to resume blocks by order of appearance
+    // Latent resume matching: latent actions (Delay, MoveTo, etc.) pause execution
+    // and resume at a bytecode offset stored in LatentActionInfo.skip_offset. The decoder
+    // annotates these calls with /*resume:0xHEX*/ (see decode.rs). Resume blocks appear
+    // at the start of the ubergraph as "(latent resume)" sections. We match them to their
+    // originating Delay() calls by order of appearance and inline them after the call.
     let parse_resume_offset = |line: &str| -> Option<usize> {
         let marker = line.find("/*resume:0x")?;
         let hex_start = marker + 11;

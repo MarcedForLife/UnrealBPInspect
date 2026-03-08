@@ -194,8 +194,11 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
         let (body_start, loop_ctrl_end, completion_start, completion_end) = if let Some(pop_idx) =
             pop_idx
         {
-            // Check if the actual body is displaced further (ForEach pattern)
-            // 64-byte tolerance: cumulative mem_adj drift from FFieldPath/obj-ref size differences
+            // Check if the actual body is displaced further (ForEach pattern).
+            // 64-byte tolerance: jump targets use in-memory offsets but we index by on-disk
+            // offsets + cumulative mem_adj. The drift accumulates from FFieldPath (variable
+            // length on disk, 8-byte pointer in memory) and obj-ref (+4 each) differences.
+            // 64 bytes is empirically sufficient for real-world functions.
             let body_at_jump = stmts
                 .iter()
                 .position(|s| s.mem_offset > 0 && s.mem_offset.abs_diff(body_jump_target) < 64);
@@ -214,7 +217,9 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
                 (pop_idx + 1, pop_idx, None, None)
             }
         } else {
-            // Find the CLOSEST matching statement (not just the first within tolerance)
+            // Find the CLOSEST matching statement, not first-match. First-match fails because
+            // completion path statements can land within the 64-byte tolerance window of the
+            // body target, so we need the nearest offset to avoid picking the wrong statement.
             let body_idx = stmts
                 .iter()
                 .enumerate()
@@ -377,7 +382,10 @@ pub fn reorder_convergence(stmts: &mut Vec<BcStatement>) {
 fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
     use std::collections::{HashMap, HashSet};
 
-    // Build offset → index map; find_idx uses 4-byte tolerance for minor mem_adj drift
+    // Build offset → index map. find_idx falls back to 4-byte bidirectional tolerance
+    // when exact lookup misses — jump targets can land on skipped opcodes (wire_trace,
+    // tracepoint) that were filtered during decode, so the nearest statement may be
+    // a few bytes away from the target address.
     let exact_map: HashMap<usize, usize> = stmts
         .iter()
         .enumerate()
@@ -441,7 +449,8 @@ fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
         target_groups.entry(target_idx).or_default().push(jump_idx);
     }
 
-    // Find the earliest convergence group (by target index) for stable ordering
+    // Process the earliest convergence group first (by target index) so that
+    // index shifts from reordering don't invalidate later groups
     let mut conv = None;
     for (&target_idx, jump_indices) in &target_groups {
         if jump_indices.len() < 2 {
@@ -460,8 +469,10 @@ fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
     jump_indices.sort();
 
     // Find convergence code extent: from target_idx to the exit jump that leaves the
-    // convergence block. Only count top-level forward jumps (not jumps inside nested ifs
-    // within the convergence code). Track nesting by counting if-jump/end pairs.
+    // convergence block. Track if-nesting depth so that jumps inside nested if/else
+    // blocks within the convergence code don't prematurely terminate the scan —
+    // each if-jump increments depth, and its exit jump decrements it. Only a jump at
+    // depth 0 marks the true convergence exit.
     let mut conv_end = conv_target_idx;
     let mut if_depth = 0usize;
     for (j, stmt) in stmts.iter().enumerate().skip(conv_target_idx) {
