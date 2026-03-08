@@ -1,23 +1,34 @@
-use crate::binary::NameTable;
-use crate::types::ImportEntry;
-use crate::resolve::{resolve_import_path, short_class};
-use super::readers::*;
 use super::names::clean_bc_name;
+use super::readers::*;
+use crate::binary::NameTable;
+use crate::resolve::{resolve_import_path, short_class};
+use crate::types::ImportEntry;
 
 pub fn resolve_bc_obj(index: i32, imports: &[ImportEntry], export_names: &[String]) -> String {
     let name = if index < 0 {
         short_class(&resolve_import_path(imports, index))
     } else if index > 0 {
         let idx = (index - 1) as usize;
-        export_names.get(idx).cloned().unwrap_or_else(|| format!("export[{}]", index))
+        export_names
+            .get(idx)
+            .cloned()
+            .unwrap_or_else(|| format!("export[{}]", index))
     } else {
         "null".to_string()
     };
-    name.strip_prefix("Default__").map(|s| s.to_string()).unwrap_or(name)
+    name.strip_prefix("Default__")
+        .map(|s| s.to_string())
+        .unwrap_or(name)
 }
 
 /// Read a UObject* reference from serialized bytecode (int32 FPackageIndex)
-pub fn read_bc_obj_ref(bc: &[u8], pos: &mut usize, imports: &[ImportEntry], export_names: &[String], mem_adj: &mut i32) -> String {
+pub fn read_bc_obj_ref(
+    bc: &[u8],
+    pos: &mut usize,
+    imports: &[ImportEntry],
+    export_names: &[String],
+    mem_adj: &mut i32,
+) -> String {
     let index = read_bc_i32(bc, pos);
     *mem_adj += 4; // disk: 4 bytes (int32), mem: 8 bytes (pointer)
     resolve_bc_obj(index, imports, export_names)
@@ -68,17 +79,17 @@ mod tests {
     }
 
     fn put_fname(buf: &mut Vec<u8>, name_idx: i32) {
-        put_i32(buf, name_idx);  // name index
-        put_i32(buf, 0);         // instance number
+        put_i32(buf, name_idx); // name index
+        put_i32(buf, 0); // instance number
     }
 
     #[test]
     fn field_path_normal() {
         let nt = make_nt(&["MyVar"]);
         let mut bc = Vec::new();
-        put_i32(&mut bc, 1);       // path_num = 1
-        put_fname(&mut bc, 0);     // FName index 0 = "MyVar"
-        put_i32(&mut bc, 0);       // owner
+        put_i32(&mut bc, 1); // path_num = 1
+        put_fname(&mut bc, 0); // FName index 0 = "MyVar"
+        put_i32(&mut bc, 0); // owner
         let mut pos = 0;
         let mut mem_adj = 0i32;
         let result = read_bc_field_path(&bc, &mut pos, &nt, &mut mem_adj);
@@ -89,8 +100,8 @@ mod tests {
     fn field_path_zero() {
         let nt = make_nt(&["X"]);
         let mut bc = Vec::new();
-        put_i32(&mut bc, 0);  // path_num = 0
-        put_i32(&mut bc, 0);  // owner
+        put_i32(&mut bc, 0); // path_num = 0
+        put_i32(&mut bc, 0); // owner
         let mut pos = 0;
         let mut mem_adj = 0i32;
         assert_eq!(read_bc_field_path(&bc, &mut pos, &nt, &mut mem_adj), "null");
@@ -101,7 +112,7 @@ mod tests {
         let nt = make_nt(&["X"]);
         let mut bc = Vec::new();
         put_i32(&mut bc, -1); // path_num = -1
-        put_i32(&mut bc, 0);  // owner
+        put_i32(&mut bc, 0); // owner
         let mut pos = 0;
         let mut mem_adj = 0i32;
         assert_eq!(read_bc_field_path(&bc, &mut pos, &nt, &mut mem_adj), "null");
@@ -111,8 +122,8 @@ mod tests {
     fn field_path_truncated() {
         let nt = make_nt(&["X"]);
         let mut bc = Vec::new();
-        put_i32(&mut bc, 1);       // path_num = 1
-        // Need 1*8 + 4 = 12 more bytes, only provide 11
+        put_i32(&mut bc, 1); // path_num = 1
+                             // Need 1*8 + 4 = 12 more bytes, only provide 11
         bc.extend_from_slice(&[0u8; 11]);
         let mut pos = 0;
         let mut mem_adj = 0i32;
@@ -124,7 +135,7 @@ mod tests {
         let nt = make_nt(&["X"]);
         let mut bc = Vec::new();
         put_i32(&mut bc, 17); // path_num = 17 (exceeds limit of 16)
-        put_i32(&mut bc, 0);  // owner (read by error path)
+        put_i32(&mut bc, 0); // owner (read by error path)
         let mut pos = 0;
         let mut mem_adj = 0i32;
         assert_eq!(read_bc_field_path(&bc, &mut pos, &nt, &mut mem_adj), "???");

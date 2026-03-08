@@ -2,14 +2,26 @@
 /// The compiler appends `_<digits>_<32 hex chars>` to disambiguate generated names.
 pub fn strip_guid_suffix(name: &str) -> &str {
     let bytes = name.as_bytes();
-    if bytes.len() < 36 { return name; }
+    if bytes.len() < 36 {
+        return name;
+    }
     let hex_start = bytes.len() - 32;
-    if !bytes[hex_start..].iter().all(|b| b.is_ascii_hexdigit()) { return name; }
-    if bytes[hex_start - 1] != b'_' { return name; }
+    if !bytes[hex_start..].iter().all(|b| b.is_ascii_hexdigit()) {
+        return name;
+    }
+    if bytes[hex_start - 1] != b'_' {
+        return name;
+    }
     let mut i = hex_start - 2;
-    if !bytes[i].is_ascii_digit() { return name; }
-    while i > 0 && bytes[i - 1].is_ascii_digit() { i -= 1; }
-    if i == 0 || bytes[i - 1] != b'_' { return name; }
+    if !bytes[i].is_ascii_digit() {
+        return name;
+    }
+    while i > 0 && bytes[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    if i == 0 || bytes[i - 1] != b'_' {
+        return name;
+    }
     &name[..i - 1]
 }
 
@@ -50,7 +62,10 @@ mod tests {
 
     #[test]
     fn strip_guid_no_hex() {
-        assert_eq!(strip_guid_suffix("Foo_42_notahexstring_notahex_pad_"), "Foo_42_notahexstring_notahex_pad_");
+        assert_eq!(
+            strip_guid_suffix("Foo_42_notahexstring_notahex_pad_"),
+            "Foo_42_notahexstring_notahex_pad_"
+        );
     }
 
     #[test]
@@ -65,7 +80,10 @@ mod tests {
 
     #[test]
     fn clean_dynamic_cast() {
-        assert_eq!(clean_bc_name("K2Node_DynamicCast_SomeClass"), "$Cast_SomeClass");
+        assert_eq!(
+            clean_bc_name("K2Node_DynamicCast_SomeClass"),
+            "$Cast_SomeClass"
+        );
     }
 
     #[test]
@@ -80,6 +98,9 @@ mod tests {
 
     #[test]
     fn clean_k2_prefix_in_callfunc() {
-        assert_eq!(clean_bc_name("CallFunc_K2_SetWorldLocationAndRotation_ReturnValue"), "$SetWorldLocationAndRotation");
+        assert_eq!(
+            clean_bc_name("CallFunc_K2_SetWorldLocationAndRotation_ReturnValue"),
+            "$SetWorldLocationAndRotation"
+        );
     }
 }

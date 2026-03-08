@@ -4,7 +4,8 @@ use std::path::PathBuf;
 
 pub fn load_fixture(name: &str) -> Vec<u8> {
     let path = fixture_path(name);
-    std::fs::read(&path).unwrap_or_else(|e| panic!("Failed to read fixture {}: {}", path.display(), e))
+    std::fs::read(&path)
+        .unwrap_or_else(|e| panic!("Failed to read fixture {}: {}", path.display(), e))
 }
 
 pub fn fixture_exists(name: &str) -> bool {
@@ -15,7 +16,8 @@ pub fn assert_snapshot(name: &str, actual: &str) {
     let path = snapshot_path(name);
 
     if std::env::var("UPDATE_SNAPSHOTS").is_ok() {
-        std::fs::write(&path, actual).unwrap_or_else(|e| panic!("Failed to write snapshot {}: {}", path.display(), e));
+        std::fs::write(&path, actual)
+            .unwrap_or_else(|e| panic!("Failed to write snapshot {}: {}", path.display(), e));
         return;
     }
 
@@ -62,9 +64,14 @@ pub fn assert_snapshot(name: &str, actual: &str) {
 }
 
 fn fixture_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("samples").join(name)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("samples")
+        .join(name)
 }
 
 fn snapshot_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("snapshots").join(format!("{}.txt", name))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("snapshots")
+        .join(format!("{}.txt", name))
 }

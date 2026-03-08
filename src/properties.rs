@@ -1,17 +1,24 @@
-use std::io::{Read, Seek, SeekFrom};
 use anyhow::Result;
+use std::io::{Read, Seek, SeekFrom};
 
 use crate::binary::*;
 use crate::types::*;
 
-pub fn read_properties(c: &mut R, nt: &NameTable, end_offset: u64, ver: AssetVersion) -> Vec<Property> {
+pub fn read_properties(
+    c: &mut R,
+    nt: &NameTable,
+    end_offset: u64,
+    ver: AssetVersion,
+) -> Vec<Property> {
     let mut props = Vec::new();
     loop {
         if c.position() + 8 > end_offset {
             break;
         }
         let pos_before = c.position();
-        let Ok((prop_name, is_none)) = nt.fname_is_none(c) else { break };
+        let Ok((prop_name, is_none)) = nt.fname_is_none(c) else {
+            break;
+        };
         if is_none {
             break;
         }
@@ -34,8 +41,13 @@ pub fn read_properties(c: &mut R, nt: &NameTable, end_offset: u64, ver: AssetVer
             break;
         }
 
-        let Ok(value) = read_property_value(c, nt, &type_name, size, end_offset, ver) else { break };
-        props.push(Property { name: prop_name, value });
+        let Ok(value) = read_property_value(c, nt, &type_name, size, end_offset, ver) else {
+            break;
+        };
+        props.push(Property {
+            name: prop_name,
+            value,
+        });
     }
     props
 }
@@ -115,14 +127,20 @@ fn read_property_value(
             let enum_name = nt.fname(c)?;
             skip_property_guid(c, file_ver)?;
             let value = nt.fname(c)?;
-            Ok(PropValue::Enum { enum_type: enum_name, value })
+            Ok(PropValue::Enum {
+                enum_type: enum_name,
+                value,
+            })
         }
         "ByteProperty" => {
             let enum_name = nt.fname(c)?;
             skip_property_guid(c, file_ver)?;
             if size == 1 {
                 let val = read_u8(c)?;
-                Ok(PropValue::Byte { enum_name, value: val.to_string() })
+                Ok(PropValue::Byte {
+                    enum_name,
+                    value: val.to_string(),
+                })
             } else {
                 let value = nt.fname(c)?;
                 Ok(PropValue::Byte { enum_name, value })
@@ -135,7 +153,10 @@ fn read_property_value(
             let struct_end = c.position() + size as u64;
             let fields = read_struct_value(c, nt, &struct_type, size, struct_end, ver)?;
             c.seek(SeekFrom::Start(struct_end))?;
-            Ok(PropValue::Struct { struct_type, fields })
+            Ok(PropValue::Struct {
+                struct_type,
+                fields,
+            })
         }
         "ArrayProperty" => {
             let inner_type = nt.fname(c)?;
@@ -155,13 +176,19 @@ fn read_property_value(
             let count = read_i32(c)?;
             let mut entries = Vec::new();
             for _ in 0..count {
-                if c.position() >= map_data_end { break; }
+                if c.position() >= map_data_end {
+                    break;
+                }
                 let k = read_typed_value(c, nt, &key_type, map_data_end, ver)?;
                 let v = read_typed_value(c, nt, &value_type, map_data_end, ver)?;
                 entries.push((k, v));
             }
             c.seek(SeekFrom::Start(map_data_end))?;
-            Ok(PropValue::Map { key_type, value_type, entries })
+            Ok(PropValue::Map {
+                key_type,
+                value_type,
+                entries,
+            })
         }
         "SetProperty" => {
             let inner_type = nt.fname(c)?;
@@ -177,10 +204,15 @@ fn read_property_value(
             skip_property_guid(c, file_ver)?;
             let obj = read_i32(c)?;
             let func = nt.fname(c)?;
-            let desc = if obj != 0 { format!("{}::{}", obj, func) } else { func };
+            let desc = if obj != 0 {
+                format!("{}::{}", obj, func)
+            } else {
+                func
+            };
             Ok(PropValue::Str(desc))
         }
-        "MulticastDelegateProperty" | "MulticastInlineDelegateProperty"
+        "MulticastDelegateProperty"
+        | "MulticastInlineDelegateProperty"
         | "MulticastSparseDelegateProperty" => {
             skip_property_guid(c, file_ver)?;
             let count = read_i32(c)?;
@@ -188,15 +220,25 @@ fn read_property_value(
             for _ in 0..count {
                 let obj = read_i32(c)?;
                 let func = nt.fname(c)?;
-                let desc = if obj != 0 { format!("{}::{}", obj, func) } else { func };
+                let desc = if obj != 0 {
+                    format!("{}::{}", obj, func)
+                } else {
+                    func
+                };
                 bindings.push(PropValue::Str(desc));
             }
-            Ok(PropValue::Array { inner_type: "DelegateProperty".into(), items: bindings })
+            Ok(PropValue::Array {
+                inner_type: "DelegateProperty".into(),
+                items: bindings,
+            })
         }
         _ => {
             skip_property_guid(c, file_ver)?;
             c.seek(SeekFrom::Current(size as i64))?;
-            Ok(PropValue::Unknown { type_name: type_name.to_string(), size })
+            Ok(PropValue::Unknown {
+                type_name: type_name.to_string(),
+                size,
+            })
         }
     }
 }
@@ -211,12 +253,19 @@ fn skip_property_guid(c: &mut R, file_ver: i32) -> Result<()> {
     Ok(())
 }
 
-fn read_typed_value(c: &mut R, nt: &NameTable, type_name: &str, end_offset: u64, ver: AssetVersion) -> Result<PropValue> {
+fn read_typed_value(
+    c: &mut R,
+    nt: &NameTable,
+    type_name: &str,
+    end_offset: u64,
+    ver: AssetVersion,
+) -> Result<PropValue> {
     match type_name {
         "IntProperty" | "Int32Property" | "UInt32Property" => Ok(PropValue::Int(read_i32(c)?)),
         "Int8Property" => Ok(PropValue::Int(read_u8(c)? as i8 as i32)),
         "Int16Property" | "UInt16Property" => {
-            let mut b = [0u8; 2]; c.read_exact(&mut b)?;
+            let mut b = [0u8; 2];
+            c.read_exact(&mut b)?;
             Ok(PropValue::Int(i16::from_le_bytes(b) as i32))
         }
         "Int64Property" | "UInt64Property" => Ok(PropValue::Int64(read_i64(c)?)),
@@ -234,9 +283,15 @@ fn read_typed_value(c: &mut R, nt: &NameTable, type_name: &str, end_offset: u64,
         }
         "StructProperty" => {
             let fields = read_properties(c, nt, end_offset, ver);
-            Ok(PropValue::Struct { struct_type: String::new(), fields })
+            Ok(PropValue::Struct {
+                struct_type: String::new(),
+                fields,
+            })
         }
-        _ => Ok(PropValue::Unknown { type_name: type_name.to_string(), size: 0 }),
+        _ => Ok(PropValue::Unknown {
+            type_name: type_name.to_string(),
+            size: 0,
+        }),
     }
 }
 
@@ -246,12 +301,12 @@ fn read_typed_value(c: &mut R, nt: &NameTable, type_name: &str, end_offset: u64,
 fn tag_overhead(_type_name: &str, file_ver: i32) -> u64 {
     let guid_byte: u64 = if file_ver >= 503 { 1 } else { 0 };
     match _type_name {
-        "ArrayProperty" => 8 + guid_byte + 4,       // InnerType FName + guid + Size
-        "SetProperty" => 8 + guid_byte + 8,          // InnerType FName + guid + remove + count
-        "MapProperty" => 16 + guid_byte + 8,          // Key+Value FNames + guid + remove + count
-        "EnumProperty" => 8 + guid_byte,              // EnumName FName + guid
-        "ByteProperty" => 8 + guid_byte,              // EnumName FName + guid
-        "StructProperty" => 8 + 16 + guid_byte,       // StructName FName + GUID + guid
+        "ArrayProperty" => 8 + guid_byte + 4, // InnerType FName + guid + Size
+        "SetProperty" => 8 + guid_byte + 8,   // InnerType FName + guid + remove + count
+        "MapProperty" => 16 + guid_byte + 8,  // Key+Value FNames + guid + remove + count
+        "EnumProperty" => 8 + guid_byte,      // EnumName FName + guid
+        "ByteProperty" => 8 + guid_byte,      // EnumName FName + guid
+        "StructProperty" => 8 + 16 + guid_byte, // StructName FName + GUID + guid
         _ => guid_byte,
     }
 }
@@ -263,8 +318,15 @@ fn read_text_property(c: &mut R, size: i32) -> Result<String> {
     let mut buf = vec![0u8; size as usize];
     c.read_exact(&mut buf)?;
     let text = String::from_utf8_lossy(&buf);
-    let readable: String = text.chars().filter(|c| c.is_ascii_graphic() || *c == ' ').collect();
-    Ok(if readable.is_empty() { "<text>".to_string() } else { readable })
+    let readable: String = text
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .collect();
+    Ok(if readable.is_empty() {
+        "<text>".to_string()
+    } else {
+        readable
+    })
 }
 
 fn read_lwc_components(c: &mut R, lwc: bool, names: &[&str]) -> Result<Vec<Property>> {
@@ -275,7 +337,10 @@ fn read_lwc_components(c: &mut R, lwc: bool, names: &[&str]) -> Result<Vec<Prope
         } else {
             PropValue::Float(read_f32(c)?)
         };
-        props.push(Property { name: name.to_string(), value });
+        props.push(Property {
+            name: name.to_string(),
+            value,
+        });
     }
     Ok(props)
 }
@@ -299,10 +364,22 @@ fn read_struct_value(
             let b = read_f32(c)?;
             let a = read_f32(c)?;
             Ok(vec![
-                Property { name: "R".into(), value: PropValue::Float(r) },
-                Property { name: "G".into(), value: PropValue::Float(g) },
-                Property { name: "B".into(), value: PropValue::Float(b) },
-                Property { name: "A".into(), value: PropValue::Float(a) },
+                Property {
+                    name: "R".into(),
+                    value: PropValue::Float(r),
+                },
+                Property {
+                    name: "G".into(),
+                    value: PropValue::Float(g),
+                },
+                Property {
+                    name: "B".into(),
+                    value: PropValue::Float(b),
+                },
+                Property {
+                    name: "A".into(),
+                    value: PropValue::Float(a),
+                },
             ])
         }
         "Guid" => {
@@ -312,9 +389,7 @@ fn read_struct_value(
                 value: PropValue::Str(format!("{:02x?}", g)),
             }])
         }
-        _ => {
-            Ok(read_properties(c, nt, end_offset, ver))
-        }
+        _ => Ok(read_properties(c, nt, end_offset, ver)),
     }
 }
 

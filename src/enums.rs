@@ -20,19 +20,26 @@ pub fn resolve_enum_args(func_name: &str, args: &mut [String]) {
         "SetCollisionEnabled" => &[(0, ECOLLISION_ENABLED)],
         "SetCollisionResponseToChannel" => &[(0, ECOLLISION_CHANNEL), (1, ECOLLISION_RESPONSE)],
         "SetCollisionResponseToAllChannels" => &[(0, ECOLLISION_RESPONSE)],
-        "AttachToComponent" | "AttachRootComponentTo" | "AttachToActor" => {
-            &[(2, EATTACHMENT_RULE), (3, EATTACHMENT_RULE), (4, EATTACHMENT_RULE)]
-        }
-        "DetachFromComponent" | "DetachRootComponentFromParent" | "DetachFromActor" => {
-            &[(0, EDETACHMENT_RULE), (1, EDETACHMENT_RULE), (2, EDETACHMENT_RULE)]
-        }
+        "AttachToComponent" | "AttachRootComponentTo" | "AttachToActor" => &[
+            (2, EATTACHMENT_RULE),
+            (3, EATTACHMENT_RULE),
+            (4, EATTACHMENT_RULE),
+        ],
+        "DetachFromComponent" | "DetachRootComponentFromParent" | "DetachFromActor" => &[
+            (0, EDETACHMENT_RULE),
+            (1, EDETACHMENT_RULE),
+            (2, EDETACHMENT_RULE),
+        ],
         "GetSocketTransform" | "GetRelativeTransform" => &[(1, ERELATIVE_TRANSFORM_SPACE)],
         "SetTickGroup" => &[(0, ETICKING_GROUP)],
         "SetMobility" => &[(0, ECOMPONENT_MOBILITY)],
         "SetMovementMode" => &[(0, EMOVEMENT_MODE)],
         "SetCollisionObjectType" => &[(0, ECOLLISION_CHANNEL)],
-        "GetInputAxisKeyValue" | "GetInputVectorKeyState" |
-        "GetKey" | "InputKey" | "InputAction" => &[(1, EINPUT_EVENT)],
+        "GetInputAxisKeyValue"
+        | "GetInputVectorKeyState"
+        | "GetKey"
+        | "InputKey"
+        | "InputAction" => &[(1, EINPUT_EVENT)],
         _ => {
             // Trace functions: SphereTraceSingle, LineTraceSingleForObjects, etc.
             if is_trace_function(stripped) {
@@ -59,85 +66,87 @@ pub fn resolve_enum_args(func_name: &str, args: &mut [String]) {
 fn is_trace_function(name: &str) -> bool {
     // Matches SphereTrace*, LineTrace*, BoxTrace*, CapsuleTrace*
     for prefix in &["SphereTrace", "LineTrace", "BoxTrace", "CapsuleTrace"] {
-        if name.starts_with(prefix) { return true; }
+        if name.starts_with(prefix) {
+            return true;
+        }
     }
     false
 }
 
 const ECOLLISION_ENABLED: &[&str] = &[
-    "NoCollision",      // 0
-    "QueryOnly",        // 1
-    "PhysicsOnly",      // 2
-    "QueryAndPhysics",  // 3
+    "NoCollision",     // 0
+    "QueryOnly",       // 1
+    "PhysicsOnly",     // 2
+    "QueryAndPhysics", // 3
 ];
 
 const ECOLLISION_CHANNEL: &[&str] = &[
-    "WorldStatic",      // 0
-    "WorldDynamic",     // 1
-    "Pawn",             // 2
-    "Visibility",       // 3
-    "Camera",           // 4
-    "PhysicsBody",      // 5
+    "WorldStatic",  // 0
+    "WorldDynamic", // 1
+    "Pawn",         // 2
+    "Visibility",   // 3
+    "Camera",       // 4
+    "PhysicsBody",  // 5
 ];
 
 const EATTACHMENT_RULE: &[&str] = &[
-    "KeepRelative",     // 0
-    "KeepWorld",        // 1
-    "SnapToTarget",     // 2
+    "KeepRelative", // 0
+    "KeepWorld",    // 1
+    "SnapToTarget", // 2
 ];
 
 const EDETACHMENT_RULE: &[&str] = &[
-    "KeepRelative",     // 0
-    "KeepWorld",        // 1
+    "KeepRelative", // 0
+    "KeepWorld",    // 1
 ];
 
 const ERELATIVE_TRANSFORM_SPACE: &[&str] = &[
-    "RTS_World",                // 0
-    "RTS_Actor",                // 1
-    "RTS_Component",            // 2
-    "RTS_ParentBoneSpace",      // 3
+    "RTS_World",           // 0
+    "RTS_Actor",           // 1
+    "RTS_Component",       // 2
+    "RTS_ParentBoneSpace", // 3
 ];
 
 const EDRAW_DEBUG_TRACE: &[&str] = &[
-    "None",             // 0
-    "ForOneFrame",      // 1
-    "ForDuration",      // 2
-    "Persistent",       // 3
+    "None",        // 0
+    "ForOneFrame", // 1
+    "ForDuration", // 2
+    "Persistent",  // 3
 ];
 
 const ETICKING_GROUP: &[&str] = &[
-    "PrePhysics",       // 0
-    "DuringPhysics",    // 1
-    "PostPhysics",      // 2
-    "PostUpdateWork",   // 3
+    "PrePhysics",     // 0
+    "DuringPhysics",  // 1
+    "PostPhysics",    // 2
+    "PostUpdateWork", // 3
 ];
 
 const ECOLLISION_RESPONSE: &[&str] = &[
-    "Ignore",           // 0
-    "Overlap",          // 1
-    "Block",            // 2
+    "Ignore",  // 0
+    "Overlap", // 1
+    "Block",   // 2
 ];
 
 const ECOMPONENT_MOBILITY: &[&str] = &[
-    "Static",           // 0
-    "Stationary",       // 1
-    "Movable",          // 2
+    "Static",     // 0
+    "Stationary", // 1
+    "Movable",    // 2
 ];
 
 const EMOVEMENT_MODE: &[&str] = &[
-    "None",             // 0
-    "Walking",          // 1
-    "NavWalking",       // 2
-    "Falling",          // 3
-    "Swimming",         // 4
-    "Flying",           // 5
-    "Custom",           // 6
+    "None",       // 0
+    "Walking",    // 1
+    "NavWalking", // 2
+    "Falling",    // 3
+    "Swimming",   // 4
+    "Flying",     // 5
+    "Custom",     // 6
 ];
 
 const EINPUT_EVENT: &[&str] = &[
-    "Pressed",          // 0
-    "Released",         // 1
-    "Repeat",           // 2
-    "DoubleClick",      // 3
-    "Axis",             // 4
+    "Pressed",     // 0
+    "Released",    // 1
+    "Repeat",      // 2
+    "DoubleClick", // 3
+    "Axis",        // 4
 ];

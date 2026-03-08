@@ -20,6 +20,7 @@ src/
   output_summary.rs    Summary output mode (component tree, variables, functions)
   bytecode/
     mod.rs             Sub-module re-exports
+    opcodes.rs         EExprToken opcode constants (EX_*)
     readers.rs         Bytecode binary stream readers (read_bc_*)
     names.rs           GUID stripping, name cleanup
     resolve.rs         Bytecode reference resolution (obj refs, field paths)
@@ -41,6 +42,8 @@ tests/
 
 ```bash
 cargo build                                    # dev build
+cargo fmt                                      # format all code (required before committing)
+cargo clippy --all-targets -- -D warnings      # lint check (must pass clean)
 cargo test                                     # run all tests
 cargo test -- --nocapture                      # run with stdout visible
 UPDATE_SNAPSHOTS=1 cargo test                  # update snapshot files after intentional changes
@@ -48,6 +51,8 @@ cargo run -- samples/<file>.uasset --summary   # test summary output
 cargo run -- samples/<file>.uasset --json      # test JSON output
 cargo build --release                          # release build
 ```
+
+CI enforces `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` on every push and PR.
 
 ### Test structure
 - `src/**/*.rs` — inline `#[cfg(test)]` unit tests for private helpers (decode.rs, inline.rs, structure.rs, names.rs, flow.rs, resolve.rs)

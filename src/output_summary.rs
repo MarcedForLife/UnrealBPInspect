@@ -1,9 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
-use crate::types::*;
+use crate::bytecode::{
+    cleanup_structured_output, discard_unused_assignments, fold_summary_patterns,
+    inline_single_use_temps, reorder_convergence, reorder_flow_patterns, structure_bytecode,
+    BcStatement,
+};
 use crate::resolve::*;
-use crate::bytecode::{BcStatement, reorder_flow_patterns, reorder_convergence, structure_bytecode, inline_single_use_temps, discard_unused_assignments, cleanup_structured_output, fold_summary_patterns};
+use crate::types::*;
 
 struct CommentBox {
     text: String,
@@ -18,7 +22,9 @@ fn emit_comment(buf: &mut String, text: &str, indent: &str) {
     let avail = 100usize.saturating_sub(prefix.len() + 1);
     for paragraph in text.lines() {
         let para = paragraph.trim();
-        if para.is_empty() { continue; }
+        if para.is_empty() {
+            continue;
+        }
         let mut wrapped: Vec<String> = Vec::new();
         let mut cur = String::new();
         for word in para.split_whitespace() {
@@ -32,17 +38,19 @@ fn emit_comment(buf: &mut String, text: &str, indent: &str) {
                 cur = word.to_string();
             }
         }
-        if !cur.is_empty() { wrapped.push(cur); }
+        if !cur.is_empty() {
+            wrapped.push(cur);
+        }
         match wrapped.len() {
             0 => {}
             1 => writeln!(buf, "{}\"{}\"", prefix, wrapped[0]).unwrap(),
             n => {
                 writeln!(buf, "{}\"{}", prefix, wrapped[0]).unwrap();
-                for i in 1..n {
+                for (i, segment) in wrapped.iter().enumerate().take(n).skip(1) {
                     if i == n - 1 {
-                        writeln!(buf, "{} {}\"", prefix, wrapped[i]).unwrap();
+                        writeln!(buf, "{} {}\"", prefix, segment).unwrap();
                     } else {
-                        writeln!(buf, "{} {}", prefix, wrapped[i]).unwrap();
+                        writeln!(buf, "{} {}", prefix, segment).unwrap();
                     }
                 }
             }
@@ -52,7 +60,11 @@ fn emit_comment(buf: &mut String, text: &str, indent: &str) {
 
 pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
     let mut buf = String::new();
-    let export_names: Vec<String> = asset.exports.iter().map(|(h, _)| h.object_name.clone()).collect();
+    let export_names: Vec<String> = asset
+        .exports
+        .iter()
+        .map(|(h, _)| h.object_name.clone())
+        .collect();
 
     let mut bp_name = String::new();
     let mut bp_parent = String::new();
@@ -74,7 +86,13 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
         }
     }
 
-    writeln!(buf, "Blueprint: {} (extends {})", bp_name, short_class(&bp_parent)).unwrap();
+    writeln!(
+        buf,
+        "Blueprint: {} (extends {})",
+        bp_name,
+        short_class(&bp_parent)
+    )
+    .unwrap();
     writeln!(buf).unwrap();
 
     // Components from SCS_Node exports
@@ -82,7 +100,9 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
     let mut components: Vec<(String, String)> = Vec::new();
     for (hdr, props) in &asset.exports {
         let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
-        if !class.ends_with(".SCS_Node") { continue; }
+        if !class.ends_with(".SCS_Node") {
+            continue;
+        }
         let comp_name = find_prop_str(props, "InternalVariableName")
             .or_else(|| {
                 find_prop(props, "ComponentTemplate").and_then(|p| match &p.value {
@@ -96,16 +116,27 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
             .unwrap_or_else(|| hdr.object_name.clone());
         let comp_class = find_prop(props, "ComponentClass")
             .and_then(|p| match &p.value {
-                PropValue::Object(idx) => Some(short_class(&resolve_index(&asset.imports, &export_names, *idx))),
+                PropValue::Object(idx) => Some(short_class(&resolve_index(
+                    &asset.imports,
+                    &export_names,
+                    *idx,
+                ))),
                 _ => None,
             })
             .unwrap_or_else(|| "?".into());
         let children = find_prop(props, "ChildNodes")
             .and_then(|p| match &p.value {
-                PropValue::Array { items, .. } => Some(items.iter().filter_map(|i| match i {
-                    PropValue::Object(idx) => Some(resolve_index(&asset.imports, &export_names, *idx)),
-                    _ => None,
-                }).collect()),
+                PropValue::Array { items, .. } => Some(
+                    items
+                        .iter()
+                        .filter_map(|i| match i {
+                            PropValue::Object(idx) => {
+                                Some(resolve_index(&asset.imports, &export_names, *idx))
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                ),
                 _ => None,
             })
             .unwrap_or_default();
@@ -113,10 +144,12 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
         scs_nodes.insert(hdr.object_name.clone(), (comp_name, comp_class, children));
     }
 
-    let all_children: Vec<String> = scs_nodes.values()
+    let all_children: Vec<String> = scs_nodes
+        .values()
         .flat_map(|(_, _, children)| children.iter().cloned())
         .collect();
-    let mut root_nodes: Vec<String> = scs_nodes.keys()
+    let mut root_nodes: Vec<String> = scs_nodes
+        .keys()
         .filter(|k| !all_children.contains(k))
         .cloned()
         .collect();
@@ -138,34 +171,49 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
     }
 
     const COMP_SKIP_PROPS: &[&str] = &[
-        "StaticMeshImportVersion", "bVisualizeComponent",
+        "StaticMeshImportVersion",
+        "bVisualizeComponent",
         "CreationMethod",
     ];
 
     fn fmt_prop_list(
-        buf: &mut String, indent: &str, props: &[Property],
-        skip: &[&str], imports: &[ImportEntry], export_names: &[String],
+        buf: &mut String,
+        indent: &str,
+        props: &[Property],
+        skip: &[&str],
+        imports: &[ImportEntry],
+        export_names: &[String],
     ) {
         for prop in props {
-            if skip.contains(&prop.name.as_str()) { continue; }
-            if let PropValue::Struct { struct_type, fields } = &prop.value {
+            if skip.contains(&prop.name.as_str()) {
+                continue;
+            }
+            if let PropValue::Struct {
+                struct_type,
+                fields,
+            } = &prop.value
+            {
                 match struct_type.as_str() {
                     "Vector" | "Rotator" => {
                         let val = prop_value_short(&prop.value, imports, export_names);
                         writeln!(buf, "{}{}: {}", indent, prop.name, val).unwrap();
                     }
                     _ => {
-                        let summary: Vec<String> = fields.iter().filter_map(|f| {
-                            match &f.value {
-                                PropValue::Struct { .. } | PropValue::Array { .. } | PropValue::Map { .. } => None,
+                        let summary: Vec<String> = fields
+                            .iter()
+                            .filter_map(|f| match &f.value {
+                                PropValue::Struct { .. }
+                                | PropValue::Array { .. }
+                                | PropValue::Map { .. } => None,
                                 _ => {
                                     let v = prop_value_short(&f.value, imports, export_names);
                                     Some(format!("{}: {}", f.name, v))
                                 }
-                            }
-                        }).collect();
+                            })
+                            .collect();
                         if !summary.is_empty() {
-                            writeln!(buf, "{}{}: {}", indent, prop.name, summary.join(", ")).unwrap();
+                            writeln!(buf, "{}{}: {}", indent, prop.name, summary.join(", "))
+                                .unwrap();
                         }
                     }
                 }
@@ -176,18 +224,27 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fmt_comp_props(
         buf: &mut String,
-        name: &str, class: &str, depth: usize,
+        name: &str,
+        class: &str,
+        depth: usize,
         comp_props: &HashMap<String, &[Property]>,
         cat_exports: &HashMap<String, (String, &[Property])>,
-        imports: &[ImportEntry], export_names: &[String],
+        imports: &[ImportEntry],
+        export_names: &[String],
     ) {
         let indent = "  ".repeat(depth + 1);
         let prop_indent = "  ".repeat(depth + 2);
         writeln!(buf, "{}{} ({})", indent, name, class).unwrap();
         if let Some(props) = comp_props.get(name) {
-            let skip = &["ChildActorTemplate", COMP_SKIP_PROPS[0], COMP_SKIP_PROPS[1], COMP_SKIP_PROPS[2]];
+            let skip = &[
+                "ChildActorTemplate",
+                COMP_SKIP_PROPS[0],
+                COMP_SKIP_PROPS[1],
+                COMP_SKIP_PROPS[2],
+            ];
             fmt_prop_list(buf, &prop_indent, props, skip, imports, export_names);
             // Handle ChildActorTemplate
             let child_actor_tpl = props.iter().find_map(|p| {
@@ -202,24 +259,52 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                 if let Some((tpl_class, tpl_props)) = cat_exports.get(&tpl_name) {
                     writeln!(buf, "{}[template: {}]", prop_indent, tpl_class).unwrap();
                     let tpl_indent = format!("{}  ", prop_indent);
-                    fmt_prop_list(buf, &tpl_indent, tpl_props, COMP_SKIP_PROPS, imports, export_names);
+                    fmt_prop_list(
+                        buf,
+                        &tpl_indent,
+                        tpl_props,
+                        COMP_SKIP_PROPS,
+                        imports,
+                        export_names,
+                    );
                 }
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fmt_comp_tree(
         buf: &mut String,
-        node_name: &str, depth: usize,
+        node_name: &str,
+        depth: usize,
         scs_nodes: &HashMap<String, (String, String, Vec<String>)>,
         comp_props: &HashMap<String, &[Property]>,
         cat_exports: &HashMap<String, (String, &[Property])>,
-        imports: &[ImportEntry], export_names: &[String],
+        imports: &[ImportEntry],
+        export_names: &[String],
     ) {
         if let Some((comp_name, comp_class, children)) = scs_nodes.get(node_name) {
-            fmt_comp_props(buf, comp_name, comp_class, depth, comp_props, cat_exports, imports, export_names);
+            fmt_comp_props(
+                buf,
+                comp_name,
+                comp_class,
+                depth,
+                comp_props,
+                cat_exports,
+                imports,
+                export_names,
+            );
             for child in children {
-                fmt_comp_tree(buf, child, depth + 1, scs_nodes, comp_props, cat_exports, imports, export_names);
+                fmt_comp_tree(
+                    buf,
+                    child,
+                    depth + 1,
+                    scs_nodes,
+                    comp_props,
+                    cat_exports,
+                    imports,
+                    export_names,
+                );
             }
         }
     }
@@ -227,7 +312,16 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
     if !components.is_empty() {
         writeln!(buf, "Components:").unwrap();
         for root in &root_nodes {
-            fmt_comp_tree(&mut buf, root, 0, &scs_nodes, &comp_props, &cat_exports, &asset.imports, &export_names);
+            fmt_comp_tree(
+                &mut buf,
+                root,
+                0,
+                &scs_nodes,
+                &comp_props,
+                &cat_exports,
+                &asset.imports,
+                &export_names,
+            );
         }
         writeln!(buf).unwrap();
     }
@@ -237,14 +331,20 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
     let component_names: Vec<&str> = components.iter().map(|(n, _)| n.as_str()).collect();
     for (hdr, props) in &asset.exports {
         let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
-        if !class.ends_with(".BlueprintGeneratedClass") { continue; }
+        if !class.ends_with(".BlueprintGeneratedClass") {
+            continue;
+        }
         if let Some(members_prop) = find_prop(props, "Members") {
             if let PropValue::Array { items, .. } = &members_prop.value {
                 for item in items {
                     if let PropValue::Str(decl) = item {
                         let var_name = decl.split(':').next().unwrap_or("");
-                        if component_names.contains(&var_name) { continue; }
-                        if var_name == "UberGraphFrame" { continue; }
+                        if component_names.contains(&var_name) {
+                            continue;
+                        }
+                        if var_name == "UberGraphFrame" {
+                            continue;
+                        }
                         members.push(decl.clone());
                     }
                 }
@@ -256,7 +356,9 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
     for (hdr, props) in &asset.exports {
         if hdr.object_name.starts_with("Default__") && !props.is_empty() {
             for prop in props {
-                if matches!(prop.name.as_str(), "ActorLabel" | "bCanProxyPhysics") { continue; }
+                if matches!(prop.name.as_str(), "ActorLabel" | "bCanProxyPhysics") {
+                    continue;
+                }
                 let val_str = prop_value_short(&prop.value, &asset.imports, &export_names);
                 defaults.push((prop.name.clone(), val_str));
             }
@@ -283,7 +385,9 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
     }
 
     // Ubergraph entry points
-    let ubergraph_name: Option<String> = asset.exports.iter()
+    let ubergraph_name: Option<String> = asset
+        .exports
+        .iter()
         .find(|(hdr, _)| hdr.object_name.starts_with("ExecuteUbergraph_"))
         .map(|(hdr, _)| hdr.object_name.clone());
     let ubergraph_labels: HashMap<usize, String> = if let Some(ref ug_name) = ubergraph_name {
@@ -291,8 +395,12 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
         let call_prefix = format!("{}(", ug_name);
         for (hdr, props) in &asset.exports {
             let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
-            if !class.ends_with(".Function") { continue; }
-            if hdr.object_name.starts_with("ExecuteUbergraph_") { continue; }
+            if !class.ends_with(".Function") {
+                continue;
+            }
+            if hdr.object_name.starts_with("ExecuteUbergraph_") {
+                continue;
+            }
             for prop_name in &["BytecodeSummary", "Bytecode"] {
                 if let Some(bc_prop) = find_prop(props, prop_name) {
                     if let PropValue::Array { items, .. } = &bc_prop.value {
@@ -310,7 +418,9 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                         }
                     }
                 }
-                if !labels.is_empty() { break; }
+                if !labels.is_empty() {
+                    break;
+                }
             }
         }
         labels
@@ -324,43 +434,68 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
 
     for (hdr, props) in &asset.exports {
         let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
-        if !class.ends_with(".EdGraph") { continue; }
+        if !class.ends_with(".EdGraph") {
+            continue;
+        }
         let graph_name = &hdr.object_name;
 
         let node_indices: Vec<i32> = find_prop(props, "Nodes")
             .or_else(|| find_prop(props, "AllNodes"))
             .map(|p| match &p.value {
-                PropValue::Array { items, .. } => items.iter().filter_map(|item| {
-                    if let PropValue::Object(idx) = item { Some(*idx) } else { None }
-                }).collect(),
+                PropValue::Array { items, .. } => items
+                    .iter()
+                    .filter_map(|item| {
+                        if let PropValue::Object(idx) = item {
+                            Some(*idx)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect(),
                 _ => Vec::new(),
             })
             .unwrap_or_default();
 
         for idx in &node_indices {
-            if *idx <= 0 { continue; }
+            if *idx <= 0 {
+                continue;
+            }
             let export_idx = (*idx - 1) as usize;
-            let Some((node_hdr, node_props)) = asset.exports.get(export_idx) else { continue };
+            let Some((node_hdr, node_props)) = asset.exports.get(export_idx) else {
+                continue;
+            };
             let node_class = resolve_index(&asset.imports, &export_names, node_hdr.class_index);
             let short = short_class(&node_class);
 
             if short == "EdGraphNode_Comment" {
-                let comment_text = find_prop(node_props, "NodeComment").and_then(|p| match &p.value {
-                    PropValue::Str(s) | PropValue::Name(s) | PropValue::Text(s) => Some(s.clone()),
-                    _ => None,
-                });
+                let comment_text =
+                    find_prop(node_props, "NodeComment").and_then(|p| match &p.value {
+                        PropValue::Str(s) | PropValue::Name(s) | PropValue::Text(s) => {
+                            Some(s.clone())
+                        }
+                        _ => None,
+                    });
                 if let Some(text) = comment_text {
                     let x = find_prop_i32(node_props, "NodePosX").unwrap_or(0);
                     let y = find_prop_i32(node_props, "NodePosY").unwrap_or(0);
                     let w = find_prop_i32(node_props, "NodeWidth").unwrap_or(0);
                     let h = find_prop_i32(node_props, "NodeHeight").unwrap_or(0);
-                    graph_comments.entry(graph_name.clone()).or_default().push(CommentBox {
-                        text, x, y, width: w, height: h,
-                    });
+                    graph_comments
+                        .entry(graph_name.clone())
+                        .or_default()
+                        .push(CommentBox {
+                            text,
+                            x,
+                            y,
+                            width: w,
+                            height: h,
+                        });
                 }
             }
 
-            if graph_name == "EventGraph" && (short == "K2Node_Event" || short == "K2Node_CustomEvent") {
+            if graph_name == "EventGraph"
+                && (short == "K2Node_Event" || short == "K2Node_CustomEvent")
+            {
                 let event_name = if short == "K2Node_CustomEvent" {
                     find_prop_str(node_props, "CustomFunctionName")
                         .or_else(|| get_event_name_opt(node_props))
@@ -378,7 +513,9 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
 
     // Build call graph: collect local function names and scan bytecodes for cross-references
     let local_functions: HashSet<String> = {
-        let mut names: HashSet<String> = asset.exports.iter()
+        let mut names: HashSet<String> = asset
+            .exports
+            .iter()
             .filter(|(hdr, _)| {
                 let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
                 class.ends_with(".Function") && !hdr.object_name.starts_with("ExecuteUbergraph_")
@@ -393,7 +530,8 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
     };
 
     // Sort ubergraph labels by offset for attributing statements to events
-    let mut ug_label_offsets: Vec<(usize, &str)> = ubergraph_labels.iter()
+    let mut ug_label_offsets: Vec<(usize, &str)> = ubergraph_labels
+        .iter()
         .map(|(off, name)| (*off, name.as_str()))
         .collect();
     ug_label_offsets.sort_by_key(|(off, _)| *off);
@@ -426,8 +564,12 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
     // (ubergraph is scanned later via structured output to catch latent resume blocks)
     for (hdr, props) in &asset.exports {
         let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
-        if !class.ends_with(".Function") { continue; }
-        if hdr.object_name.starts_with("ExecuteUbergraph_") { continue; }
+        if !class.ends_with(".Function") {
+            continue;
+        }
+        if hdr.object_name.starts_with("ExecuteUbergraph_") {
+            continue;
+        }
 
         // Skip ubergraph stubs
         if ubergraph_name.is_some()
@@ -436,10 +578,12 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
             continue;
         }
 
-        let bc_prop = find_prop(props, "Bytecode")
-            .or_else(|| find_prop(props, "BytecodeSummary"));
+        let bc_prop = find_prop(props, "Bytecode").or_else(|| find_prop(props, "BytecodeSummary"));
         let items = match bc_prop {
-            Some(Property { value: PropValue::Array { items, .. }, .. }) => items,
+            Some(Property {
+                value: PropValue::Array { items, .. },
+                ..
+            }) => items,
             _ => continue,
         };
 
@@ -456,7 +600,9 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
 
             let calls = find_local_calls(code, &local_functions);
             for callee in &calls {
-                if *callee == hdr.object_name { continue; }
+                if *callee == hdr.object_name {
+                    continue;
+                }
                 let entry = callees_map.entry(hdr.object_name.clone()).or_default();
                 if !entry.contains(callee) {
                     entry.push(callee.clone());
@@ -471,20 +617,34 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
 
     // Pre-compute structured ubergraph output for call graph scanning
     let ubergraph_structured: Option<Vec<String>> = if !ubergraph_labels.is_empty() {
-        asset.exports.iter()
+        asset
+            .exports
+            .iter()
             .find(|(hdr, _)| hdr.object_name.starts_with("ExecuteUbergraph_"))
             .and_then(|(_, props)| find_prop(props, "Bytecode"))
             .and_then(|bc_prop| {
                 if let PropValue::Array { items, .. } = &bc_prop.value {
-                    let stmts: Vec<BcStatement> = items.iter().filter_map(|item| {
-                        if let PropValue::Str(line) = item {
-                            if line.len() > 6 && line.as_bytes()[4] == b':' {
-                                let offset = usize::from_str_radix(&line[..4], 16).ok()?;
-                                Some(BcStatement { mem_offset: offset, text: line[6..].to_string() })
-                            } else { None }
-                        } else { None }
-                    }).collect();
-                    if stmts.is_empty() { return None; }
+                    let stmts: Vec<BcStatement> = items
+                        .iter()
+                        .filter_map(|item| {
+                            if let PropValue::Str(line) = item {
+                                if line.len() > 6 && line.as_bytes()[4] == b':' {
+                                    let offset = usize::from_str_radix(&line[..4], 16).ok()?;
+                                    Some(BcStatement {
+                                        mem_offset: offset,
+                                        text: line[6..].to_string(),
+                                    })
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if stmts.is_empty() {
+                        return None;
+                    }
                     let mut reordered = reorder_flow_patterns(&stmts);
                     reorder_convergence(&mut reordered);
                     inline_single_use_temps(&mut reordered);
@@ -503,7 +663,12 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
 
     // Scan structured ubergraph output for local calls per event section
     if let Some(ref structured) = ubergraph_structured {
-        scan_structured_calls(structured, &local_functions, &mut callees_map, &mut callers_map);
+        scan_structured_calls(
+            structured,
+            &local_functions,
+            &mut callees_map,
+            &mut callers_map,
+        );
     }
 
     // Emit call graph section (only functions with local callees)
@@ -522,21 +687,32 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
     let mut functions_with_bytecode: HashSet<String> = HashSet::new();
     for (hdr, props) in &asset.exports {
         let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
-        if !class.ends_with(".Function") { continue; }
-        if !matches_filter(&hdr.object_name, filters) { continue; }
-
-        // Skip stub dispatchers when ubergraph bytecode is present
-        if ubergraph_name.is_some() && !hdr.object_name.starts_with("ExecuteUbergraph_") {
-            if is_ubergraph_stub(props, ubergraph_name.as_deref().unwrap_or("")) {
-                continue;
-            }
+        if !class.ends_with(".Function") {
+            continue;
+        }
+        if !matches_filter(&hdr.object_name, filters) {
+            continue;
         }
 
-        let sig = find_prop_str(props, "Signature")
-            .unwrap_or_else(|| format!("{}()", hdr.object_name));
+        // Skip stub dispatchers when ubergraph bytecode is present
+        if ubergraph_name.is_some()
+            && !hdr.object_name.starts_with("ExecuteUbergraph_")
+            && is_ubergraph_stub(props, ubergraph_name.as_deref().unwrap_or(""))
+        {
+            continue;
+        }
+
+        let sig =
+            find_prop_str(props, "Signature").unwrap_or_else(|| format!("{}()", hdr.object_name));
         let flags = find_prop_str(props, "FunctionFlags")
             .map(|f| filter_flags_for_summary(&f))
-            .and_then(|f| if f.is_empty() { None } else { Some(format!(" [{}]", f)) })
+            .and_then(|f| {
+                if f.is_empty() {
+                    None
+                } else {
+                    Some(format!(" [{}]", f))
+                }
+            })
             .unwrap_or_default();
 
         // For ubergraph: use pre-computed structured output
@@ -547,7 +723,13 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                     has_functions = true;
                 }
                 let ug_comments = graph_comments.get("EventGraph").map(|v| v.as_slice());
-                emit_ubergraph_events(&mut buf, structured, ug_comments, &event_positions, &callers_map);
+                emit_ubergraph_events(
+                    &mut buf,
+                    structured,
+                    ug_comments,
+                    &event_positions,
+                    &callers_map,
+                );
                 functions_with_bytecode.insert(hdr.object_name.clone());
             }
             continue;
@@ -598,7 +780,9 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
             }
         }
     }
-    if has_functions { writeln!(buf).unwrap(); }
+    if has_functions {
+        writeln!(buf).unwrap();
+    }
 
     // Graphs
     let mut func_flags: HashMap<String, String> = HashMap::new();
@@ -611,30 +795,56 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
         }
     }
 
-    let has_ubergraph_bytecode = functions_with_bytecode.iter().any(|f| f.starts_with("ExecuteUbergraph_"));
+    let has_ubergraph_bytecode = functions_with_bytecode
+        .iter()
+        .any(|f| f.starts_with("ExecuteUbergraph_"));
     for (hdr, props) in &asset.exports {
         let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
-        if !class.ends_with(".EdGraph") { continue; }
-        if !matches_filter(&hdr.object_name, filters) { continue; }
-        if functions_with_bytecode.contains(&hdr.object_name) { continue; }
-        if hdr.object_name == "EventGraph" && has_ubergraph_bytecode { continue; }
+        if !class.ends_with(".EdGraph") {
+            continue;
+        }
+        if !matches_filter(&hdr.object_name, filters) {
+            continue;
+        }
+        if functions_with_bytecode.contains(&hdr.object_name) {
+            continue;
+        }
+        if hdr.object_name == "EventGraph" && has_ubergraph_bytecode {
+            continue;
+        }
         let graph_name = &hdr.object_name;
 
         let node_indices: Vec<i32> = find_prop(props, "Nodes")
             .or_else(|| find_prop(props, "AllNodes"))
             .map(|p| match &p.value {
-                PropValue::Array { items, .. } => items.iter().filter_map(|item| {
-                    if let PropValue::Object(idx) = item { Some(*idx) } else { None }
-                }).collect(),
+                PropValue::Array { items, .. } => items
+                    .iter()
+                    .filter_map(|item| {
+                        if let PropValue::Object(idx) = item {
+                            Some(*idx)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect(),
                 _ => Vec::new(),
             })
             .unwrap_or_default();
 
-        if node_indices.is_empty() { continue; }
+        if node_indices.is_empty() {
+            continue;
+        }
 
-        let flags = func_flags.get(graph_name.as_str())
+        let flags = func_flags
+            .get(graph_name.as_str())
             .map(|f| filter_flags_for_summary(f))
-            .and_then(|f| if f.is_empty() { None } else { Some(format!(" [{}]", f)) })
+            .and_then(|f| {
+                if f.is_empty() {
+                    None
+                } else {
+                    Some(format!(" [{}]", f))
+                }
+            })
             .unwrap_or_default();
         writeln!(buf, "Graph: {}{}", graph_name, flags).unwrap();
 
@@ -645,7 +855,8 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                 if let Some((hdr, node_props)) = asset.exports.get(export_idx) {
                     let node_class = resolve_index(&asset.imports, &export_names, hdr.class_index);
                     let x = find_prop_i32(node_props, "NodePosX").unwrap_or(0);
-                    let summary = summarise_node(&node_class, node_props, &asset.imports, &export_names);
+                    let summary =
+                        summarise_node(&node_class, node_props, &asset.imports, &export_names);
                     nodes.push((x, summary));
                 }
             }
@@ -664,13 +875,23 @@ pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
     print!("{}", format_summary(asset, filters));
 }
 
-fn summarise_node(class: &str, props: &[Property], imports: &[ImportEntry], export_names: &[String]) -> String {
+fn summarise_node(
+    class: &str,
+    props: &[Property],
+    imports: &[ImportEntry],
+    export_names: &[String],
+) -> String {
     let short = short_class(class);
     match short.as_str() {
         "K2Node_CallFunction" => {
             let func = get_member_ref(props, imports, export_names);
-            let pure = find_prop(props, "bIsPureFunc").is_some_and(|p| matches!(p.value, PropValue::Bool(true)));
-            if pure { format!("[pure] {}", func) } else { format!("Call {}", func) }
+            let pure = find_prop(props, "bIsPureFunc")
+                .is_some_and(|p| matches!(p.value, PropValue::Bool(true)));
+            if pure {
+                format!("[pure] {}", func)
+            } else {
+                format!("Call {}", func)
+            }
         }
         "K2Node_CommutativeAssociativeBinaryOperator" => {
             let func = get_member_ref(props, imports, export_names);
@@ -695,7 +916,9 @@ fn summarise_node(class: &str, props: &[Property], imports: &[ImportEntry], expo
         "K2Node_DynamicCast" => {
             let target = find_prop(props, "TargetType")
                 .map(|p| match &p.value {
-                    PropValue::Object(idx) => short_class(&resolve_index(imports, export_names, *idx)),
+                    PropValue::Object(idx) => {
+                        short_class(&resolve_index(imports, export_names, *idx))
+                    }
                     _ => "?".into(),
                 })
                 .unwrap_or_else(|| "?".into());
@@ -726,12 +949,18 @@ fn get_member_ref(props: &[Property], imports: &[ImportEntry], export_names: &[S
             PropValue::Struct { fields, .. } => {
                 let parent = find_prop(fields, "MemberParent")
                     .map(|mp| match &mp.value {
-                        PropValue::Object(idx) => short_class(&resolve_index(imports, export_names, *idx)),
+                        PropValue::Object(idx) => {
+                            short_class(&resolve_index(imports, export_names, *idx))
+                        }
                         _ => String::new(),
                     })
                     .unwrap_or_default();
                 let name = find_prop_str(fields, "MemberName").unwrap_or_else(|| "?".into());
-                if parent.is_empty() { Some(name) } else { Some(format!("{}::{}", parent, name)) }
+                if parent.is_empty() {
+                    Some(name)
+                } else {
+                    Some(format!("{}::{}", parent, name))
+                }
             }
             _ => None,
         })
@@ -787,7 +1016,8 @@ fn get_macro_name(props: &[Property], imports: &[ImportEntry], export_names: &[S
 
 fn filter_flags_for_summary(flags: &str) -> String {
     const NOISE: &[&str] = &["BlueprintCallable"];
-    flags.split('|')
+    flags
+        .split('|')
         .filter(|f| !NOISE.contains(&f.trim()))
         .collect::<Vec<_>>()
         .join("|")
@@ -807,7 +1037,10 @@ fn emit_ubergraph_events(
         lines: Vec<String>, // code lines (without the marker)
     }
     let mut sections: Vec<Section> = Vec::new();
-    let mut current = Section { name: String::new(), lines: Vec::new() };
+    let mut current = Section {
+        name: String::new(),
+        lines: Vec::new(),
+    };
 
     for line in lines {
         let trimmed = line.trim();
@@ -817,7 +1050,10 @@ fn emit_ubergraph_events(
                 sections.push(current);
             }
             let name = trimmed[4..trimmed.len() - 4].to_string();
-            current = Section { name, lines: Vec::new() };
+            current = Section {
+                name,
+                lines: Vec::new(),
+            };
         } else {
             current.lines.push(line.clone());
         }
@@ -833,7 +1069,9 @@ fn emit_ubergraph_events(
     }
     let mut resume_blocks: Vec<ResumeBlock> = Vec::new();
     for section in &sections {
-        if section.name != "(latent resume)" { continue; }
+        if section.name != "(latent resume)" {
+            continue;
+        }
         let mut block_lines: Vec<String> = Vec::new();
         for line in &section.lines {
             if line.trim() == "return" {
@@ -865,7 +1103,9 @@ fn emit_ubergraph_events(
     let mut delay_resume_map: Vec<(usize, usize)> = Vec::new(); // (section_idx, resume_block_idx)
     let mut resume_idx = 0usize;
     for (si, section) in sections.iter().enumerate() {
-        if section.name == "(latent resume)" { continue; }
+        if section.name == "(latent resume)" {
+            continue;
+        }
         for line in &section.lines {
             if let Some(_offset) = parse_resume_offset(line) {
                 if resume_idx < resume_blocks.len() {
@@ -878,8 +1118,12 @@ fn emit_ubergraph_events(
 
     // Emit each event section as a standalone function
     for (si, section) in sections.iter().enumerate() {
-        if section.name == "(latent resume)" { continue; }
-        if section.name.is_empty() && section.lines.is_empty() { continue; }
+        if section.name == "(latent resume)" {
+            continue;
+        }
+        if section.name.is_empty() && section.lines.is_empty() {
+            continue;
+        }
 
         // Skip empty unnamed preamble sections
         if section.name.is_empty() {
@@ -887,7 +1131,9 @@ fn emit_ubergraph_events(
                 let t = l.trim();
                 !t.is_empty() && t != "return"
             });
-            if !has_content { continue; }
+            if !has_content {
+                continue;
+            }
         }
 
         if !section.name.is_empty() {
@@ -896,8 +1142,11 @@ fn emit_ubergraph_events(
                 writeln!(buf, "    // called by: {}", callers.join(", ")).unwrap();
             }
             if let (Some(cbs), Some(&(ex, ey))) = (comments, event_positions.get(&section.name)) {
-                let mut matching: Vec<&CommentBox> = cbs.iter()
-                    .filter(|c| ex >= c.x && ey >= c.y && ex <= c.x + c.width && ey <= c.y + c.height)
+                let mut matching: Vec<&CommentBox> = cbs
+                    .iter()
+                    .filter(|c| {
+                        ex >= c.x && ey >= c.y && ex <= c.x + c.width && ey <= c.y + c.height
+                    })
                     .collect();
                 matching.sort_by_key(|c| (c.width as i64) * (c.height as i64));
                 for cb in matching.iter().take(2) {
@@ -909,7 +1158,9 @@ fn emit_ubergraph_events(
             // Strip resume annotations from displayed output
             let clean = strip_resume_annotation(line);
             let trimmed = clean.trim();
-            if trimmed == "return" { continue; } // trailing returns are implicit
+            if trimmed == "return" {
+                continue;
+            } // trailing returns are implicit
             writeln!(buf, "    {}", clean).unwrap();
 
             // If this line had a Delay with a resume, inline the resume block
@@ -938,16 +1189,25 @@ fn scan_structured_calls(
     callers_map: &mut HashMap<String, Vec<String>>,
 ) {
     // First, split into sections and collect resume blocks (same logic as emit_ubergraph_events)
-    struct Section { name: String, lines: Vec<String> }
+    struct Section {
+        name: String,
+        lines: Vec<String>,
+    }
     let mut sections: Vec<Section> = Vec::new();
-    let mut current = Section { name: String::new(), lines: Vec::new() };
+    let mut current = Section {
+        name: String::new(),
+        lines: Vec::new(),
+    };
     for line in lines {
         let trimmed = line.trim();
         if trimmed.starts_with("--- ") && trimmed.ends_with(" ---") {
             if !current.lines.is_empty() || !current.name.is_empty() {
                 sections.push(current);
             }
-            current = Section { name: trimmed[4..trimmed.len() - 4].to_string(), lines: Vec::new() };
+            current = Section {
+                name: trimmed[4..trimmed.len() - 4].to_string(),
+                lines: Vec::new(),
+            };
         } else {
             current.lines.push(line.clone());
         }
@@ -959,7 +1219,9 @@ fn scan_structured_calls(
     // Collect resume blocks from (latent resume) sections
     let mut resume_blocks: Vec<Vec<String>> = Vec::new();
     for section in &sections {
-        if section.name != "(latent resume)" { continue; }
+        if section.name != "(latent resume)" {
+            continue;
+        }
         let mut block: Vec<String> = Vec::new();
         for line in &section.lines {
             if line.trim() == "return" {
@@ -971,7 +1233,9 @@ fn scan_structured_calls(
                 block.push(line.clone());
             }
         }
-        if !block.is_empty() { resume_blocks.push(block); }
+        if !block.is_empty() {
+            resume_blocks.push(block);
+        }
     }
 
     // Build resume mapping: for each event section with a Delay()+resume annotation,
@@ -979,14 +1243,16 @@ fn scan_structured_calls(
     let mut resume_idx = 0usize;
     let mut event_resume_lines: HashMap<String, Vec<String>> = HashMap::new();
     for section in &sections {
-        if section.name.is_empty() || section.name == "(latent resume)" { continue; }
+        if section.name.is_empty() || section.name == "(latent resume)" {
+            continue;
+        }
         for line in &section.lines {
-            if line.contains("/*resume:0x") {
-                if resume_idx < resume_blocks.len() {
-                    event_resume_lines.entry(section.name.clone()).or_default()
-                        .extend(resume_blocks[resume_idx].iter().cloned());
-                    resume_idx += 1;
-                }
+            if line.contains("/*resume:0x") && resume_idx < resume_blocks.len() {
+                event_resume_lines
+                    .entry(section.name.clone())
+                    .or_default()
+                    .extend(resume_blocks[resume_idx].iter().cloned());
+                resume_idx += 1;
             }
         }
     }
@@ -1014,25 +1280,33 @@ fn scan_structured_calls(
                     let prev = trimmed.as_bytes()[pos - 1];
                     !(prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'.')
                 };
-                if is_boundary { found.push(func.clone()); }
+                if is_boundary {
+                    found.push(func.clone());
+                }
             }
         }
         found
     };
 
     for section in &sections {
-        if section.name.is_empty() || section.name == "(latent resume)" { continue; }
+        if section.name.is_empty() || section.name == "(latent resume)" {
+            continue;
+        }
         // Scan main section lines
         for line in &section.lines {
             for callee in find_calls(line, local_functions) {
-                if callee != section.name { record_call(&section.name, &callee); }
+                if callee != section.name {
+                    record_call(&section.name, &callee);
+                }
             }
         }
         // Scan associated resume block lines
         if let Some(resume_lines) = event_resume_lines.get(&section.name) {
             for line in resume_lines {
                 for callee in find_calls(line, local_functions) {
-                    if callee != section.name { record_call(&section.name, &callee); }
+                    if callee != section.name {
+                        record_call(&section.name, &callee);
+                    }
                 }
             }
         }
@@ -1052,34 +1326,42 @@ fn strip_resume_annotation(line: &str) -> String {
 /// Check if a function is a stub that just dispatches to the ubergraph.
 /// Stubs contain only an ExecuteUbergraph_X(N) call, plus optional return/persistent-frame lines.
 fn is_ubergraph_stub(props: &[Property], ug_name: &str) -> bool {
-    let bc_prop = find_prop(props, "BytecodeSummary")
-        .or_else(|| find_prop(props, "Bytecode"));
+    let bc_prop = find_prop(props, "BytecodeSummary").or_else(|| find_prop(props, "Bytecode"));
     let items = match bc_prop {
-        Some(Property { value: PropValue::Array { items, .. }, .. }) => items,
+        Some(Property {
+            value: PropValue::Array { items, .. },
+            ..
+        }) => items,
         _ => return false,
     };
-    let meaningful: Vec<&str> = items.iter().filter_map(|item| {
-        if let PropValue::Str(line) = item {
-            // Strip hex offset prefix (e.g. "0000: ")
-            let code = if line.len() > 6 && line.as_bytes()[4] == b':' {
-                line[6..].trim()
+    let meaningful: Vec<&str> = items
+        .iter()
+        .filter_map(|item| {
+            if let PropValue::Str(line) = item {
+                // Strip hex offset prefix (e.g. "0000: ")
+                let code = if line.len() > 6 && line.as_bytes()[4] == b':' {
+                    line[6..].trim()
+                } else {
+                    line.trim()
+                };
+                match code {
+                    "" | "return" | "return nop" => None,
+                    _ => Some(code),
+                }
             } else {
-                line.trim()
-            };
-            match code {
-                "" | "return" | "return nop" => None,
-                _ => Some(code),
+                None
             }
-        } else {
-            None
-        }
-    }).collect();
-    if meaningful.is_empty() || meaningful.len() > 2 { return false; }
-    meaningful.iter().any(|line| line.starts_with(&format!("{}(", ug_name)))
-        && meaningful.iter().all(|line| {
-            line.starts_with(&format!("{}(", ug_name))
-                || line.contains("[persistent]")
         })
+        .collect();
+    if meaningful.is_empty() || meaningful.len() > 2 {
+        return false;
+    }
+    meaningful
+        .iter()
+        .any(|line| line.starts_with(&format!("{}(", ug_name)))
+        && meaningful
+            .iter()
+            .all(|line| line.starts_with(&format!("{}(", ug_name)) || line.contains("[persistent]"))
 }
 
 fn get_var_ref(props: &[Property], imports: &[ImportEntry], export_names: &[String]) -> String {
@@ -1088,16 +1370,22 @@ fn get_var_ref(props: &[Property], imports: &[ImportEntry], export_names: &[Stri
             PropValue::Struct { fields, .. } => {
                 let parent = find_prop(fields, "MemberParent")
                     .map(|mp| match &mp.value {
-                        PropValue::Object(idx) => short_class(&resolve_index(imports, export_names, *idx)),
+                        PropValue::Object(idx) => {
+                            short_class(&resolve_index(imports, export_names, *idx))
+                        }
                         _ => String::new(),
                     })
                     .unwrap_or_default();
                 let name = find_prop_str(fields, "MemberName").unwrap_or_else(|| "?".into());
                 let is_self = find_prop(fields, "bSelfContext")
                     .is_some_and(|p| matches!(p.value, PropValue::Bool(true)));
-                if is_self { Some(format!("self.{}", name)) }
-                else if parent.is_empty() { Some(name) }
-                else { Some(format!("{}.{}", parent, name)) }
+                if is_self {
+                    Some(format!("self.{}", name))
+                } else if parent.is_empty() {
+                    Some(name)
+                } else {
+                    Some(format!("{}.{}", parent, name))
+                }
             }
             _ => None,
         })

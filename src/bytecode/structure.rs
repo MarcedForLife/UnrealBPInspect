@@ -1,6 +1,8 @@
-use std::collections::{HashMap, HashSet};
 use super::decode::BcStatement;
-use super::flow::{parse_if_jump, parse_jump, parse_push_flow, parse_pop_flow_if_not, parse_jump_computed};
+use super::flow::{
+    parse_if_jump, parse_jump, parse_jump_computed, parse_pop_flow_if_not, parse_push_flow,
+};
+use std::collections::{HashMap, HashSet};
 
 /// Negate a condition string for if/else inversion.
 /// Rules: `!X` → `X`, `!(expr)` → `expr` (if balanced), otherwise `!(cond)`.
@@ -22,7 +24,11 @@ fn negate_cond(cond: &str) -> String {
             // Verify parens are balanced (the stripped ')' is the matching one)
             let mut depth = 0i32;
             let balanced = inner.chars().all(|ch| {
-                match ch { '(' => depth += 1, ')' => depth -= 1, _ => {} }
+                match ch {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
                 depth >= 0
             }) && depth == 0;
             if balanced {
@@ -38,7 +44,10 @@ fn negate_cond(cond: &str) -> String {
         match bytes[i] {
             b'(' => depth += 1,
             b')' => depth -= 1,
-            b' ' if depth == 0 && i > 0 && i + 1 < bytes.len() => { has_infix = true; break; }
+            b' ' if depth == 0 && i > 0 && i + 1 < bytes.len() => {
+                has_infix = true;
+                break;
+            }
             _ => {}
         }
     }
@@ -57,27 +66,44 @@ fn negate_cond(cond: &str) -> String {
 /// separate Branch nodes into compound conditions — it only detects if/else blocks from
 /// `JumpIfNot` opcodes and chains them into else-if when they share the same end target.
 pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>) -> Vec<String> {
-    if stmts.is_empty() { return Vec::new(); }
+    if stmts.is_empty() {
+        return Vec::new();
+    }
 
-    let exact_map: HashMap<usize, usize> = stmts.iter().enumerate()
+    let exact_map: HashMap<usize, usize> = stmts
+        .iter()
+        .enumerate()
         .filter(|(_, s)| s.mem_offset > 0)
         .map(|(i, s)| (s.mem_offset, i))
         .collect();
-    let mut sorted_offsets: Vec<(usize, usize)> = exact_map.iter()
-        .map(|(&off, &idx)| (off, idx))
-        .collect();
+    let mut sorted_offsets: Vec<(usize, usize)> =
+        exact_map.iter().map(|(&off, &idx)| (off, idx)).collect();
     sorted_offsets.sort_by_key(|&(off, _)| off);
 
     let find_target_idx = |target: usize| -> Option<usize> {
-        if let Some(&idx) = exact_map.get(&target) { return Some(idx); }
+        if let Some(&idx) = exact_map.get(&target) {
+            return Some(idx);
+        }
         let pos = sorted_offsets.partition_point(|&(off, _)| off <= target);
-        let below = if pos > 0 { Some(sorted_offsets[pos - 1]) } else { None };
-        let above = if pos < sorted_offsets.len() { Some(sorted_offsets[pos]) } else { None };
+        let below = if pos > 0 {
+            Some(sorted_offsets[pos - 1])
+        } else {
+            None
+        };
+        let above = if pos < sorted_offsets.len() {
+            Some(sorted_offsets[pos])
+        } else {
+            None
+        };
         let best = match (below, above) {
             (Some((bo, bi)), Some((ao, ai))) => {
                 let bd = target.saturating_sub(bo);
                 let ad = ao.saturating_sub(target);
-                if bd <= ad { Some((bd, bi)) } else { Some((ad, ai)) }
+                if bd <= ad {
+                    Some((bd, bi))
+                } else {
+                    Some((ad, ai))
+                }
             }
             (Some((bo, bi)), None) => Some((target.saturating_sub(bo), bi)),
             (None, Some((ao, ai))) => Some((ao.saturating_sub(target), ai)),
@@ -99,13 +125,24 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         })
     };
 
-    let label_at: HashMap<usize, &String> = labels.iter().filter_map(|(offset, name)| {
-        stmts.iter().position(|s| s.mem_offset >= *offset).map(|idx| (idx, name))
-    }).collect();
+    let label_at: HashMap<usize, &String> = labels
+        .iter()
+        .filter_map(|(offset, name)| {
+            stmts
+                .iter()
+                .position(|s| s.mem_offset >= *offset)
+                .map(|idx| (idx, name))
+        })
+        .collect();
 
     #[derive(Clone)]
     #[allow(clippy::enum_variant_names)]
-    enum BlockEvent { CloseIf, CloseIfOpenElse, CloseIfOpenElseIf(String), CloseElse }
+    enum BlockEvent {
+        CloseIf,
+        CloseIfOpenElse,
+        CloseIfOpenElseIf(String),
+        CloseElse,
+    }
 
     let mut events: HashMap<usize, Vec<BlockEvent>> = HashMap::new();
     let mut skip: HashSet<usize> = HashSet::new();
@@ -123,13 +160,17 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
     let mut if_blocks: Vec<IfBlock> = Vec::new();
 
     for (i, stmt) in stmts.iter().enumerate() {
-        let Some((cond, target)) = parse_if_jump(&stmt.text) else { continue };
-        let Some(target_idx) = find_target_idx_or_end(target) else { continue };
+        let Some((cond, target)) = parse_if_jump(&stmt.text) else {
+            continue;
+        };
+        let Some(target_idx) = find_target_idx_or_end(target) else {
+            continue;
+        };
 
         let mut jump_idx = None;
         let mut end_idx = None;
         if target_idx > 0 && target_idx <= stmts.len() {
-            let check_idx = if target_idx == stmts.len() { target_idx - 1 } else { target_idx - 1 };
+            let check_idx = target_idx - 1;
             let prev = &stmts[check_idx];
             if let Some(end_target) = parse_jump(&prev.text) {
                 if let Some(eidx) = find_target_idx_or_end(end_target) {
@@ -141,22 +182,35 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
                 }
             }
         }
-        if_blocks.push(IfBlock { if_idx: i, cond: cond.to_string(), target_idx, jump_idx, end_idx, else_close_idx: None });
+        if_blocks.push(IfBlock {
+            if_idx: i,
+            cond: cond.to_string(),
+            target_idx,
+            jump_idx,
+            end_idx,
+            else_close_idx: None,
+        });
     }
 
     // Pass 1.5: false-block truncation — when the false block contains an
     // unconditional jump to end_idx, the else body ends at that jump, not at end_idx.
     // This prevents inner else blocks from engulfing outer false blocks.
-    for blk_i in 0..if_blocks.len() {
-        let Some(end_idx) = if_blocks[blk_i].end_idx else { continue };
-        let target_idx = if_blocks[blk_i].target_idx;
-        if target_idx >= end_idx { continue; }
+    for blk in &mut if_blocks {
+        let Some(end_idx) = blk.end_idx else {
+            continue;
+        };
+        let target_idx = blk.target_idx;
+        if target_idx >= end_idx {
+            continue;
+        }
         for j in target_idx..end_idx {
-            if j >= stmts.len() { break; }
+            if j >= stmts.len() {
+                break;
+            }
             if let Some(jt) = parse_jump(&stmts[j].text) {
                 if let Some(jt_idx) = find_target_idx_or_end(jt) {
                     if jt_idx == end_idx {
-                        if_blocks[blk_i].else_close_idx = Some(j + 1);
+                        blk.else_close_idx = Some(j + 1);
                         break;
                     }
                 }
@@ -170,12 +224,15 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         let mut set = HashSet::new();
         for a in &if_blocks {
             let Some(a_end) = a.end_idx else { continue };
-            if set.contains(&a.if_idx) { continue; }
+            if set.contains(&a.if_idx) {
+                continue;
+            }
             let mut cur_target = a.target_idx;
             loop {
                 let next = if_blocks.iter().find(|b| {
-                    b.if_idx == cur_target && !set.contains(&b.if_idx)
-                    && (b.end_idx == Some(a_end) || b.target_idx == a_end)
+                    b.if_idx == cur_target
+                        && !set.contains(&b.if_idx)
+                        && (b.end_idx == Some(a_end) || b.target_idx == a_end)
                 });
                 let Some(b) = next else { break };
                 set.insert(b.if_idx);
@@ -186,7 +243,9 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
     };
 
     let is_next_chained = |target_idx: usize| -> bool {
-        if_blocks.iter().any(|b| b.if_idx == target_idx && chained.contains(&b.if_idx))
+        if_blocks
+            .iter()
+            .any(|b| b.if_idx == target_idx && chained.contains(&b.if_idx))
     };
 
     for blk in &if_blocks {
@@ -194,37 +253,60 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
 
         if chained.contains(&blk.if_idx) {
             // Chained else-if: emit } else if (cond) { at our if_idx
-            events.entry(blk.if_idx).or_default().push(
-                BlockEvent::CloseIfOpenElseIf(blk.cond.clone())
-            );
+            events
+                .entry(blk.if_idx)
+                .or_default()
+                .push(BlockEvent::CloseIfOpenElseIf(blk.cond.clone()));
             skip.insert(blk.if_idx);
-            if let Some(ji) = blk.jump_idx { skip.insert(ji); }
+            if let Some(ji) = blk.jump_idx {
+                skip.insert(ji);
+            }
 
             if !is_next_chained(blk.target_idx) {
                 // Last in chain — close the block
                 if blk.jump_idx.is_some() {
                     // Has unconditional jump → else body follows
-                    events.entry(blk.target_idx).or_default().push(BlockEvent::CloseIfOpenElse);
+                    events
+                        .entry(blk.target_idx)
+                        .or_default()
+                        .push(BlockEvent::CloseIfOpenElse);
                     if blk.end_idx.is_some() {
-                        events.entry(else_end).or_default().push(BlockEvent::CloseElse);
+                        events
+                            .entry(else_end)
+                            .or_default()
+                            .push(BlockEvent::CloseElse);
                     }
                 } else {
                     // No else body
-                    events.entry(blk.target_idx).or_default().push(BlockEvent::CloseIf);
+                    events
+                        .entry(blk.target_idx)
+                        .or_default()
+                        .push(BlockEvent::CloseIf);
                 }
             }
         } else {
             // Non-chained: either standalone or head of a chain
             replacements.insert(blk.if_idx, format!("if ({}) {{", blk.cond));
-            if let Some(ji) = blk.jump_idx { skip.insert(ji); }
+            if let Some(ji) = blk.jump_idx {
+                skip.insert(ji);
+            }
 
             if is_next_chained(blk.target_idx) {
                 // Head of chain — chained block handles the transition
             } else if blk.end_idx.is_some() {
-                events.entry(blk.target_idx).or_default().push(BlockEvent::CloseIfOpenElse);
-                events.entry(else_end).or_default().push(BlockEvent::CloseElse);
+                events
+                    .entry(blk.target_idx)
+                    .or_default()
+                    .push(BlockEvent::CloseIfOpenElse);
+                events
+                    .entry(else_end)
+                    .or_default()
+                    .push(BlockEvent::CloseElse);
             } else {
-                events.entry(blk.target_idx).or_default().push(BlockEvent::CloseIf);
+                events
+                    .entry(blk.target_idx)
+                    .or_default()
+                    .push(BlockEvent::CloseIf);
             }
         }
     }
@@ -240,18 +322,22 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
 
     // Track block types for pop_flow → break/return disambiguation
     #[derive(Clone, Copy, PartialEq)]
-    enum BlockType { If, Loop }
+    enum BlockType {
+        If,
+        Loop,
+    }
     let mut block_stack: Vec<BlockType> = Vec::new();
 
-    let in_loop = |stack: &[BlockType]| -> bool {
-        stack.iter().rev().any(|b| *b == BlockType::Loop)
-    };
+    let in_loop =
+        |stack: &[BlockType]| -> bool { stack.iter().rev().any(|b| *b == BlockType::Loop) };
 
     // Pre-collect jump targets for label injection
     let mut label_targets: HashMap<usize, String> = HashMap::new();
     let mut pending_labels: HashMap<usize, String> = HashMap::new();
     for (i, stmt) in stmts.iter().enumerate() {
-        if skip.contains(&i) || replacements.contains_key(&i) { continue; }
+        if skip.contains(&i) || replacements.contains_key(&i) {
+            continue;
+        }
         if let Some(target) = parse_jump(&stmt.text) {
             if let Some(target_idx) = find_target_idx_or_end(target) {
                 let is_jump_to_end_label = target_idx >= stmts.len()
@@ -263,7 +349,9 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
                 } else {
                     // Generate a label for the target
                     let label_name = format!("L_{:04x}", target);
-                    pending_labels.entry(target_idx).or_insert_with(|| label_name.clone());
+                    pending_labels
+                        .entry(target_idx)
+                        .or_insert_with(|| label_name.clone());
                     label_targets.insert(i, format!("goto {}", label_name));
                 }
             }
@@ -273,7 +361,10 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
     let mut output = Vec::new();
     let mut indent: usize = 0;
 
-    let emit_block_events = |evts: &[BlockEvent], indent: &mut usize, output: &mut Vec<String>, block_stack: &mut Vec<BlockType>| {
+    let emit_block_events = |evts: &[BlockEvent],
+                             indent: &mut usize,
+                             output: &mut Vec<String>,
+                             block_stack: &mut Vec<BlockType>| {
         for evt in evts.iter().rev() {
             match evt {
                 BlockEvent::CloseIf => {
@@ -289,7 +380,11 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
                 }
                 BlockEvent::CloseIfOpenElseIf(cond) => {
                     *indent = indent.saturating_sub(1);
-                    output.push(format!("{}}} else if ({}) {{", "    ".repeat(*indent), cond));
+                    output.push(format!(
+                        "{}}} else if ({}) {{",
+                        "    ".repeat(*indent),
+                        cond
+                    ));
                     // Pop If, push If (same level)
                     *indent += 1;
                 }
@@ -326,7 +421,9 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
             output.push(format!("--- {} ---", label));
         }
 
-        if skip.contains(&i) { continue; }
+        if skip.contains(&i) {
+            continue;
+        }
 
         if let Some(replacement) = replacements.get(&i) {
             output.push(format!("{}{}", "    ".repeat(indent), replacement));
@@ -340,14 +437,31 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
             let is_loop = stmt.text.starts_with("while ") || stmt.text.starts_with("for ");
             output.push(format!("{}{}", "    ".repeat(indent), stmt.text));
             indent += 1;
-            block_stack.push(if is_loop { BlockType::Loop } else { BlockType::If });
+            block_stack.push(if is_loop {
+                BlockType::Loop
+            } else {
+                BlockType::If
+            });
         } else if stmt.text == "pop_flow" {
-            let keyword = if in_loop(&block_stack) { "break" } else { "return" };
+            let keyword = if in_loop(&block_stack) {
+                "break"
+            } else {
+                "return"
+            };
             output.push(format!("{}{}", "    ".repeat(indent), keyword));
         } else if let Some(cond) = parse_pop_flow_if_not(&stmt.text) {
-            let keyword = if in_loop(&block_stack) { "break" } else { "return" };
+            let keyword = if in_loop(&block_stack) {
+                "break"
+            } else {
+                "return"
+            };
             let negated = negate_cond(cond);
-            output.push(format!("{}if ({}) {}", "    ".repeat(indent), negated, keyword));
+            output.push(format!(
+                "{}if ({}) {}",
+                "    ".repeat(indent),
+                negated,
+                keyword
+            ));
         } else if let Some(target) = parse_jump(&stmt.text) {
             // Resolve raw jumps
             if let Some(target_idx) = find_target_idx_or_end(target) {
@@ -369,7 +483,11 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
                 output.push(format!("{}{}", "    ".repeat(indent), stmt.text));
             }
         } else {
-            let text = if stmt.text == "return nop" { "return" } else { &stmt.text };
+            let text = if stmt.text == "return nop" {
+                "return"
+            } else {
+                &stmt.text
+            };
             output.push(format!("{}{}", "    ".repeat(indent), text));
         }
     }
@@ -408,7 +526,7 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
                 if break_labels.contains(label) {
                     let indent_str = " ".repeat(output[i].len() - trimmed.len());
                     let line_indent = indent_str.len() / 4; // 4 spaces per indent level
-                    // Check if we're inside a loop by scanning previous lines
+                                                            // Check if we're inside a loop by scanning previous lines
                     let in_loop = output[..i].iter().rev().any(|l| {
                         let lt = l.trim();
                         let li = (l.len() - l.trim_start().len()) / 4;
@@ -425,7 +543,8 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         }
         // Remove empty lines from cleared gotos and unused labels
         output.retain(|line| !line.is_empty());
-        let remaining_gotos: HashSet<String> = output.iter()
+        let remaining_gotos: HashSet<String> = output
+            .iter()
             .filter_map(|l| l.trim().strip_prefix("goto ").map(|s| s.to_string()))
             .collect();
         output.retain(|line| {
@@ -461,50 +580,74 @@ fn extract_convergence(output: &mut Vec<String>) {
         }
 
         // Find first convergence label (2+ gotos)
-        let conv = goto_map.iter()
+        let conv = goto_map
+            .iter()
             .find(|(_, gotos)| gotos.len() >= 2)
             .map(|(label, gotos)| (label.clone(), gotos.clone()));
-        let Some((label_name, goto_indices)) = conv else { break };
+        let Some((label_name, goto_indices)) = conv else {
+            break;
+        };
 
         // Find the label line
         let label_text = format!("{}:", label_name);
-        let Some(label_idx) = output.iter().position(|l| l.trim() == label_text) else { break };
+        let Some(label_idx) = output.iter().position(|l| l.trim() == label_text) else {
+            break;
+        };
 
         // Determine convergence code extent: from label+1 until a structural
         // boundary (closing brace / else) at shallower indent
         let code_start = label_idx + 1;
-        if code_start >= output.len() { break; }
+        if code_start >= output.len() {
+            break;
+        }
 
         let first_indent = output[code_start].len() - output[code_start].trim_start().len();
         let mut code_end = code_start;
-        for j in code_start..output.len() {
-            let trimmed = output[j].trim();
-            if trimmed.is_empty() { code_end = j + 1; continue; }
-            let line_indent = output[j].len() - output[j].trim_start().len();
-            if line_indent < first_indent && (trimmed.starts_with('}') || trimmed.starts_with("} else")) {
+        for (j, line) in output[code_start..].iter().enumerate() {
+            let j = j + code_start;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                code_end = j + 1;
+                continue;
+            }
+            let line_indent = line.len() - line.trim_start().len();
+            if line_indent < first_indent
+                && (trimmed.starts_with('}') || trimmed.starts_with("} else"))
+            {
                 break;
             }
-            if j > code_start && trimmed.ends_with(':') && !trimmed.starts_with("//") && !trimmed.starts_with("---") {
+            if j > code_start
+                && trimmed.ends_with(':')
+                && !trimmed.starts_with("//")
+                && !trimmed.starts_with("---")
+            {
                 break;
             }
             code_end = j + 1;
         }
-        if code_end <= code_start { break; }
+        if code_end <= code_start {
+            break;
+        }
 
         // Extract convergence content (trimmed)
         let conv_content: Vec<String> = output[code_start..code_end]
-            .iter().map(|l| l.trim().to_string()).collect();
+            .iter()
+            .map(|l| l.trim().to_string())
+            .collect();
 
         // Find insert point: first `}` after all gotos at indent < shallowest goto indent
-        let min_goto_indent = goto_indices.iter()
+        let min_goto_indent = goto_indices
+            .iter()
             .map(|&i| output[i].len() - output[i].trim_start().len())
-            .min().unwrap_or(0);
+            .min()
+            .unwrap_or(0);
         let max_goto = goto_indices.iter().copied().max().unwrap_or(0);
 
         let mut insert_after = None;
-        for j in (max_goto + 1)..output.len() {
-            let trimmed = output[j].trim();
-            let line_indent = output[j].len() - output[j].trim_start().len();
+        for (j, line) in output[(max_goto + 1)..].iter().enumerate() {
+            let j = j + max_goto + 1;
+            let trimmed = line.trim();
+            let line_indent = line.len() - line.trim_start().len();
             if trimmed == "}" && line_indent < min_goto_indent {
                 insert_after = Some(j);
                 break;

@@ -1,10 +1,14 @@
 use serde_json::{json, Value};
 
-use crate::types::*;
 use crate::resolve::*;
+use crate::types::*;
 
 pub fn to_json(asset: &ParsedAsset, filters: &[String]) -> Value {
-    let export_names: Vec<String> = asset.exports.iter().map(|(h, _)| h.object_name.clone()).collect();
+    let export_names: Vec<String> = asset
+        .exports
+        .iter()
+        .map(|(h, _)| h.object_name.clone())
+        .collect();
 
     json!({
         "imports": asset.imports.iter().enumerate().map(|(i, imp)| {
@@ -52,7 +56,10 @@ fn prop_to_json(prop: &Property, imports: &[ImportEntry], export_names: &[String
         PropValue::Object(idx) => json!(resolve_index(imports, export_names, *idx)),
         PropValue::Enum { value, .. } => json!(value),
         PropValue::Byte { value, .. } => json!(value),
-        PropValue::Struct { struct_type, fields } => json!({
+        PropValue::Struct {
+            struct_type,
+            fields,
+        } => json!({
             "type": struct_type,
             "fields": fields.iter().map(|f| prop_to_json(f, imports, export_names)).collect::<Vec<_>>(),
         }),
@@ -63,7 +70,11 @@ fn prop_to_json(prop: &Property, imports: &[ImportEntry], export_names: &[String
                 prop_to_json(&child, imports, export_names)["value"].clone()
             }).collect::<Vec<_>>(),
         }),
-        PropValue::Map { key_type, value_type, entries } => json!({
+        PropValue::Map {
+            key_type,
+            value_type,
+            entries,
+        } => json!({
             "key_type": key_type,
             "value_type": value_type,
             "entries": entries.iter().map(|(k, v)| {

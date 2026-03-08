@@ -1,7 +1,9 @@
-use crate::binary::NameTable;
-use crate::types::ImportEntry;
 use super::readers::*;
 use super::resolve::*;
+use crate::binary::NameTable;
+use crate::types::ImportEntry;
+
+use super::opcodes::*;
 
 #[derive(Clone)]
 pub struct BcStatement {
@@ -12,15 +14,18 @@ pub struct BcStatement {
 /// Check if an expression contains an infix operator and needs parenthesization.
 fn needs_parens(expr: &str) -> bool {
     const TOKENS: &[&str] = &[
-        " && ", " || ", " + ", " - ", " * ", " / ", " % ",
-        " < ", " <= ", " > ", " >= ", " == ", " != ",
-        " >> ", " << ",
+        " && ", " || ", " + ", " - ", " * ", " / ", " % ", " < ", " <= ", " > ", " >= ", " == ",
+        " != ", " >> ", " << ",
     ];
     TOKENS.iter().any(|tok| expr.contains(tok)) || expr.starts_with('!')
 }
 
 fn maybe_paren(expr: &str) -> String {
-    if needs_parens(expr) { format!("({})", expr) } else { expr.to_string() }
+    if needs_parens(expr) {
+        format!("({})", expr)
+    } else {
+        expr.to_string()
+    }
 }
 
 /// Try to inline a Kismet math/logic function as an operator expression.
@@ -79,7 +84,8 @@ fn strip_func_prefix(name: &str) -> String {
     if let Some(dot_pos) = name.rfind('.') {
         let class_part = &name[..dot_pos];
         let func = &name[dot_pos + 1..];
-        let stripped = func.strip_prefix("K2_")
+        let stripped = func
+            .strip_prefix("K2_")
             .or_else(|| func.strip_prefix("Conv_"))
             .unwrap_or(func);
         if is_ue4_library_class(class_part) {
@@ -88,7 +94,8 @@ fn strip_func_prefix(name: &str) -> String {
             format!("{}.{}", class_part, stripped)
         }
     } else {
-        let stripped = name.strip_prefix("K2_")
+        let stripped = name
+            .strip_prefix("K2_")
             .or_else(|| name.strip_prefix("Conv_"))
             .unwrap_or(name);
         stripped.to_string()
@@ -97,13 +104,22 @@ fn strip_func_prefix(name: &str) -> String {
 
 fn is_ue4_library_class(name: &str) -> bool {
     let short = name.rsplit('.').next().unwrap_or(name);
-    matches!(short,
-        "KismetArrayLibrary" | "KismetMathLibrary" | "KismetSystemLibrary"
-        | "KismetStringLibrary" | "KismetTextLibrary" | "KismetInputLibrary"
-        | "KismetMaterialLibrary" | "KismetNodeHelperLibrary"
-        | "KismetRenderingLibrary" | "KismetGuidLibrary"
-        | "GameplayStatics" | "HeadMountedDisplayFunctionLibrary"
-        | "BlueprintMapLibrary" | "BlueprintSetLibrary"
+    matches!(
+        short,
+        "KismetArrayLibrary"
+            | "KismetMathLibrary"
+            | "KismetSystemLibrary"
+            | "KismetStringLibrary"
+            | "KismetTextLibrary"
+            | "KismetInputLibrary"
+            | "KismetMaterialLibrary"
+            | "KismetNodeHelperLibrary"
+            | "KismetRenderingLibrary"
+            | "KismetGuidLibrary"
+            | "GameplayStatics"
+            | "HeadMountedDisplayFunctionLibrary"
+            | "BlueprintMapLibrary"
+            | "BlueprintSetLibrary"
     )
 }
 
@@ -123,20 +139,32 @@ fn format_call_or_operator(name: &str, args: Vec<String>) -> String {
         return inlined;
     }
     // Extract resume offset from LatentActionInfo before stripping
-    let resume_annotation = args.iter()
+    let resume_annotation = args
+        .iter()
         .find(|a| a.starts_with("LatentActionInfo("))
         .and_then(|lai| extract_latent_resume_offset(lai));
     // Strip WorldContextObject (self as first arg of global functions) and LatentActionInfo
-    let mut clean_args: Vec<String> = args.iter().filter(|a| {
-        // Drop WorldContextObject — "self" as first arg of non-method calls
-        // (method calls use dot syntax so self won't appear as an arg)
-        !(a.as_str() == "self" && !name.contains('.'))
-        // Drop LatentActionInfo struct literals — internal plumbing
-        && !a.starts_with("LatentActionInfo(")
-    }).cloned().collect();
+    let mut clean_args: Vec<String> = args
+        .iter()
+        .filter(|a| {
+            // Drop WorldContextObject — "self" as first arg of non-method calls
+            (a.as_str() != "self" || name.contains('.'))
+            // Drop LatentActionInfo struct literals — internal plumbing
+            && !a.starts_with("LatentActionInfo(")
+        })
+        .cloned()
+        .collect();
     let clean_name = strip_func_prefix(name);
     crate::enums::resolve_enum_args(&clean_name, &mut clean_args);
-    let call = format!("{}({})", clean_name, clean_args.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(", "));
+    let call = format!(
+        "{}({})",
+        clean_name,
+        clean_args
+            .iter()
+            .map(|a| a.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     if let Some(offset) = resume_annotation {
         format!("{} /*resume:0x{:04x}*/", call, offset)
     } else {
@@ -145,13 +173,26 @@ fn format_call_or_operator(name: &str, args: Vec<String>) -> String {
 }
 
 /// Decode expressions until a terminator opcode is reached, returning them as a list.
-fn decode_expr_list(bc: &[u8], pos: &mut usize, nt: &NameTable,
-                    imports: &[ImportEntry], export_names: &[String],
-                    mem_adj: &mut i32, ue5: i32, terminator: u8) -> Vec<String> {
+#[allow(clippy::too_many_arguments)]
+fn decode_expr_list(
+    bc: &[u8],
+    pos: &mut usize,
+    nt: &NameTable,
+    imports: &[ImportEntry],
+    export_names: &[String],
+    mem_adj: &mut i32,
+    ue5: i32,
+    terminator: u8,
+) -> Vec<String> {
     let mut items = Vec::new();
     loop {
-        if *pos >= bc.len() { break; }
-        if bc[*pos] == terminator { *pos += 1; break; }
+        if *pos >= bc.len() {
+            break;
+        }
+        if bc[*pos] == terminator {
+            *pos += 1;
+            break;
+        }
         match decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5) {
             Some(item) => items.push(item),
             None => break,
@@ -162,92 +203,113 @@ fn decode_expr_list(bc: &[u8], pos: &mut usize, nt: &NameTable,
 
 /// Decode a single Kismet expression, returning a string representation.
 /// Returns None if at end of script or unknown opcode.
-pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
-               imports: &[ImportEntry], export_names: &[String], mem_adj: &mut i32,
-               ue5: i32) -> Option<String> {
-    if *pos >= bc.len() { return None; }
+pub fn decode_expr(
+    bc: &[u8],
+    pos: &mut usize,
+    nt: &NameTable,
+    imports: &[ImportEntry],
+    export_names: &[String],
+    mem_adj: &mut i32,
+    ue5: i32,
+) -> Option<String> {
+    if *pos >= bc.len() {
+        return None;
+    }
     let opcode = read_bc_u8(bc, pos);
     match opcode {
         // --- Variables (local, instance, default, out) ---
-        0x00 => { // EX_LocalVariable
+        EX_LOCAL_VARIABLE => {
             let prop = read_bc_field_path(bc, pos, nt, mem_adj);
             Some(prop)
         }
-        0x01 => { // EX_InstanceVariable
+        EX_INSTANCE_VARIABLE => {
             let prop = read_bc_field_path(bc, pos, nt, mem_adj);
             Some(format!("self.{}", prop))
         }
-        0x02 => { // EX_DefaultVariable
+        EX_DEFAULT_VARIABLE => {
             let prop = read_bc_field_path(bc, pos, nt, mem_adj);
             Some(format!("default.{}", prop))
         }
         // --- Control flow (return, jump, assert, switch, flow stack) ---
-        0x04 => { // EX_Return
-            let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+        EX_RETURN => {
+            let expr =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("return {}", expr))
         }
-        0x06 => { // EX_Jump
+        EX_JUMP => {
             let offset = read_bc_u32(bc, pos);
             Some(format!("jump 0x{:x}", offset))
         }
-        0x07 => { // EX_JumpIfNot
+        EX_JUMP_IF_NOT => {
             let offset = read_bc_u32(bc, pos);
-            let cond = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let cond =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("if !({}) jump 0x{:x}", cond, offset))
         }
-        0x09 => { // EX_Assert
+        EX_ASSERT => {
             let _line = read_bc_u16(bc, pos);
             let _debug_only = read_bc_u8(bc, pos);
-            let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("assert({})", expr))
         }
-        0x0B => Some("nop".into()), // EX_Nothing
-        0x0C => { // EX_NothingInt32
+        EX_NOTHING => Some("nop".into()),
+        EX_NOTHING_INT32 => {
             let _ = read_bc_i32(bc, pos);
             Some("nop".into())
         }
         // --- Assignment (Let variants) ---
-        0x0F | 0x43 | 0x44 => { // EX_Let / EX_LetMulticastDelegate / EX_LetDelegate
+        EX_LET | EX_LET_MULTICAST_DELEGATE | EX_LET_DELEGATE => {
             let _prop = read_bc_field_path(bc, pos, nt, mem_adj);
-            let var = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            let val = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let var =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let val =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("{} = {}", var, val))
         }
-        0x11 => { // EX_BitFieldConst
+        EX_BITFIELD_CONST => {
             let path = read_bc_field_path(bc, pos, nt, mem_adj);
-            let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("bitfield({}, {})", path, expr))
         }
         // --- Context / member access ---
-        0x12 => { // EX_ClassContext
-            let obj = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+        EX_CLASS_CONTEXT => {
+            let obj =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             read_bc_context_rvalue(bc, pos, nt, mem_adj);
-            let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             let expr = expr.strip_prefix("self.").unwrap_or(&expr);
             Some(format!("{}.{}", obj, expr))
         }
         // --- Casts ---
-        0x13 | 0x2E => { // EX_MetaCast / EX_DynamicCast
+        EX_META_CAST | EX_DYNAMIC_CAST => {
             let class = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
-            let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("cast<{}>({})", class, expr))
         }
-        0x14 | 0x5F => { // EX_LetBool / EX_LetObj
-            let var = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            let val = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+        EX_LET_BOOL | EX_LET_OBJ => {
+            let var =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let val =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("{} = {}", var, val))
         }
-        0x15 => Some("end_param".into()), // EX_EndParmValue
-        0x16 => None, // EX_EndFunctionParms
-        0x17 => Some("self".into()), // EX_Self
-        0x18 => { // EX_Skip
+        EX_END_PARM_VALUE => Some("end_param".into()),
+        EX_END_FUNCTION_PARMS => None,
+        EX_SELF => Some("self".into()),
+        EX_SKIP => {
             let _skip = read_bc_u32(bc, pos);
             decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
         }
-        0x19 => { // EX_Context
-            let obj = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+        EX_CONTEXT => {
+            let obj =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             read_bc_context_rvalue(bc, pos, nt, mem_adj);
-            let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             let expr = expr.strip_prefix("self.").unwrap_or(&expr);
             if is_ue4_library_class(&obj) {
                 Some(expr.to_string())
@@ -255,10 +317,12 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
                 Some(format!("{}.{}", obj, expr))
             }
         }
-        0x1A => { // EX_Context_FailSilent
-            let obj = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+        EX_CONTEXT_FAIL_SILENT => {
+            let obj =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             read_bc_context_rvalue(bc, pos, nt, mem_adj);
-            let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             let expr = expr.strip_prefix("self.").unwrap_or(&expr);
             if is_ue4_library_class(&obj) {
                 Some(expr.to_string())
@@ -267,68 +331,73 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             }
         }
         // --- Function calls ---
-        0x1B | 0x45 => { // EX_VirtualFunction / EX_LocalVirtualFunction
+        EX_VIRTUAL_FUNCTION | EX_LOCAL_VIRTUAL_FUNCTION => {
             let name = read_bc_fname(bc, pos, nt);
             *mem_adj += 4; // disk: FName (8 bytes), mem: UFunction* resolved pointer (8+4 alignment)
             let args = decode_func_args(bc, pos, nt, imports, export_names, mem_adj, ue5);
             Some(format_call_or_operator(&name, args))
         }
-        0x1C | 0x46 => { // EX_FinalFunction / EX_LocalFinalFunction
+        EX_FINAL_FUNCTION | EX_LOCAL_FINAL_FUNCTION => {
             let func = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
             let args = decode_func_args(bc, pos, nt, imports, export_names, mem_adj, ue5);
             Some(format_call_or_operator(&func, args))
         }
         // --- Constants (int, float, string, name, vector, struct, text, containers) ---
-        0x1D => Some(format!("{}", read_bc_i32(bc, pos))),    // EX_IntConst
-        0x1E => Some(format!("{:.4}", read_bc_f32(bc, pos))), // EX_FloatConst
-        0x1F => Some(format!("\"{}\"", read_bc_string(bc, pos))), // EX_StringConst
-        0x20 => { // EX_ObjectConst
+        EX_INT_CONST => Some(format!("{}", read_bc_i32(bc, pos))),
+        EX_FLOAT_CONST => Some(format!("{:.4}", read_bc_f32(bc, pos))),
+        EX_STRING_CONST => Some(format!("\"{}\"", read_bc_string(bc, pos))),
+        EX_OBJECT_CONST => {
             let obj = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
             Some(obj)
         }
-        0x21 => { // EX_NameConst
+        EX_NAME_CONST => {
             let name = read_bc_fname(bc, pos, nt);
             *mem_adj += 4; // disk: FName (8 bytes), mem: FName (12 bytes with DisplayIndex)
             Some(format!("'{}'", name))
         }
-        0x22 => { // EX_RotationConst
+        EX_ROTATION_CONST => {
             let (p, y, r) = read_bc_xyz(bc, pos, ue5 >= 1004);
             Some(format!("Rot({:.1},{:.1},{:.1})", p, y, r))
         }
-        0x23 => { // EX_VectorConst
+        EX_VECTOR_CONST => {
             let (x, y, z) = read_bc_xyz(bc, pos, ue5 >= 1004);
             Some(format!("Vec({:.1},{:.1},{:.1})", x, y, z))
         }
-        0x24 => Some(format!("{}", read_bc_u8(bc, pos))), // EX_ByteConst
-        0x25 => Some("0".into()),    // EX_IntZero
-        0x26 => Some("1".into()),    // EX_IntOne
-        0x27 => Some("true".into()), // EX_True
-        0x28 => Some("false".into()),// EX_False
-        0x29 => { // EX_TextConst
+        EX_BYTE_CONST => Some(format!("{}", read_bc_u8(bc, pos))),
+        EX_INT_ZERO => Some("0".into()),
+        EX_INT_ONE => Some("1".into()),
+        EX_TRUE => Some("true".into()),
+        EX_FALSE => Some("false".into()),
+        EX_TEXT_CONST => {
             let text_type = read_bc_u8(bc, pos);
             match text_type {
                 0 => Some("\"\"".into()),
                 1 => {
-                    let _ns = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-                    let _key = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-                    let val = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+                    let _ns = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
+                        .unwrap_or_default();
+                    let _key = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
+                        .unwrap_or_default();
+                    let val = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
+                        .unwrap_or_default();
                     Some(format!("LOCTEXT({})", val))
                 }
                 2 | 3 => {
-                    let val = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+                    let val = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
+                        .unwrap_or_default();
                     Some(val)
                 }
                 4 => {
                     let _table = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
-                    let key = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+                    let key = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
+                        .unwrap_or_default();
                     Some(format!("STRTABLE({})", key))
                 }
                 0xFF => Some("\"\"".into()),
-                _ => Some(format!("text(type={})", text_type))
+                _ => Some(format!("text(type={})", text_type)),
             }
         }
-        0x2A => Some("null".into()),  // EX_NoObject
-        0x2B => { // EX_TransformConst
+        EX_NO_OBJECT => Some("null".into()),
+        EX_TRANSFORM_CONST => {
             let lwc = ue5 >= 1004;
             let (rx, ry, rz, rw) = read_bc_xyzw(bc, pos, lwc);
             let (tx, ty, tz) = read_bc_xyz(bc, pos, lwc);
@@ -336,76 +405,121 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             Some(format!("Transform(Rot({:.1},{:.1},{:.1},{:.1}),Pos({:.1},{:.1},{:.1}),Scale({:.1},{:.1},{:.1}))",
                 rx, ry, rz, rw, tx, ty, tz, sx, sy, sz))
         }
-        0x2C => Some(format!("{}", read_bc_u8(bc, pos))), // EX_IntConstByte
-        0x2D => Some("null_iface".into()), // EX_NoInterface
-        0x2F => { // EX_StructConst
+        EX_INT_CONST_BYTE => Some(format!("{}", read_bc_u8(bc, pos))),
+        EX_NO_INTERFACE => Some("null_iface".into()),
+        EX_STRUCT_CONST => {
             let struct_ref = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
             let _serial_size = read_bc_i32(bc, pos);
-            let fields = decode_expr_list(bc, pos, nt, imports, export_names, mem_adj, ue5, 0x30);
+            let fields = decode_expr_list(
+                bc,
+                pos,
+                nt,
+                imports,
+                export_names,
+                mem_adj,
+                ue5,
+                EX_END_STRUCT_CONST,
+            );
             Some(format!("{}({})", struct_ref, fields.join(", ")))
         }
-        0x30 => None, // EX_EndStructConst
-        0x31 => { // EX_SetArray
-            let target = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            let items = decode_expr_list(bc, pos, nt, imports, export_names, mem_adj, ue5, 0x32);
+        EX_END_STRUCT_CONST => None,
+        EX_SET_ARRAY => {
+            let target =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let items = decode_expr_list(
+                bc,
+                pos,
+                nt,
+                imports,
+                export_names,
+                mem_adj,
+                ue5,
+                EX_END_ARRAY,
+            );
             Some(format!("{} = [{}]", target, items.join(", ")))
         }
-        0x32 => None, // EX_EndArray
-        0x33 => { // EX_PropertyConst
+        EX_END_ARRAY => None,
+        EX_PROPERTY_CONST => {
             let path = read_bc_field_path(bc, pos, nt, mem_adj);
             Some(format!("prop({})", path))
         }
-        0x34 => { // EX_UnicodeStringConst
+        EX_UNICODE_STRING_CONST => {
             let mut s = Vec::new();
             while *pos + 1 < bc.len() {
-                let lo = bc[*pos]; let hi = bc[*pos + 1];
+                let lo = bc[*pos];
+                let hi = bc[*pos + 1];
                 *pos += 2;
-                if lo == 0 && hi == 0 { break; }
+                if lo == 0 && hi == 0 {
+                    break;
+                }
                 s.push(u16::from_le_bytes([lo, hi]));
             }
             Some(format!("\"{}\"", String::from_utf16_lossy(&s)))
         }
-        0x35 => Some(format!("{}L", read_bc_i64(bc, pos))), // EX_Int64Const
-        0x36 => Some(format!("{}UL", read_bc_u64(bc, pos))), // EX_UInt64Const
-        0x37 => Some(format!("{:.4}", read_bc_f64(bc, pos))), // EX_DoubleConst
-        0x38 => { // EX_PrimitiveCast
+        EX_INT64_CONST => Some(format!("{}L", read_bc_i64(bc, pos))),
+        EX_UINT64_CONST => Some(format!("{}UL", read_bc_u64(bc, pos))),
+        EX_DOUBLE_CONST => Some(format!("{:.4}", read_bc_f64(bc, pos))),
+        EX_PRIMITIVE_CAST => {
             let cast_type = read_bc_u8(bc, pos);
-            let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             let name = primitive_cast_name(cast_type);
             Some(format!("{}({})", name, expr))
         }
-        0x39 => { // EX_SetSet
-            let target = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+        EX_SET_SET => {
+            let target =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             let _count = read_bc_i32(bc, pos);
-            let items = decode_expr_list(bc, pos, nt, imports, export_names, mem_adj, ue5, 0x3A);
+            let items =
+                decode_expr_list(bc, pos, nt, imports, export_names, mem_adj, ue5, EX_END_SET);
             Some(format!("{} = set{{{}}}", target, items.join(", ")))
         }
-        0x3A => None, // EX_EndSet
-        0x3B => { // EX_SetMap
-            let target = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+        EX_END_SET => None,
+        EX_SET_MAP => {
+            let target =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             let _count = read_bc_i32(bc, pos);
-            let items = decode_expr_list(bc, pos, nt, imports, export_names, mem_adj, ue5, 0x3C);
+            let items =
+                decode_expr_list(bc, pos, nt, imports, export_names, mem_adj, ue5, EX_END_MAP);
             Some(format!("{} = map{{{}}}", target, items.join(", ")))
         }
-        0x3C => None, // EX_EndMap
-        0x3D => { // EX_SetConst
+        EX_END_MAP => None,
+        EX_SET_CONST => {
             let _inner = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
             let _count = read_bc_i32(bc, pos);
-            let items = decode_expr_list(bc, pos, nt, imports, export_names, mem_adj, ue5, 0x3E);
+            let items = decode_expr_list(
+                bc,
+                pos,
+                nt,
+                imports,
+                export_names,
+                mem_adj,
+                ue5,
+                EX_END_SET_CONST,
+            );
             Some(format!("set{{{}}}", items.join(", ")))
         }
-        0x3E => None, // EX_EndSetConst
-        0x3F => { // EX_MapConst
+        EX_END_SET_CONST => None,
+        EX_MAP_CONST => {
             let _key_prop = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
             let _val_prop = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
             let _count = read_bc_i32(bc, pos);
-            let items = decode_expr_list(bc, pos, nt, imports, export_names, mem_adj, ue5, 0x40);
+            let items = decode_expr_list(
+                bc,
+                pos,
+                nt,
+                imports,
+                export_names,
+                mem_adj,
+                ue5,
+                EX_END_MAP_CONST,
+            );
             Some(format!("map{{{}}}", items.join(", ")))
         }
-        0x40 => None, // EX_EndMapConst
-        0x41 => {
+        EX_END_MAP_CONST => None,
+        EX_VECTOR3F_CONST => {
             if ue5 > 0 {
-                // EX_Vector3fConst (UE5: explicit float vector)
+                // UE5: explicit float vector
                 let x = read_bc_f32(bc, pos);
                 let y = read_bc_f32(bc, pos);
                 let z = read_bc_f32(bc, pos);
@@ -413,131 +527,167 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             } else {
                 // UE4: unused opcode, treat as StructMemberContext fallback
                 let prop = read_bc_field_path(bc, pos, nt, mem_adj);
-                let struct_expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+                let struct_expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
+                    .unwrap_or_default();
                 Some(format!("{}.{}", struct_expr, prop))
             }
         }
-        0x42 => { // EX_StructMemberContext
+        EX_STRUCT_MEMBER_CONTEXT => {
             let prop = read_bc_field_path(bc, pos, nt, mem_adj);
-            let struct_expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let struct_expr =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("{}.{}", struct_expr, prop))
         }
-        0x48 => { // EX_LocalOutVariable
+        EX_LOCAL_OUT_VARIABLE => {
             let prop = read_bc_field_path(bc, pos, nt, mem_adj);
             Some(format!("out {}", prop))
         }
         // --- Delegates ---
-        0x4B => { // EX_InstanceDelegate
+        EX_INSTANCE_DELEGATE => {
             let name = read_bc_fname(bc, pos, nt);
             *mem_adj += 4;
             Some(format!("delegate({})", name))
         }
-        0x4C => { // EX_PushExecutionFlow
+        EX_PUSH_EXECUTION_FLOW => {
             let offset = read_bc_u32(bc, pos);
             Some(format!("push_flow 0x{:x}", offset))
         }
-        0x4D => Some("pop_flow".into()), // EX_PopExecutionFlow
-        0x4E => { // EX_ComputedJump
-            let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+        EX_POP_EXECUTION_FLOW => Some("pop_flow".into()),
+        EX_COMPUTED_JUMP => {
+            let expr =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("jump_computed({})", expr))
         }
-        0x4F => { // EX_PopExecutionFlowIfNot
-            let cond = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+        EX_POP_FLOW_IF_NOT => {
+            let cond =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("pop_flow_if_not({})", cond))
         }
-        0x50 => Some("breakpoint".into()), // EX_Breakpoint
-        0x51 => { // EX_InterfaceContext
-            let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+        EX_BREAKPOINT => Some("breakpoint".into()),
+        EX_INTERFACE_CONTEXT => {
+            let expr =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("iface({})", expr))
         }
-        0x52 | 0x54 => { // EX_ObjToInterfaceCast / EX_CrossInterfaceCast
+        EX_OBJ_TO_IFACE_CAST | EX_CROSS_IFACE_CAST => {
             let class = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
-            let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("icast<{}>({})", class, expr))
         }
-        0x53 => None, // EX_EndOfScript
-        0x55 => { // EX_InterfaceToObjCast
+        EX_END_OF_SCRIPT => None,
+        EX_IFACE_TO_OBJ_CAST => {
             let class = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
-            let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let expr =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("obj_cast<{}>({})", class, expr))
         }
-        0x5A => Some("wire_trace".into()), // EX_WireTracepoint
-        0x5B => { // EX_SkipOffsetConst
+        EX_WIRE_TRACEPOINT => Some("wire_trace".into()),
+        EX_SKIP_OFFSET_CONST => {
             let offset = read_bc_u32(bc, pos);
             Some(format!("skip_offset(0x{:x})", offset))
         }
-        0x5C => { // EX_AddMulticastDelegate
-            let delegate = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            let func = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+        EX_ADD_MULTICAST_DELEGATE => {
+            let delegate =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let func =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("{} += {}", delegate, func))
         }
-        0x5D => { // EX_ClearMulticastDelegate
-            let delegate = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+        EX_CLEAR_MULTICAST_DELEGATE => {
+            let delegate =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("{}.Clear()", delegate))
         }
-        0x5E => Some("tracepoint".into()), // EX_Tracepoint
-        0x60 => { // EX_LetWeakObjPtr
-            let var = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            let val = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+        EX_TRACEPOINT => Some("tracepoint".into()),
+        EX_LET_WEAK_OBJ_PTR => {
+            let var =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let val =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("{} = weak({})", var, val))
         }
-        0x61 => { // EX_BindDelegate
+        EX_BIND_DELEGATE => {
             let name = read_bc_fname(bc, pos, nt);
             *mem_adj += 4;
-            let delegate = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            let obj = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let delegate =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let obj =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("bind({}, {}, {})", name, delegate, obj))
         }
-        0x62 => { // EX_RemoveMulticastDelegate
-            let delegate = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            let func = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+        EX_REMOVE_MULTICAST_DELEGATE => {
+            let delegate =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let func =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("{} -= {}", delegate, func))
         }
-        0x63 => { // EX_CallMulticastDelegate
+        EX_CALL_MULTICAST_DELEGATE => {
             let func = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
             let args = decode_func_args(bc, pos, nt, imports, export_names, mem_adj, ue5);
             Some(format!("{}.Broadcast({})", func, args.join(", ")))
         }
-        0x64 => { // EX_LetValueOnPersistentFrame
+        EX_LET_VALUE_ON_PERSISTENT_FRAME => {
             let prop = read_bc_field_path(bc, pos, nt, mem_adj);
-            let val = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let val =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("{} = {} [persistent]", prop, val))
         }
-        0x65 => { // EX_ArrayConst
+        EX_ARRAY_CONST => {
             let _inner = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
             let _count = read_bc_i32(bc, pos);
-            let items = decode_expr_list(bc, pos, nt, imports, export_names, mem_adj, ue5, 0x66);
+            let items = decode_expr_list(
+                bc,
+                pos,
+                nt,
+                imports,
+                export_names,
+                mem_adj,
+                ue5,
+                EX_END_ARRAY_CONST,
+            );
             Some(format!("[{}]", items.join(", ")))
         }
-        0x66 => None, // EX_EndArrayConst
-        0x67 => { // EX_SoftObjectConst
-            let path = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+        EX_END_ARRAY_CONST => None,
+        EX_SOFT_OBJECT_CONST => {
+            let path =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("soft({})", path))
         }
-        0x68 => { // EX_CallMath
+        EX_CALL_MATH => {
             let func = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
             let args = decode_func_args(bc, pos, nt, imports, export_names, mem_adj, ue5);
             Some(format_call_or_operator(&func, args))
         }
-        0x69 => { // EX_SwitchValue
+        EX_SWITCH_VALUE => {
             let num_cases = read_bc_u16(bc, pos);
             let _end_offset = read_bc_u32(bc, pos);
-            let index = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let index =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             let mut cases = Vec::new();
             for _ in 0..num_cases {
-                let case_val = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+                let case_val = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
+                    .unwrap_or_default();
                 let _next_offset = read_bc_u32(bc, pos);
-                let result = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+                let result = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5)
+                    .unwrap_or_default();
                 cases.push(format!("{}: {}", case_val, result));
             }
-            let default = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let default =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             if default.starts_with("$Select_Default") {
                 Some(format!("switch({}) {{ {} }}", index, cases.join(", ")))
             } else {
-                Some(format!("switch({}) {{ {}, default: {} }}", index, cases.join(", "), default))
+                Some(format!(
+                    "switch({}) {{ {}, default: {} }}",
+                    index,
+                    cases.join(", "),
+                    default
+                ))
             }
         }
-        0x6A => { // EX_InstrumentationEvent
+        EX_INSTRUMENTATION_EVENT => {
             let event_type = read_bc_u8(bc, pos);
             if event_type == 4 {
                 let _name = read_bc_fname(bc, pos, nt);
@@ -545,44 +695,54 @@ pub fn decode_expr(bc: &[u8], pos: &mut usize, nt: &NameTable,
             }
             Some("instrumentation".into())
         }
-        0x6B => { // EX_ArrayGetByRef
-            let array = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
-            let index = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+        EX_ARRAY_GET_BY_REF => {
+            let array =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+            let index =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("{}[{}]", array, index))
         }
-        0x6C => { // EX_ClassSparseDataVariable
+        EX_CLASS_SPARSE_DATA_VARIABLE => {
             let path = read_bc_field_path(bc, pos, nt, mem_adj);
             Some(format!("sparse.{}", path))
         }
-        0x6D => { // EX_FieldPathConst
+        EX_FIELD_PATH_CONST => {
             let path = read_bc_field_path(bc, pos, nt, mem_adj);
             Some(format!("fieldpath({})", path))
         }
-        0x70 => { // EX_AutoRtfmTransact
-            let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+        EX_AUTO_RTFM_TRANSACT => {
+            let expr =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("rtfm_transact({})", expr))
         }
-        0x71 => { // EX_AutoRtfmStopTransact
+        EX_AUTO_RTFM_STOP_TRANSACT => {
             let _mode = read_bc_u8(bc, pos);
             Some("rtfm_stop".into())
         }
-        0x72 => { // EX_AutoRtfmAbortIfNot
-            let expr = decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
+        EX_AUTO_RTFM_ABORT_IF_NOT => {
+            let expr =
+                decode_expr(bc, pos, nt, imports, export_names, mem_adj, ue5).unwrap_or_default();
             Some(format!("rtfm_abort_if_not({})", expr))
         }
-        _ => {
-            Some(format!("???(0x{:02x})", opcode))
-        }
+        _ => Some(format!("???(0x{:02x})", opcode)),
     }
 }
 
-fn decode_func_args(bc: &[u8], pos: &mut usize, nt: &NameTable,
-                    imports: &[ImportEntry], export_names: &[String], mem_adj: &mut i32,
-                    ue5: i32) -> Vec<String> {
+fn decode_func_args(
+    bc: &[u8],
+    pos: &mut usize,
+    nt: &NameTable,
+    imports: &[ImportEntry],
+    export_names: &[String],
+    mem_adj: &mut i32,
+    ue5: i32,
+) -> Vec<String> {
     let mut args = Vec::new();
     loop {
-        if *pos >= bc.len() { break; }
-        if bc[*pos] == 0x16 {
+        if *pos >= bc.len() {
+            break;
+        }
+        if bc[*pos] == EX_END_FUNCTION_PARMS {
             *pos += 1;
             break;
         }
@@ -597,11 +757,43 @@ fn decode_func_args(bc: &[u8], pos: &mut usize, nt: &NameTable,
 
 fn primitive_cast_name(cast_type: u8) -> String {
     match cast_type {
-        0x41 => "iface_to_obj".into(),  // CST_InterfaceToObject
-        0x46 => "obj_to_iface".into(),  // CST_ObjectToInterface
-        0x47 => "bool".into(),          // CST_ObjectToBool
+        0x41 => "iface_to_obj".into(), // CST_InterfaceToObject
+        0x46 => "obj_to_iface".into(), // CST_ObjectToInterface
+        0x47 => "bool".into(),         // CST_ObjectToBool
         _ => format!("cast_{}", cast_type),
     }
+}
+
+pub fn decode_bytecode(
+    bc: &[u8],
+    nt: &NameTable,
+    imports: &[ImportEntry],
+    export_names: &[String],
+    ue5: i32,
+) -> (Vec<BcStatement>, i32) {
+    let mut pos = 0;
+    let mut mem_adj: i32 = 0;
+    let mut stmts = Vec::new();
+    while pos < bc.len() {
+        let mem_start = (pos as i32 + mem_adj) as usize;
+        let start = pos;
+        match decode_expr(bc, &mut pos, nt, imports, export_names, &mut mem_adj, ue5) {
+            Some(s) => match s.as_str() {
+                "nop" | "wire_trace" | "tracepoint" | "instrumentation" => continue,
+                _ => {
+                    stmts.push(BcStatement {
+                        mem_offset: mem_start,
+                        text: s,
+                    });
+                }
+            },
+            None => break,
+        }
+        if pos == start {
+            break;
+        }
+    }
+    (stmts, mem_adj)
 }
 
 #[cfg(test)]
@@ -615,17 +807,23 @@ mod tests {
     }
 
     // Helper: append little-endian i32
-    fn push_i32(bc: &mut Vec<u8>, v: i32) { bc.extend_from_slice(&v.to_le_bytes()); }
-    fn push_f32(bc: &mut Vec<u8>, v: f32) { bc.extend_from_slice(&v.to_le_bytes()); }
-    fn push_f64(bc: &mut Vec<u8>, v: f64) { bc.extend_from_slice(&v.to_le_bytes()); }
+    fn push_i32(bc: &mut Vec<u8>, v: i32) {
+        bc.extend_from_slice(&v.to_le_bytes());
+    }
+    fn push_f32(bc: &mut Vec<u8>, v: f32) {
+        bc.extend_from_slice(&v.to_le_bytes());
+    }
+    fn push_f64(bc: &mut Vec<u8>, v: f64) {
+        bc.extend_from_slice(&v.to_le_bytes());
+    }
 
     // Helper: append a single-name FFieldPath — 16 bytes
     // FName = name_index(i32) + instance_number(i32), then owner(i32)
     fn push_field_path(bc: &mut Vec<u8>, name_idx: i32) {
-        push_i32(bc, 1);          // path_num = 1
-        push_i32(bc, name_idx);   // FName index
-        push_i32(bc, 0);          // FName instance number
-        push_i32(bc, 0);          // owner
+        push_i32(bc, 1); // path_num = 1
+        push_i32(bc, name_idx); // FName index
+        push_i32(bc, 0); // FName instance number
+        push_i32(bc, 0); // owner
     }
 
     // Helper: decode a single expression from bytes
@@ -635,7 +833,15 @@ mod tests {
         let export_names = vec![];
         let mut pos = 0;
         let mut mem_adj = 0;
-        let result = decode_expr(bc, &mut pos, &names, &imports, &export_names, &mut mem_adj, ue5);
+        let result = decode_expr(
+            bc,
+            &mut pos,
+            &names,
+            &imports,
+            &export_names,
+            &mut mem_adj,
+            ue5,
+        );
         (result, mem_adj)
     }
 
@@ -645,7 +851,15 @@ mod tests {
         let export_names = vec![];
         let mut pos = 0;
         let mut mem_adj = 0;
-        decode_expr(bc, &mut pos, names, &imports, &export_names, &mut mem_adj, ue5)
+        decode_expr(
+            bc,
+            &mut pos,
+            names,
+            &imports,
+            &export_names,
+            &mut mem_adj,
+            ue5,
+        )
     }
 
     // --- LWC opcodes: float vs double branching ---
@@ -653,7 +867,9 @@ mod tests {
     #[test]
     fn rotation_const_ue4_reads_floats() {
         let mut bc = vec![0x22];
-        push_f32(&mut bc, 1.0); push_f32(&mut bc, 2.0); push_f32(&mut bc, 3.0);
+        push_f32(&mut bc, 1.0);
+        push_f32(&mut bc, 2.0);
+        push_f32(&mut bc, 3.0);
         let (result, _) = expr(&bc, 0);
         assert_eq!(result.unwrap(), "Rot(1.0,2.0,3.0)");
     }
@@ -661,7 +877,9 @@ mod tests {
     #[test]
     fn rotation_const_ue5_lwc_reads_doubles() {
         let mut bc = vec![0x22];
-        push_f64(&mut bc, 1.0); push_f64(&mut bc, 2.0); push_f64(&mut bc, 3.0);
+        push_f64(&mut bc, 1.0);
+        push_f64(&mut bc, 2.0);
+        push_f64(&mut bc, 3.0);
         let (result, _) = expr(&bc, 1004);
         assert_eq!(result.unwrap(), "Rot(1.0,2.0,3.0)");
     }
@@ -669,7 +887,9 @@ mod tests {
     #[test]
     fn vector_const_ue4_reads_floats() {
         let mut bc = vec![0x23];
-        push_f32(&mut bc, 10.0); push_f32(&mut bc, 20.0); push_f32(&mut bc, 30.0);
+        push_f32(&mut bc, 10.0);
+        push_f32(&mut bc, 20.0);
+        push_f32(&mut bc, 30.0);
         let (result, _) = expr(&bc, 0);
         assert_eq!(result.unwrap(), "Vec(10.0,20.0,30.0)");
     }
@@ -677,7 +897,9 @@ mod tests {
     #[test]
     fn vector_const_ue5_lwc_reads_doubles() {
         let mut bc = vec![0x23];
-        push_f64(&mut bc, 10.0); push_f64(&mut bc, 20.0); push_f64(&mut bc, 30.0);
+        push_f64(&mut bc, 10.0);
+        push_f64(&mut bc, 20.0);
+        push_f64(&mut bc, 30.0);
         let (result, _) = expr(&bc, 1004);
         assert_eq!(result.unwrap(), "Vec(10.0,20.0,30.0)");
     }
@@ -707,7 +929,9 @@ mod tests {
     #[test]
     fn vector3f_const_ue5() {
         let mut bc = vec![0x41];
-        push_f32(&mut bc, 1.0); push_f32(&mut bc, 2.0); push_f32(&mut bc, 3.0);
+        push_f32(&mut bc, 1.0);
+        push_f32(&mut bc, 2.0);
+        push_f32(&mut bc, 3.0);
         let (result, _) = expr(&bc, 1000);
         assert_eq!(result.unwrap(), "Vec3f(1.0,2.0,3.0)");
     }
@@ -717,9 +941,9 @@ mod tests {
     #[test]
     fn double_const() {
         let mut bc = vec![0x37];
-        push_f64(&mut bc, 3.1415);
+        push_f64(&mut bc, 1.2345);
         let (result, _) = expr(&bc, 0);
-        assert_eq!(result.unwrap(), "3.1415");
+        assert_eq!(result.unwrap(), "1.2345");
     }
 
     // --- 0x0C: EX_NothingInt32 ---
@@ -797,8 +1021,8 @@ mod tests {
     fn let_multicast_delegate() {
         let names = nt(&["MyDelegate", "Target", "Value"]);
         let mut bc = vec![0x43];
-        push_field_path(&mut bc, 0);  // FFieldPath → "MyDelegate"
-        // var: EX_LocalVariable with FFieldPath → "Target"
+        push_field_path(&mut bc, 0); // FFieldPath → "MyDelegate"
+                                     // var: EX_LocalVariable with FFieldPath → "Target"
         bc.push(0x00);
         push_field_path(&mut bc, 1);
         // val: EX_LocalVariable with FFieldPath → "Value"
@@ -812,9 +1036,11 @@ mod tests {
     fn let_delegate() {
         let names = nt(&["MyDelegate", "Target", "Value"]);
         let mut bc = vec![0x44];
-        push_field_path(&mut bc, 0);  // FFieldPath → "MyDelegate"
-        bc.push(0x00); push_field_path(&mut bc, 1); // var
-        bc.push(0x00); push_field_path(&mut bc, 2); // val
+        push_field_path(&mut bc, 0); // FFieldPath → "MyDelegate"
+        bc.push(0x00);
+        push_field_path(&mut bc, 1); // var
+        bc.push(0x00);
+        push_field_path(&mut bc, 2); // val
         let result = expr_with_nt(&bc, &names, 0);
         assert_eq!(result.unwrap(), "Target = Value");
     }
@@ -826,12 +1052,15 @@ mod tests {
         let names = nt(&["MySet"]);
         let mut bc = vec![0x39];
         // target: EX_LocalVariable
-        bc.push(0x00); push_field_path(&mut bc, 0);
+        bc.push(0x00);
+        push_field_path(&mut bc, 0);
         // element count (int32)
         push_i32(&mut bc, 2);
         // two elements: EX_IntConst(1), EX_IntConst(2), then EX_EndSet
-        bc.push(0x1D); push_i32(&mut bc, 1);
-        bc.push(0x1D); push_i32(&mut bc, 2);
+        bc.push(0x1D);
+        push_i32(&mut bc, 1);
+        bc.push(0x1D);
+        push_i32(&mut bc, 2);
         bc.push(0x3A); // EX_EndSet
         let result = expr_with_nt(&bc, &names, 0);
         assert_eq!(result.unwrap(), "MySet = set{1, 2}");
@@ -841,10 +1070,13 @@ mod tests {
     fn set_map_reads_element_count() {
         let names = nt(&["MyMap"]);
         let mut bc = vec![0x3B];
-        bc.push(0x00); push_field_path(&mut bc, 0); // target
+        bc.push(0x00);
+        push_field_path(&mut bc, 0); // target
         push_i32(&mut bc, 1); // element count
-        bc.push(0x1D); push_i32(&mut bc, 10); // key
-        bc.push(0x1D); push_i32(&mut bc, 20); // value
+        bc.push(0x1D);
+        push_i32(&mut bc, 10); // key
+        bc.push(0x1D);
+        push_i32(&mut bc, 20); // value
         bc.push(0x3C); // EX_EndMap
         let result = expr_with_nt(&bc, &names, 0);
         assert_eq!(result.unwrap(), "MyMap = map{10, 20}");
@@ -855,7 +1087,9 @@ mod tests {
     #[test]
     fn vector_const_ue5_pre_lwc_reads_floats() {
         let mut bc = vec![0x23];
-        push_f32(&mut bc, 1.0); push_f32(&mut bc, 2.0); push_f32(&mut bc, 3.0);
+        push_f32(&mut bc, 1.0);
+        push_f32(&mut bc, 2.0);
+        push_f32(&mut bc, 3.0);
         let (result, _) = expr(&bc, 1003); // pre-LWC UE5
         assert_eq!(result.unwrap(), "Vec(1.0,2.0,3.0)");
     }
@@ -873,29 +1107,4 @@ mod tests {
         let (stmts, _) = decode_bytecode(&bc, &names, &imports, &export_names, 0);
         assert!(stmts.is_empty(), "NothingInt32 should be filtered as nop");
     }
-}
-
-pub fn decode_bytecode(bc: &[u8], nt: &NameTable,
-                   imports: &[ImportEntry], export_names: &[String],
-                   ue5: i32) -> (Vec<BcStatement>, i32) {
-    let mut pos = 0;
-    let mut mem_adj: i32 = 0;
-    let mut stmts = Vec::new();
-    while pos < bc.len() {
-        let mem_start = (pos as i32 + mem_adj) as usize;
-        let start = pos;
-        match decode_expr(bc, &mut pos, nt, imports, export_names, &mut mem_adj, ue5) {
-            Some(s) => {
-                match s.as_str() {
-                    "nop" | "wire_trace" | "tracepoint" | "instrumentation" => continue,
-                    _ => {
-                        stmts.push(BcStatement { mem_offset: mem_start, text: s });
-                    }
-                }
-            }
-            None => break,
-        }
-        if pos == start { break; }
-    }
-    (stmts, mem_adj)
 }

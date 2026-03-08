@@ -1,13 +1,17 @@
-use std::path::PathBuf;
 use clap::Parser as ClapParser;
+use std::path::PathBuf;
 
-use unreal_bp_inspect::parser::parse_asset;
-use unreal_bp_inspect::output_text::print_text;
 use unreal_bp_inspect::output_json::to_json;
 use unreal_bp_inspect::output_summary::print_summary;
+use unreal_bp_inspect::output_text::print_text;
+use unreal_bp_inspect::parser::parse_asset;
 
 #[derive(ClapParser)]
-#[command(name = "bp-inspect", about = "Extract Blueprint graph data from .uasset files", version)]
+#[command(
+    name = "bp-inspect",
+    about = "Extract Blueprint graph data from .uasset files",
+    version
+)]
 struct Cli {
     /// Path to the .uasset file
     path: PathBuf,
@@ -45,12 +49,16 @@ fn main() {
         }
     };
 
-    let filters: Vec<String> = cli.filter
+    let filters: Vec<String> = cli
+        .filter
         .map(|f| f.split(',').map(|s| s.trim().to_lowercase()).collect())
         .unwrap_or_default();
 
     if cli.json {
-        println!("{}", serde_json::to_string_pretty(&to_json(&asset, &filters)).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&to_json(&asset, &filters)).unwrap()
+        );
     } else if cli.summary {
         print_summary(&asset, &filters);
     } else {
