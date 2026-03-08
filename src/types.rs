@@ -1,3 +1,9 @@
+#[derive(Clone, Copy)]
+pub struct AssetVersion {
+    pub file_ver: i32,      // UE4 version (e.g. 522 for UE4.27)
+    pub file_ver_ue5: i32,  // UE5 version (0 for UE4 assets, 1000+ for UE5)
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ImportEntry {

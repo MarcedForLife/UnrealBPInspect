@@ -32,7 +32,7 @@ pub fn read_bc_field_path(bc: &[u8], pos: &mut usize, nt: &NameTable, mem_adj: &
         return "null".to_string();
     }
     let needed = path_num as usize * 8 + 4;
-    if path_num > 16 || *pos + needed > bc.len() + 8 {
+    if path_num > 16 || *pos + needed > bc.len() {
         let _owner = read_bc_i32(bc, pos);
         return "???".to_string();
     }
@@ -51,4 +51,80 @@ pub fn read_bc_field_path(bc: &[u8], pos: &mut usize, nt: &NameTable, mem_adj: &
 pub fn read_bc_context_rvalue(bc: &[u8], pos: &mut usize, nt: &NameTable, mem_adj: &mut i32) {
     let _skip = read_bc_u32(bc, pos);
     let _rvalue = read_bc_field_path(bc, pos, nt, mem_adj);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_nt(names: &[&str]) -> NameTable {
+        NameTable::from_names(names.iter().map(|s| s.to_string()).collect())
+    }
+
+    fn put_i32(buf: &mut Vec<u8>, v: i32) {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    fn put_fname(buf: &mut Vec<u8>, name_idx: i32) {
+        put_i32(buf, name_idx);  // name index
+        put_i32(buf, 0);         // instance number
+    }
+
+    #[test]
+    fn field_path_normal() {
+        let nt = make_nt(&["MyVar"]);
+        let mut bc = Vec::new();
+        put_i32(&mut bc, 1);       // path_num = 1
+        put_fname(&mut bc, 0);     // FName index 0 = "MyVar"
+        put_i32(&mut bc, 0);       // owner
+        let mut pos = 0;
+        let mut mem_adj = 0i32;
+        let result = read_bc_field_path(&bc, &mut pos, &nt, &mut mem_adj);
+        assert_eq!(result, "MyVar");
+    }
+
+    #[test]
+    fn field_path_zero() {
+        let nt = make_nt(&["X"]);
+        let mut bc = Vec::new();
+        put_i32(&mut bc, 0);  // path_num = 0
+        put_i32(&mut bc, 0);  // owner
+        let mut pos = 0;
+        let mut mem_adj = 0i32;
+        assert_eq!(read_bc_field_path(&bc, &mut pos, &nt, &mut mem_adj), "null");
+    }
+
+    #[test]
+    fn field_path_negative() {
+        let nt = make_nt(&["X"]);
+        let mut bc = Vec::new();
+        put_i32(&mut bc, -1); // path_num = -1
+        put_i32(&mut bc, 0);  // owner
+        let mut pos = 0;
+        let mut mem_adj = 0i32;
+        assert_eq!(read_bc_field_path(&bc, &mut pos, &nt, &mut mem_adj), "null");
+    }
+
+    #[test]
+    fn field_path_truncated() {
+        let nt = make_nt(&["X"]);
+        let mut bc = Vec::new();
+        put_i32(&mut bc, 1);       // path_num = 1
+        // Need 1*8 + 4 = 12 more bytes, only provide 11
+        bc.extend_from_slice(&[0u8; 11]);
+        let mut pos = 0;
+        let mut mem_adj = 0i32;
+        assert_eq!(read_bc_field_path(&bc, &mut pos, &nt, &mut mem_adj), "???");
+    }
+
+    #[test]
+    fn field_path_too_many() {
+        let nt = make_nt(&["X"]);
+        let mut bc = Vec::new();
+        put_i32(&mut bc, 17); // path_num = 17 (exceeds limit of 16)
+        put_i32(&mut bc, 0);  // owner (read by error path)
+        let mut pos = 0;
+        let mut mem_adj = 0i32;
+        assert_eq!(read_bc_field_path(&bc, &mut pos, &nt, &mut mem_adj), "???");
+    }
 }

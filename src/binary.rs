@@ -94,6 +94,11 @@ impl NameTable {
         }
     }
 
+    #[cfg(test)]
+    pub fn from_names(names: Vec<String>) -> Self {
+        NameTable { names }
+    }
+
     pub fn fname_is_none(&self, c: &mut R) -> Result<(String, bool)> {
         let index = read_i32(c)?;
         let number = read_i32(c)?;

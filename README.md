@@ -104,10 +104,10 @@ The `--summary` output is designed to be handed directly to an AI assistant and 
 
 ## Supported formats
 
-- UE4 uncooked `.uasset` files (single-file, not split `.uasset`/`.uexp`)
-- Tested against UE4.27 (file version 522)
+- UE4 uncooked `.uasset` files (UE4.14–4.27, file versions 459–522)
+- UE5 uncooked `.uasset` files (UE5.0–5.5) with Large World Coordinates support
 - Animation Blueprints and Widget Blueprints partially work (event graphs and functions parse correctly; AnimGraph state machines and widget hierarchy display are planned)
-- UE5 and cooked asset support is planned
+- Cooked assets (split `.uasset`/`.uexp`) and UE5 IoStore format are not yet supported
 
 ## Install
 
@@ -137,16 +137,16 @@ The `skill/` directory contains a Claude Code skill that teaches Claude how to u
 ## Testing
 
 ```sh
-cargo test                         # run all tests (101 tests)
+cargo test                         # run all tests (122 tests)
 UPDATE_SNAPSHOTS=1 cargo test      # update snapshot files after intentional output changes
 ```
 
-The test suite includes 88 unit tests for bytecode helpers, 10 integration tests with snapshot regression for summary/text/JSON output, and 3 extended tests for additional sample files.
+The test suite includes 109 unit tests for bytecode helpers, 10 integration tests with snapshot regression for summary/text/JSON output, and 3 extended tests for additional sample files.
 
 ## Limitations
 
-- UE5 assets and cooked (split `.uasset`/`.uexp`) files are not yet supported
-- Bytecode decoder covers ~77 of ~120+ Kismet opcodes; uncommon expressions may show as `??(0xNN)`
+- Cooked (split `.uasset`/`.uexp`) files are not yet supported
+- Bytecode decoder covers ~85 of ~120+ Kismet opcodes; uncommon expressions may show as `??(0xNN)`
 - Animation Blueprint state machines (AnimGraph) and Material expression trees are not yet interpreted — only standard Blueprint logic (event graphs, functions)
 - Unversioned properties (UE5 IoStore) require `.usmap` mappings, which are not implemented
 

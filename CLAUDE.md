@@ -23,7 +23,7 @@ src/
     readers.rs         Bytecode binary stream readers (read_bc_*)
     names.rs           GUID stripping, name cleanup
     resolve.rs         Bytecode reference resolution (obj refs, field paths)
-    decode.rs          Expression decoder (~77 opcodes), BcStatement, decode_bytecode
+    decode.rs          Expression decoder (~85 opcodes), BcStatement, decode_bytecode
     flow.rs            Flow pattern detection (sequences, for-loops, ForEach, convergence reorder)
     structure.rs       If/else block structuring, false-block truncation
     inline.rs          Temp inlining, ForEach rewriting, delegate folding, cast guard folding, Break/Make folding, summary pattern folding
@@ -50,7 +50,7 @@ cargo build --release                          # release build
 ```
 
 ### Test structure
-- `src/**/*.rs` — inline `#[cfg(test)]` unit tests for private helpers (inline.rs, structure.rs, names.rs, flow.rs, resolve.rs)
+- `src/**/*.rs` — inline `#[cfg(test)]` unit tests for private helpers (decode.rs, inline.rs, structure.rs, names.rs, flow.rs, resolve.rs)
 - `tests/integration.rs` — snapshot and structural tests using `samples/Helm_BP.uasset`
 - `tests/extended.rs` — optional tests using gitignored sample files (auto-skip when absent)
 - `tests/snapshots/` — expected output for regression detection
@@ -65,7 +65,7 @@ The parser reads the binary format sequentially through these modules:
 1. **binary.rs** — Low-level I/O helpers and NameTable
 2. **properties.rs** — Tagged property deserialisation (recursive)
 3. **ffield.rs** — FField child property parsing, type resolution, function signatures
-4. **bytecode/** — Kismet bytecode: expression decoding (~77 opcodes), flow pattern detection, if/else structuring
+4. **bytecode/** — Kismet bytecode: expression decoding (~85 opcodes, UE5 LWC support), flow pattern detection, if/else structuring
 5. **parser.rs** — Orchestrates all parsing: header, name/import/export tables, export data, bytecode
 6. **output_*.rs** — Three output modes: text, JSON, summary
 
@@ -79,6 +79,7 @@ Key things to know:
 - **UStruct::Children** is `int32 count + int32[count]` (array of package indices), not a single pointer.
 - All FName references on disk are 8 bytes (int32 index + int32 instance number). In memory with `WITH_CASE_PRESERVING_NAME` (typical for uncooked), FName is 12 bytes (adds DisplayIndex). This +4 difference affects mem_adj for bytecode FName operands.
 - Uncooked assets have everything in one `.uasset` file. Cooked assets split into `.uasset` header + `.uexp` data (not yet supported).
+- **UE5 versioning**: `AssetVersion { file_ver, file_ver_ue5 }` is threaded through parsing. `file_ver_ue5` is 0 for UE4 assets, 1000+ for UE5. Key gates: 1003 (OptionalResources), 1004 (LWC — double vectors/rotators), 1005 (remove export GUID), 1007 (SoftObjectPaths). The `ue5: i32` parameter is threaded through bytecode decoding for LWC opcode branching.
 
 ## Conventions
 

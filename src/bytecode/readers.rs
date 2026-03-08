@@ -62,6 +62,35 @@ pub fn read_bc_u64(bc: &[u8], pos: &mut usize) -> u64 {
     v
 }
 
+pub fn read_bc_f64(bc: &[u8], pos: &mut usize) -> f64 {
+    if *pos + 8 > bc.len() { *pos = bc.len(); return 0.0; }
+    let v = f64::from_le_bytes([
+        bc[*pos], bc[*pos+1], bc[*pos+2], bc[*pos+3],
+        bc[*pos+4], bc[*pos+5], bc[*pos+6], bc[*pos+7],
+    ]);
+    *pos += 8;
+    v
+}
+
+/// Read 3 floats (f32 or f64 depending on LWC) as f64 values.
+pub fn read_bc_xyz(bc: &[u8], pos: &mut usize, lwc: bool) -> (f64, f64, f64) {
+    if lwc {
+        (read_bc_f64(bc, pos), read_bc_f64(bc, pos), read_bc_f64(bc, pos))
+    } else {
+        (read_bc_f32(bc, pos) as f64, read_bc_f32(bc, pos) as f64, read_bc_f32(bc, pos) as f64)
+    }
+}
+
+/// Read 4 floats (f32 or f64 depending on LWC) as f64 values.
+pub fn read_bc_xyzw(bc: &[u8], pos: &mut usize, lwc: bool) -> (f64, f64, f64, f64) {
+    if lwc {
+        (read_bc_f64(bc, pos), read_bc_f64(bc, pos), read_bc_f64(bc, pos), read_bc_f64(bc, pos))
+    } else {
+        (read_bc_f32(bc, pos) as f64, read_bc_f32(bc, pos) as f64,
+         read_bc_f32(bc, pos) as f64, read_bc_f32(bc, pos) as f64)
+    }
+}
+
 pub fn read_bc_string(bc: &[u8], pos: &mut usize) -> String {
     let mut s = Vec::new();
     while *pos < bc.len() {

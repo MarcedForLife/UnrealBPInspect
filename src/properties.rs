@@ -4,7 +4,7 @@ use anyhow::Result;
 use crate::binary::*;
 use crate::types::*;
 
-pub fn read_properties(c: &mut R, nt: &NameTable, end_offset: u64, file_ver: i32) -> Vec<Property> {
+pub fn read_properties(c: &mut R, nt: &NameTable, end_offset: u64, ver: AssetVersion) -> Vec<Property> {
     let mut props = Vec::new();
     loop {
         if c.position() + 8 > end_offset {
@@ -34,7 +34,7 @@ pub fn read_properties(c: &mut R, nt: &NameTable, end_offset: u64, file_ver: i32
             break;
         }
 
-        let Ok(value) = read_property_value(c, nt, &type_name, size, end_offset, file_ver) else { break };
+        let Ok(value) = read_property_value(c, nt, &type_name, size, end_offset, ver) else { break };
         props.push(Property { name: prop_name, value });
     }
     props
@@ -46,8 +46,9 @@ fn read_property_value(
     type_name: &str,
     size: i32,
     _end_offset: u64,
-    file_ver: i32,
+    ver: AssetVersion,
 ) -> Result<PropValue> {
+    let file_ver = ver.file_ver;
     let data_start = c.position();
 
     match type_name {
@@ -132,7 +133,7 @@ fn read_property_value(
             let _struct_guid = read_guid(c)?;
             skip_property_guid(c, file_ver)?;
             let struct_end = c.position() + size as u64;
-            let fields = read_struct_value(c, nt, &struct_type, size, struct_end, file_ver)?;
+            let fields = read_struct_value(c, nt, &struct_type, size, struct_end, ver)?;
             c.seek(SeekFrom::Start(struct_end))?;
             Ok(PropValue::Struct { struct_type, fields })
         }
@@ -141,7 +142,7 @@ fn read_property_value(
             skip_property_guid(c, file_ver)?;
             let count = read_i32(c)?;
             let array_data_end = data_start + tag_overhead(type_name, file_ver) + size as u64;
-            let items = read_array_items(c, nt, &inner_type, count, array_data_end, file_ver)?;
+            let items = read_array_items(c, nt, &inner_type, count, array_data_end, ver)?;
             c.seek(SeekFrom::Start(array_data_end))?;
             Ok(PropValue::Array { inner_type, items })
         }
@@ -155,8 +156,8 @@ fn read_property_value(
             let mut entries = Vec::new();
             for _ in 0..count {
                 if c.position() >= map_data_end { break; }
-                let k = read_map_item(c, nt, &key_type, map_data_end, file_ver)?;
-                let v = read_map_item(c, nt, &value_type, map_data_end, file_ver)?;
+                let k = read_map_item(c, nt, &key_type, map_data_end, ver)?;
+                let v = read_map_item(c, nt, &value_type, map_data_end, ver)?;
                 entries.push((k, v));
             }
             c.seek(SeekFrom::Start(map_data_end))?;
@@ -168,7 +169,7 @@ fn read_property_value(
             let set_data_end = data_start + tag_overhead(type_name, file_ver) + size as u64;
             let _num_to_remove = read_i32(c)?;
             let count = read_i32(c)?;
-            let items = read_array_items(c, nt, &inner_type, count, set_data_end, file_ver)?;
+            let items = read_array_items(c, nt, &inner_type, count, set_data_end, ver)?;
             c.seek(SeekFrom::Start(set_data_end))?;
             Ok(PropValue::Array { inner_type, items })
         }
@@ -210,7 +211,7 @@ fn skip_property_guid(c: &mut R, file_ver: i32) -> Result<()> {
     Ok(())
 }
 
-fn read_map_item(c: &mut R, nt: &NameTable, type_name: &str, end_offset: u64, file_ver: i32) -> Result<PropValue> {
+fn read_map_item(c: &mut R, nt: &NameTable, type_name: &str, end_offset: u64, ver: AssetVersion) -> Result<PropValue> {
     match type_name {
         "IntProperty" | "Int32Property" | "UInt32Property" => Ok(PropValue::Int(read_i32(c)?)),
         "Int8Property" => Ok(PropValue::Int(read_u8(c)? as i8 as i32)),
@@ -233,7 +234,7 @@ fn read_map_item(c: &mut R, nt: &NameTable, type_name: &str, end_offset: u64, fi
             Ok(PropValue::SoftObject(path))
         }
         "StructProperty" => {
-            let fields = read_properties(c, nt, end_offset, file_ver);
+            let fields = read_properties(c, nt, end_offset, ver);
             Ok(PropValue::Struct { struct_type: String::new(), fields })
         }
         _ => Ok(PropValue::Unknown { type_name: type_name.to_string(), size: 0 }),
@@ -270,36 +271,68 @@ fn read_struct_value(
     struct_type: &str,
     _size: i32,
     end_offset: u64,
-    file_ver: i32,
+    ver: AssetVersion,
 ) -> Result<Vec<Property>> {
+    let lwc = ver.file_ver_ue5 >= 1004; // LARGE_WORLD_COORDINATES
     match struct_type {
         "Vector" => {
-            let x = read_f32(c)?;
-            let y = read_f32(c)?;
-            let z = read_f32(c)?;
-            Ok(vec![
-                Property { name: "X".into(), value: PropValue::Float(x) },
-                Property { name: "Y".into(), value: PropValue::Float(y) },
-                Property { name: "Z".into(), value: PropValue::Float(z) },
-            ])
+            if lwc {
+                let x = read_f64(c)?;
+                let y = read_f64(c)?;
+                let z = read_f64(c)?;
+                Ok(vec![
+                    Property { name: "X".into(), value: PropValue::Double(x) },
+                    Property { name: "Y".into(), value: PropValue::Double(y) },
+                    Property { name: "Z".into(), value: PropValue::Double(z) },
+                ])
+            } else {
+                let x = read_f32(c)?;
+                let y = read_f32(c)?;
+                let z = read_f32(c)?;
+                Ok(vec![
+                    Property { name: "X".into(), value: PropValue::Float(x) },
+                    Property { name: "Y".into(), value: PropValue::Float(y) },
+                    Property { name: "Z".into(), value: PropValue::Float(z) },
+                ])
+            }
         }
         "Rotator" => {
-            let p = read_f32(c)?;
-            let y = read_f32(c)?;
-            let r = read_f32(c)?;
-            Ok(vec![
-                Property { name: "Pitch".into(), value: PropValue::Float(p) },
-                Property { name: "Yaw".into(), value: PropValue::Float(y) },
-                Property { name: "Roll".into(), value: PropValue::Float(r) },
-            ])
+            if lwc {
+                let p = read_f64(c)?;
+                let y = read_f64(c)?;
+                let r = read_f64(c)?;
+                Ok(vec![
+                    Property { name: "Pitch".into(), value: PropValue::Double(p) },
+                    Property { name: "Yaw".into(), value: PropValue::Double(y) },
+                    Property { name: "Roll".into(), value: PropValue::Double(r) },
+                ])
+            } else {
+                let p = read_f32(c)?;
+                let y = read_f32(c)?;
+                let r = read_f32(c)?;
+                Ok(vec![
+                    Property { name: "Pitch".into(), value: PropValue::Float(p) },
+                    Property { name: "Yaw".into(), value: PropValue::Float(y) },
+                    Property { name: "Roll".into(), value: PropValue::Float(r) },
+                ])
+            }
         }
         "Vector2D" => {
-            let x = read_f32(c)?;
-            let y = read_f32(c)?;
-            Ok(vec![
-                Property { name: "X".into(), value: PropValue::Float(x) },
-                Property { name: "Y".into(), value: PropValue::Float(y) },
-            ])
+            if lwc {
+                let x = read_f64(c)?;
+                let y = read_f64(c)?;
+                Ok(vec![
+                    Property { name: "X".into(), value: PropValue::Double(x) },
+                    Property { name: "Y".into(), value: PropValue::Double(y) },
+                ])
+            } else {
+                let x = read_f32(c)?;
+                let y = read_f32(c)?;
+                Ok(vec![
+                    Property { name: "X".into(), value: PropValue::Float(x) },
+                    Property { name: "Y".into(), value: PropValue::Float(y) },
+                ])
+            }
         }
         "LinearColor" => {
             let r = read_f32(c)?;
@@ -321,7 +354,7 @@ fn read_struct_value(
             }])
         }
         _ => {
-            Ok(read_properties(c, nt, end_offset, file_ver))
+            Ok(read_properties(c, nt, end_offset, ver))
         }
     }
 }
@@ -332,7 +365,7 @@ fn read_array_items(
     inner_type: &str,
     count: i32,
     end_offset: u64,
-    file_ver: i32,
+    ver: AssetVersion,
 ) -> Result<Vec<PropValue>> {
     let mut items = Vec::new();
     for _ in 0..count {
@@ -361,7 +394,7 @@ fn read_array_items(
                 PropValue::SoftObject(path)
             }
             "StructProperty" => {
-                let fields = read_properties(c, nt, end_offset, file_ver);
+                let fields = read_properties(c, nt, end_offset, ver);
                 PropValue::Struct { struct_type: "".into(), fields }
             }
             _ => {
