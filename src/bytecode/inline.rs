@@ -8,8 +8,8 @@ use super::decode::BcStatement;
 /// - Are referenced exactly once in a later statement
 /// - Would not produce a line longer than MAX_LINE chars
 pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
-    const MAX_LINE: usize = 120;
-    const MAX_PASSES: usize = 6;
+    const MAX_LINE: usize = 120;  // Skip inlining if result would exceed this (readability cap)
+    const MAX_PASSES: usize = 6;  // Iterative: inlining one temp may expose further inlines
 
     for _ in 0..MAX_PASSES {
         let mut inlined_any = false;
@@ -629,7 +629,7 @@ fn parse_foreach_while(trimmed: &str) -> Option<(String, String)> {
 fn find_foreach_init(
     lines: &[String], while_idx: usize, indent_len: usize, counter: &str,
 ) -> Option<(usize, usize, String)> {
-    // Look at up to 4 lines before while for the two inits (may have blank lines)
+    // Look at up to 4 lines before while for counter=0 and index=0 (compiler may insert gaps)
     let start = while_idx.saturating_sub(4);
     let mut counter_idx = None;
     let mut index_idx = None;

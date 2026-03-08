@@ -45,6 +45,7 @@ pub fn read_guid(c: &mut R) -> Result<[u8; 16]> {
     Ok(g)
 }
 
+/// Read UE FString: len > 0 → UTF-8 (len bytes), len < 0 → UTF-16 (|len| code units).
 pub fn read_fstring(c: &mut R) -> Result<String> {
     let len = read_i32(c)?;
     if len == 0 {
@@ -83,6 +84,8 @@ impl NameTable {
         self.names.get(index as usize).map(|s| s.as_str()).unwrap_or("?")
     }
 
+    /// Read an FName (8 bytes on disk): name table index + instance number.
+    /// UE serializes instance number 1-based, so Number=1 displays as "_0".
     pub fn fname(&self, c: &mut R) -> Result<String> {
         let index = read_i32(c)?;
         let number = read_i32(c)?;

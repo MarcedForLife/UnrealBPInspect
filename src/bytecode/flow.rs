@@ -156,6 +156,7 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
         // Detect by checking if the body_jump_target lands past the control block end.
         let (body_start, loop_ctrl_end, completion_start, completion_end) = if let Some(pop_idx) = pop_idx {
             // Check if the actual body is displaced further (ForEach pattern)
+            // 64-byte tolerance: cumulative mem_adj drift from FFieldPath/obj-ref size differences
             let body_at_jump = stmts.iter().position(|s| {
                 s.mem_offset > 0 && s.mem_offset.abs_diff(body_jump_target) < 64
             });
@@ -316,7 +317,7 @@ pub fn reorder_convergence(stmts: &mut Vec<BcStatement>) {
 fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
     use std::collections::{HashMap, HashSet};
 
-    // Build offset → index map with 4-byte tolerance
+    // Build offset → index map; find_idx uses 4-byte tolerance for minor mem_adj drift
     let exact_map: HashMap<usize, usize> = stmts.iter().enumerate()
         .filter(|(_, s)| s.mem_offset > 0)
         .map(|(i, s)| (s.mem_offset, i))

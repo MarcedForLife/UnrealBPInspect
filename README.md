@@ -134,14 +134,41 @@ cargo build --release
 
 The `skill/` directory contains a Claude Code skill that teaches Claude how to use `bp-inspect` for Blueprint debugging, logic review, and BP-to-C++ migration. See [skill/README.md](skill/README.md) for install instructions.
 
-## Testing
+## Development
+
+### Building
 
 ```sh
-cargo test                         # run all tests (122 tests)
+cargo build                        # dev build
+cargo build --release              # optimised build → target/release/bp-inspect
+```
+
+### Running locally
+
+Use `cargo run --` to pass arguments to the CLI during development:
+
+```sh
+cargo run -- samples/Helm_BP.uasset --summary           # human-readable summary
+cargo run -- samples/Helm_BP.uasset --json               # full JSON output
+cargo run -- samples/Helm_BP.uasset --json | python3 -m json.tool   # validate JSON
+cargo run -- samples/Helm_BP.uasset --summary --filter GetSteeringAngle  # single function
+cargo run -- samples/Helm_BP.uasset --debug              # raw table dump for format investigation
+```
+
+### Testing
+
+```sh
+cargo test                         # run all tests
+cargo test -- --nocapture          # run with stdout visible
+cargo test inline                  # run tests matching "inline"
 UPDATE_SNAPSHOTS=1 cargo test      # update snapshot files after intentional output changes
 ```
 
-The test suite includes 109 unit tests for bytecode helpers, 10 integration tests with snapshot regression for summary/text/JSON output, and 3 extended tests for additional sample files.
+The test suite includes unit tests for bytecode helpers (`decode`, `inline`, `structure`, `flow`, `names`, `resolve`), integration tests with snapshot regression for summary/text/JSON output, and extended tests for additional sample files that auto-skip when absent.
+
+**Snapshot tests**: expected outputs live in `tests/snapshots/`. When you intentionally change output format, run with `UPDATE_SNAPSHOTS=1` to regenerate them, then review the diffs before committing.
+
+**Adding test fixtures**: place `.uasset` files in `samples/`. The committed fixture `Helm_BP.uasset` is used by integration tests. Additional files are gitignored and used by `tests/extended.rs`, which auto-skips when they're absent.
 
 ## Limitations
 
