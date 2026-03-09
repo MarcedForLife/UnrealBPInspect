@@ -42,7 +42,7 @@ Multiple names can be comma-separated: `--filter GetSteeringAngle,UserConstructi
 bp-inspect <path>.uasset --json
 ```
 
-Full export data as JSON. Use when you need to programmatically inspect properties, or when the summary view doesn't show a specific detail you need.
+Full structured data as JSON with top-level `imports`, `exports`, and `functions` arrays. Functions have pre-extracted signatures, flags, and structured bytecode. Use when you need to programmatically inspect properties, or when the default view doesn't show a specific detail you need.
 
 ### Find Blueprint files
 

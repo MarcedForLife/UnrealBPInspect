@@ -10,8 +10,11 @@ pub fn to_json(asset: &ParsedAsset, filters: &[String]) -> Value {
         .map(|(h, _)| h.object_name.clone())
         .collect();
 
-    json!({
-        "imports": asset.imports.iter().enumerate().map(|(i, imp)| {
+    let imports_json: Vec<Value> = asset
+        .imports
+        .iter()
+        .enumerate()
+        .map(|(i, imp)| {
             let full_path = resolve_import_path(&asset.imports, -(i as i32 + 1));
             json!({
                 "index": i,
@@ -20,10 +23,15 @@ pub fn to_json(asset: &ParsedAsset, filters: &[String]) -> Value {
                 "class_package": imp.class_package,
                 "class_name": imp.class_name,
             })
-        }).collect::<Vec<_>>(),
-        "exports": asset.exports.iter().enumerate().filter(|(_, (hdr, _))| {
-            matches_filter(&hdr.object_name, filters)
-        }).map(|(i, (hdr, props))| {
+        })
+        .collect();
+
+    let exports_json: Vec<Value> = asset
+        .exports
+        .iter()
+        .enumerate()
+        .filter(|(_, (hdr, _))| matches_filter(&hdr.object_name, filters))
+        .map(|(i, (hdr, props))| {
             let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
             let parent = resolve_index(&asset.imports, &export_names, hdr.super_index);
             let mut exp = json!({
@@ -36,11 +44,57 @@ pub fn to_json(asset: &ParsedAsset, filters: &[String]) -> Value {
             }
             if !props.is_empty() {
                 exp["properties"] = Value::Array(
-                    props.iter().map(|p| prop_to_json(p, &asset.imports, &export_names)).collect()
+                    props
+                        .iter()
+                        .map(|p| prop_to_json(p, &asset.imports, &export_names))
+                        .collect(),
                 );
             }
             exp
-        }).collect::<Vec<_>>(),
+        })
+        .collect();
+
+    let functions_json: Vec<Value> = asset
+        .exports
+        .iter()
+        .enumerate()
+        .filter(|(_, (hdr, _))| {
+            let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
+            class.ends_with(".Function") && matches_filter(&hdr.object_name, filters)
+        })
+        .map(|(i, (hdr, props))| {
+            let sig = find_prop_str(props, "Signature")
+                .unwrap_or_else(|| format!("{}()", hdr.object_name));
+            let flags = find_prop_str(props, "FunctionFlags").unwrap_or_default();
+            let bytecode = find_prop(props, "BytecodeSummary")
+                .or_else(|| find_prop(props, "Bytecode"))
+                .and_then(|p| match &p.value {
+                    PropValue::Array { items, .. } => Some(
+                        items
+                            .iter()
+                            .filter_map(|item| match item {
+                                PropValue::Str(s) => Some(json!(s)),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            json!({
+                "name": hdr.object_name,
+                "signature": sig,
+                "flags": flags,
+                "bytecode": bytecode,
+                "export_index": i + 1,
+            })
+        })
+        .collect();
+
+    json!({
+        "imports": imports_json,
+        "exports": exports_json,
+        "functions": functions_json,
     })
 }
 
