@@ -29,9 +29,12 @@ src/
     flow.rs            Flow pattern detection (sequences, for-loops, ForEach, convergence reorder)
     structure.rs       If/else block structuring, false-block truncation
     inline.rs          Temp inlining, ForEach rewriting, delegate folding, cast guard folding, Break/Make folding, summary pattern folding
-skill/SKILL.md       Claude Code skill instructions
-skill/README.md      Skill install guide
-samples/             Test .uasset files (UE4.27, uncooked); Helm_BP.uasset is committed as test fixture
+  update.rs            Self-update from GitHub releases (--update)
+install.sh             macOS/Linux install script (curl | sh)
+install.ps1            Windows install script (irm | iex)
+skill/SKILL.md         Claude Code skill instructions
+skill/README.md        Skill install guide
+samples/               Test .uasset files (UE4.27, uncooked); Helm_BP.uasset is committed as test fixture
 tests/
   common/mod.rs      Test utilities (fixture loading, snapshot comparison)
   integration.rs     Snapshot and structural tests using Helm_BP.uasset
@@ -92,7 +95,7 @@ Key things to know:
 
 ## Conventions
 
-- No external dependencies beyond `clap`, `serde_json`, and `anyhow`. ~15ms to parse a 1MB Blueprint
+- Minimal dependencies: `clap`, `serde_json`, `anyhow`, `similar`, `ureq` (for self-update). ~15ms to parse a 1MB Blueprint
 - Modular architecture: `lib.rs` + `main.rs` pattern with focused modules
 - Default output is the summary mode (human-readable, designed for AI assistant use)
 - `--json` is for programmatic access and should always be valid JSON
@@ -108,4 +111,6 @@ git tag v0.1.0
 git push --tags
 ```
 
-Builds binaries for linux-x86_64, macos-x86_64, macos-aarch64, windows-x86_64 and creates a GitHub release.
+Builds binaries for linux-x86_64, macos-x86_64, macos-aarch64, windows-x86_64 with SHA-256 checksums and creates a GitHub release.
+
+Install scripts (`install.sh` / `install.ps1`) download from GitHub releases. `cargo install unreal-bp-inspect` works once published to crates.io.

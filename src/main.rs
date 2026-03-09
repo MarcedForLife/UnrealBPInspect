@@ -7,6 +7,7 @@ use unreal_bp_inspect::output_json::to_json;
 use unreal_bp_inspect::output_summary::format_summary;
 use unreal_bp_inspect::output_text::format_text;
 use unreal_bp_inspect::parser::parse_asset;
+use unreal_bp_inspect::update::run_update;
 
 #[derive(ClapParser)]
 #[command(
@@ -16,8 +17,12 @@ use unreal_bp_inspect::parser::parse_asset;
 )]
 struct Cli {
     /// Paths to .uasset files or directories (recursive)
-    #[arg(required = true)]
+    #[arg(required_unless_present = "update", num_args = 1..)]
     paths: Vec<PathBuf>,
+
+    /// Update bp-inspect to the latest version (or specify a version, e.g. --update v0.2.0)
+    #[arg(long, num_args = 0..=1, default_missing_value = "latest")]
+    update: Option<String>,
 
     /// Output as JSON
     #[arg(long)]
@@ -94,6 +99,19 @@ fn process_file(path: &Path, mode: &OutputMode, filters: &[String], debug: bool)
 
 fn main() {
     let cli = Cli::parse();
+
+    if let Some(version) = cli.update {
+        let target = if version == "latest" {
+            None
+        } else {
+            Some(version)
+        };
+        if let Err(e) = run_update(target.as_deref()) {
+            eprintln!("Update failed: {:#}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
 
     let mode = if cli.json {
         OutputMode::Json

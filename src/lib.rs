@@ -10,3 +10,4 @@ pub mod parser;
 pub mod properties;
 pub mod resolve;
 pub mod types;
+pub mod update;

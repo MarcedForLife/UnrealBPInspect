@@ -12,7 +12,21 @@ Use `bp-inspect` to read and understand Unreal Engine Blueprint `.uasset` files 
 
 ## Prerequisites
 
-`bp-inspect` must be installed and available on PATH. Install from source (`cargo install --path .` in the repo) or download a binary from the GitHub releases.
+`bp-inspect` must be installed and available on PATH. If it's not installed, run:
+
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/MarcedForLife/unreal-bp-inspect/main/install.sh | sh
+
+# Windows PowerShell
+irm https://raw.githubusercontent.com/MarcedForLife/unreal-bp-inspect/main/install.ps1 | iex
+```
+
+To update to the latest version:
+
+```bash
+bp-inspect --update
+```
 
 ## Commands
 
