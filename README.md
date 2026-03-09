@@ -100,7 +100,7 @@ Blueprint `.uasset` files are binary — opaque to git diff, code review, CI pip
 
 bp-inspect takes a different approach: it reads the compiled bytecode from the binary file directly, with zero UE dependency. A 1MB Blueprint with 18 functions parses in ~15ms — the entire Blueprint (all functions, components, variables), not one graph at a time. No API calls, no editor, no network.
 
-The raw bytecode is not the hard part — making it *readable* is. bp-inspect reconstructs function signatures from parameter properties, disassembles Kismet bytecode into structured pseudo-code, detects and structures control flow (if/else, while/for loops, ForEach, sequence nodes), reorders displaced convergence blocks from the UE4 compiler, inlines single-use temporaries and operators, resolves enum arguments to readable names, dynamically infers and folds struct Break/Make patterns, strips serialisation noise (GUID suffixes, K2Node prefixes, library prefixes), splits ubergraph functions into labelled event handlers, and inlines latent resume blocks after their corresponding Delay() calls. The goal is output that reads like hand-written pseudocode, not a bytecode dump.
+The raw bytecode is not the hard part — making it *readable* is. bp-inspect reconstructs function signatures from parameter properties, disassembles Kismet bytecode into structured pseudo-code, detects and structures control flow (if/else, while/for loops, ForEach, sequence nodes), reorders displaced convergence blocks from the UE4 compiler, inlines single-use temporaries and operators, resolves enum arguments to readable names, dynamically infers and folds struct Break/Make patterns, strips serialisation noise (GUID suffixes, K2Node prefixes, library prefixes), splits ubergraph functions into labelled event handlers, inlines latent resume blocks after their corresponding Delay() calls, and places Blueprint comment boxes and node bubble comments inline near the code they annotate (using 2D spatial matching between graph nodes and bytecode). The goal is output that reads like hand-written pseudocode, not a bytecode dump.
 
 The default output is designed to be handed directly to an AI assistant and asked "what does this Blueprint do?".
 
@@ -112,6 +112,7 @@ The default output is designed to be handed directly to an AI assistant and aske
 - **FField types** (FloatProperty, ObjectProperty, BoolProperty, StructProperty, ArrayProperty, etc.)
 - **Kismet bytecode** decoded to structured pseudo-code with nested if/else blocks, while loops, ForEach loops, and sequence nodes (arithmetic, casts, context calls, conditionals, local/instance variables). Convergence reordering handles displaced branches from the UE4 compiler. Accurate memory-space offset tracking for jump target resolution.
 - **EdGraph nodes** (K2Node_CallFunction, VariableGet/Set, DynamicCast, FunctionEntry/Result, events, etc.)
+- **Blueprint comments** — comment boxes and node bubble comments placed inline near corresponding code via spatial node-to-bytecode matching
 - **SCS component tree** with sub-object properties and child actor templates
 
 ## Supported formats
