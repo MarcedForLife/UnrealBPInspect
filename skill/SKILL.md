@@ -19,7 +19,7 @@ Use `bp-inspect` to read and understand Unreal Engine Blueprint `.uasset` files 
 ### Get a full overview
 
 ```bash
-bp-inspect <path>.uasset --summary
+bp-inspect <path>.uasset
 ```
 
 Returns: class hierarchy, component tree with properties (meshes, physics, transforms), variable declarations with types, function signatures with structured bytecode pseudo-code (if/else blocks, indented), and graph node summaries for graphs not already shown as functions.
@@ -29,7 +29,7 @@ Start here. This gives you everything you need for most questions.
 ### Drill into a specific function
 
 ```bash
-bp-inspect <path>.uasset --summary --filter <FunctionName>
+bp-inspect <path>.uasset --filter <FunctionName>
 ```
 
 Filters functions and graphs to the named export while keeping class context (components, variables). Use when the full summary is too noisy or you need to focus on one function.
@@ -89,21 +89,21 @@ EdGraph node list showing the visual Blueprint graph structure. Graphs that alre
 
 ### Understanding what a Blueprint does
 
-1. Run `--summary` to get the full picture
+1. Run `bp-inspect` to get the full picture
 2. Read the Components section for the physical structure
 3. Read the Variables section for state
 4. Read the Functions section for logic -- the pseudo-code reads like simplified code
 
 ### Debugging a specific function
 
-1. Run `--summary --filter FunctionName`
+1. Run with `--filter FunctionName`
 2. Read the pseudo-code line by line
 3. Cross-reference variable types from the Variables/Components sections
 4. Check component properties for physics/collision configuration if relevant
 
 ### Blueprint to C++ migration
 
-1. Run `--summary` to understand the full Blueprint
+1. Run `bp-inspect` to understand the full Blueprint
 2. Components section maps to `CreateDefaultSubobject<T>()` calls in the constructor
 3. Component properties map to constructor defaults (`SetRelativeLocation`, `SetCollisionProfileName`, etc.)
 4. Variables section maps to `UPROPERTY()` declarations
@@ -112,10 +112,10 @@ EdGraph node list showing the visual Blueprint graph structure. Graphs that alre
 
 ### Comparing two Blueprints
 
-Run `--summary` on both and diff the output:
+Run on both and diff the output:
 
 ```bash
-diff <(bp-inspect A.uasset --summary) <(bp-inspect B.uasset --summary)
+diff <(bp-inspect A.uasset) <(bp-inspect B.uasset)
 ```
 
 ## Limitations
