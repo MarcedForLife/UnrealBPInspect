@@ -88,6 +88,7 @@ Pseudo-code conventions:
 - `if (cond) { ... }` / `if (cond) { ... } else { ... }` -- structured control flow (conditions are inverted from the raw `JumpIfNot` for readability)
 - `while (cond) { body; increment; }` -- for/ForEach loops (reordered from scattered bytecode into logical order)
 - `// sequence [N]:` -- sequence node pins in execution order
+- `// "Comment text"` -- Blueprint comment boxes and node bubble comments, placed inline near the code they describe
 
 ### Graph section
 

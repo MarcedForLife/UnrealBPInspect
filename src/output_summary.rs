@@ -15,6 +15,29 @@ struct CommentBox {
     y: i32,
     width: i32,
     height: i32,
+    is_bubble: bool,
+}
+
+impl CommentBox {
+    fn contains_point(&self, px: i32, py: i32) -> bool {
+        px >= self.x && py >= self.y && px <= self.x + self.width && py <= self.y + self.height
+    }
+}
+
+#[derive(Clone)]
+struct NodeInfo {
+    x: i32,
+    y: i32,
+    identifier: String,
+}
+
+struct UbergraphSection {
+    name: String,
+    lines: Vec<String>,
+}
+
+struct ResumeBlock {
+    lines: Vec<String>,
 }
 
 fn emit_comment(buf: &mut String, text: &str, indent: &str) {
@@ -56,6 +79,243 @@ fn emit_comment(buf: &mut String, text: &str, indent: &str) {
             }
         }
     }
+}
+
+/// Split structured ubergraph output into per-event sections and resume blocks.
+fn split_ubergraph_sections(lines: &[String]) -> (Vec<UbergraphSection>, Vec<ResumeBlock>) {
+    let mut sections: Vec<UbergraphSection> = Vec::new();
+    let mut current = UbergraphSection {
+        name: String::new(),
+        lines: Vec::new(),
+    };
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with("--- ") && trimmed.ends_with(" ---") {
+            if !current.lines.is_empty() || !current.name.is_empty() {
+                sections.push(current);
+            }
+            current = UbergraphSection {
+                name: trimmed[4..trimmed.len() - 4].to_string(),
+                lines: Vec::new(),
+            };
+        } else {
+            current.lines.push(line.clone());
+        }
+    }
+    if !current.lines.is_empty() || !current.name.is_empty() {
+        sections.push(current);
+    }
+
+    let mut resume_blocks: Vec<ResumeBlock> = Vec::new();
+    for section in &sections {
+        if section.name != "(latent resume)" {
+            continue;
+        }
+        let mut block_lines: Vec<String> = Vec::new();
+        for line in &section.lines {
+            if line.trim() == "return" {
+                if !block_lines.is_empty() {
+                    resume_blocks.push(ResumeBlock { lines: block_lines });
+                    block_lines = Vec::new();
+                }
+            } else {
+                block_lines.push(line.clone());
+            }
+        }
+        if !block_lines.is_empty() {
+            resume_blocks.push(ResumeBlock { lines: block_lines });
+        }
+    }
+
+    (sections, resume_blocks)
+}
+
+fn find_local_calls(line: &str, local_fns: &HashSet<String>) -> Vec<String> {
+    let mut found = Vec::new();
+    for func in local_fns {
+        let pattern = format!("{}(", func);
+        if let Some(pos) = line.find(&pattern) {
+            let is_boundary = pos == 0 || {
+                let prev = line.as_bytes()[pos - 1];
+                !(prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'.')
+            };
+            if is_boundary {
+                found.push(func.clone());
+            }
+        }
+    }
+    found
+}
+
+fn strip_node_func_prefix(name: &str) -> String {
+    name.strip_prefix("K2_")
+        .or_else(|| name.strip_prefix("Conv_"))
+        .unwrap_or(name)
+        .to_string()
+}
+
+fn line_contains_identifier(line: &str, identifier: &str) -> bool {
+    let mut start = 0;
+    while start + identifier.len() <= line.len() {
+        if let Some(pos) = line[start..].find(identifier) {
+            let abs_pos = start + pos;
+            let is_start = abs_pos == 0 || {
+                let prev = line.as_bytes()[abs_pos - 1];
+                !(prev.is_ascii_alphanumeric() || prev == b'_')
+            };
+            let end = abs_pos + identifier.len();
+            let is_end = end >= line.len() || {
+                let next = line.as_bytes()[end];
+                !(next.is_ascii_alphanumeric() || next == b'_')
+            };
+            if is_start && is_end {
+                return true;
+            }
+            start = abs_pos + 1;
+        } else {
+            break;
+        }
+    }
+    false
+}
+
+/// Find the Nth occurrence of `identifier` in bytecode lines (0-based rank).
+fn find_nth_identifier_line(
+    identifier: &str,
+    rank: usize,
+    bytecode_lines: &[String],
+) -> Option<usize> {
+    let mut count = 0;
+    for (i, line) in bytecode_lines.iter().enumerate() {
+        if line_contains_identifier(line, identifier) {
+            if count == rank {
+                return Some(i);
+            }
+            count += 1;
+        }
+    }
+    None
+}
+
+/// Determine a node's rank among all nodes sharing its identifier.
+/// Uses (Y, X) sort order — UE4 graphs branch vertically (true=up, false=down),
+/// which generally matches bytecode order (true branches processed first).
+fn node_rank(node: &NodeInfo, all_nodes: &[NodeInfo]) -> Option<usize> {
+    let mut same_id: Vec<(i32, i32)> = all_nodes
+        .iter()
+        .filter(|n| n.identifier == node.identifier)
+        .map(|n| (n.y, n.x))
+        .collect();
+    same_id.sort();
+    same_id
+        .iter()
+        .position(|&(y, x)| y == node.y && x == node.x)
+}
+
+fn find_comment_line(
+    comment: &CommentBox,
+    nodes: &[NodeInfo],
+    bytecode_lines: &[String],
+) -> Option<usize> {
+    let contained: Vec<&NodeInfo> = if comment.is_bubble {
+        // Bubble comments sit on a specific node. The node itself may not have an
+        // identifier (e.g. K2Node_IfThenElse), so find the closest identifiable nodes.
+        // UE4 execution flows left-to-right, so prefer nodes to the right (downstream).
+        // Two-pass: first try right-side only, fall back to all directions.
+        let dist_limit = 800i64 * 800;
+        let mut right: Vec<(&NodeInfo, i64)> = nodes
+            .iter()
+            .filter(|n| n.x >= comment.x)
+            .map(|n| {
+                let dx = (n.x - comment.x) as i64;
+                let dy = (n.y - comment.y) as i64;
+                (n, dx * dx + dy * dy)
+            })
+            .filter(|&(_, d)| d < dist_limit)
+            .collect();
+        right.sort_by_key(|&(_, d)| d);
+        right.truncate(5);
+        if !right.is_empty() {
+            right.into_iter().map(|(n, _)| n).collect()
+        } else {
+            let mut all: Vec<(&NodeInfo, i64)> = nodes
+                .iter()
+                .map(|n| {
+                    let dx = (n.x - comment.x) as i64;
+                    let dy = (n.y - comment.y) as i64;
+                    (n, dx * dx + dy * dy)
+                })
+                .filter(|&(_, d)| d < dist_limit)
+                .collect();
+            all.sort_by_key(|&(_, d)| d);
+            all.truncate(5);
+            all.into_iter().map(|(n, _)| n).collect()
+        }
+    } else {
+        nodes
+            .iter()
+            .filter(|n| comment.contains_point(n.x, n.y))
+            .collect()
+    };
+
+    if contained.is_empty() {
+        return None;
+    }
+
+    let mut min_line: Option<usize> = None;
+    for node in &contained {
+        let rank = match node_rank(node, nodes) {
+            Some(r) => r,
+            None => continue,
+        };
+        if let Some(line_idx) = find_nth_identifier_line(&node.identifier, rank, bytecode_lines) {
+            min_line = Some(min_line.map_or(line_idx, |m: usize| m.min(line_idx)));
+            // For bubbles, use the first match (closest node) rather than minimum line
+            if comment.is_bubble {
+                return min_line;
+            }
+        }
+    }
+
+    min_line
+}
+
+fn classify_comments<'a>(
+    comments: &'a [CommentBox],
+    nodes: &[NodeInfo],
+    bytecode_lines: &[String],
+) -> (Vec<&'a CommentBox>, Vec<(usize, &'a CommentBox)>) {
+    let total_nodes = nodes.len();
+    let mut top_level: Vec<&CommentBox> = Vec::new();
+    let mut inline: Vec<(usize, &CommentBox)> = Vec::new();
+
+    for comment in comments {
+        if comment.is_bubble {
+            if let Some(line_idx) = find_comment_line(comment, nodes, bytecode_lines) {
+                inline.push((line_idx, comment));
+            } else {
+                top_level.push(comment);
+            }
+            continue;
+        }
+
+        let contained = nodes
+            .iter()
+            .filter(|n| comment.contains_point(n.x, n.y))
+            .count();
+
+        if total_nodes > 0 && contained > 0 && contained * 100 / total_nodes > 80 {
+            top_level.push(comment);
+        } else if let Some(line_idx) = find_comment_line(comment, nodes, bytecode_lines) {
+            inline.push((line_idx, comment));
+        } else {
+            top_level.push(comment);
+        }
+    }
+
+    inline.sort_by_key(|(idx, _)| *idx);
+
+    (top_level, inline)
 }
 
 pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
@@ -428,8 +688,9 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
         HashMap::new()
     };
 
-    // Collect blueprint comment boxes and event node positions from EdGraph exports
+    // Collect blueprint comment boxes, node positions, and event positions from EdGraph exports
     let mut graph_comments: HashMap<String, Vec<CommentBox>> = HashMap::new();
+    let mut graph_nodes: HashMap<String, Vec<NodeInfo>> = HashMap::new();
     let mut event_positions: HashMap<String, (i32, i32)> = HashMap::new();
 
     for (hdr, props) in &asset.exports {
@@ -489,7 +750,68 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                             y,
                             width: w,
                             height: h,
+                            is_bubble: false,
                         });
+                }
+            } else {
+                // Collect bubble comments from non-comment nodes
+                let has_bubble = find_prop(node_props, "bCommentBubbleVisible")
+                    .is_some_and(|p| matches!(p.value, PropValue::Bool(true)));
+                if has_bubble {
+                    if let Some(text) =
+                        find_prop(node_props, "NodeComment").and_then(|p| match &p.value {
+                            PropValue::Str(s) | PropValue::Name(s) | PropValue::Text(s) => {
+                                Some(s.clone())
+                            }
+                            _ => None,
+                        })
+                    {
+                        let x = find_prop_i32(node_props, "NodePosX").unwrap_or(0);
+                        let y = find_prop_i32(node_props, "NodePosY").unwrap_or(0);
+                        graph_comments
+                            .entry(graph_name.clone())
+                            .or_default()
+                            .push(CommentBox {
+                                text,
+                                x,
+                                y,
+                                width: 0,
+                                height: 0,
+                                is_bubble: true,
+                            });
+                    }
+                }
+
+                // Collect node positions with identifiers for comment placement
+                let node_identifier = match short.as_str() {
+                    "K2Node_CallFunction" | "K2Node_CommutativeAssociativeBinaryOperator" => {
+                        find_prop(node_props, "FunctionReference").and_then(|p| {
+                            if let PropValue::Struct { fields, .. } = &p.value {
+                                find_prop_str(fields, "MemberName")
+                                    .map(|n| strip_node_func_prefix(&n))
+                            } else {
+                                None
+                            }
+                        })
+                    }
+                    "K2Node_VariableSet" => {
+                        find_prop(node_props, "VariableReference").and_then(|p| {
+                            if let PropValue::Struct { fields, .. } = &p.value {
+                                find_prop_str(fields, "MemberName")
+                            } else {
+                                None
+                            }
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(identifier) = node_identifier {
+                    let x = find_prop_i32(node_props, "NodePosX").unwrap_or(0);
+                    let y = find_prop_i32(node_props, "NodePosY").unwrap_or(0);
+                    graph_nodes
+                        .entry(graph_name.clone())
+                        .or_default()
+                        .push(NodeInfo { x, y, identifier });
                 }
             }
 
@@ -539,27 +861,6 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
     let mut callees_map: HashMap<String, Vec<String>> = HashMap::new();
     let mut callers_map: HashMap<String, Vec<String>> = HashMap::new();
 
-    // Helper: check if a bytecode line calls a local function
-    let find_local_calls = |line: &str, local_fns: &HashSet<String>| -> Vec<String> {
-        let mut found = Vec::new();
-        for func in local_fns {
-            // Look for FuncName( with word boundary before it
-            let pattern = format!("{}(", func);
-            if let Some(pos) = line.find(&pattern) {
-                // Check word boundary: char before must not be alphanumeric or underscore
-                let is_boundary = pos == 0 || {
-                    let prev = line.as_bytes()[pos - 1];
-                    !(prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'.')
-                };
-                if is_boundary {
-                    found.push(func.clone());
-                }
-            }
-        }
-        found
-    };
-
-    // Scan all function exports for calls to local functions
     // Scan non-ubergraph functions for calls to local functions
     // (ubergraph is scanned later via structured output to catch latent resume blocks)
     for (hdr, props) in &asset.exports {
@@ -723,10 +1024,12 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                     has_functions = true;
                 }
                 let ug_comments = graph_comments.get("EventGraph").map(|v| v.as_slice());
+                let ug_nodes = graph_nodes.get("EventGraph").map(|v| v.as_slice());
                 emit_ubergraph_events(
                     &mut buf,
                     structured,
                     ug_comments,
+                    ug_nodes,
                     &event_positions,
                     &callers_map,
                 );
@@ -744,40 +1047,72 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
             writeln!(buf, "    // called by: {}", callers.join(", ")).unwrap();
         }
 
-        if let Some(comments) = graph_comments.get(&hdr.object_name) {
-            let mut sorted: Vec<&CommentBox> = comments.iter().collect();
-            sorted.sort_by_key(|c| c.x);
-            for cb in &sorted {
-                emit_comment(&mut buf, &cb.text, "    ");
-            }
-        }
-
+        // Collect bytecode lines
         let bc_prop_name = if find_prop(props, "BytecodeSummary").is_some() {
             "BytecodeSummary"
         } else {
             "Bytecode"
         };
-        if let Some(bc_prop) = find_prop(props, bc_prop_name) {
-            if let PropValue::Array { items, .. } = &bc_prop.value {
-                let has_bytecode = !items.is_empty();
-                for item in items {
-                    if let PropValue::Str(line) = item {
-                        if bc_prop_name == "Bytecode" {
-                            let code = if line.len() > 6 && line.as_bytes()[4] == b':' {
-                                &line[6..]
-                            } else {
-                                line
-                            };
-                            writeln!(buf, "    {}", code).unwrap();
-                        } else {
-                            writeln!(buf, "    {}", line).unwrap();
-                        }
-                    }
+        let bc_lines: Vec<String> = find_prop(props, bc_prop_name)
+            .and_then(|p| {
+                if let PropValue::Array { items, .. } = &p.value {
+                    Some(
+                        items
+                            .iter()
+                            .filter_map(|item| {
+                                if let PropValue::Str(line) = item {
+                                    if bc_prop_name == "Bytecode"
+                                        && line.len() > 6
+                                        && line.as_bytes()[4] == b':'
+                                    {
+                                        Some(line[6..].to_string())
+                                    } else {
+                                        Some(line.clone())
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect(),
+                    )
+                } else {
+                    None
                 }
-                if has_bytecode {
-                    functions_with_bytecode.insert(hdr.object_name.clone());
-                }
+            })
+            .unwrap_or_default();
+
+        // Classify comments as top-level vs inline using node positions
+        let comments = graph_comments.get(&hdr.object_name);
+        let nodes = graph_nodes.get(&hdr.object_name);
+        let (top_level, inline) = if let Some(cbs) = comments {
+            let node_slice = nodes.map(|v| v.as_slice()).unwrap_or(&[]);
+            classify_comments(cbs, node_slice, &bc_lines)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        // Emit top-level comments after signature
+        if !top_level.is_empty() {
+            let mut sorted_top = top_level;
+            sorted_top.sort_by_key(|c| c.x);
+            for cb in &sorted_top {
+                emit_comment(&mut buf, &cb.text, "    ");
             }
+        }
+
+        // Emit bytecode lines with inline comments interleaved
+        if !bc_lines.is_empty() {
+            let mut inline_idx = 0;
+            for (i, line) in bc_lines.iter().enumerate() {
+                while inline_idx < inline.len() && inline[inline_idx].0 == i {
+                    let ws_len = line.len() - line.trim_start().len();
+                    let indent = format!("    {}", &line[..ws_len]);
+                    emit_comment(&mut buf, &inline[inline_idx].1.text, &indent);
+                    inline_idx += 1;
+                }
+                writeln!(buf, "    {}", line).unwrap();
+            }
+            functions_with_bytecode.insert(hdr.object_name.clone());
         }
     }
     if has_functions {
@@ -1028,65 +1363,11 @@ fn emit_ubergraph_events(
     buf: &mut String,
     lines: &[String],
     comments: Option<&[CommentBox]>,
+    nodes: Option<&[NodeInfo]>,
     event_positions: &HashMap<String, (i32, i32)>,
     callers_map: &HashMap<String, Vec<String>>,
 ) {
-    // Split into sections by "--- label ---" markers
-    struct Section {
-        name: String,       // event name or "(latent resume)"
-        lines: Vec<String>, // code lines (without the marker)
-    }
-    let mut sections: Vec<Section> = Vec::new();
-    let mut current = Section {
-        name: String::new(),
-        lines: Vec::new(),
-    };
-
-    for line in lines {
-        let trimmed = line.trim();
-        if trimmed.starts_with("--- ") && trimmed.ends_with(" ---") {
-            // Save previous section if it has content
-            if !current.lines.is_empty() || !current.name.is_empty() {
-                sections.push(current);
-            }
-            let name = trimmed[4..trimmed.len() - 4].to_string();
-            current = Section {
-                name,
-                lines: Vec::new(),
-            };
-        } else {
-            current.lines.push(line.clone());
-        }
-    }
-    if !current.lines.is_empty() || !current.name.is_empty() {
-        sections.push(current);
-    }
-
-    // Split latent resume sections into individual resume blocks (separated by "return")
-    // and extract their bytecode offsets from the ubergraph label map
-    struct ResumeBlock {
-        lines: Vec<String>,
-    }
-    let mut resume_blocks: Vec<ResumeBlock> = Vec::new();
-    for section in &sections {
-        if section.name != "(latent resume)" {
-            continue;
-        }
-        let mut block_lines: Vec<String> = Vec::new();
-        for line in &section.lines {
-            if line.trim() == "return" {
-                if !block_lines.is_empty() {
-                    resume_blocks.push(ResumeBlock { lines: block_lines });
-                    block_lines = Vec::new();
-                }
-            } else {
-                block_lines.push(line.clone());
-            }
-        }
-        if !block_lines.is_empty() {
-            resume_blocks.push(ResumeBlock { lines: block_lines });
-        }
-    }
+    let (sections, resume_blocks) = split_ubergraph_sections(lines);
 
     // Latent resume matching: latent actions (Delay, MoveTo, etc.) pause execution
     // and resume at a bytecode offset stored in LatentActionInfo.skip_offset. The decoder
@@ -1139,25 +1420,96 @@ fn emit_ubergraph_events(
             }
         }
 
+        // Classify comments for this event section
+        let (top_level_comments, inline_comments) = if !section.name.is_empty() {
+            if let (Some(cbs), Some(&(ex, ey))) = (comments, event_positions.get(&section.name)) {
+                // Event-wrapping comment boxes (contain the event node) → top-level
+                let mut event_wrapping: Vec<&CommentBox> = cbs
+                    .iter()
+                    .filter(|c| !c.is_bubble && c.contains_point(ex, ey))
+                    .collect();
+                event_wrapping.sort_by_key(|c| (c.width as i64) * (c.height as i64));
+                event_wrapping.truncate(2);
+
+                // Remaining comments: try to inline using node-to-bytecode matching.
+                // Scope to the Y range of the event's wrapping comment box to prevent
+                // leaking between nearby events.
+                let node_slice = nodes.unwrap_or(&[]);
+                let mut inline: Vec<(usize, &CommentBox)> = Vec::new();
+                if !node_slice.is_empty() {
+                    let (scope_y_min, scope_y_max) = event_wrapping
+                        .iter()
+                        .fold(None, |acc: Option<(i32, i32)>, c| {
+                            let (y1, y2) = (c.y, c.y + c.height);
+                            match acc {
+                                Some((min_y, max_y)) => Some((min_y.min(y1), max_y.max(y2))),
+                                None => Some((y1, y2)),
+                            }
+                        })
+                        .unwrap_or((ey - 400, ey + 400));
+
+                    // Scope nodes to the event's Y range for correct rank computation.
+                    // Without this, node_rank counts duplicates across all events
+                    // (e.g. two Delay nodes), inflating the rank beyond what the
+                    // scoped bytecode lines contain.
+                    let scoped_nodes: Vec<NodeInfo> = node_slice
+                        .iter()
+                        .filter(|n| n.y >= scope_y_min && n.y <= scope_y_max)
+                        .cloned()
+                        .collect();
+
+                    let remaining: Vec<&CommentBox> = cbs
+                        .iter()
+                        .filter(|c| {
+                            if event_wrapping.iter().any(|ew| std::ptr::eq(*ew, *c)) {
+                                return false;
+                            }
+                            let cy = if c.is_bubble { c.y } else { c.y + c.height / 2 };
+                            cy >= scope_y_min && cy <= scope_y_max
+                        })
+                        .collect();
+                    for cb in remaining {
+                        if let Some(line_idx) = find_comment_line(cb, &scoped_nodes, &section.lines)
+                        {
+                            inline.push((line_idx, cb));
+                        }
+                    }
+                    inline.sort_by_key(|(idx, _)| *idx);
+                }
+
+                (event_wrapping, inline)
+            } else {
+                (Vec::new(), Vec::new())
+            }
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
         if !section.name.is_empty() {
             writeln!(buf, "  {}():", section.name).unwrap();
             if let Some(callers) = callers_map.get(&section.name) {
                 writeln!(buf, "    // called by: {}", callers.join(", ")).unwrap();
             }
-            if let (Some(cbs), Some(&(ex, ey))) = (comments, event_positions.get(&section.name)) {
-                let mut matching: Vec<&CommentBox> = cbs
-                    .iter()
-                    .filter(|c| {
-                        ex >= c.x && ey >= c.y && ex <= c.x + c.width && ey <= c.y + c.height
-                    })
-                    .collect();
-                matching.sort_by_key(|c| (c.width as i64) * (c.height as i64));
-                for cb in matching.iter().take(2) {
-                    emit_comment(buf, &cb.text, "    ");
-                }
+            for cb in &top_level_comments {
+                emit_comment(buf, &cb.text, "    ");
             }
         }
-        for line in &section.lines {
+        // Find the first entry in delay_resume_map for this section
+        let mut drm_pos = delay_resume_map
+            .iter()
+            .position(|&(s, _)| s == si)
+            .unwrap_or(delay_resume_map.len());
+
+        let mut inline_idx = 0;
+        for (i, line) in section.lines.iter().enumerate() {
+            // Emit any inline comments targeting this line
+            while inline_idx < inline_comments.len() && inline_comments[inline_idx].0 == i {
+                let ws_len = line.len() - line.trim_start().len();
+                let indent = format!("    {}", &line[..ws_len]);
+                emit_comment(buf, &inline_comments[inline_idx].1.text, &indent);
+                inline_idx += 1;
+            }
+
             // Strip resume annotations from displayed output
             let clean = strip_resume_annotation(line);
             let trimmed = clean.trim();
@@ -1166,16 +1518,19 @@ fn emit_ubergraph_events(
             } // trailing returns are implicit
             writeln!(buf, "    {}", clean).unwrap();
 
-            // If this line had a Delay with a resume, inline the resume block
-            if parse_resume_offset(line).is_some() {
-                if let Some(&(_, ri)) = delay_resume_map.iter().find(|&&(s, _)| s == si) {
-                    if let Some(rb) = resume_blocks.get(ri) {
-                        writeln!(buf, "    // after delay:").unwrap();
-                        for rline in &rb.lines {
-                            writeln!(buf, "    {}", rline).unwrap();
-                        }
+            // If this line had a Delay with a resume, inline the next resume block
+            if parse_resume_offset(line).is_some()
+                && drm_pos < delay_resume_map.len()
+                && delay_resume_map[drm_pos].0 == si
+            {
+                let ri = delay_resume_map[drm_pos].1;
+                if let Some(rb) = resume_blocks.get(ri) {
+                    writeln!(buf, "    // after delay:").unwrap();
+                    for rline in &rb.lines {
+                        writeln!(buf, "    {}", rline).unwrap();
                     }
                 }
+                drm_pos += 1;
             }
         }
     }
@@ -1191,55 +1546,7 @@ fn scan_structured_calls(
     callees_map: &mut HashMap<String, Vec<String>>,
     callers_map: &mut HashMap<String, Vec<String>>,
 ) {
-    // First, split into sections and collect resume blocks (same logic as emit_ubergraph_events)
-    struct Section {
-        name: String,
-        lines: Vec<String>,
-    }
-    let mut sections: Vec<Section> = Vec::new();
-    let mut current = Section {
-        name: String::new(),
-        lines: Vec::new(),
-    };
-    for line in lines {
-        let trimmed = line.trim();
-        if trimmed.starts_with("--- ") && trimmed.ends_with(" ---") {
-            if !current.lines.is_empty() || !current.name.is_empty() {
-                sections.push(current);
-            }
-            current = Section {
-                name: trimmed[4..trimmed.len() - 4].to_string(),
-                lines: Vec::new(),
-            };
-        } else {
-            current.lines.push(line.clone());
-        }
-    }
-    if !current.lines.is_empty() || !current.name.is_empty() {
-        sections.push(current);
-    }
-
-    // Collect resume blocks from (latent resume) sections
-    let mut resume_blocks: Vec<Vec<String>> = Vec::new();
-    for section in &sections {
-        if section.name != "(latent resume)" {
-            continue;
-        }
-        let mut block: Vec<String> = Vec::new();
-        for line in &section.lines {
-            if line.trim() == "return" {
-                if !block.is_empty() {
-                    resume_blocks.push(block);
-                    block = Vec::new();
-                }
-            } else {
-                block.push(line.clone());
-            }
-        }
-        if !block.is_empty() {
-            resume_blocks.push(block);
-        }
-    }
+    let (sections, resume_blocks) = split_ubergraph_sections(lines);
 
     // Build resume mapping: for each event section with a Delay()+resume annotation,
     // associate the resume block with that event
@@ -1254,7 +1561,7 @@ fn scan_structured_calls(
                 event_resume_lines
                     .entry(section.name.clone())
                     .or_default()
-                    .extend(resume_blocks[resume_idx].iter().cloned());
+                    .extend(resume_blocks[resume_idx].lines.iter().cloned());
                 resume_idx += 1;
             }
         }
@@ -1273,40 +1580,20 @@ fn scan_structured_calls(
     };
 
     // Scan each event section + its resume blocks for local function calls
-    let find_calls = |line: &str, local_fns: &HashSet<String>| -> Vec<String> {
-        let trimmed = line.trim();
-        let mut found = Vec::new();
-        for func in local_fns {
-            let pattern = format!("{}(", func);
-            if let Some(pos) = trimmed.find(&pattern) {
-                let is_boundary = pos == 0 || {
-                    let prev = trimmed.as_bytes()[pos - 1];
-                    !(prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'.')
-                };
-                if is_boundary {
-                    found.push(func.clone());
-                }
-            }
-        }
-        found
-    };
-
     for section in &sections {
         if section.name.is_empty() || section.name == "(latent resume)" {
             continue;
         }
-        // Scan main section lines
         for line in &section.lines {
-            for callee in find_calls(line, local_functions) {
+            for callee in find_local_calls(line.trim(), local_functions) {
                 if callee != section.name {
                     record_call(&section.name, &callee);
                 }
             }
         }
-        // Scan associated resume block lines
         if let Some(resume_lines) = event_resume_lines.get(&section.name) {
             for line in resume_lines {
-                for callee in find_calls(line, local_functions) {
+                for callee in find_local_calls(line.trim(), local_functions) {
                     if callee != section.name {
                         record_call(&section.name, &callee);
                     }

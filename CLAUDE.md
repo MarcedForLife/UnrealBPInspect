@@ -17,7 +17,7 @@ src/
   parser.rs            Asset parser orchestrator (parse_asset)
   output_text.rs       Dump output mode (--dump)
   output_json.rs       JSON output mode (--json)
-  output_summary.rs    Summary output mode (default: component tree, variables, functions)
+  output_summary.rs    Summary output mode (default: component tree, variables, functions, inline comments)
   bytecode/
     mod.rs             Sub-module re-exports
     opcodes.rs         EExprToken opcode constants (EX_*)
@@ -74,7 +74,7 @@ The parser reads the binary format sequentially through these modules:
 3. **ffield.rs** — FField child property parsing, type resolution, function signatures
 4. **bytecode/** — Kismet bytecode: expression decoding (~85 opcodes, UE5 LWC support), flow pattern detection, if/else structuring
 5. **parser.rs** — Orchestrates all parsing: header, name/import/export tables, export data, bytecode
-6. **output_*.rs** — Three output modes: summary (default), dump, JSON
+6. **output_*.rs** — Three output modes: summary (default), dump, JSON. Summary mode uses 2D bounding-box intersection between EdGraph comment boxes/bubble comments and identifiable nodes to place comments inline near corresponding bytecode.
 
 Key dependency flow: `types` + `binary` → `resolve` → `properties` + `ffield` → `bytecode` → `parser` → `output_*`
 
