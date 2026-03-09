@@ -80,6 +80,38 @@ fn try_inline_operator(name: &str, args: &[String]) -> Option<String> {
     }
 }
 
+/// Rewrite KismetArrayLibrary function calls to idiomatic array syntax.
+///
+/// Method-style: `Array_Add(arr, item)` → `arr.Add(item)`
+/// Index-style:  `Array_Get(arr, idx, $out)` → `$out = arr[idx]`
+/// Property-style: `Array_Length(arr)` → `arr.Num()`
+fn try_rewrite_array_call(name: &str, args: &[String]) -> Option<String> {
+    let method = name.strip_prefix("Array_")?;
+    let arr = args.first()?;
+    let rest = &args[1..];
+
+    // Index-access patterns
+    match method {
+        "Get" if args.len() == 3 => return Some(format!("{} = {}[{}]", args[2], arr, args[1])),
+        "Set" if args.len() >= 3 && args.get(3).is_none_or(|v| v != "true") => {
+            return Some(format!("{}[{}] = {}", arr, args[1], args[2]));
+        }
+        _ => {}
+    }
+
+    // Out-param patterns (last arg is the output)
+    match method {
+        "Last" if rest.len() == 1 => return Some(format!("{} = {}.Last()", rest[0], arr)),
+        "Find" if rest.len() == 2 => {
+            return Some(format!("{} = {}.Find({})", rest[1], arr, rest[0]));
+        }
+        _ => {}
+    }
+
+    // Default: arr.Method(remaining args)
+    Some(format!("{}.{}({})", arr, method, rest.join(", ")))
+}
+
 /// Decode EX_CONTEXT / EX_CLASS_CONTEXT / EX_CONTEXT_FAIL_SILENT.
 /// All three read object + rvalue info + member expression, then format as `obj.member`.
 /// `sep` is the separator ("." or "?."), `elide_library` controls whether UE4 library
@@ -192,6 +224,9 @@ fn format_call_or_operator(name: &str, args: Vec<String>) -> String {
         .collect();
     let clean_name = strip_func_prefix(name);
     crate::enums::resolve_enum_args(&clean_name, &mut clean_args);
+    if let Some(rewritten) = try_rewrite_array_call(&clean_name, &clean_args) {
+        return rewritten;
+    }
     let call = format!(
         "{}({})",
         clean_name,
@@ -775,6 +810,8 @@ pub fn decode_bytecode(
     (stmts, mem_adj)
 }
 
+// Inline tests: these test private functions (try_rewrite_array_call, decode_expr, etc.)
+// that aren't accessible from tests/. Integration tests cover the public API end-to-end.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1085,5 +1122,89 @@ mod tests {
         bc.push(0x53); // EX_EndOfScript
         let (stmts, _) = decode_bytecode(&bc, &names, &imports, &export_names, 0);
         assert!(stmts.is_empty(), "NothingInt32 should be filtered as nop");
+    }
+
+    // --- Array rewrite tests ---
+
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
+
+    #[test]
+    fn array_get_rewrite() {
+        let r = try_rewrite_array_call("Array_Get", &[s("arr"), s("0"), s("$item")]);
+        assert_eq!(r.unwrap(), "$item = arr[0]");
+    }
+
+    #[test]
+    fn array_set_rewrite() {
+        let r = try_rewrite_array_call("Array_Set", &[s("arr"), s("0"), s("val"), s("false")]);
+        assert_eq!(r.unwrap(), "arr[0] = val");
+    }
+
+    #[test]
+    fn array_set_size_to_fit_keeps_method_call() {
+        let r = try_rewrite_array_call("Array_Set", &[s("arr"), s("0"), s("val"), s("true")]);
+        assert_eq!(r.unwrap(), "arr.Set(0, val, true)");
+    }
+
+    #[test]
+    fn array_length_rewrite() {
+        let r = try_rewrite_array_call("Array_Length", &[s("arr")]);
+        assert_eq!(r.unwrap(), "arr.Length()");
+    }
+
+    #[test]
+    fn array_add_rewrite() {
+        let r = try_rewrite_array_call("Array_Add", &[s("arr"), s("item")]);
+        assert_eq!(r.unwrap(), "arr.Add(item)");
+    }
+
+    #[test]
+    fn array_contains_rewrite() {
+        let r = try_rewrite_array_call("Array_Contains", &[s("arr"), s("item")]);
+        assert_eq!(r.unwrap(), "arr.Contains(item)");
+    }
+
+    #[test]
+    fn array_remove_rewrite() {
+        let r = try_rewrite_array_call("Array_Remove", &[s("arr"), s("2")]);
+        assert_eq!(r.unwrap(), "arr.Remove(2)");
+    }
+
+    #[test]
+    fn array_remove_item_rewrite() {
+        let r = try_rewrite_array_call("Array_RemoveItem", &[s("arr"), s("item")]);
+        assert_eq!(r.unwrap(), "arr.RemoveItem(item)");
+    }
+
+    #[test]
+    fn array_find_rewrite() {
+        let r = try_rewrite_array_call("Array_Find", &[s("arr"), s("item"), s("$idx")]);
+        assert_eq!(r.unwrap(), "$idx = arr.Find(item)");
+    }
+
+    #[test]
+    fn array_last_rewrite() {
+        let r = try_rewrite_array_call("Array_Last", &[s("arr"), s("$item")]);
+        assert_eq!(r.unwrap(), "$item = arr.Last()");
+    }
+
+    #[test]
+    fn array_clear_rewrite() {
+        let r = try_rewrite_array_call("Array_Clear", &[s("arr")]);
+        assert_eq!(r.unwrap(), "arr.Clear()");
+    }
+
+    #[test]
+    fn array_insert_rewrite() {
+        let r = try_rewrite_array_call("Array_Insert", &[s("arr"), s("item"), s("2")]);
+        assert_eq!(r.unwrap(), "arr.Insert(item, 2)");
+    }
+
+    #[test]
+    fn non_array_passthrough() {
+        let r = try_rewrite_array_call("SomeFunc", &[s("a"), s("b")]);
+        assert!(r.is_none());
     }
 }

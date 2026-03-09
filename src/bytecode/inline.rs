@@ -676,23 +676,15 @@ fn rewrite_foreach_loops(lines: &mut Vec<String>) {
                     }
                 }
             }
-            // Scan body for Array_Get(ARRAY, INDEX_VAR, ITEM) and remove
+            // Scan body for ITEM = ARRAY[INDEX_VAR] re-fetches and remove
+            let redundant_get = format!("{} = {}[{}]", item, array, index_var);
             let mut j = for_idx + 1;
             while j < new_close {
                 let t = lines[j].trim();
-                if let Some(rest) = t.strip_prefix("Array_Get(") {
-                    if let Some(inner) = rest.strip_suffix(')') {
-                        let ag_args = split_args(inner);
-                        if ag_args.len() == 3
-                            && ag_args[0] == array
-                            && ag_args[1] == index_var
-                            && ag_args[2] == item
-                        {
-                            lines.remove(j);
-                            new_close -= 1;
-                            continue; // don't advance j
-                        }
-                    }
+                if t == redundant_get {
+                    lines.remove(j);
+                    new_close -= 1;
+                    continue; // don't advance j
                 }
                 j += 1;
             }
@@ -703,16 +695,15 @@ fn rewrite_foreach_loops(lines: &mut Vec<String>) {
     }
 }
 
-/// Parse "while (COUNTER < Array_Length(ARRAY)) {" → Some((counter, array))
+/// Parse "while (COUNTER < ARRAY.Length()) {" → Some((counter, array))
 fn parse_foreach_while(trimmed: &str) -> Option<(String, String)> {
     let rest = trimmed.strip_prefix("while (")?;
     let rest = rest.strip_suffix(") {")?;
-    // Pattern: COUNTER < Array_Length(ARRAY)
+    // Pattern: COUNTER < ARRAY.Length()
     let lt_pos = rest.find(" < ")?;
     let counter = &rest[..lt_pos];
     let rhs = &rest[lt_pos + 3..];
-    let inner = rhs.strip_prefix("Array_Length(")?;
-    let array = inner.strip_suffix(')')?;
+    let array = rhs.strip_suffix(".Length()")?;
     Some((counter.to_string(), array.to_string()))
 }
 
@@ -787,18 +778,18 @@ fn validate_body_start(
     }
     let assign_idx = body_lines[0].0;
 
-    // Line 2: Array_Get(ARRAY, INDEX, ITEM)
+    // Line 2: ITEM = ARRAY[INDEX]
     let t = &body_lines[1].1;
-    let rest = t.strip_prefix("Array_Get(")?;
-    let rest = rest.strip_suffix(')')?;
-    let args = split_args(rest);
-    if args.len() != 3 {
+    let eq_pos = t.find(" = ")?;
+    let item_part = &t[..eq_pos];
+    let rhs = &t[eq_pos + 3..];
+    let bracket_start = rhs.find('[')?;
+    let arr_part = &rhs[..bracket_start];
+    let idx_part = rhs[bracket_start + 1..].strip_suffix(']')?;
+    if arr_part != array || idx_part != index {
         return None;
     }
-    if args[0] != array || args[1] != index {
-        return None;
-    }
-    let item = args[2].to_string();
+    let item = item_part.to_string();
     let get_idx = body_lines[1].0;
 
     Some((assign_idx, get_idx, item))
@@ -1676,6 +1667,8 @@ fn extract_containing_func_name(before_text: &str) -> Option<String> {
     }
 }
 
+// Inline tests: these test private functions (clean_line, parse_temp_assignment,
+// substitute_var, split_args, etc.) that aren't accessible from tests/.
 #[cfg(test)]
 mod tests {
     use super::*;
