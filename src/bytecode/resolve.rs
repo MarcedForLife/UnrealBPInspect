@@ -67,6 +67,8 @@ pub fn read_bc_context_rvalue(bc: &[u8], pos: &mut usize, nt: &NameTable, mem_ad
     let _rvalue = read_bc_field_path(bc, pos, nt, mem_adj);
 }
 
+// Inline tests: read_bc_field_path is private and needs direct access to test
+// edge cases (truncated data, too-many paths, negative indices).
 #[cfg(test)]
 mod tests {
     use super::*;

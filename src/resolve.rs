@@ -152,6 +152,8 @@ pub fn format_func_flags(flags: u32) -> String {
     }
 }
 
+// Inline tests: these test private helpers (resolve_index, resolve_import_path,
+// format_func_flags, matches_filter) that aren't part of the public API.
 #[cfg(test)]
 mod tests {
     use super::*;
