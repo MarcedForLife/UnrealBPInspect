@@ -233,7 +233,7 @@ fn find_comment_line(
             })
             .filter(|&(_, d)| d < dist_limit)
             .collect();
-        right.sort_by_key(|&(_, d)| d);
+        right.sort_by_key(|&(n, d)| (d, n.y, n.x));
         right.truncate(5);
         if !right.is_empty() {
             right.into_iter().map(|(n, _)| n).collect()
@@ -247,7 +247,7 @@ fn find_comment_line(
                 })
                 .filter(|&(_, d)| d < dist_limit)
                 .collect();
-            all.sort_by_key(|&(_, d)| d);
+            all.sort_by_key(|&(n, d)| (d, n.y, n.x));
             all.truncate(5);
             all.into_iter().map(|(n, _)| n).collect()
         }
@@ -974,10 +974,11 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
 
     // Emit call graph section (only functions with local callees)
     if !callees_map.is_empty() {
-        let mut entries: Vec<(&String, &Vec<String>)> = callees_map.iter().collect();
+        let mut entries: Vec<(&String, &mut Vec<String>)> = callees_map.iter_mut().collect();
         entries.sort_by_key(|(name, _)| name.to_string());
         writeln!(buf, "Call graph:").unwrap();
-        for (caller, callees) in &entries {
+        for (caller, callees) in &mut entries {
+            callees.sort();
             writeln!(buf, "  {} \u{2192} {}", caller, callees.join(", ")).unwrap();
         }
         writeln!(buf).unwrap();
@@ -1094,7 +1095,7 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
         // Emit top-level comments after signature
         if !top_level.is_empty() {
             let mut sorted_top = top_level;
-            sorted_top.sort_by_key(|c| c.x);
+            sorted_top.sort_by(|a, b| a.x.cmp(&b.x).then(a.y.cmp(&b.y)).then(a.text.cmp(&b.text)));
             for cb in &sorted_top {
                 emit_comment(&mut buf, &cb.text, "    ");
             }
@@ -1196,7 +1197,7 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                 }
             }
         }
-        nodes.sort_by_key(|(x, _)| *x);
+        nodes.sort_by(|(x1, s1), (x2, s2)| x1.cmp(x2).then(s1.cmp(s2)));
         for (_, desc) in &nodes {
             writeln!(buf, "  {}", desc).unwrap();
         }
@@ -1428,7 +1429,7 @@ fn emit_ubergraph_events(
                     .iter()
                     .filter(|c| !c.is_bubble && c.contains_point(ex, ey))
                     .collect();
-                event_wrapping.sort_by_key(|c| (c.width as i64) * (c.height as i64));
+                event_wrapping.sort_by_key(|c| ((c.width as i64) * (c.height as i64), c.x, c.y));
                 event_wrapping.truncate(2);
 
                 // Remaining comments: try to inline using node-to-bytecode matching.

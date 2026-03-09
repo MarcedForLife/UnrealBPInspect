@@ -94,3 +94,32 @@ fn truncated_input_returns_error() {
 fn garbage_input_returns_error() {
     assert!(parse_asset(b"not a uasset file", false).is_err());
 }
+
+/// Run all three output modes multiple times and verify identical output.
+/// Each call creates fresh HashMaps with different random seeds, so this
+/// catches any HashMap iteration order nondeterminism.
+#[test]
+fn output_determinism() {
+    let data = common::load_fixture("Helm_BP.uasset");
+    let asset = parse_asset(&data, false).unwrap();
+    let baseline_summary = format_summary(&asset, &[]);
+    let baseline_text = format_text(&asset, &[]);
+    let baseline_json = serde_json::to_string_pretty(&to_json(&asset, &[])).unwrap();
+    for _ in 0..4 {
+        assert_eq!(
+            format_summary(&asset, &[]),
+            baseline_summary,
+            "summary output is nondeterministic"
+        );
+        assert_eq!(
+            format_text(&asset, &[]),
+            baseline_text,
+            "text output is nondeterministic"
+        );
+        assert_eq!(
+            serde_json::to_string_pretty(&to_json(&asset, &[])).unwrap(),
+            baseline_json,
+            "json output is nondeterministic"
+        );
+    }
+}

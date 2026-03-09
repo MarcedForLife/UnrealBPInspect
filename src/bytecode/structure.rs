@@ -587,14 +587,17 @@ fn extract_convergence(output: &mut Vec<String>) {
             }
         }
 
-        // Find first convergence label (2+ gotos)
-        let conv = goto_map
-            .iter()
-            .find(|(_, gotos)| gotos.len() >= 2)
-            .map(|(label, gotos)| (label.clone(), gotos.clone()));
-        let Some((label_name, goto_indices)) = conv else {
+        // Find convergence labels (2+ gotos), pick the earliest by line index
+        // for deterministic processing (HashMap iteration order is random)
+        let mut candidates: Vec<(String, Vec<usize>)> = goto_map
+            .into_iter()
+            .filter(|(_, gotos)| gotos.len() >= 2)
+            .collect();
+        if candidates.is_empty() {
             break;
-        };
+        }
+        candidates.sort_by_key(|(_, gotos)| gotos.iter().copied().min().unwrap_or(usize::MAX));
+        let (label_name, goto_indices) = candidates.remove(0);
 
         // Find the label line
         let label_text = format!("{}:", label_name);
