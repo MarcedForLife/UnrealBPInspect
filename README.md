@@ -70,10 +70,10 @@ bp-inspect Helm_BP.uasset --filter GetSteeringAngle
 
 ### JSON mode
 
-Full structured output for programmatic use:
+Full structured output for programmatic use. Includes top-level `imports`, `exports`, and `functions` arrays — functions have pre-extracted signatures, flags, and structured bytecode:
 
 ```sh
-bp-inspect Helm_BP.uasset --json | jq '.exports[] | select(.name == "GetSteeringAngle")'
+bp-inspect Helm_BP.uasset --json | jq '.functions[] | {name, signature, flags}'
 ```
 
 ## Why bp-inspect

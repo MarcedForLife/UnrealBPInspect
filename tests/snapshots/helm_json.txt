@@ -2516,6 +2516,30 @@
       ]
     }
   ],
+  "functions": [
+    {
+      "bytecode": [
+        "self.WinchConstraintInstance.GetRotationAlpha($GetRotationAlpha_RotationAlpha)",
+        "out SteeringAngle = ($GetRotationAlpha_RotationAlpha * 2.0000) - 1.0000"
+      ],
+      "export_index": 14,
+      "flags": "Public|HasOutParms|BlueprintPure|Const",
+      "name": "GetSteeringAngle",
+      "signature": "GetSteeringAngle(out SteeringAngle: float)"
+    },
+    {
+      "bytecode": [
+        "$Cast_AsWinch_Constraint_BP = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)",
+        "if ($Cast_AsWinch_Constraint_BP) {",
+        "    self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP",
+        "}"
+      ],
+      "export_index": 15,
+      "flags": "Event|Public|BlueprintPure",
+      "name": "UserConstructionScript",
+      "signature": "UserConstructionScript()"
+    }
+  ],
   "imports": [
     {
       "class_name": "Actor",
