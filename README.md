@@ -7,8 +7,10 @@ Parses the binary format directly and outputs component trees, variable declarat
 ## Usage
 
 ```sh
-bp-inspect [OPTIONS] <PATH>
+bp-inspect [OPTIONS] <PATH>...
 ```
+
+Accepts one or more `.uasset` files or directories. Directories are scanned recursively for `.uasset` files.
 
 ### Options
 
@@ -66,6 +68,16 @@ Drill into a specific function while keeping class context:
 
 ```sh
 bp-inspect Helm_BP.uasset --filter GetSteeringAngle
+```
+
+### Batch / directory mode
+
+Process multiple files or scan a directory recursively:
+
+```sh
+bp-inspect Content/Blueprints/                          # all .uasset files under directory
+bp-inspect Helm_BP.uasset VRHand_BP.uasset              # multiple files
+bp-inspect Content/ --json | jq '.[].functions[].name'   # multi-file JSON array
 ```
 
 ### JSON mode
@@ -153,6 +165,7 @@ cargo run -- samples/Helm_BP.uasset --dump               # full import/export/pr
 cargo run -- samples/Helm_BP.uasset --json               # full JSON output
 cargo run -- samples/Helm_BP.uasset --json | python3 -m json.tool   # validate JSON
 cargo run -- samples/Helm_BP.uasset --filter GetSteeringAngle        # single function
+cargo run -- samples/                                    # all .uasset files in directory
 cargo run -- samples/Helm_BP.uasset --debug              # raw table dump for format investigation
 ```
 

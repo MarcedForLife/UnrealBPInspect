@@ -36,6 +36,14 @@ Filters functions and graphs to the named export while keeping class context (co
 
 Multiple names can be comma-separated: `--filter GetSteeringAngle,UserConstructionScript`
 
+### Scan a directory
+
+```bash
+bp-inspect <directory>/
+```
+
+Recursively finds and processes all `.uasset` files. Each file gets a header. Multiple files and directories can be mixed. Works with all output modes.
+
 ### Get structured data
 
 ```bash

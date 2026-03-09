@@ -50,6 +50,7 @@ UPDATE_SNAPSHOTS=1 cargo test                  # update snapshot files after int
 cargo run -- samples/<file>.uasset             # test summary output (default)
 cargo run -- samples/<file>.uasset --dump      # test full dump output
 cargo run -- samples/<file>.uasset --json      # test JSON output
+cargo run -- samples/                          # test batch/directory mode
 cargo build --release                          # release build
 ```
 

@@ -1,9 +1,10 @@
+use anyhow::{Context, Result};
 use clap::Parser as ClapParser;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use unreal_bp_inspect::output_json::to_json;
-use unreal_bp_inspect::output_summary::print_summary;
-use unreal_bp_inspect::output_text::print_text;
+use unreal_bp_inspect::output_summary::format_summary;
+use unreal_bp_inspect::output_text::format_text;
 use unreal_bp_inspect::parser::parse_asset;
 
 #[derive(ClapParser)]
@@ -13,8 +14,9 @@ use unreal_bp_inspect::parser::parse_asset;
     version
 )]
 struct Cli {
-    /// Path to the .uasset file
-    path: PathBuf,
+    /// Paths to .uasset files or directories (recursive)
+    #[arg(required = true)]
+    paths: Vec<PathBuf>,
 
     /// Output as JSON
     #[arg(long)]
@@ -33,20 +35,63 @@ struct Cli {
     debug: bool,
 }
 
+enum OutputMode {
+    Summary,
+    Dump,
+    Json,
+}
+
+fn collect_uasset_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut result = Vec::new();
+    for path in paths {
+        if path.is_dir() {
+            collect_from_dir(path, &mut result);
+        } else {
+            result.push(path.clone());
+        }
+    }
+    result.sort();
+    result
+}
+
+fn collect_from_dir(dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Warning: cannot read directory {}: {}", dir.display(), e);
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_from_dir(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "uasset") {
+            out.push(path);
+        }
+    }
+}
+
+fn process_file(path: &Path, mode: &OutputMode, filters: &[String], debug: bool) -> Result<String> {
+    let data = std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let asset =
+        parse_asset(&data, debug).with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(match mode {
+        OutputMode::Summary => format_summary(&asset, filters),
+        OutputMode::Dump => format_text(&asset, filters),
+        OutputMode::Json => serde_json::to_string_pretty(&to_json(&asset, filters)).unwrap(),
+    })
+}
+
 fn main() {
     let cli = Cli::parse();
 
-    let data = std::fs::read(&cli.path).unwrap_or_else(|e| {
-        eprintln!("Failed to read {}: {}", cli.path.display(), e);
-        std::process::exit(1);
-    });
-
-    let asset = match parse_asset(&data, cli.debug) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("Failed to parse {}: {}", cli.path.display(), e);
-            std::process::exit(1);
-        }
+    let mode = if cli.json {
+        OutputMode::Json
+    } else if cli.dump {
+        OutputMode::Dump
+    } else {
+        OutputMode::Summary
     };
 
     let filters: Vec<String> = cli
@@ -54,14 +99,70 @@ fn main() {
         .map(|f| f.split(',').map(|s| s.trim().to_lowercase()).collect())
         .unwrap_or_default();
 
-    if cli.json {
+    let files = collect_uasset_paths(&cli.paths);
+    if files.is_empty() {
+        eprintln!("No .uasset files found");
+        std::process::exit(1);
+    }
+
+    let single = files.len() == 1;
+
+    if matches!(mode, OutputMode::Json) && !single {
+        // Multi-file JSON: collect into array
+        let mut results = Vec::new();
+        let mut failures = 0;
+        for path in &files {
+            match process_file(path, &mode, &filters, cli.debug) {
+                Ok(json_str) => {
+                    let mut val: serde_json::Value =
+                        serde_json::from_str(&json_str).expect("internal JSON error");
+                    val["file"] = serde_json::json!(path.display().to_string());
+                    results.push(val);
+                }
+                Err(e) => {
+                    eprintln!("Warning: {:#}", e);
+                    failures += 1;
+                }
+            }
+        }
+        if results.is_empty() {
+            std::process::exit(1);
+        }
         println!(
             "{}",
-            serde_json::to_string_pretty(&to_json(&asset, &filters)).unwrap()
+            serde_json::to_string_pretty(&results).expect("internal JSON error")
         );
-    } else if cli.dump {
-        print_text(&asset, &filters);
+        if failures > 0 {
+            eprintln!("{} of {} files failed", failures, failures + results.len());
+        }
     } else {
-        print_summary(&asset, &filters);
+        // Single file or multi-file text modes
+        let mut successes = 0;
+        let mut failures = 0;
+        for path in &files {
+            match process_file(path, &mode, &filters, cli.debug) {
+                Ok(output) => {
+                    if !single {
+                        println!("=== {} ===\n", path.display());
+                    }
+                    print!("{}", output);
+                    successes += 1;
+                }
+                Err(e) => {
+                    if single {
+                        eprintln!("{:#}", e);
+                        std::process::exit(1);
+                    }
+                    eprintln!("Warning: {:#}", e);
+                    failures += 1;
+                }
+            }
+        }
+        if successes == 0 {
+            std::process::exit(1);
+        }
+        if failures > 0 {
+            eprintln!("{} of {} files failed", failures, failures + successes);
+        }
     }
 }
