@@ -20,9 +20,9 @@ struct Cli {
     #[arg(long)]
     json: bool,
 
-    /// Summary: concise logical structure (class, components, graphs)
+    /// Full import/export/property dump
     #[arg(long)]
-    summary: bool,
+    dump: bool,
 
     /// Filter exports by name (substring match, comma-separated)
     #[arg(long, short)]
@@ -59,9 +59,9 @@ fn main() {
             "{}",
             serde_json::to_string_pretty(&to_json(&asset, &filters)).unwrap()
         );
-    } else if cli.summary {
-        print_summary(&asset, &filters);
-    } else {
+    } else if cli.dump {
         print_text(&asset, &filters);
+    } else {
+        print_summary(&asset, &filters);
     }
 }

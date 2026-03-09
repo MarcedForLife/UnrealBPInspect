@@ -12,20 +12,20 @@ bp-inspect [OPTIONS] <PATH>
 
 ### Options
 
-| Flag               | Description                                                                                   |
-| ------------------ | --------------------------------------------------------------------------------------------- |
-| `--summary`        | Concise logical structure: class hierarchy, components, variables, functions with pseudo-code |
-| `--json`           | Full structured output as JSON                                                                |
-| `--filter <name>`  | Filter exports by name (substring match, comma-separated)                                     |
-| `--debug`          | Dump raw table data for format investigation                                                  |
-| `-V` / `--version` | Print version                                                                                 |
+| Flag               | Description                                                              |
+| ------------------ | ------------------------------------------------------------------------ |
+| `--dump`           | Full import/export/property dump (verbose diagnostic view)               |
+| `--json`           | Full structured output as JSON                                           |
+| `--filter <name>`  | Filter exports by name (substring match, comma-separated)                |
+| `--debug`          | Dump raw table data for format investigation                             |
+| `-V` / `--version` | Print version                                                            |
 
-### Summary mode
+### Default output
 
-The default debugging view. Shows the Blueprint as a single readable document.
+Shows the Blueprint as a single readable document with components, variables, and decoded functions.
 
 ```sh
-$ bp-inspect Helm_BP.uasset --summary
+$ bp-inspect Helm_BP.uasset
 
 Blueprint: Helm_BP (extends Actor)
 
@@ -65,7 +65,7 @@ Functions:
 Drill into a specific function while keeping class context:
 
 ```sh
-bp-inspect Helm_BP.uasset --summary --filter GetSteeringAngle
+bp-inspect Helm_BP.uasset --filter GetSteeringAngle
 ```
 
 ### JSON mode
@@ -90,7 +90,7 @@ bp-inspect takes a different approach: it reads the compiled bytecode from the b
 
 The raw bytecode is not the hard part — making it *readable* is. bp-inspect reconstructs function signatures from parameter properties, disassembles Kismet bytecode into structured pseudo-code, detects and structures control flow (if/else, while/for loops, ForEach, sequence nodes), reorders displaced convergence blocks from the UE4 compiler, inlines single-use temporaries and operators, resolves enum arguments to readable names, dynamically infers and folds struct Break/Make patterns, strips serialisation noise (GUID suffixes, K2Node prefixes, library prefixes), splits ubergraph functions into labelled event handlers, and inlines latent resume blocks after their corresponding Delay() calls. The goal is output that reads like hand-written pseudocode, not a bytecode dump.
 
-The `--summary` output is designed to be handed directly to an AI assistant and asked "what does this Blueprint do?".
+The default output is designed to be handed directly to an AI assistant and asked "what does this Blueprint do?".
 
 ## What it parses
 
@@ -148,10 +148,11 @@ cargo build --release              # optimised build → target/release/bp-inspe
 Use `cargo run --` to pass arguments to the CLI during development:
 
 ```sh
-cargo run -- samples/Helm_BP.uasset --summary           # human-readable summary
+cargo run -- samples/Helm_BP.uasset                      # human-readable summary (default)
+cargo run -- samples/Helm_BP.uasset --dump               # full import/export/property dump
 cargo run -- samples/Helm_BP.uasset --json               # full JSON output
 cargo run -- samples/Helm_BP.uasset --json | python3 -m json.tool   # validate JSON
-cargo run -- samples/Helm_BP.uasset --summary --filter GetSteeringAngle  # single function
+cargo run -- samples/Helm_BP.uasset --filter GetSteeringAngle        # single function
 cargo run -- samples/Helm_BP.uasset --debug              # raw table dump for format investigation
 ```
 

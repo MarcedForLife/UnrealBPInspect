@@ -15,9 +15,9 @@ src/
   properties.rs        Tagged property deserialiser
   ffield.rs            FField type resolution, function signatures
   parser.rs            Asset parser orchestrator (parse_asset)
-  output_text.rs       Text output mode
-  output_json.rs       JSON output mode
-  output_summary.rs    Summary output mode (component tree, variables, functions)
+  output_text.rs       Dump output mode (--dump)
+  output_json.rs       JSON output mode (--json)
+  output_summary.rs    Summary output mode (default: component tree, variables, functions)
   bytecode/
     mod.rs             Sub-module re-exports
     opcodes.rs         EExprToken opcode constants (EX_*)
@@ -47,7 +47,8 @@ cargo clippy --all-targets -- -D warnings      # lint check (must pass clean)
 cargo test                                     # run all tests
 cargo test -- --nocapture                      # run with stdout visible
 UPDATE_SNAPSHOTS=1 cargo test                  # update snapshot files after intentional changes
-cargo run -- samples/<file>.uasset --summary   # test summary output
+cargo run -- samples/<file>.uasset             # test summary output (default)
+cargo run -- samples/<file>.uasset --dump      # test full dump output
 cargo run -- samples/<file>.uasset --json      # test JSON output
 cargo build --release                          # release build
 ```
@@ -72,7 +73,7 @@ The parser reads the binary format sequentially through these modules:
 3. **ffield.rs** — FField child property parsing, type resolution, function signatures
 4. **bytecode/** — Kismet bytecode: expression decoding (~85 opcodes, UE5 LWC support), flow pattern detection, if/else structuring
 5. **parser.rs** — Orchestrates all parsing: header, name/import/export tables, export data, bytecode
-6. **output_*.rs** — Three output modes: text, JSON, summary
+6. **output_*.rs** — Three output modes: summary (default), dump, JSON
 
 Key dependency flow: `types` + `binary` → `resolve` → `properties` + `ffield` → `bytecode` → `parser` → `output_*`
 
@@ -90,7 +91,7 @@ Key things to know:
 
 - No external dependencies beyond `clap`, `serde_json`, and `anyhow`. ~15ms to parse a 1MB Blueprint
 - Modular architecture: `lib.rs` + `main.rs` pattern with focused modules
-- `--summary` is the primary output mode for AI assistant use
+- Default output is the summary mode (human-readable, designed for AI assistant use)
 - `--json` is for programmatic access and should always be valid JSON
 - Sample files in `samples/` are from a UE4.27 project called "LastResort" (gitignored, not in repo)
 - Always check if the `README.md`, `CLAUDE.md`, and other documentation files need updating
