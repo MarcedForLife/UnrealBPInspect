@@ -4,20 +4,24 @@ This skill teaches Claude Code how to use `bp-inspect` to read, debug, and expla
 
 ## Install
 
-### Option 1: Copy to your skills directory
+Install alongside bp-inspect using the `--with-skill` flag:
 
 ```bash
-cp -r skill/ ~/.claude/skills/unreal-bp/
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/MarcedForLife/unreal-bp-inspect/main/install.sh | sh -s -- --with-skill
+
+# Windows PowerShell
+.\install.ps1 -WithSkill
 ```
 
-### Option 2: Add to a project
-
-Copy `SKILL.md` into your UE project's `.claude/skills/unreal-bp/` directory for project-scoped use.
-
-### Option 3: Use with npx skills (when published)
+Or copy manually:
 
 ```bash
-npx skills add <owner>/unreal-bp-inspect@skill
+# Global (available in all projects)
+cp -r skill/ ~/.claude/skills/unreal-bp/
+
+# Project-scoped
+cp skill/SKILL.md your-ue-project/.claude/skills/unreal-bp/SKILL.md
 ```
 
 ## Requirements

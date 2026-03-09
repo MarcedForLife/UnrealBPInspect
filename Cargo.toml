@@ -5,6 +5,11 @@ edition = "2021"
 description = "Extract readable structure and logic from Unreal Engine Blueprint .uasset files"
 license = "Apache-2.0"
 readme = "README.md"
+repository = "https://github.com/MarcedForLife/unreal-bp-inspect"
+homepage = "https://github.com/MarcedForLife/unreal-bp-inspect"
+keywords = ["unreal-engine", "blueprint", "uasset", "gamedev", "parser"]
+categories = ["command-line-utilities", "game-development", "parser-implementations"]
+exclude = ["samples/*", ".github/*", "CLAUDE.md"]
 
 [[bin]]
 name = "bp-inspect"
@@ -15,3 +20,4 @@ anyhow = "1"
 clap = { version = "4.5.60", features = ["derive"] }
 serde_json = "1.0.149"
 similar = "2"
+ureq = { version = "3", features = ["json"] }

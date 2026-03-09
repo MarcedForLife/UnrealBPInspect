@@ -6,33 +6,41 @@ Parses the binary format directly and outputs component trees, variable declarat
 
 ## Install
 
-### From releases
-
-Download a prebuilt binary from [Releases](../../releases) for your platform and add it to your PATH:
-
-**macOS / Linux:**
-
-```sh
-mv bp-inspect /usr/local/bin/
-```
-
-**Windows (PowerShell):**
+### Windows (PowerShell)
 
 ```powershell
-move bp-inspect.exe C:\Tools\
-# Add to PATH if C:\Tools isn't already there (persistent, current user):
-[Environment]::SetEnvironmentVariable("Path", $env:Path + ";C:\Tools", "User")
+irm https://raw.githubusercontent.com/MarcedForLife/unreal-bp-inspect/main/install.ps1 | iex
 ```
+
+### macOS / Linux
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/MarcedForLife/unreal-bp-inspect/main/install.sh | sh
+```
+
+### With Cargo
+
+```sh
+cargo install unreal-bp-inspect
+```
+
+The install scripts download the latest binary, add it to your PATH, and configure Git to show readable Blueprint diffs. See [Git integration](#git-integration) for details.
+
+### Install options
+
+| Option | Shell | PowerShell |
+| --- | --- | --- |
+| Specific version | `BP_INSPECT_VERSION=v0.1.0 curl ... \| sh` | `.\install.ps1 -Version v0.1.0` |
+| Custom directory | `INSTALL_DIR=/usr/local/bin curl ... \| sh` | `.\install.ps1 -InstallDir C:\Tools` |
+| With Claude Code skill | `curl ... \| sh -s -- --with-skill` | `.\install.ps1 -WithSkill` |
 
 ### From source
 
-Requires [Rust](https://rustup.rs/) 1.70+.
-
 ```sh
+git clone https://github.com/MarcedForLife/unreal-bp-inspect.git
+cd unreal-bp-inspect
 cargo install --path .
 ```
-
-This installs to `~/.cargo/bin/`, which is on your PATH after Rust setup.
 
 ## Usage
 
@@ -48,6 +56,7 @@ Accepts one or more `.uasset` files or directories. Directories are scanned recu
 | `--json`           | Full structured output as JSON                                           |
 | `--diff`           | Compare two `.uasset` files (unified diff of summaries)                  |
 | `--filter <name>`  | Filter exports by name (substring match, comma-separated)                |
+| `--update`         | Update bp-inspect to the latest release                                  |
 | `--context <N>`    | Context lines in diff output (default: 3)                                |
 | `--debug`          | Dump raw table data for format investigation                             |
 | `-V` / `--version` | Print version                                                            |
@@ -174,20 +183,12 @@ $ git diff Content/Blueprints/VRHand_BP.uasset
 
 ## Claude Code skill
 
-The `skill/` directory contains a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skill that teaches Claude how to use bp-inspect for Blueprint debugging, logic review, and BP-to-C++ migration.
+bp-inspect includes a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skill that teaches Claude to read, debug, and explain Blueprint files.
 
-### Install the skill
-
-Copy to your global skills directory (available in all projects):
+Install it alongside bp-inspect using `--with-skill` (see [Install options](#install-options)), or copy manually:
 
 ```sh
 cp -r skill/ ~/.claude/skills/unreal-bp/
-```
-
-Or copy into a specific UE project for project-scoped use:
-
-```sh
-cp skill/SKILL.md your-ue-project/.claude/skills/unreal-bp/SKILL.md
 ```
 
 Once installed, Claude can read any `.uasset` file you point it at — ask it to explain what a Blueprint does, debug a specific function, or plan a Blueprint-to-C++ migration.
