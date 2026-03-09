@@ -164,7 +164,7 @@ cargo test inline                  # run tests matching "inline"
 UPDATE_SNAPSHOTS=1 cargo test      # update snapshot files after intentional output changes
 ```
 
-The test suite includes unit tests for bytecode helpers (`decode`, `inline`, `structure`, `flow`, `names`, `resolve`), integration tests with snapshot regression for summary/text/JSON output, and extended tests for additional sample files that auto-skip when absent.
+The test suite has two layers. **Unit tests** live inline in source files (`#[cfg(test)]`) because they test private helper functions (expression decoding, temp inlining, control flow structuring, name cleanup) that aren't accessible from outside their module. **Integration tests** in `tests/` exercise the public API end-to-end with snapshot regression for summary/text/JSON output and structural assertions.
 
 **Snapshot tests**: expected outputs live in `tests/snapshots/`. When you intentionally change output format, run with `UPDATE_SNAPSHOTS=1` to regenerate them, then review the diffs before committing.
 

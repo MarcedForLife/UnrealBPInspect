@@ -599,6 +599,8 @@ fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
     true
 }
 
+// Inline tests: these test private flow pattern parsers (parse_push_flow, parse_jump, etc.)
+// that aren't accessible from tests/.
 #[cfg(test)]
 mod tests {
     use super::*;

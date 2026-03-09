@@ -42,6 +42,7 @@ pub fn clean_bc_name(name: &str) -> String {
     name.to_string()
 }
 
+// Inline tests: strip_guid_suffix and clean_bytecode_name are private helpers.
 #[cfg(test)]
 mod tests {
     use super::*;

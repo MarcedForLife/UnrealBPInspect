@@ -702,6 +702,7 @@ fn extract_convergence(output: &mut Vec<String>) {
     }
 }
 
+// Inline tests: negate_cond is private and used only within structuring passes.
 #[cfg(test)]
 mod tests {
     use super::*;
