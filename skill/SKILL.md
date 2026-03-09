@@ -52,6 +52,14 @@ bp-inspect <path>.uasset --json
 
 Full structured data as JSON with top-level `imports`, `exports`, and `functions` arrays. Functions have pre-extracted signatures, flags, and structured bytecode. Use when you need to programmatically inspect properties, or when the default view doesn't show a specific detail you need.
 
+### Compare two Blueprints
+
+```bash
+bp-inspect --diff <before>.uasset <after>.uasset
+```
+
+Outputs a unified diff of the decoded summaries. Exit code 0 means identical, 1 means differences found. Use `--filter` to compare specific functions, and `--context N` to control surrounding lines.
+
 ### Find Blueprint files
 
 ```bash
@@ -121,15 +129,15 @@ EdGraph node list showing the visual Blueprint graph structure. Graphs that alre
 
 ### Comparing two Blueprints
 
-Run on both and diff the output:
-
 ```bash
-diff <(bp-inspect A.uasset) <(bp-inspect B.uasset)
+bp-inspect --diff A.uasset B.uasset
 ```
+
+Use `--filter FunctionName` to focus the diff on a specific function. Exit code 0 means no changes, 1 means differences found.
 
 ## Limitations
 
-- Only supports UE4 uncooked `.uasset` files (not split `.uasset`/`.uexp` cooked assets)
-- Tested against UE4.27; UE5 support is planned
+- UE4 uncooked `.uasset` files fully supported; UE5 uncooked assets have basic support
+- Cooked assets (split `.uasset`/`.uexp`) are not yet supported
 - Some complex bytecode expressions may show as `??(0xNN)` -- the common opcodes are covered
 - Default property values only show non-null values from the CDO

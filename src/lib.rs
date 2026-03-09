@@ -2,6 +2,7 @@ pub mod binary;
 pub mod bytecode;
 pub mod enums;
 pub mod ffield;
+pub mod output_diff;
 pub mod output_json;
 pub mod output_summary;
 pub mod output_text;

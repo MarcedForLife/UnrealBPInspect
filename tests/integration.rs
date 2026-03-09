@@ -1,5 +1,6 @@
 mod common;
 
+use unreal_bp_inspect::output_diff::format_diff;
 use unreal_bp_inspect::output_json::to_json;
 use unreal_bp_inspect::output_summary::format_summary;
 use unreal_bp_inspect::output_text::format_text;
@@ -122,4 +123,34 @@ fn output_determinism() {
             "json output is nondeterministic"
         );
     }
+}
+
+#[test]
+fn diff_identical_files_produces_no_output() {
+    let data = common::load_fixture("Helm_BP.uasset");
+    let (output, has_changes) = format_diff(&data, &data, "a.uasset", "b.uasset", &[], 3).unwrap();
+    assert!(!has_changes);
+    assert!(output.is_empty());
+}
+
+#[test]
+fn diff_different_files_produces_unified_diff() {
+    let helm = common::load_fixture("Helm_BP.uasset");
+    // Use a truncated copy as "different" — will fail to parse, so use the same
+    // file with different labels to at least exercise the code path. For a real
+    // diff test we need two distinct valid fixtures.
+    // Instead, verify the diff output format when comparing against an empty asset
+    // is not possible, so just verify two different valid files if available.
+    let vrhand_path = std::path::Path::new("samples/VRHand_BP.uasset");
+    if !vrhand_path.exists() {
+        // Skip if VRHand not available — the identical test above covers the API
+        return;
+    }
+    let vrhand = std::fs::read(vrhand_path).unwrap();
+    let (output, has_changes) =
+        format_diff(&helm, &vrhand, "Helm_BP.uasset", "VRHand_BP.uasset", &[], 3).unwrap();
+    assert!(has_changes);
+    assert!(output.contains("---"));
+    assert!(output.contains("+++"));
+    assert!(output.contains("@@"));
 }

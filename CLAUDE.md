@@ -18,6 +18,7 @@ src/
   output_text.rs       Dump output mode (--dump)
   output_json.rs       JSON output mode (--json)
   output_summary.rs    Summary output mode (default: component tree, variables, functions, inline comments)
+  output_diff.rs       Diff output mode (--diff: unified diff of two summaries)
   bytecode/
     mod.rs             Sub-module re-exports
     opcodes.rs         EExprToken opcode constants (EX_*)
@@ -50,6 +51,7 @@ UPDATE_SNAPSHOTS=1 cargo test                  # update snapshot files after int
 cargo run -- samples/<file>.uasset             # test summary output (default)
 cargo run -- samples/<file>.uasset --dump      # test full dump output
 cargo run -- samples/<file>.uasset --json      # test JSON output
+cargo run -- --diff samples/A.uasset samples/B.uasset  # test diff output
 cargo run -- samples/                          # test batch/directory mode
 cargo build --release                          # release build
 ```

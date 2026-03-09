@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::Parser as ClapParser;
 use std::path::{Path, PathBuf};
 
+use unreal_bp_inspect::output_diff::format_diff;
 use unreal_bp_inspect::output_json::to_json;
 use unreal_bp_inspect::output_summary::format_summary;
 use unreal_bp_inspect::output_text::format_text;
@@ -29,6 +30,14 @@ struct Cli {
     /// Filter exports by name (substring match, comma-separated)
     #[arg(long, short)]
     filter: Option<String>,
+
+    /// Compare two .uasset files (requires exactly 2 paths)
+    #[arg(long)]
+    diff: bool,
+
+    /// Number of context lines in diff output (default: 3)
+    #[arg(long, default_value = "3")]
+    context: usize,
 
     /// Debug: dump raw table data
     #[arg(long)]
@@ -103,6 +112,42 @@ fn main() {
     if files.is_empty() {
         eprintln!("No .uasset files found");
         std::process::exit(1);
+    }
+
+    if cli.diff {
+        if files.len() != 2 {
+            eprintln!("--diff requires exactly 2 .uasset files");
+            std::process::exit(2);
+        }
+        let before = match std::fs::read(&files[0]) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("failed to read {}: {}", files[0].display(), e);
+                std::process::exit(2);
+            }
+        };
+        let after = match std::fs::read(&files[1]) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("failed to read {}: {}", files[1].display(), e);
+                std::process::exit(2);
+            }
+        };
+        let label_a = files[0].display().to_string();
+        let label_b = files[1].display().to_string();
+        match format_diff(&before, &after, &label_a, &label_b, &filters, cli.context) {
+            Ok((output, has_changes)) => {
+                if has_changes {
+                    print!("{}", output);
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                eprintln!("{:#}", e);
+                std::process::exit(2);
+            }
+        }
+        return;
     }
 
     let single = files.len() == 1;
