@@ -238,9 +238,26 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
                         hdr.object_name, child_prop_count
                     );
                 }
-                for _ci in 0..child_prop_count {
+                let mut ci = 0;
+                loop {
                     if c.position() + 16 > end {
                         break;
+                    }
+                    // After reading the counted children, check for uncounted extras.
+                    // Some UE4 assets serialize more FField children than the count
+                    // indicates. Peek at the next FName: if it resolves to a known
+                    // FField class (ends with "Property"), there's an extra child.
+                    if ci >= child_prop_count {
+                        if !nt.peek_is_ffield_class(&mut c)? {
+                            break;
+                        }
+                        if debug {
+                            eprintln!(
+                                "  {} extra child property at {}",
+                                hdr.object_name,
+                                c.position()
+                            );
+                        }
                     }
                     let field_class = nt.fname(&mut c)?;
                     let field_name = nt.fname(&mut c)?;
@@ -280,6 +297,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
                             c.position()
                         );
                     }
+                    ci += 1;
                 }
             }
 
