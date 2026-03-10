@@ -124,4 +124,14 @@ impl NameTable {
         };
         Ok((name, is_none))
     }
+
+    /// Peek at the next FName without consuming it. Returns true if it resolves
+    /// to a known FField property class name (ends with "Property").
+    pub fn peek_is_ffield_class(&self, c: &mut R) -> Result<bool> {
+        let pos = c.position();
+        let index = read_i32(c)?;
+        c.seek(SeekFrom::Start(pos))?;
+        let base = self.get(index);
+        Ok(base.ends_with("Property"))
+    }
 }

@@ -1184,22 +1184,103 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
             .unwrap_or_default();
         writeln!(buf, "Graph: {}{}", graph_name, flags).unwrap();
 
-        let mut nodes: Vec<(i32, String)> = Vec::new();
+        // Collect comment boxes from this graph's nodes
+        let mut graph_comments: Vec<CommentBox> = Vec::new();
+        let mut nodes: Vec<(i32, i32, String)> = Vec::new(); // (x, y, description)
         for idx in &node_indices {
             if *idx > 0 {
                 let export_idx = (*idx - 1) as usize;
                 if let Some((hdr, node_props)) = asset.exports.get(export_idx) {
                     let node_class = resolve_index(&asset.imports, &export_names, hdr.class_index);
+                    // Collect comment boxes for grouping
+                    if node_class.ends_with(".EdGraphNode_Comment") {
+                        let text = find_prop_str(node_props, "NodeComment").unwrap_or_default();
+                        if !text.is_empty() {
+                            let x = find_prop_i32(node_props, "NodePosX").unwrap_or(0);
+                            let y = find_prop_i32(node_props, "NodePosY").unwrap_or(0);
+                            let w = find_prop_i32(node_props, "NodeWidth").unwrap_or(0);
+                            let h = find_prop_i32(node_props, "NodeHeight").unwrap_or(0);
+                            graph_comments.push(CommentBox {
+                                text,
+                                x,
+                                y,
+                                width: w,
+                                height: h,
+                                is_bubble: false,
+                            });
+                        }
+                        continue;
+                    }
                     let x = find_prop_i32(node_props, "NodePosX").unwrap_or(0);
+                    let y = find_prop_i32(node_props, "NodePosY").unwrap_or(0);
                     let summary =
                         summarise_node(&node_class, node_props, &asset.imports, &export_names);
-                    nodes.push((x, summary));
+                    if !summary.is_empty() {
+                        nodes.push((x, y, summary));
+                    }
                 }
             }
         }
-        nodes.sort_by(|(x1, s1), (x2, s2)| x1.cmp(x2).then(s1.cmp(s2)));
-        for (_, desc) in &nodes {
-            writeln!(buf, "  {}", desc).unwrap();
+        nodes.sort_by(|(x1, _, s1), (x2, _, s2)| x1.cmp(x2).then(s1.cmp(s2)));
+
+        if graph_comments.is_empty() {
+            // No comment boxes — flat list
+            for (_, _, desc) in &nodes {
+                writeln!(buf, "  {}", desc).unwrap();
+            }
+        } else {
+            // Group nodes by enclosing comment box
+            let mut grouped: Vec<(Option<&str>, Vec<&str>)> = Vec::new();
+            let mut ungrouped: Vec<&str> = Vec::new();
+            // For each comment box, collect nodes inside it
+            let mut assigned: Vec<bool> = vec![false; nodes.len()];
+            // Sort comments by area (largest first) so smaller inner comments take priority later
+            let mut comment_order: Vec<usize> = (0..graph_comments.len()).collect();
+            comment_order.sort_by_key(|&i| {
+                let cb = &graph_comments[i];
+                std::cmp::Reverse(cb.width as i64 * cb.height as i64)
+            });
+            // Assign nodes to the smallest enclosing comment
+            let mut node_group: Vec<Option<usize>> = vec![None; nodes.len()];
+            for &ci in comment_order.iter().rev() {
+                let cb = &graph_comments[ci];
+                for (ni, (x, y, _)) in nodes.iter().enumerate() {
+                    if cb.contains_point(*x, *y) {
+                        node_group[ni] = Some(ci);
+                    }
+                }
+            }
+            // Collect groups in comment order
+            let mut seen_groups: HashSet<usize> = HashSet::new();
+            for (ni, (_, _, desc)) in nodes.iter().enumerate() {
+                if let Some(ci) = node_group[ni] {
+                    if seen_groups.insert(ci) {
+                        let group_nodes: Vec<&str> = nodes
+                            .iter()
+                            .enumerate()
+                            .filter(|(j, _)| node_group[*j] == Some(ci))
+                            .map(|(_, (_, _, d))| d.as_str())
+                            .collect();
+                        grouped.push((Some(graph_comments[ci].text.as_str()), group_nodes));
+                    }
+                    assigned[ni] = true;
+                } else {
+                    ungrouped.push(desc.as_str());
+                }
+            }
+            // Emit ungrouped nodes first
+            for desc in &ungrouped {
+                writeln!(buf, "  {}", desc).unwrap();
+            }
+            // Emit each comment group
+            for (comment, group_nodes) in &grouped {
+                if let Some(text) = comment {
+                    emit_comment(&mut buf, text, "  ");
+                }
+                for desc in group_nodes {
+                    writeln!(buf, "  {}", desc).unwrap();
+                }
+            }
         }
         writeln!(buf).unwrap();
     }
@@ -1275,6 +1356,48 @@ fn summarise_node(
             let name = get_macro_name(props, imports, export_names);
             format!("Macro: {}", name)
         }
+        "K2Node_InputAction" => {
+            let name = find_prop_str(props, "InputActionName").unwrap_or_else(|| "?".into());
+            format!("InputAction: {}", name)
+        }
+        "K2Node_InputAxisEvent" => {
+            let name = find_prop_str(props, "InputAxisName").unwrap_or_else(|| "?".into());
+            format!("InputAxis: {}", name)
+        }
+        "K2Node_InputKey" => {
+            let key = find_prop(props, "InputKey")
+                .and_then(|p| match &p.value {
+                    PropValue::Struct { fields, .. } => find_prop_str(fields, "KeyName"),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "?".into());
+            format!("InputKey: {}", key)
+        }
+        "K2Node_ExecutionSequence" => "Sequence".into(),
+        "K2Node_Timeline" => {
+            let name = find_prop_str(props, "TimelineName").unwrap_or_else(|| "?".into());
+            format!("Timeline: {}", name)
+        }
+        "K2Node_SpawnActorFromClass" => "SpawnActor".into(),
+        "K2Node_CreateDelegate" | "K2Node_AssignDelegate" => {
+            let name = find_prop_str(props, "FunctionName")
+                .or_else(|| find_prop_str(props, "SelectedFunctionName"))
+                .unwrap_or_else(|| "?".into());
+            format!("{}: {}", short, name)
+        }
+        "K2Node_ComponentBoundEvent" => {
+            let event = find_prop_str(props, "DelegatePropertyName").unwrap_or_else(|| "?".into());
+            let component =
+                find_prop_str(props, "ComponentPropertyName").unwrap_or_else(|| "?".into());
+            format!("Event: {}.{}", component, event)
+        }
+        "K2Node_SwitchEnum"
+        | "K2Node_SwitchInteger"
+        | "K2Node_SwitchString"
+        | "K2Node_SwitchName" => "Switch".into(),
+        "K2Node_Select" => "Select".into(),
+        // Noise nodes — filtered out in the graph loop
+        "K2Node_Knot" | "K2Node_Self" => String::new(),
         _ => short.to_string(),
     }
 }
