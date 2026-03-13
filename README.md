@@ -4,6 +4,11 @@ A standalone CLI that makes Unreal Engine Blueprint `.uasset` files readable out
 
 Parses the binary format directly and outputs component trees, variable declarations, function signatures, decoded bytecode pseudo-code, and graph node summaries. No editor, no project context, no dependencies.
 
+> [!NOTE]
+> This project is in early development. Core parsing works well for uncooked assets, but expect rough edges, missing opcodes, and breaking changes. Bug reports and sample files welcome.
+>
+> This started as a personal prototype to see if Blueprint bytecode could be made readable outside the editor. AI-assisted development made it practical to explore as a solo side project.
+
 ## Install
 
 ### Windows (PowerShell)
