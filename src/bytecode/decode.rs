@@ -28,53 +28,50 @@ fn maybe_paren(expr: &str) -> String {
     }
 }
 
+/// Binary operator table: (prefix_or_exact_name, operator_symbol).
+/// Matched against the short name (after last `.`). Prefix entries use `starts_with`,
+/// exact entries (no `_` suffix) use `==`.
+const BINARY_OPS: &[(&str, &str)] = &[
+    ("Add_", "+"),
+    ("Subtract_", "-"),
+    ("Multiply_", "*"),
+    ("Divide_", "/"),
+    ("Percent_", "%"),
+    ("EqualEqual_", "=="),
+    ("NotEqual_", "!="),
+    ("LessEqual_", "<="),
+    ("GreaterEqual_", ">="),
+    ("Less_", "<"),
+    ("Greater_", ">"),
+    ("GreaterGreater_", ">>"),
+    ("LessLess_", "<<"),
+    ("BooleanAND", "&&"),
+    ("BooleanOR", "||"),
+    ("Concat_StrStr", "+"),
+];
+
 /// Try to inline a Kismet math/logic function as an operator expression.
 fn try_inline_operator(name: &str, args: &[String]) -> Option<String> {
     let short = name.rsplit('.').next().unwrap_or(name);
     // Unary prefix
     if short == "Not_PreBool" {
-        if let Some(a) = args.first() {
-            return Some(format!("!{}", maybe_paren(a)));
-        }
+        return args.first().map(|a| format!("!{}", maybe_paren(a)));
     }
-    // Binary operators — prefix matching covers all type combinations
-    let op = if short.starts_with("Add_") || short == "Concat_StrStr" {
-        "+"
-    } else if short.starts_with("Subtract_") {
-        "-"
-    } else if short.starts_with("Multiply_") {
-        "*"
-    } else if short.starts_with("Divide_") {
-        "/"
-    } else if short.starts_with("Percent_") {
-        "%"
-    } else if short.starts_with("EqualEqual_") {
-        "=="
-    } else if short.starts_with("NotEqual_") {
-        "!="
-    } else if short.starts_with("LessEqual_") {
-        "<="
-    } else if short.starts_with("GreaterEqual_") {
-        ">="
-    } else if short.starts_with("Less_") {
-        "<"
-    } else if short.starts_with("Greater_") {
-        ">"
-    } else if short == "BooleanAND" {
-        "&&"
-    } else if short == "BooleanOR" {
-        "||"
-    } else if short.starts_with("GreaterGreater_") {
-        ">>"
-    } else if short.starts_with("LessLess_") {
-        "<<"
-    } else {
-        return None;
-    };
+    // Binary operators
+    let op = BINARY_OPS.iter().find_map(|(prefix, op)| {
+        if short.starts_with(prefix) || short == *prefix {
+            Some(*op)
+        } else {
+            None
+        }
+    })?;
     if args.len() >= 2 {
-        let lhs = maybe_paren(&args[0]);
-        let rhs = maybe_paren(&args[1]);
-        Some(format!("{} {} {}", lhs, op, rhs))
+        Some(format!(
+            "{} {} {}",
+            maybe_paren(&args[0]),
+            op,
+            maybe_paren(&args[1])
+        ))
     } else {
         None
     }
@@ -599,7 +596,17 @@ pub fn decode_expr(
         EX_BREAKPOINT => Some("breakpoint".into()),
         EX_INTERFACE_CONTEXT => {
             let expr = decode_next!();
-            Some(format!("iface({})", expr))
+            // Collapse nested iface: iface(iface(X)) → iface(X)
+            if let Some(inner) = expr
+                .strip_prefix("iface(")
+                .and_then(|s| s.strip_suffix(')'))
+            {
+                Some(format!("iface({})", inner))
+            } else if expr == "null_iface" || expr.is_empty() {
+                Some("null_iface".into())
+            } else {
+                Some(format!("iface({})", expr))
+            }
         }
         EX_OBJ_TO_IFACE_CAST | EX_CROSS_IFACE_CAST => {
             let class = read_bc_obj_ref(bc, pos, imports, export_names, mem_adj);
@@ -774,6 +781,7 @@ fn primitive_cast_name(cast_type: u8) -> String {
         0x41 => "iface_to_obj".into(), // CST_InterfaceToObject
         0x46 => "obj_to_iface".into(), // CST_ObjectToInterface
         0x47 => "bool".into(),         // CST_ObjectToBool
+        73 => "bool".into(),           // CST_InterfaceToBool (0x49)
         _ => format!("cast_{}", cast_type),
     }
 }

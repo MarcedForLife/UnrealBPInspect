@@ -94,17 +94,20 @@ impl NameTable {
             .unwrap_or("?")
     }
 
+    fn format_fname(base: &str, number: i32) -> String {
+        if number > 0 {
+            format!("{}_{}", base, number - 1)
+        } else {
+            base.to_string()
+        }
+    }
+
     /// Read an FName (8 bytes on disk): name table index + instance number.
     /// UE serializes instance number 1-based, so Number=1 displays as "_0".
     pub fn fname(&self, c: &mut R) -> Result<String> {
         let index = read_i32(c)?;
         let number = read_i32(c)?;
-        let base = self.get(index);
-        if number > 0 {
-            Ok(format!("{}_{}", base, number - 1))
-        } else {
-            Ok(base.to_string())
-        }
+        Ok(Self::format_fname(self.get(index), number))
     }
 
     #[cfg(test)]
@@ -117,12 +120,20 @@ impl NameTable {
         let number = read_i32(c)?;
         let base = self.get(index);
         let is_none = base == "None" && number == 0;
-        let name = if number > 0 {
-            format!("{}_{}", base, number - 1)
-        } else {
-            base.to_string()
-        };
-        Ok((name, is_none))
+        Ok((Self::format_fname(base, number), is_none))
+    }
+
+    /// Skip an FField metadata block: int32 gate (1 = present), then count + key/value entries.
+    pub fn skip_metadata(&self, c: &mut R) -> Result<()> {
+        let has_meta = read_i32(c)?;
+        if has_meta != 0 {
+            let meta_count = read_i32(c)?;
+            for _ in 0..meta_count {
+                self.fname(c)?;
+                read_fstring(c)?;
+            }
+        }
+        Ok(())
     }
 
     /// Peek at the next FName without consuming it. Returns true if it resolves
