@@ -100,6 +100,7 @@ Key things to know:
 - Default output is the summary mode (human-readable, designed for AI assistant use)
 - `--json` is for programmatic access and should always be valid JSON
 - Sample files in `samples/` are from a UE4.27 project called "LastResort" (gitignored, not in repo)
+- **Deterministic output**: All output must be identical across runs for the same input. Never iterate a `HashMap`/`HashSet` when the order affects output or substitution results — use `BTreeMap`, `BTreeSet`, or collect-and-sort instead.
 - Always check if the `README.md`, `CLAUDE.md`, and other documentation files need updating
 
 ## Release process
