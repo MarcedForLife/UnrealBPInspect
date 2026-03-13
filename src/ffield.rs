@@ -15,14 +15,7 @@ pub fn skip_ffield_child(c: &mut R, nt: &NameTable, end: u64) -> Result<()> {
     }
     let _field_name = nt.fname(c)?;
     let _flags = read_u32(c)?;
-    let has_meta = read_i32(c)?;
-    if has_meta != 0 {
-        let meta_count = read_i32(c)?;
-        for _ in 0..meta_count {
-            let _meta_key = nt.fname(c)?;
-            let _meta_val = read_fstring(c)?;
-        }
-    }
+    nt.skip_metadata(c)?;
     let _array_dim = read_i32(c)?;
     let _elem_size = read_i32(c)?;
     let _prop_flags = read_i64(c)?;

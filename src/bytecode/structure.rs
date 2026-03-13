@@ -62,6 +62,358 @@ fn negate_cond(cond: &str) -> String {
     }
 }
 
+// ── Region tree data structures ──────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+enum RegionKind {
+    Root,
+    IfThen(String),
+    Else,
+    ElseIf(String),
+}
+
+#[derive(Debug, Clone)]
+struct Region {
+    kind: RegionKind,
+    /// Statement index range [start, end) — inclusive start, exclusive end
+    start: usize,
+    end: usize,
+    /// Ordered child regions (non-overlapping, contained within [start, end))
+    children: Vec<Region>,
+}
+
+impl Region {
+    fn new(kind: RegionKind, start: usize, end: usize) -> Self {
+        Region {
+            kind,
+            start,
+            end,
+            children: Vec::new(),
+        }
+    }
+}
+
+struct IfBlock {
+    if_idx: usize,
+    cond: String,
+    target_idx: usize,
+    jump_idx: Option<usize>,
+    end_idx: Option<usize>,
+    else_close_idx: Option<usize>,
+}
+
+/// Track block types for pop_flow → break/return disambiguation
+#[derive(Clone, Copy, PartialEq)]
+enum BlockType {
+    If,
+    Loop,
+}
+
+fn in_loop(stack: &[BlockType]) -> bool {
+    stack.iter().rev().any(|b| *b == BlockType::Loop)
+}
+
+/// Shared context for `emit_stmts_range` and `emit_region_tree` to reduce parameter passing.
+struct EmitCtx<'a> {
+    stmts: &'a [BcStatement],
+    skip: &'a HashSet<usize>,
+    label_targets: &'a HashMap<usize, String>,
+    pending_labels: &'a HashMap<usize, String>,
+    label_at: &'a HashMap<usize, &'a String>,
+    is_ubergraph: bool,
+    find_target_idx_or_end: &'a dyn Fn(usize) -> Option<usize>,
+}
+
+// ── Region tree builder ──────────────────────────────────────────────────
+
+/// Build a region tree from detected if-blocks.
+///
+/// Each if-block becomes one or two child regions (IfThen + optional Else)
+/// inserted into the deepest containing region. Overlapping blocks are skipped
+/// (they'll be emitted as guards during output).
+fn build_region_tree(num_stmts: usize, if_blocks: &[IfBlock], skip: &mut HashSet<usize>) -> Region {
+    let mut root = Region::new(RegionKind::Root, 0, num_stmts);
+
+    // Sort if-blocks by (if_idx, effective_end descending) so outer blocks
+    // are inserted before inner ones
+    let mut order: Vec<usize> = (0..if_blocks.len()).collect();
+    order.sort_by(|&a, &b| {
+        let a_blk = &if_blocks[a];
+        let b_blk = &if_blocks[b];
+        let a_end = a_blk
+            .else_close_idx
+            .or(a_blk.end_idx)
+            .unwrap_or(a_blk.target_idx);
+        let b_end = b_blk
+            .else_close_idx
+            .or(b_blk.end_idx)
+            .unwrap_or(b_blk.target_idx);
+        a_blk.if_idx.cmp(&b_blk.if_idx).then(b_end.cmp(&a_end)) // larger span first
+    });
+
+    for &blk_idx in &order {
+        let blk = &if_blocks[blk_idx];
+        let effective_end = blk.else_close_idx.or(blk.end_idx).unwrap_or(blk.target_idx);
+
+        // Skip degenerate blocks (empty true-branch)
+        if blk.target_idx <= blk.if_idx + 1 {
+            continue;
+        }
+
+        // Try to insert this if-block into the tree
+        if insert_if_block(&mut root, blk, effective_end, skip) {
+            // Mark the if-jump statement for skip
+            skip.insert(blk.if_idx);
+            // Mark the unconditional jump at end of true-branch for skip
+            if let Some(ji) = blk.jump_idx {
+                skip.insert(ji);
+            }
+        }
+    }
+
+    root
+}
+
+/// Try to insert an if-block as children of the deepest containing region.
+/// Returns true if inserted, false if overlapping (demoted to guard).
+fn insert_if_block(
+    region: &mut Region,
+    blk: &IfBlock,
+    effective_end: usize,
+    skip: &mut HashSet<usize>,
+) -> bool {
+    let if_start = blk.if_idx;
+
+    // Range that this if-block needs to fit within
+    if if_start < region.start || effective_end > region.end {
+        return false;
+    }
+
+    // blk.cond is the raw condition from parse_if_jump("if !(cond) jump").
+    // The bytecode means "if NOT cond, jump past true-block", so the true-block
+    // executes when cond IS true. Use blk.cond directly (no negation).
+    let cond_text = blk.cond.clone();
+
+    let then_start = blk.if_idx + 1;
+    let then_end = if blk.jump_idx.is_some() {
+        blk.target_idx - 1 // exclude the unconditional jump
+    } else {
+        blk.target_idx
+    };
+
+    // Check if this is an else-if chain BEFORE recursing into children.
+    // If our if_idx is the start of an existing Else region in this region's
+    // children, convert that Else → ElseIf (don't recurse into it).
+    for (ci, child) in region.children.iter().enumerate() {
+        if matches!(child.kind, RegionKind::Else) && child.start == blk.if_idx {
+            // Found an Else that starts at our if_idx — convert to ElseIf
+            skip.insert(blk.if_idx);
+            if let Some(ji) = blk.jump_idx {
+                skip.insert(ji);
+            }
+
+            let child = &mut region.children[ci];
+            if blk.end_idx.is_some() {
+                // Has else: shrink this region to ElseIf body, add new Else sibling
+                child.kind = RegionKind::ElseIf(cond_text);
+                child.end = then_end.max(then_start);
+
+                let else_start = blk.target_idx;
+                let else_end = blk.else_close_idx.or(blk.end_idx).unwrap_or(blk.target_idx);
+                if else_end > else_start {
+                    let else_region = Region::new(RegionKind::Else, else_start, else_end);
+                    insert_child_sorted(region, else_region);
+                }
+            } else {
+                // No else: just convert Else → ElseIf, adjust end
+                child.kind = RegionKind::ElseIf(cond_text);
+                child.end = blk.target_idx;
+            }
+            return true;
+        }
+    }
+
+    // Try to insert into the deepest child that fully contains our range
+    for child in &mut region.children {
+        if if_start >= child.start && effective_end <= child.end {
+            return insert_if_block(child, blk, effective_end, skip);
+        }
+    }
+
+    // Check if our range [if_start, effective_end) partially overlaps any child
+    for child in &region.children {
+        let overlaps = if_start < child.end && effective_end > child.start;
+        let contains = if_start <= child.start && effective_end >= child.end;
+        if overlaps && !contains {
+            return false;
+        }
+    }
+
+    // Normal insertion: create IfThen + optional Else
+    let then_region = Region::new(
+        RegionKind::IfThen(cond_text),
+        then_start,
+        then_end.max(then_start),
+    );
+    let then_region = adopt_children(region, then_region);
+    insert_child_sorted(region, then_region);
+
+    if blk.end_idx.is_some() {
+        let else_start = blk.target_idx;
+        let else_end = blk.else_close_idx.or(blk.end_idx).unwrap_or(blk.target_idx);
+        if else_end > else_start {
+            let else_region = Region::new(RegionKind::Else, else_start, else_end);
+            let else_region = adopt_children(region, else_region);
+            insert_child_sorted(region, else_region);
+        }
+    }
+
+    true
+}
+
+/// Move children of `parent` that fall within `new_region` into `new_region.children`.
+fn adopt_children(parent: &mut Region, mut new_region: Region) -> Region {
+    let mut adopted = Vec::new();
+    let mut kept = Vec::new();
+    for child in parent.children.drain(..) {
+        if child.start >= new_region.start && child.end <= new_region.end {
+            adopted.push(child);
+        } else {
+            kept.push(child);
+        }
+    }
+    parent.children = kept;
+    new_region.children.extend(adopted);
+    new_region
+        .children
+        .sort_by_key(|c| (c.start, std::cmp::Reverse(c.end)));
+    new_region
+}
+
+/// Insert a child region maintaining sorted order by start index.
+fn insert_child_sorted(parent: &mut Region, child: Region) {
+    let pos = parent.children.partition_point(|c| c.start < child.start);
+    parent.children.insert(pos, child);
+}
+
+/// Emit statements in range [from, to) with given indent.
+fn emit_stmts_range(
+    ctx: &EmitCtx,
+    from: usize,
+    to: usize,
+    indent: usize,
+    block_stack: &mut Vec<BlockType>,
+    output: &mut Vec<String>,
+) {
+    for i in from..to {
+        if i >= ctx.stmts.len() {
+            break;
+        }
+
+        // Inject pending labels
+        if let Some(lbl) = ctx.pending_labels.get(&i) {
+            output.push(format!("{}:", lbl));
+        }
+
+        if let Some(label) = ctx.label_at.get(&i) {
+            if ctx.is_ubergraph
+                && !output.is_empty()
+                && !output.iter().any(|l| l.starts_with("---"))
+            {
+                let has_content = output.iter().any(|l| {
+                    let t = l.trim();
+                    !t.is_empty() && t != "return"
+                });
+                if has_content {
+                    output.insert(0, "--- (latent resume) ---".to_string());
+                }
+            }
+            output.push(format!("--- {} ---", label));
+        }
+
+        if ctx.skip.contains(&i) {
+            continue;
+        }
+
+        let stmt = &ctx.stmts[i];
+
+        if stmt.text == "}" {
+            // Closing brace from flow.rs (loop end)
+            block_stack.pop();
+            let close_indent = indent.saturating_sub(1);
+            output.push(format!("{}}}", "    ".repeat(close_indent)));
+        } else if stmt.text.ends_with(" {") {
+            let is_loop = stmt.text.starts_with("while ") || stmt.text.starts_with("for ");
+            output.push(format!("{}{}", "    ".repeat(indent), stmt.text));
+            block_stack.push(if is_loop {
+                BlockType::Loop
+            } else {
+                BlockType::If
+            });
+        } else if stmt.text == "pop_flow" {
+            let keyword = if in_loop(block_stack) {
+                "break"
+            } else {
+                "return"
+            };
+            output.push(format!("{}{}", "    ".repeat(indent), keyword));
+        } else if let Some(cond) = parse_pop_flow_if_not(&stmt.text) {
+            let keyword = if in_loop(block_stack) {
+                "break"
+            } else {
+                "return"
+            };
+            let negated = negate_cond(cond);
+            output.push(format!(
+                "{}if ({}) {}",
+                "    ".repeat(indent),
+                negated,
+                keyword
+            ));
+        } else if let Some((cond, _target)) = parse_if_jump(&stmt.text) {
+            // Unresolvable conditional jump — treat as guard
+            let negated = negate_cond(cond);
+            let keyword = if in_loop(block_stack) {
+                "break"
+            } else {
+                "return"
+            };
+            output.push(format!(
+                "{}if ({}) {}",
+                "    ".repeat(indent),
+                negated,
+                keyword
+            ));
+        } else if let Some(target) = parse_jump(&stmt.text) {
+            if let Some(target_idx) = (ctx.find_target_idx_or_end)(target) {
+                let is_jump_to_end = target_idx >= ctx.stmts.len()
+                    || (target_idx == ctx.stmts.len() - 1
+                        && ctx.stmts[target_idx].text == "return nop");
+                if is_jump_to_end {
+                    if in_loop(block_stack) {
+                        output.push(format!("{}break", "    ".repeat(indent)));
+                    }
+                } else if let Some(goto_text) = ctx.label_targets.get(&i) {
+                    output.push(format!("{}{}", "    ".repeat(indent), goto_text));
+                } else {
+                    output.push(format!("{}{}", "    ".repeat(indent), stmt.text));
+                }
+            } else if in_loop(block_stack) {
+                output.push(format!("{}break", "    ".repeat(indent)));
+            }
+        } else {
+            let text = if stmt.text == "return nop" {
+                "return"
+            } else {
+                &stmt.text
+            };
+            output.push(format!("{}{}", "    ".repeat(indent), text));
+        }
+    }
+}
+
+// ── Main entry point ─────────────────────────────────────────────────────
+
 /// Convert flat bytecode statements into structured pseudo-code with if/else blocks.
 ///
 /// **Condition fidelity:** `&&` and `||` in decoded bytecode are ALWAYS faithful to the
@@ -74,62 +426,9 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         return Vec::new();
     }
 
-    // Build offset → index map with 4-byte tolerance fallback (same rationale as flow.rs:
-    // skipped opcodes like wire_trace/tracepoint cause jump targets to be slightly off)
-    let exact_map: HashMap<usize, usize> = stmts
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.mem_offset > 0)
-        .map(|(i, s)| (s.mem_offset, i))
-        .collect();
-    let mut sorted_offsets: Vec<(usize, usize)> =
-        exact_map.iter().map(|(&off, &idx)| (off, idx)).collect();
-    sorted_offsets.sort_by_key(|&(off, _)| off);
-
-    let find_target_idx = |target: usize| -> Option<usize> {
-        if let Some(&idx) = exact_map.get(&target) {
-            return Some(idx);
-        }
-        let pos = sorted_offsets.partition_point(|&(off, _)| off <= target);
-        let below = if pos > 0 {
-            Some(sorted_offsets[pos - 1])
-        } else {
-            None
-        };
-        let above = if pos < sorted_offsets.len() {
-            Some(sorted_offsets[pos])
-        } else {
-            None
-        };
-        let best = match (below, above) {
-            (Some((bo, bi)), Some((ao, ai))) => {
-                let bd = target.saturating_sub(bo);
-                let ad = ao.saturating_sub(target);
-                if bd <= ad {
-                    Some((bd, bi))
-                } else {
-                    Some((ad, ai))
-                }
-            }
-            (Some((bo, bi)), None) => Some((target.saturating_sub(bo), bi)),
-            (None, Some((ao, ai))) => Some((ao.saturating_sub(target), ai)),
-            (None, None) => None,
-        };
-        match best {
-            Some((dist, idx)) if dist <= 4 => Some(idx),
-            _ => None,
-        }
-    };
-
-    let find_target_idx_or_end = |target: usize| -> Option<usize> {
-        find_target_idx(target).or_else(|| {
-            if !sorted_offsets.is_empty() && target > sorted_offsets.last().unwrap().0 {
-                Some(stmts.len())
-            } else {
-                None
-            }
-        })
-    };
+    let offset_map = super::OffsetMap::build(stmts);
+    let find_target_idx_or_end =
+        |target: usize| -> Option<usize> { offset_map.find_fuzzy_or_end(target, 8, stmts.len()) };
 
     let label_at: HashMap<usize, &String> = labels
         .iter()
@@ -141,28 +440,10 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         })
         .collect();
 
-    #[derive(Clone)]
-    #[allow(clippy::enum_variant_names)]
-    enum BlockEvent {
-        CloseIf,
-        CloseIfOpenElse,
-        CloseIfOpenElseIf(String),
-        CloseElse,
-    }
-
-    let mut events: HashMap<usize, Vec<BlockEvent>> = HashMap::new();
     let mut skip: HashSet<usize> = HashSet::new();
-    let mut replacements: HashMap<usize, String> = HashMap::new();
 
-    // Pass 1: collect if-blocks
-    struct IfBlock {
-        if_idx: usize,
-        cond: String,
-        target_idx: usize,
-        jump_idx: Option<usize>,
-        end_idx: Option<usize>,
-        else_close_idx: Option<usize>,
-    }
+    // ── Phase 1: Detect if-blocks ────────────────────────────────────────
+
     let mut if_blocks: Vec<IfBlock> = Vec::new();
 
     for (i, stmt) in stmts.iter().enumerate() {
@@ -180,7 +461,6 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
             let prev = &stmts[check_idx];
             if let Some(end_target) = parse_jump(&prev.text) {
                 if let Some(eidx) = find_target_idx_or_end(end_target) {
-                    // Only valid if/else when else-end is at or after else-start
                     if eidx >= target_idx {
                         jump_idx = Some(check_idx);
                         end_idx = Some(eidx);
@@ -198,11 +478,7 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         });
     }
 
-    // Pass 1.5: false-block truncation.
-    // In nested convergence patterns, an inner else block's end_idx can be the same as
-    // an outer block's end_idx, making the inner else appear to span all the way to the
-    // outer block's end. Fix: scan the false block for an unconditional jump targeting
-    // end_idx — that jump is where the else body actually ends.
+    // Phase 1.5: false-block truncation
     for blk in &mut if_blocks {
         let Some(end_idx) = blk.end_idx else {
             continue;
@@ -226,101 +502,7 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         }
     }
 
-    // Pass 2: detect chains — B is chained to A when B starts at A's else
-    // and both converge to the same end point
-    let chained: HashSet<usize> = {
-        let mut set = HashSet::new();
-        for a in &if_blocks {
-            let Some(a_end) = a.end_idx else { continue };
-            if set.contains(&a.if_idx) {
-                continue;
-            }
-            let mut cur_target = a.target_idx;
-            loop {
-                let next = if_blocks.iter().find(|b| {
-                    b.if_idx == cur_target
-                        && !set.contains(&b.if_idx)
-                        && (b.end_idx == Some(a_end) || b.target_idx == a_end)
-                });
-                let Some(b) = next else { break };
-                set.insert(b.if_idx);
-                cur_target = b.target_idx;
-            }
-        }
-        set
-    };
-
-    let is_next_chained = |target_idx: usize| -> bool {
-        if_blocks
-            .iter()
-            .any(|b| b.if_idx == target_idx && chained.contains(&b.if_idx))
-    };
-
-    for blk in &if_blocks {
-        let else_end = blk.else_close_idx.unwrap_or(blk.end_idx.unwrap_or(0));
-
-        if chained.contains(&blk.if_idx) {
-            // Chained else-if: emit } else if (cond) { at our if_idx
-            events
-                .entry(blk.if_idx)
-                .or_default()
-                .push(BlockEvent::CloseIfOpenElseIf(blk.cond.clone()));
-            skip.insert(blk.if_idx);
-            if let Some(ji) = blk.jump_idx {
-                skip.insert(ji);
-            }
-
-            if !is_next_chained(blk.target_idx) {
-                // Last in chain — close the block
-                if blk.jump_idx.is_some() {
-                    // Has unconditional jump → else body follows
-                    events
-                        .entry(blk.target_idx)
-                        .or_default()
-                        .push(BlockEvent::CloseIfOpenElse);
-                    if blk.end_idx.is_some() {
-                        events
-                            .entry(else_end)
-                            .or_default()
-                            .push(BlockEvent::CloseElse);
-                    }
-                } else {
-                    // No else body
-                    events
-                        .entry(blk.target_idx)
-                        .or_default()
-                        .push(BlockEvent::CloseIf);
-                }
-            }
-        } else {
-            // Non-chained: either standalone or head of a chain
-            replacements.insert(blk.if_idx, format!("if ({}) {{", blk.cond));
-            if let Some(ji) = blk.jump_idx {
-                skip.insert(ji);
-            }
-
-            if is_next_chained(blk.target_idx) {
-                // Head of chain — chained block handles the transition
-            } else if blk.end_idx.is_some() {
-                events
-                    .entry(blk.target_idx)
-                    .or_default()
-                    .push(BlockEvent::CloseIfOpenElse);
-                events
-                    .entry(else_end)
-                    .or_default()
-                    .push(BlockEvent::CloseElse);
-            } else {
-                events
-                    .entry(blk.target_idx)
-                    .or_default()
-                    .push(BlockEvent::CloseIf);
-            }
-        }
-    }
-
-    // Suppress push_flow and jump_computed everywhere (their semantic meaning
-    // has already been consumed by reorder_flow_patterns for sequences/loops)
+    // Suppress push_flow and jump_computed everywhere
     let is_ubergraph = !labels.is_empty();
     for (i, stmt) in stmts.iter().enumerate() {
         if parse_push_flow(&stmt.text).is_some() || parse_jump_computed(&stmt.text) {
@@ -328,22 +510,16 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         }
     }
 
-    // Track block types for pop_flow → break/return disambiguation
-    #[derive(Clone, Copy, PartialEq)]
-    enum BlockType {
-        If,
-        Loop,
-    }
-    let mut block_stack: Vec<BlockType> = Vec::new();
+    // ── Phase 2: Build region tree ───────────────────────────────────────
 
-    let in_loop =
-        |stack: &[BlockType]| -> bool { stack.iter().rev().any(|b| *b == BlockType::Loop) };
+    let region_tree = build_region_tree(stmts.len(), &if_blocks, &mut skip);
 
-    // Pre-collect jump targets for label injection
+    // ── Pre-collect jump targets for label injection ─────────────────────
+
     let mut label_targets: HashMap<usize, String> = HashMap::new();
     let mut pending_labels: HashMap<usize, String> = HashMap::new();
     for (i, stmt) in stmts.iter().enumerate() {
-        if skip.contains(&i) || replacements.contains_key(&i) {
+        if skip.contains(&i) {
             continue;
         }
         if let Some(target) = parse_jump(&stmt.text) {
@@ -351,11 +527,10 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
                 let is_jump_to_end_label = target_idx >= stmts.len()
                     || (target_idx == stmts.len() - 1 && stmts[target_idx].text == "return nop");
                 if is_jump_to_end_label {
-                    // Jump to end — will be break or omitted
+                    // Will be break or omitted
                 } else if let Some(lbl) = label_at.get(&target_idx) {
                     label_targets.insert(i, format!("goto {}", lbl));
                 } else {
-                    // Generate a label for the target
                     let label_name = format!("L_{:04x}", target);
                     pending_labels
                         .entry(target_idx)
@@ -366,162 +541,43 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         }
     }
 
-    let mut output = Vec::new();
-    let mut indent: usize = 0;
+    // ── Phase 3: Emit code from region tree ──────────────────────────────
 
-    let emit_block_events = |evts: &[BlockEvent],
-                             indent: &mut usize,
-                             output: &mut Vec<String>,
-                             block_stack: &mut Vec<BlockType>| {
-        for evt in evts.iter().rev() {
-            match evt {
-                BlockEvent::CloseIf => {
-                    *indent = indent.saturating_sub(1);
-                    output.push(format!("{}}}", "    ".repeat(*indent)));
-                    block_stack.pop();
-                }
-                BlockEvent::CloseIfOpenElse => {
-                    *indent = indent.saturating_sub(1);
-                    output.push(format!("{}}} else {{", "    ".repeat(*indent)));
-                    // Pop If, push If (same level)
-                    *indent += 1;
-                }
-                BlockEvent::CloseIfOpenElseIf(cond) => {
-                    *indent = indent.saturating_sub(1);
-                    output.push(format!(
-                        "{}}} else if ({}) {{",
-                        "    ".repeat(*indent),
-                        cond
-                    ));
-                    // Pop If, push If (same level)
-                    *indent += 1;
-                }
-                BlockEvent::CloseElse => {
-                    *indent = indent.saturating_sub(1);
-                    output.push(format!("{}}}", "    ".repeat(*indent)));
-                    block_stack.pop();
-                }
-            }
-        }
+    let mut output = Vec::new();
+    let mut block_stack: Vec<BlockType> = Vec::new();
+
+    let ctx = EmitCtx {
+        stmts,
+        skip: &skip,
+        label_targets: &label_targets,
+        pending_labels: &pending_labels,
+        label_at: &label_at,
+        is_ubergraph,
+        find_target_idx_or_end: &find_target_idx_or_end,
     };
 
-    for (i, stmt) in stmts.iter().enumerate() {
-        if let Some(evts) = events.get(&i) {
-            emit_block_events(evts, &mut indent, &mut output, &mut block_stack);
-        }
+    emit_region_tree(&region_tree, &ctx, 0, &mut block_stack, &mut output);
 
-        // Inject pending labels
-        if let Some(lbl) = pending_labels.get(&i) {
-            output.push(format!("{}:", lbl));
-        }
+    // ── Phase 4: Post-process (safety nets) ──────────────────────────────
 
-        if let Some(label) = label_at.get(&i) {
-            // Label orphan code before the first event label as latent resumes
-            if is_ubergraph && !output.is_empty() && !output.iter().any(|l| l.starts_with("---")) {
-                let has_content = output.iter().any(|l| {
-                    let t = l.trim();
-                    !t.is_empty() && t != "return"
-                });
-                if has_content {
-                    output.insert(0, "--- (latent resume) ---".to_string());
-                }
-            }
-            output.push(format!("--- {} ---", label));
-        }
-
-        if skip.contains(&i) {
-            continue;
-        }
-
-        if let Some(replacement) = replacements.get(&i) {
-            output.push(format!("{}{}", "    ".repeat(indent), replacement));
-            indent += 1;
-            block_stack.push(BlockType::If);
-        } else if stmt.text == "}" {
-            indent = indent.saturating_sub(1);
-            output.push(format!("{}}}", "    ".repeat(indent)));
-            block_stack.pop();
-        } else if stmt.text.ends_with(" {") {
-            let is_loop = stmt.text.starts_with("while ") || stmt.text.starts_with("for ");
-            output.push(format!("{}{}", "    ".repeat(indent), stmt.text));
-            indent += 1;
-            block_stack.push(if is_loop {
-                BlockType::Loop
-            } else {
-                BlockType::If
-            });
-        } else if stmt.text == "pop_flow" {
-            let keyword = if in_loop(&block_stack) {
-                "break"
-            } else {
-                "return"
-            };
-            output.push(format!("{}{}", "    ".repeat(indent), keyword));
-        } else if let Some(cond) = parse_pop_flow_if_not(&stmt.text) {
-            let keyword = if in_loop(&block_stack) {
-                "break"
-            } else {
-                "return"
-            };
-            let negated = negate_cond(cond);
-            output.push(format!(
-                "{}if ({}) {}",
-                "    ".repeat(indent),
-                negated,
-                keyword
-            ));
-        } else if let Some(target) = parse_jump(&stmt.text) {
-            // Resolve raw jumps
-            if let Some(target_idx) = find_target_idx_or_end(target) {
-                let is_jump_to_end = target_idx >= stmts.len()
-                    || (target_idx == stmts.len() - 1 && stmts[target_idx].text == "return nop");
-                if is_jump_to_end {
-                    // Jump to end — break or omit
-                    if in_loop(&block_stack) {
-                        output.push(format!("{}break", "    ".repeat(indent)));
-                    }
-                    // Outside loops, jump-to-end is implicit return — omit
-                } else if let Some(goto_text) = label_targets.get(&i) {
-                    output.push(format!("{}{}", "    ".repeat(indent), goto_text));
-                } else {
-                    // Fallback: keep raw jump
-                    output.push(format!("{}{}", "    ".repeat(indent), stmt.text));
-                }
-            } else {
-                output.push(format!("{}{}", "    ".repeat(indent), stmt.text));
-            }
-        } else {
-            let text = if stmt.text == "return nop" {
-                "return"
-            } else {
-                &stmt.text
-            };
-            output.push(format!("{}{}", "    ".repeat(indent), text));
-        }
-    }
-
-    if let Some(evts) = events.get(&stmts.len()) {
-        emit_block_events(evts, &mut indent, &mut output, &mut block_stack);
-    }
-
-    while indent > 0 {
-        indent -= 1;
-        output.push(format!("{}}}", "    ".repeat(indent)));
-    }
-
-    // Post-process: convert "goto L_XXXX" to "break" (in loop) or remove (outside loop)
-    // when the label appears right after a closing "}"
+    // Convert "goto L_XXXX" to "break" or remove when label is near-end
     let break_labels: HashSet<String> = {
         let mut set = HashSet::new();
         for i in 0..output.len() {
             let trimmed = output[i].trim();
             if trimmed.ends_with(':') && !trimmed.starts_with("---") && !trimmed.starts_with("//") {
                 let label = &trimmed[..trimmed.len() - 1];
-                // Check if the previous non-empty line is a closing brace
-                if let Some(prev) = output[..i].iter().rev().find(|l| !l.trim().is_empty()) {
-                    if prev.trim() == "}" {
-                        set.insert(label.to_string());
-                    }
+                let prev_is_brace = output[..i]
+                    .iter()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .is_some_and(|l| l.trim() == "}");
+                let is_near_end = output[i + 1..].iter().all(|l| {
+                    let t = l.trim();
+                    t.is_empty() || t == "return" || t == "}"
+                });
+                if prev_is_brace || is_near_end {
+                    set.insert(label.to_string());
                 }
             }
         }
@@ -533,8 +589,7 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
             if let Some(label) = trimmed.strip_prefix("goto ") {
                 if break_labels.contains(label) {
                     let indent_str = " ".repeat(output[i].len() - trimmed.len());
-                    let line_indent = indent_str.len() / 4; // 4 spaces per indent level
-                                                            // Check if we're inside a loop by scanning previous lines
+                    let line_indent = indent_str.len() / 4;
                     let in_loop = output[..i].iter().rev().any(|l| {
                         let lt = l.trim();
                         let li = (l.len() - l.trim_start().len()) / 4;
@@ -543,13 +598,11 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
                     if in_loop {
                         output[i] = format!("{}break", indent_str);
                     } else {
-                        // Outside loop: redundant fall-through, mark for removal
                         output[i] = String::new();
                     }
                 }
             }
         }
-        // Remove empty lines from cleared gotos and unused labels
         output.retain(|line| !line.is_empty());
         let remaining_gotos: HashSet<String> = output
             .iter()
@@ -567,19 +620,92 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         });
     }
 
-    // Post-process: extract convergence code from inside blocks.
-    // When a label inside a block is targeted by 2+ gotos, the code from
-    // the label to the block boundary is shared convergence code that
-    // should appear after the enclosing block, not inside one branch.
     extract_convergence(&mut output);
+    collapse_double_else(&mut output);
 
     output
 }
 
+/// Emit the region tree, handling if/else group closing braces.
+///
+/// This wrapper calls `emit_region` and manages the "}" placement for
+/// if/else/else-if groups. An IfThen followed by Else/ElseIf forms a group;
+/// the final region in the group gets the closing "}".
+fn emit_region_tree(
+    region: &Region,
+    ctx: &EmitCtx,
+    indent: usize,
+    block_stack: &mut Vec<BlockType>,
+    output: &mut Vec<String>,
+) {
+    let body_indent = match region.kind {
+        RegionKind::Root => indent,
+        _ => indent + 1,
+    };
+
+    // Emit opening
+    match &region.kind {
+        RegionKind::Root => {}
+        RegionKind::IfThen(cond) => {
+            output.push(format!("{}if ({}) {{", "    ".repeat(indent), cond));
+            block_stack.push(BlockType::If);
+        }
+        RegionKind::Else => {
+            output.push(format!("{}}} else {{", "    ".repeat(indent)));
+        }
+        RegionKind::ElseIf(cond) => {
+            output.push(format!("{}}} else if ({}) {{", "    ".repeat(indent), cond));
+        }
+    }
+
+    // Emit body: walk [start, end), recursing into children
+    let mut pos = region.start;
+
+    let children = &region.children;
+    let mut child_idx = 0;
+    while child_idx < children.len() {
+        let child = &children[child_idx];
+
+        // Emit statements [pos, child.start) at body_indent
+        emit_stmts_range(ctx, pos, child.start, body_indent, block_stack, output);
+
+        // Detect if/else groups: IfThen possibly followed by Else/ElseIf
+        if matches!(child.kind, RegionKind::IfThen(_)) {
+            // Emit the IfThen
+            emit_region_tree(child, ctx, body_indent, block_stack, output);
+            pos = child.end;
+            child_idx += 1;
+
+            // Continue emitting Else/ElseIf siblings that form a chain
+            while child_idx < children.len() {
+                let next = &children[child_idx];
+                if !matches!(next.kind, RegionKind::Else | RegionKind::ElseIf(_)) {
+                    break;
+                }
+                // Emit any gap statements between previous and this else
+                emit_stmts_range(ctx, pos, next.start, body_indent, block_stack, output);
+                emit_region_tree(next, ctx, body_indent, block_stack, output);
+                pos = next.end;
+                child_idx += 1;
+            }
+
+            // Close the if/else group
+            output.push(format!("{}}}", "    ".repeat(body_indent)));
+            block_stack.pop();
+        } else {
+            // Non-if child (shouldn't happen with current data, but handle gracefully)
+            emit_region_tree(child, ctx, body_indent, block_stack, output);
+            pos = child.end;
+            child_idx += 1;
+        }
+    }
+
+    // Emit remaining statements [pos, end)
+    emit_stmts_range(ctx, pos, region.end, body_indent, block_stack, output);
+}
+
 fn extract_convergence(output: &mut Vec<String>) {
-    // Process one convergence label per iteration (indices shift after each)
     loop {
-        // Collect goto targets and their line indices
         let mut goto_map: HashMap<String, Vec<usize>> = HashMap::new();
         for (i, line) in output.iter().enumerate() {
             if let Some(label) = line.trim().strip_prefix("goto ") {
@@ -587,11 +713,26 @@ fn extract_convergence(output: &mut Vec<String>) {
             }
         }
 
-        // Find convergence labels (2+ gotos), pick the earliest by line index
-        // for deterministic processing (HashMap iteration order is random)
         let mut candidates: Vec<(String, Vec<usize>)> = goto_map
             .into_iter()
-            .filter(|(_, gotos)| gotos.len() >= 2)
+            .filter(|(label_name, gotos)| {
+                if gotos.len() >= 2 {
+                    return true;
+                }
+                if gotos.len() == 1 {
+                    let label_text = format!("{}:", label_name);
+                    if let Some(li) = output.iter().position(|l| l.trim() == label_text) {
+                        let gi = gotos[0];
+                        let (lo, hi) = if li < gi { (li, gi) } else { (gi, li) };
+                        let has_boundary = output[lo + 1..hi].iter().any(|l| {
+                            let t = l.trim();
+                            t == "}" || t.starts_with("} else")
+                        });
+                        return has_boundary;
+                    }
+                }
+                false
+            })
             .collect();
         if candidates.is_empty() {
             break;
@@ -599,14 +740,11 @@ fn extract_convergence(output: &mut Vec<String>) {
         candidates.sort_by_key(|(_, gotos)| gotos.iter().copied().min().unwrap_or(usize::MAX));
         let (label_name, goto_indices) = candidates.remove(0);
 
-        // Find the label line
         let label_text = format!("{}:", label_name);
         let Some(label_idx) = output.iter().position(|l| l.trim() == label_text) else {
             break;
         };
 
-        // Determine convergence code extent: from label+1 until a structural
-        // boundary (closing brace / else) at shallower indent
         let code_start = label_idx + 1;
         if code_start >= output.len() {
             break;
@@ -640,13 +778,11 @@ fn extract_convergence(output: &mut Vec<String>) {
             break;
         }
 
-        // Extract convergence content (trimmed)
         let conv_content: Vec<String> = output[code_start..code_end]
             .iter()
             .map(|l| l.trim().to_string())
             .collect();
 
-        // Find insert point: first `}` after all gotos at indent < shallowest goto indent
         let min_goto_indent = goto_indices
             .iter()
             .map(|&i| output[i].len() - output[i].trim_start().len())
@@ -664,7 +800,6 @@ fn extract_convergence(output: &mut Vec<String>) {
                 break;
             }
         }
-        // Fallback: append at end
         let insert_pos = insert_after.unwrap_or(output.len());
         let target_indent = if insert_pos < output.len() {
             output[insert_pos].len() - output[insert_pos].trim_start().len()
@@ -672,7 +807,6 @@ fn extract_convergence(output: &mut Vec<String>) {
             0
         };
 
-        // Collect all lines to remove
         let mut to_remove: Vec<usize> = Vec::new();
         to_remove.push(label_idx);
         to_remove.extend(code_start..code_end);
@@ -680,18 +814,15 @@ fn extract_convergence(output: &mut Vec<String>) {
         to_remove.sort();
         to_remove.dedup();
 
-        // Remove in reverse order
         for &idx in to_remove.iter().rev() {
             if idx < output.len() {
                 output.remove(idx);
             }
         }
 
-        // Adjust insert position for removed lines
         let removed_before = to_remove.iter().filter(|&&idx| idx < insert_pos).count();
         let adjusted_pos = insert_pos.saturating_sub(removed_before);
 
-        // Insert convergence code at target indent
         let indent_str = "    ".repeat(target_indent / 4);
         for (i, content) in conv_content.iter().enumerate() {
             let line = if content.is_empty() {
@@ -705,7 +836,35 @@ fn extract_convergence(output: &mut Vec<String>) {
     }
 }
 
-// Inline tests: negate_cond is private and used only within structuring passes.
+fn collapse_double_else(output: &mut Vec<String>) {
+    loop {
+        let mut changed = false;
+        let mut i = 0;
+        while i + 1 < output.len() {
+            let trimmed = output[i].trim();
+            let next_trimmed = output[i + 1].trim();
+
+            if trimmed == "} else {" && next_trimmed == "} else {" {
+                output.remove(i);
+                changed = true;
+                continue;
+            }
+
+            if trimmed == "} else {" && next_trimmed == "}" {
+                output.remove(i);
+                output.remove(i);
+                changed = true;
+                continue;
+            }
+
+            i += 1;
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,5 +892,180 @@ mod tests {
     #[test]
     fn negate_self_member() {
         assert_eq!(negate_cond("!self.GrippingActor"), "self.GrippingActor");
+    }
+
+    fn make_stmt(offset: usize, text: &str) -> BcStatement {
+        BcStatement {
+            mem_offset: offset,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn simple_if_block() {
+        // if !(cond) jump 0x30 → negated to "if (cond) {"
+        // body
+        // return nop
+        let stmts = vec![
+            make_stmt(0x10, "if !(Cond) jump 0x30"),
+            make_stmt(0x20, "DoSomething()"),
+            make_stmt(0x30, "return nop"),
+        ];
+        let result = structure_bytecode(&stmts, &HashMap::new());
+        assert!(result.iter().any(|l| l.contains("if (Cond) {")));
+        assert!(result.iter().any(|l| l.contains("DoSomething()")));
+    }
+
+    #[test]
+    fn simple_if_else() {
+        // if !(cond) jump 0x30
+        // TrueBranch()
+        // jump 0x40          (unconditional jump to end)
+        // FalseBranch()
+        // return nop
+        let stmts = vec![
+            make_stmt(0x10, "if !(Cond) jump 0x30"),
+            make_stmt(0x20, "TrueBranch()"),
+            make_stmt(0x28, "jump 0x40"),
+            make_stmt(0x30, "FalseBranch()"),
+            make_stmt(0x40, "return nop"),
+        ];
+        let result = structure_bytecode(&stmts, &HashMap::new());
+        let text = result.join("\n");
+        assert!(text.contains("if (Cond) {"));
+        assert!(text.contains("TrueBranch()"));
+        assert!(text.contains("} else {"));
+        assert!(text.contains("FalseBranch()"));
+    }
+
+    #[test]
+    fn nested_if_blocks() {
+        // if !(A) jump 0x50
+        //   if !(B) jump 0x40
+        //     InnerBody()
+        //   OuterAfterInner()
+        // return nop
+        let stmts = vec![
+            make_stmt(0x10, "if !(A) jump 0x50"),
+            make_stmt(0x18, "if !(B) jump 0x40"),
+            make_stmt(0x20, "InnerBody()"),
+            make_stmt(0x40, "OuterAfterInner()"),
+            make_stmt(0x50, "return nop"),
+        ];
+        let result = structure_bytecode(&stmts, &HashMap::new());
+        let text = result.join("\n");
+        assert!(text.contains("if (A) {"));
+        assert!(text.contains("if (B) {"));
+        assert!(text.contains("InnerBody()"));
+        assert!(text.contains("OuterAfterInner()"));
+    }
+
+    #[test]
+    fn overlapping_blocks_demoted_to_guard() {
+        // Two if-blocks that partially overlap should not crash.
+        // The overlapping one becomes a guard.
+        let stmts = vec![
+            make_stmt(0x10, "if !(A) jump 0x40"),
+            make_stmt(0x18, "if !(B) jump 0x50"),
+            make_stmt(0x20, "Body()"),
+            make_stmt(0x40, "AfterA()"),
+            make_stmt(0x50, "return nop"),
+        ];
+        let result = structure_bytecode(&stmts, &HashMap::new());
+        // Should not panic and should produce output
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn if_else_if_chain() {
+        // if !(A) jump 0x30
+        // TrueA()
+        // jump 0x50
+        // if !(B) jump 0x50
+        // TrueB()
+        // return nop
+        let stmts = vec![
+            make_stmt(0x10, "if !(A) jump 0x30"),
+            make_stmt(0x20, "TrueA()"),
+            make_stmt(0x28, "jump 0x50"),
+            make_stmt(0x30, "if !(B) jump 0x50"),
+            make_stmt(0x40, "TrueB()"),
+            make_stmt(0x50, "return nop"),
+        ];
+        let result = structure_bytecode(&stmts, &HashMap::new());
+        let text = result.join("\n");
+        assert!(text.contains("if (A) {"));
+        assert!(text.contains("} else if (B) {"));
+        assert!(text.contains("TrueB()"));
+    }
+
+    #[test]
+    fn region_tree_simple_if() {
+        let mut skip = HashSet::new();
+        let blocks = vec![IfBlock {
+            if_idx: 0,
+            cond: "X".to_string(),
+            target_idx: 3,
+            jump_idx: None,
+            end_idx: None,
+            else_close_idx: None,
+        }];
+        let tree = build_region_tree(5, &blocks, &mut skip);
+        assert_eq!(tree.children.len(), 1);
+        assert!(matches!(tree.children[0].kind, RegionKind::IfThen(_)));
+        assert_eq!(tree.children[0].start, 1);
+        assert_eq!(tree.children[0].end, 3);
+        assert!(skip.contains(&0));
+    }
+
+    #[test]
+    fn region_tree_if_else() {
+        let mut skip = HashSet::new();
+        let blocks = vec![IfBlock {
+            if_idx: 0,
+            cond: "X".to_string(),
+            target_idx: 3,
+            jump_idx: Some(2),
+            end_idx: Some(5),
+            else_close_idx: None,
+        }];
+        let tree = build_region_tree(6, &blocks, &mut skip);
+        assert_eq!(tree.children.len(), 2);
+        assert!(matches!(tree.children[0].kind, RegionKind::IfThen(_)));
+        assert!(matches!(tree.children[1].kind, RegionKind::Else));
+        assert_eq!(tree.children[0].start, 1);
+        assert_eq!(tree.children[0].end, 2); // excludes jump_idx
+        assert_eq!(tree.children[1].start, 3);
+        assert_eq!(tree.children[1].end, 5);
+        assert!(skip.contains(&0));
+        assert!(skip.contains(&2));
+    }
+
+    #[test]
+    fn region_tree_nested() {
+        let mut skip = HashSet::new();
+        // Outer: if at 0, target 5
+        // Inner: if at 1, target 3
+        let blocks = vec![
+            IfBlock {
+                if_idx: 0,
+                cond: "A".to_string(),
+                target_idx: 5,
+                jump_idx: None,
+                end_idx: None,
+                else_close_idx: None,
+            },
+            IfBlock {
+                if_idx: 1,
+                cond: "B".to_string(),
+                target_idx: 3,
+                jump_idx: None,
+                end_idx: None,
+                else_close_idx: None,
+            },
+        ];
+        let tree = build_region_tree(6, &blocks, &mut skip);
+        assert_eq!(tree.children.len(), 1); // outer IfThen
+        assert_eq!(tree.children[0].children.len(), 1); // inner IfThen
     }
 }

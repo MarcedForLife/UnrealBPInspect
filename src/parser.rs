@@ -5,7 +5,8 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::binary::*;
 use crate::bytecode::{
     cleanup_structured_output, decode_bytecode, discard_unused_assignments, fold_summary_patterns,
-    inline_single_use_temps, reorder_convergence, reorder_flow_patterns, structure_bytecode,
+    inline_constant_temps, inline_single_use_temps, reorder_convergence, reorder_flow_patterns,
+    strip_orphaned_blocks, structure_bytecode,
 };
 use crate::ffield::*;
 use crate::properties::read_properties;
@@ -262,16 +263,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
                     let field_class = nt.fname(&mut c)?;
                     let field_name = nt.fname(&mut c)?;
                     let _flags = read_u32(&mut c)?;
-                    // FField metadata gate: 1 = metadata block follows (MetadataCount + key/value
-                    // entries), 0 = no metadata. Class members have metadata, function params don't.
-                    let has_meta = read_i32(&mut c)?;
-                    if has_meta != 0 {
-                        let meta_count = read_i32(&mut c)?;
-                        for _ in 0..meta_count {
-                            let _meta_key = nt.fname(&mut c)?;
-                            let _meta_val = read_fstring(&mut c)?;
-                        }
-                    }
+                    nt.skip_metadata(&mut c)?;
                     let _array_dim = read_i32(&mut c)?;
                     let _elem_size = read_i32(&mut c)?;
                     let prop_flags = read_i64(&mut c)? as u64;
@@ -400,11 +392,13 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
                     });
                     let mut reordered = reorder_flow_patterns(&stmts);
                     reorder_convergence(&mut reordered);
+                    inline_constant_temps(&mut reordered);
                     inline_single_use_temps(&mut reordered);
                     discard_unused_assignments(&mut reordered);
                     let mut structured = structure_bytecode(&reordered, &HashMap::new());
                     cleanup_structured_output(&mut structured);
                     fold_summary_patterns(&mut structured);
+                    strip_orphaned_blocks(&mut structured);
                     if !structured.is_empty() {
                         extra_props.push(Property {
                             name: "BytecodeSummary".into(),
