@@ -3,8 +3,8 @@ use std::fmt::Write;
 
 use crate::bytecode::{
     cleanup_structured_output, discard_unused_assignments, fold_summary_patterns,
-    inline_single_use_temps, reorder_convergence, reorder_flow_patterns, structure_bytecode,
-    BcStatement,
+    inline_constant_temps, inline_single_use_temps, reorder_convergence, reorder_flow_patterns,
+    strip_orphaned_blocks, structure_bytecode, BcStatement,
 };
 use crate::resolve::*;
 use crate::types::*;
@@ -40,9 +40,22 @@ struct ResumeBlock {
     lines: Vec<String>,
 }
 
+const COMMENT_WRAP_WIDTH: usize = 100;
+const MAX_BUBBLE_DISTANCE_SQ: i64 = 640_000; // 800²
+const FUZZY_LABEL_WINDOW: usize = 8;
+
+/// Strip the `XXXX: ` offset prefix from a bytecode line (e.g. `0012: expr` → `expr`).
+fn strip_offset_prefix(line: &str) -> &str {
+    if line.len() > 6 && line.as_bytes()[4] == b':' {
+        &line[6..]
+    } else {
+        line
+    }
+}
+
 fn emit_comment(buf: &mut String, text: &str, indent: &str) {
     let prefix = format!("{}// ", indent);
-    let avail = 100usize.saturating_sub(prefix.len() + 1);
+    let avail = COMMENT_WRAP_WIDTH.saturating_sub(prefix.len() + 1);
     for paragraph in text.lines() {
         let para = paragraph.trim();
         if para.is_empty() {
@@ -79,6 +92,141 @@ fn emit_comment(buf: &mut String, text: &str, indent: &str) {
             }
         }
     }
+}
+
+/// Rewrite unresolvable jumps to point past the end of the segment.
+///
+/// In UberGraph bytecode, each event is processed as an independent segment.
+/// Jumps targeting offsets outside the current segment are always "return from
+/// this event" — control goes back to the dispatcher.  But even intra-segment
+/// jumps can fail to resolve when filtered trace opcodes shift the visible
+/// statement offsets away from the raw bytecode targets.
+///
+/// This function uses the **same ±4-byte sorted-offset lookup** that
+/// `structure_bytecode`'s `find_target_idx` uses.  Any jump target that would
+/// return `None` there (and isn't past the end) is rewritten to a sentinel
+/// offset, which `find_target_idx_or_end` resolves as jump-to-end (implicit
+/// return or break).
+fn resolve_cross_segment_jumps(stmts: &mut Vec<BcStatement>) {
+    if stmts.is_empty() {
+        return;
+    }
+
+    // Build exact map and sorted offsets — mirrors structure_bytecode logic
+    let exact_map: HashSet<usize> = stmts.iter().map(|s| s.mem_offset).collect();
+    let mut sorted_offsets: Vec<usize> = exact_map.iter().copied().collect();
+    sorted_offsets.sort();
+
+    let max_offset = *sorted_offsets.last().unwrap();
+    let sentinel_offset = max_offset + 1;
+
+    // Replicate structure_bytecode's find_target_idx: exact match, then ±4
+    // binary-search fallback.  Returns true if the target would resolve.
+    let is_resolvable = |target: usize| -> bool {
+        // Past end → find_target_idx_or_end returns stmts.len() (end sentinel)
+        if target > max_offset {
+            return true;
+        }
+        // Exact match
+        if exact_map.contains(&target) {
+            return true;
+        }
+        // ±4 fuzzy match via sorted offsets (same as structure.rs)
+        let pos = sorted_offsets.partition_point(|&off| off <= target);
+        let below_dist = if pos > 0 {
+            target.saturating_sub(sorted_offsets[pos - 1])
+        } else {
+            usize::MAX
+        };
+        let above_dist = if pos < sorted_offsets.len() {
+            sorted_offsets[pos].saturating_sub(target)
+        } else {
+            usize::MAX
+        };
+        below_dist.min(above_dist) <= 4
+    };
+
+    for stmt in stmts.iter_mut() {
+        // Pattern: "if !(COND) jump 0xHEX"
+        if let Some(jump_pos) = stmt.text.find(") jump 0x") {
+            let hex_start = jump_pos + 9; // after ") jump 0x"
+            let hex_str = &stmt.text[hex_start..];
+            let hex_end = hex_str
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .unwrap_or(hex_str.len());
+            if let Ok(t) = usize::from_str_radix(&hex_str[..hex_end], 16) {
+                if !is_resolvable(t) {
+                    stmt.text =
+                        format!("{}jump 0x{:x}", &stmt.text[..jump_pos + 2], sentinel_offset);
+                }
+            }
+        }
+        // Pattern: standalone "jump 0xHEX"
+        else if let Some(hex_str) = stmt.text.strip_prefix("jump 0x") {
+            if let Ok(t) = usize::from_str_radix(hex_str, 16) {
+                if !is_resolvable(t) {
+                    stmt.text = format!("jump 0x{:x}", sentinel_offset);
+                }
+            }
+        }
+    }
+
+    // Add sentinel so find_target_idx_or_end can resolve to it
+    stmts.push(BcStatement {
+        mem_offset: sentinel_offset,
+        text: "return nop".to_string(),
+    });
+}
+
+/// Split raw BcStatements into per-event segments using label offsets.
+/// Each segment gets its own name (from the label) and a slice of statements.
+/// Statements before the first label get an empty name (latent resume code).
+///
+/// Uses exact offset matching (not watermark) because flow reordering moves
+/// Sequence body blocks inline — those blocks retain their original (high)
+/// offsets which would trigger wrong segment splits with a >= comparison.
+fn split_stmts_by_labels(
+    stmts: &[BcStatement],
+    sorted_labels: &[(usize, &String)],
+) -> Vec<(String, Vec<BcStatement>)> {
+    // Pre-match each label to the first statement at or just after its offset.
+    // Exact matching fails because trace opcodes (filtered by the decoder) cause
+    // event entry points to land a few bytes before the first visible statement.
+    // We use a bounded window (8 bytes) instead of unbounded >= to prevent
+    // moved Sequence body blocks from triggering wrong splits.
+    let mut matched: HashMap<usize, String> = HashMap::new(); // stmt_idx → label name
+    let mut used_labels: HashSet<usize> = HashSet::new();
+    for &(label_off, label_name) in sorted_labels {
+        for (i, stmt) in stmts.iter().enumerate() {
+            if matched.contains_key(&i) {
+                continue; // already claimed by another label
+            }
+            if stmt.mem_offset >= label_off && stmt.mem_offset <= label_off + FUZZY_LABEL_WINDOW {
+                matched.insert(i, label_name.clone());
+                used_labels.insert(label_off);
+                break;
+            }
+        }
+    }
+
+    let mut segments: Vec<(String, Vec<BcStatement>)> = Vec::new();
+    let mut current_name = String::new();
+    let mut current_stmts: Vec<BcStatement> = Vec::new();
+
+    for (i, stmt) in stmts.iter().enumerate() {
+        if let Some(name) = matched.get(&i) {
+            if !current_stmts.is_empty() || !current_name.is_empty() {
+                segments.push((current_name.clone(), current_stmts));
+                current_stmts = Vec::new();
+            }
+            current_name = name.clone();
+        }
+        current_stmts.push(stmt.clone());
+    }
+    if !current_stmts.is_empty() || !current_name.is_empty() {
+        segments.push((current_name, current_stmts));
+    }
+    segments
 }
 
 /// Split structured ubergraph output into per-event sections and resume blocks.
@@ -155,6 +303,10 @@ fn strip_node_func_prefix(name: &str) -> String {
 }
 
 fn line_contains_identifier(line: &str, identifier: &str) -> bool {
+    if identifier == "__branch__" {
+        let trimmed = line.trim_start();
+        return trimmed.starts_with("if (") || trimmed.starts_with("} else if (");
+    }
     let mut start = 0;
     while start + identifier.len() <= line.len() {
         if let Some(pos) = line[start..].find(identifier) {
@@ -212,6 +364,23 @@ fn node_rank(node: &NodeInfo, all_nodes: &[NodeInfo]) -> Option<usize> {
         .position(|&(y, x)| y == node.y && x == node.x)
 }
 
+/// Walk backward from `anchor_line` to find the nearest `if` at a shallower indent.
+fn find_enclosing_if(bytecode_lines: &[String], anchor_line: usize) -> Option<usize> {
+    let anchor_indent =
+        bytecode_lines[anchor_line].len() - bytecode_lines[anchor_line].trim_start().len();
+    for i in (0..anchor_line).rev() {
+        let line = &bytecode_lines[i];
+        let trimmed = line.trim_start();
+        let indent = line.len() - trimmed.len();
+        if indent < anchor_indent
+            && (trimmed.starts_with("if (") || trimmed.starts_with("} else if ("))
+        {
+            return Some(i);
+        }
+    }
+    None
+}
+
 fn find_comment_line(
     comment: &CommentBox,
     nodes: &[NodeInfo],
@@ -222,7 +391,7 @@ fn find_comment_line(
         // identifier (e.g. K2Node_IfThenElse), so find the closest identifiable nodes.
         // UE4 execution flows left-to-right, so prefer nodes to the right (downstream).
         // Two-pass: first try right-side only, fall back to all directions.
-        let dist_limit = 800i64 * 800;
+        let dist_limit = MAX_BUBBLE_DISTANCE_SQ;
         let mut right: Vec<(&NodeInfo, i64)> = nodes
             .iter()
             .filter(|n| n.x >= comment.x)
@@ -260,6 +429,36 @@ fn find_comment_line(
 
     if contained.is_empty() {
         return None;
+    }
+
+    // When a comment covers both Branch nodes and regular identifiable nodes,
+    // anchor on the regular nodes and walk backward to the enclosing `if`.
+    let has_branch = contained.iter().any(|n| n.identifier == "__branch__");
+    if has_branch {
+        let regular: Vec<&&NodeInfo> = contained
+            .iter()
+            .filter(|n| n.identifier != "__branch__")
+            .collect();
+        if !regular.is_empty() {
+            let mut anchor_line: Option<usize> = None;
+            for node in &regular {
+                let rank = match node_rank(node, nodes) {
+                    Some(r) => r,
+                    None => continue,
+                };
+                if let Some(line_idx) =
+                    find_nth_identifier_line(&node.identifier, rank, bytecode_lines)
+                {
+                    anchor_line = Some(anchor_line.map_or(line_idx, |m: usize| m.min(line_idx)));
+                    if comment.is_bubble {
+                        break;
+                    }
+                }
+            }
+            if let Some(anchor) = anchor_line {
+                return Some(find_enclosing_if(bytecode_lines, anchor).unwrap_or(anchor));
+            }
+        }
     }
 
     let mut min_line: Option<usize> = None;
@@ -754,9 +953,11 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                         });
                 }
             } else {
-                // Collect bubble comments from non-comment nodes
-                let has_bubble = find_prop(node_props, "bCommentBubbleVisible")
-                    .is_some_and(|p| matches!(p.value, PropValue::Bool(true)));
+                // Collect bubble comments from non-comment nodes (skip reroute knots —
+                // their labels describe wire routing, not logic)
+                let has_bubble = short != "K2Node_Knot"
+                    && find_prop(node_props, "bCommentBubbleVisible")
+                        .is_some_and(|p| matches!(p.value, PropValue::Bool(true)));
                 if has_bubble {
                     if let Some(text) =
                         find_prop(node_props, "NodeComment").and_then(|p| match &p.value {
@@ -803,6 +1004,7 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                             }
                         })
                     }
+                    "K2Node_IfThenElse" => Some("__branch__".to_string()),
                     _ => None,
                 };
                 if let Some(identifier) = node_identifier {
@@ -893,11 +1095,7 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                 PropValue::Str(s) => s.as_str(),
                 _ => continue,
             };
-            let code = if line.len() > 6 && line.as_bytes()[4] == b':' {
-                &line[6..]
-            } else {
-                line
-            };
+            let code = strip_offset_prefix(line);
 
             let calls = find_local_calls(code, &local_functions);
             for callee in &calls {
@@ -946,14 +1144,47 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                     if stmts.is_empty() {
                         return None;
                     }
+
+                    // Flow reorder the entire UberGraph first — Sequence node
+                    // body blocks are scattered across events and push_flow/pop_flow
+                    // pairs need the whole function to resolve correctly.
                     let mut reordered = reorder_flow_patterns(&stmts);
                     reorder_convergence(&mut reordered);
-                    inline_single_use_temps(&mut reordered);
-                    discard_unused_assignments(&mut reordered);
-                    let mut structured = structure_bytecode(&reordered, &ubergraph_labels);
-                    cleanup_structured_output(&mut structured);
-                    fold_summary_patterns(&mut structured);
-                    Some(structured)
+
+                    // Now split into per-event segments and process each through
+                    // inline/structure/cleanup independently. This produces much
+                    // cleaner pseudocode because the structurer and inliner aren't
+                    // confused by cross-event jumps and shared temp variables.
+                    let mut sorted_labels: Vec<(usize, &String)> =
+                        ubergraph_labels.iter().map(|(k, v)| (*k, v)).collect();
+                    sorted_labels.sort_by_key(|(offset, _)| *offset);
+
+                    let segments = split_stmts_by_labels(&reordered, &sorted_labels);
+                    let mut all_lines: Vec<String> = Vec::new();
+                    for (name, segment_stmts) in &segments {
+                        if !name.is_empty() {
+                            all_lines.push(format!("--- {} ---", name));
+                        } else if !segment_stmts.is_empty() {
+                            all_lines.push("--- (latent resume) ---".to_string());
+                        }
+                        if !segment_stmts.is_empty() {
+                            let mut seg = segment_stmts.clone();
+                            resolve_cross_segment_jumps(&mut seg);
+                            inline_constant_temps(&mut seg);
+                            inline_single_use_temps(&mut seg);
+                            discard_unused_assignments(&mut seg);
+                            let mut structured = structure_bytecode(&seg, &HashMap::new());
+                            cleanup_structured_output(&mut structured);
+                            fold_summary_patterns(&mut structured);
+                            strip_orphaned_blocks(&mut structured);
+                            all_lines.extend(structured);
+                        }
+                    }
+                    if all_lines.is_empty() {
+                        None
+                    } else {
+                        Some(all_lines)
+                    }
                 } else {
                     None
                 }
@@ -961,7 +1192,6 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
     } else {
         None
     };
-
     // Scan structured ubergraph output for local calls per event section
     if let Some(ref structured) = ubergraph_structured {
         scan_structured_calls(
@@ -1043,10 +1273,10 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
             writeln!(buf, "Functions:").unwrap();
             has_functions = true;
         }
-        writeln!(buf, "  {}{}", sig, flags).unwrap();
         if let Some(callers) = callers_map.get(&hdr.object_name) {
-            writeln!(buf, "    // called by: {}", callers.join(", ")).unwrap();
+            writeln!(buf, "  // called by: {}", callers.join(", ")).unwrap();
         }
+        writeln!(buf, "  {}{}", sig, flags).unwrap();
 
         // Collect bytecode lines
         let bc_prop_name = if find_prop(props, "BytecodeSummary").is_some() {
@@ -1062,14 +1292,11 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                             .iter()
                             .filter_map(|item| {
                                 if let PropValue::Str(line) = item {
-                                    if bc_prop_name == "Bytecode"
-                                        && line.len() > 6
-                                        && line.as_bytes()[4] == b':'
-                                    {
-                                        Some(line[6..].to_string())
+                                    Some(if bc_prop_name == "Bytecode" {
+                                        strip_offset_prefix(line).to_string()
                                     } else {
-                                        Some(line.clone())
-                                    }
+                                        line.clone()
+                                    })
                                 } else {
                                     None
                                 }
@@ -1120,323 +1347,11 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
         writeln!(buf).unwrap();
     }
 
-    // Graphs
-    let mut func_flags: HashMap<String, String> = HashMap::new();
-    for (hdr, props) in &asset.exports {
-        let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
-        if class.ends_with(".Function") {
-            if let Some(flags) = find_prop_str(props, "FunctionFlags") {
-                func_flags.insert(hdr.object_name.clone(), flags);
-            }
-        }
-    }
-
-    let has_ubergraph_bytecode = functions_with_bytecode
-        .iter()
-        .any(|f| f.starts_with("ExecuteUbergraph_"));
-    for (hdr, props) in &asset.exports {
-        let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
-        if !class.ends_with(".EdGraph") {
-            continue;
-        }
-        if !matches_filter(&hdr.object_name, filters) {
-            continue;
-        }
-        if functions_with_bytecode.contains(&hdr.object_name) {
-            continue;
-        }
-        if hdr.object_name == "EventGraph" && has_ubergraph_bytecode {
-            continue;
-        }
-        let graph_name = &hdr.object_name;
-
-        let node_indices: Vec<i32> = find_prop(props, "Nodes")
-            .or_else(|| find_prop(props, "AllNodes"))
-            .map(|p| match &p.value {
-                PropValue::Array { items, .. } => items
-                    .iter()
-                    .filter_map(|item| {
-                        if let PropValue::Object(idx) = item {
-                            Some(*idx)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            })
-            .unwrap_or_default();
-
-        if node_indices.is_empty() {
-            continue;
-        }
-
-        let flags = func_flags
-            .get(graph_name.as_str())
-            .map(|f| filter_flags_for_summary(f))
-            .and_then(|f| {
-                if f.is_empty() {
-                    None
-                } else {
-                    Some(format!(" [{}]", f))
-                }
-            })
-            .unwrap_or_default();
-        writeln!(buf, "Graph: {}{}", graph_name, flags).unwrap();
-
-        // Collect comment boxes from this graph's nodes
-        let mut graph_comments: Vec<CommentBox> = Vec::new();
-        let mut nodes: Vec<(i32, i32, String)> = Vec::new(); // (x, y, description)
-        for idx in &node_indices {
-            if *idx > 0 {
-                let export_idx = (*idx - 1) as usize;
-                if let Some((hdr, node_props)) = asset.exports.get(export_idx) {
-                    let node_class = resolve_index(&asset.imports, &export_names, hdr.class_index);
-                    // Collect comment boxes for grouping
-                    if node_class.ends_with(".EdGraphNode_Comment") {
-                        let text = find_prop_str(node_props, "NodeComment").unwrap_or_default();
-                        if !text.is_empty() {
-                            let x = find_prop_i32(node_props, "NodePosX").unwrap_or(0);
-                            let y = find_prop_i32(node_props, "NodePosY").unwrap_or(0);
-                            let w = find_prop_i32(node_props, "NodeWidth").unwrap_or(0);
-                            let h = find_prop_i32(node_props, "NodeHeight").unwrap_or(0);
-                            graph_comments.push(CommentBox {
-                                text,
-                                x,
-                                y,
-                                width: w,
-                                height: h,
-                                is_bubble: false,
-                            });
-                        }
-                        continue;
-                    }
-                    let x = find_prop_i32(node_props, "NodePosX").unwrap_or(0);
-                    let y = find_prop_i32(node_props, "NodePosY").unwrap_or(0);
-                    let summary =
-                        summarise_node(&node_class, node_props, &asset.imports, &export_names);
-                    if !summary.is_empty() {
-                        nodes.push((x, y, summary));
-                    }
-                }
-            }
-        }
-        nodes.sort_by(|(x1, _, s1), (x2, _, s2)| x1.cmp(x2).then(s1.cmp(s2)));
-
-        if graph_comments.is_empty() {
-            // No comment boxes — flat list
-            for (_, _, desc) in &nodes {
-                writeln!(buf, "  {}", desc).unwrap();
-            }
-        } else {
-            // Group nodes by enclosing comment box
-            let mut grouped: Vec<(Option<&str>, Vec<&str>)> = Vec::new();
-            let mut ungrouped: Vec<&str> = Vec::new();
-            // For each comment box, collect nodes inside it
-            let mut assigned: Vec<bool> = vec![false; nodes.len()];
-            // Sort comments by area (largest first) so smaller inner comments take priority later
-            let mut comment_order: Vec<usize> = (0..graph_comments.len()).collect();
-            comment_order.sort_by_key(|&i| {
-                let cb = &graph_comments[i];
-                std::cmp::Reverse(cb.width as i64 * cb.height as i64)
-            });
-            // Assign nodes to the smallest enclosing comment
-            let mut node_group: Vec<Option<usize>> = vec![None; nodes.len()];
-            for &ci in comment_order.iter().rev() {
-                let cb = &graph_comments[ci];
-                for (ni, (x, y, _)) in nodes.iter().enumerate() {
-                    if cb.contains_point(*x, *y) {
-                        node_group[ni] = Some(ci);
-                    }
-                }
-            }
-            // Collect groups in comment order
-            let mut seen_groups: HashSet<usize> = HashSet::new();
-            for (ni, (_, _, desc)) in nodes.iter().enumerate() {
-                if let Some(ci) = node_group[ni] {
-                    if seen_groups.insert(ci) {
-                        let group_nodes: Vec<&str> = nodes
-                            .iter()
-                            .enumerate()
-                            .filter(|(j, _)| node_group[*j] == Some(ci))
-                            .map(|(_, (_, _, d))| d.as_str())
-                            .collect();
-                        grouped.push((Some(graph_comments[ci].text.as_str()), group_nodes));
-                    }
-                    assigned[ni] = true;
-                } else {
-                    ungrouped.push(desc.as_str());
-                }
-            }
-            // Emit ungrouped nodes first
-            for desc in &ungrouped {
-                writeln!(buf, "  {}", desc).unwrap();
-            }
-            // Emit each comment group
-            for (comment, group_nodes) in &grouped {
-                if let Some(text) = comment {
-                    emit_comment(&mut buf, text, "  ");
-                }
-                for desc in group_nodes {
-                    writeln!(buf, "  {}", desc).unwrap();
-                }
-            }
-        }
-        writeln!(buf).unwrap();
-    }
-
     buf
 }
 
 pub fn print_summary(asset: &ParsedAsset, filters: &[String]) {
     print!("{}", format_summary(asset, filters));
-}
-
-fn summarise_node(
-    class: &str,
-    props: &[Property],
-    imports: &[ImportEntry],
-    export_names: &[String],
-) -> String {
-    let short = short_class(class);
-    match short.as_str() {
-        "K2Node_CallFunction" => {
-            let func = get_member_ref(props, imports, export_names);
-            let pure = find_prop(props, "bIsPureFunc")
-                .is_some_and(|p| matches!(p.value, PropValue::Bool(true)));
-            if pure {
-                format!("[pure] {}", func)
-            } else {
-                format!("Call {}", func)
-            }
-        }
-        "K2Node_CommutativeAssociativeBinaryOperator" => {
-            let func = get_member_ref(props, imports, export_names);
-            format!("[pure] {}", func)
-        }
-        "K2Node_FunctionEntry" => {
-            let name = get_member_name(props);
-            format!("Entry: {}", name)
-        }
-        "K2Node_FunctionResult" => {
-            let name = get_member_name(props);
-            format!("Return: {}", name)
-        }
-        "K2Node_VariableGet" => {
-            let var = get_var_ref(props, imports, export_names);
-            format!("Get {}", var)
-        }
-        "K2Node_VariableSet" => {
-            let var = get_var_ref(props, imports, export_names);
-            format!("Set {}", var)
-        }
-        "K2Node_DynamicCast" => {
-            let target = find_prop(props, "TargetType")
-                .map(|p| match &p.value {
-                    PropValue::Object(idx) => {
-                        short_class(&resolve_index(imports, export_names, *idx))
-                    }
-                    _ => "?".into(),
-                })
-                .unwrap_or_else(|| "?".into());
-            format!("Cast to {}", target)
-        }
-        "K2Node_Event" => {
-            let name = get_event_name(props);
-            format!("Event: {}", name)
-        }
-        "K2Node_CustomEvent" => {
-            let name = find_prop_str(props, "CustomFunctionName")
-                .or_else(|| get_event_name_opt(props))
-                .unwrap_or_else(|| "?".into());
-            format!("Event: {}", name)
-        }
-        "K2Node_IfThenElse" => "Branch".into(),
-        "K2Node_MacroInstance" => {
-            let name = get_macro_name(props, imports, export_names);
-            format!("Macro: {}", name)
-        }
-        "K2Node_InputAction" => {
-            let name = find_prop_str(props, "InputActionName").unwrap_or_else(|| "?".into());
-            format!("InputAction: {}", name)
-        }
-        "K2Node_InputAxisEvent" => {
-            let name = find_prop_str(props, "InputAxisName").unwrap_or_else(|| "?".into());
-            format!("InputAxis: {}", name)
-        }
-        "K2Node_InputKey" => {
-            let key = find_prop(props, "InputKey")
-                .and_then(|p| match &p.value {
-                    PropValue::Struct { fields, .. } => find_prop_str(fields, "KeyName"),
-                    _ => None,
-                })
-                .unwrap_or_else(|| "?".into());
-            format!("InputKey: {}", key)
-        }
-        "K2Node_ExecutionSequence" => "Sequence".into(),
-        "K2Node_Timeline" => {
-            let name = find_prop_str(props, "TimelineName").unwrap_or_else(|| "?".into());
-            format!("Timeline: {}", name)
-        }
-        "K2Node_SpawnActorFromClass" => "SpawnActor".into(),
-        "K2Node_CreateDelegate" | "K2Node_AssignDelegate" => {
-            let name = find_prop_str(props, "FunctionName")
-                .or_else(|| find_prop_str(props, "SelectedFunctionName"))
-                .unwrap_or_else(|| "?".into());
-            format!("{}: {}", short, name)
-        }
-        "K2Node_ComponentBoundEvent" => {
-            let event = find_prop_str(props, "DelegatePropertyName").unwrap_or_else(|| "?".into());
-            let component =
-                find_prop_str(props, "ComponentPropertyName").unwrap_or_else(|| "?".into());
-            format!("Event: {}.{}", component, event)
-        }
-        "K2Node_SwitchEnum"
-        | "K2Node_SwitchInteger"
-        | "K2Node_SwitchString"
-        | "K2Node_SwitchName" => "Switch".into(),
-        "K2Node_Select" => "Select".into(),
-        // Noise nodes — filtered out in the graph loop
-        "K2Node_Knot" | "K2Node_Self" => String::new(),
-        _ => short.to_string(),
-    }
-}
-
-fn get_member_ref(props: &[Property], imports: &[ImportEntry], export_names: &[String]) -> String {
-    find_prop(props, "FunctionReference")
-        .and_then(|p| match &p.value {
-            PropValue::Struct { fields, .. } => {
-                let parent = find_prop(fields, "MemberParent")
-                    .map(|mp| match &mp.value {
-                        PropValue::Object(idx) => {
-                            short_class(&resolve_index(imports, export_names, *idx))
-                        }
-                        _ => String::new(),
-                    })
-                    .unwrap_or_default();
-                let name = find_prop_str(fields, "MemberName").unwrap_or_else(|| "?".into());
-                if parent.is_empty() {
-                    Some(name)
-                } else {
-                    Some(format!("{}::{}", parent, name))
-                }
-            }
-            _ => None,
-        })
-        .unwrap_or_else(|| "?".into())
-}
-
-fn get_member_name(props: &[Property]) -> String {
-    find_prop(props, "FunctionReference")
-        .and_then(|p| match &p.value {
-            PropValue::Struct { fields, .. } => find_prop_str(fields, "MemberName"),
-            _ => None,
-        })
-        .unwrap_or_else(|| "?".into())
-}
-
-fn get_event_name(props: &[Property]) -> String {
-    get_event_name_opt(props).unwrap_or_else(|| "?".into())
 }
 
 fn get_event_name_opt(props: &[Property]) -> Option<String> {
@@ -1451,26 +1366,6 @@ fn get_event_name_opt(props: &[Property]) -> Option<String> {
         }
     }
     None
-}
-
-fn get_macro_name(props: &[Property], imports: &[ImportEntry], export_names: &[String]) -> String {
-    // MacroGraphReference.MacroGraph — can be object ref or string path
-    if let Some(p) = find_prop(props, "MacroGraphReference") {
-        if let PropValue::Struct { fields, .. } = &p.value {
-            if let Some(mg) = find_prop(fields, "MacroGraph") {
-                match &mg.value {
-                    PropValue::Object(idx) => {
-                        return short_class(&resolve_index(imports, export_names, *idx));
-                    }
-                    PropValue::Str(path) | PropValue::Name(path) => {
-                        return short_class(path);
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-    get_member_name(props)
 }
 
 fn filter_flags_for_summary(flags: &str) -> String {
@@ -1524,6 +1419,30 @@ fn emit_ubergraph_events(
         }
     }
 
+    // Identify comment boxes covering multiple events — emit once as group header
+    let multi_event_idxs: HashSet<usize> = if let Some(cbs) = comments {
+        cbs.iter()
+            .enumerate()
+            .filter_map(|(i, cb)| {
+                if cb.is_bubble {
+                    return None;
+                }
+                let count = event_positions
+                    .values()
+                    .filter(|&&(ex, ey)| cb.contains_point(ex, ey))
+                    .count();
+                if count > 1 {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let mut emitted_group_comments: HashSet<usize> = HashSet::new();
+
     // Emit each event section as a standalone function
     for (si, section) in sections.iter().enumerate() {
         if section.name == "(latent resume)" {
@@ -1548,9 +1467,14 @@ fn emit_ubergraph_events(
         let (top_level_comments, inline_comments) = if !section.name.is_empty() {
             if let (Some(cbs), Some(&(ex, ey))) = (comments, event_positions.get(&section.name)) {
                 // Event-wrapping comment boxes (contain the event node) → top-level
+                // Exclude multi-event comments (handled as group headers)
                 let mut event_wrapping: Vec<&CommentBox> = cbs
                     .iter()
-                    .filter(|c| !c.is_bubble && c.contains_point(ex, ey))
+                    .enumerate()
+                    .filter(|(i, c)| {
+                        !c.is_bubble && c.contains_point(ex, ey) && !multi_event_idxs.contains(i)
+                    })
+                    .map(|(_, c)| c)
                     .collect();
                 event_wrapping.sort_by_key(|c| ((c.width as i64) * (c.height as i64), c.x, c.y));
                 event_wrapping.truncate(2);
@@ -1584,13 +1508,18 @@ fn emit_ubergraph_events(
 
                     let remaining: Vec<&CommentBox> = cbs
                         .iter()
-                        .filter(|c| {
+                        .enumerate()
+                        .filter(|(i, c)| {
                             if event_wrapping.iter().any(|ew| std::ptr::eq(*ew, *c)) {
+                                return false;
+                            }
+                            if multi_event_idxs.contains(i) {
                                 return false;
                             }
                             let cy = if c.is_bubble { c.y } else { c.y + c.height / 2 };
                             cy >= scope_y_min && cy <= scope_y_max
                         })
+                        .map(|(_, c)| c)
                         .collect();
                     for cb in remaining {
                         if let Some(line_idx) = find_comment_line(cb, &scoped_nodes, &section.lines)
@@ -1609,14 +1538,44 @@ fn emit_ubergraph_events(
             (Vec::new(), Vec::new())
         };
 
+        // Determine if this event is inside a multi-event comment group
+        let in_group = if let Some(cbs) = comments {
+            if let Some(&(ex, ey)) = event_positions.get(&section.name) {
+                cbs.iter()
+                    .enumerate()
+                    .any(|(i, cb)| multi_event_idxs.contains(&i) && cb.contains_point(ex, ey))
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        let sig_indent = if in_group { "    " } else { "  " };
+        let body_indent = if in_group { "        " } else { "    " };
+
         if !section.name.is_empty() {
-            writeln!(buf, "  {}():", section.name).unwrap();
+            // Emit multi-event group headers (once, on first event in group)
+            if let Some(cbs) = comments {
+                if let Some(&(ex, ey)) = event_positions.get(&section.name) {
+                    for (i, cb) in cbs.iter().enumerate() {
+                        if multi_event_idxs.contains(&i)
+                            && !emitted_group_comments.contains(&i)
+                            && cb.contains_point(ex, ey)
+                        {
+                            emit_comment(buf, &cb.text, "  ");
+                            emitted_group_comments.insert(i);
+                        }
+                    }
+                }
+            }
             if let Some(callers) = callers_map.get(&section.name) {
-                writeln!(buf, "    // called by: {}", callers.join(", ")).unwrap();
+                writeln!(buf, "{}// called by: {}", sig_indent, callers.join(", ")).unwrap();
             }
+            // Per-event comments before signature
             for cb in &top_level_comments {
-                emit_comment(buf, &cb.text, "    ");
+                emit_comment(buf, &cb.text, sig_indent);
             }
+            writeln!(buf, "{}{}():", sig_indent, section.name).unwrap();
         }
         // Find the first entry in delay_resume_map for this section
         let mut drm_pos = delay_resume_map
@@ -1629,7 +1588,7 @@ fn emit_ubergraph_events(
             // Emit any inline comments targeting this line
             while inline_idx < inline_comments.len() && inline_comments[inline_idx].0 == i {
                 let ws_len = line.len() - line.trim_start().len();
-                let indent = format!("    {}", &line[..ws_len]);
+                let indent = format!("{}{}", body_indent, &line[..ws_len]);
                 emit_comment(buf, &inline_comments[inline_idx].1.text, &indent);
                 inline_idx += 1;
             }
@@ -1640,7 +1599,7 @@ fn emit_ubergraph_events(
             if trimmed == "return" {
                 continue;
             } // trailing returns are implicit
-            writeln!(buf, "    {}", clean).unwrap();
+            writeln!(buf, "{}{}", body_indent, clean).unwrap();
 
             // If this line had a Delay with a resume, inline the next resume block
             if parse_resume_offset(line).is_some()
@@ -1649,9 +1608,9 @@ fn emit_ubergraph_events(
             {
                 let ri = delay_resume_map[drm_pos].1;
                 if let Some(rb) = resume_blocks.get(ri) {
-                    writeln!(buf, "    // after delay:").unwrap();
+                    writeln!(buf, "{}// after delay:", body_indent).unwrap();
                     for rline in &rb.lines {
-                        writeln!(buf, "    {}", rline).unwrap();
+                        writeln!(buf, "{}{}", body_indent, rline).unwrap();
                     }
                 }
                 drm_pos += 1;
@@ -1752,12 +1711,7 @@ fn is_ubergraph_stub(props: &[Property], ug_name: &str) -> bool {
         .iter()
         .filter_map(|item| {
             if let PropValue::Str(line) = item {
-                // Strip hex offset prefix (e.g. "0000: ")
-                let code = if line.len() > 6 && line.as_bytes()[4] == b':' {
-                    line[6..].trim()
-                } else {
-                    line.trim()
-                };
+                let code = strip_offset_prefix(line).trim();
                 match code {
                     "" | "return" | "return nop" => None,
                     _ => Some(code),
@@ -1767,7 +1721,7 @@ fn is_ubergraph_stub(props: &[Property], ug_name: &str) -> bool {
             }
         })
         .collect();
-    if meaningful.is_empty() || meaningful.len() > 2 {
+    if meaningful.is_empty() {
         return false;
     }
     meaningful
@@ -1778,30 +1732,295 @@ fn is_ubergraph_stub(props: &[Property], ug_name: &str) -> bool {
             .all(|line| line.starts_with(&format!("{}(", ug_name)) || line.contains("[persistent]"))
 }
 
-fn get_var_ref(props: &[Property], imports: &[ImportEntry], export_names: &[String]) -> String {
-    find_prop(props, "VariableReference")
-        .and_then(|p| match &p.value {
-            PropValue::Struct { fields, .. } => {
-                let parent = find_prop(fields, "MemberParent")
-                    .map(|mp| match &mp.value {
-                        PropValue::Object(idx) => {
-                            short_class(&resolve_index(imports, export_names, *idx))
-                        }
-                        _ => String::new(),
-                    })
-                    .unwrap_or_default();
-                let name = find_prop_str(fields, "MemberName").unwrap_or_else(|| "?".into());
-                let is_self = find_prop(fields, "bSelfContext")
-                    .is_some_and(|p| matches!(p.value, PropValue::Bool(true)));
-                if is_self {
-                    Some(format!("self.{}", name))
-                } else if parent.is_empty() {
-                    Some(name)
-                } else {
-                    Some(format!("{}.{}", parent, name))
-                }
-            }
-            _ => None,
-        })
-        .unwrap_or_else(|| "?".into())
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stmt(offset: usize, text: &str) -> BcStatement {
+        BcStatement {
+            mem_offset: offset,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn split_exact_match_ignores_high_offsets() {
+        // Simulate flow-reordered UberGraph: Event A at offset 100 has a Sequence
+        // body moved inline from offset 5000. Event B starts at offset 1000.
+        // The old watermark approach would split at offset 5000 >= 1000.
+        let stmts = vec![
+            stmt(100, "// sequence [0]:"),
+            stmt(5000, "body_stmt_1"),
+            stmt(5010, "body_stmt_2"),
+            stmt(100, "// sequence [1]:"),
+            stmt(150, "inline_stmt"),
+            stmt(1000, "event_b_start"),
+            stmt(1020, "event_b_stmt"),
+        ];
+        let a = "EventA".to_string();
+        let b = "EventB".to_string();
+        let labels: Vec<(usize, &String)> = vec![(100, &a), (1000, &b)];
+
+        let segments = split_stmts_by_labels(&stmts, &labels);
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].0, "EventA");
+        assert_eq!(segments[0].1.len(), 5); // all stmts before EventB
+        assert_eq!(segments[1].0, "EventB");
+        assert_eq!(segments[1].1.len(), 2);
+    }
+
+    #[test]
+    fn split_latent_resume_before_first_label() {
+        let stmts = vec![
+            stmt(50, "latent_code"),
+            stmt(100, "event_start"),
+            stmt(120, "event_stmt"),
+        ];
+        let a = "EventA".to_string();
+        let labels: Vec<(usize, &String)> = vec![(100, &a)];
+
+        let segments = split_stmts_by_labels(&stmts, &labels);
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].0, ""); // unnamed latent resume
+        assert_eq!(segments[0].1.len(), 1);
+        assert_eq!(segments[1].0, "EventA");
+        assert_eq!(segments[1].1.len(), 2);
+    }
+
+    #[test]
+    fn split_fuzzy_match_within_8_bytes() {
+        // Label offset 97 matches first stmt at offset 100 (3 bytes off, within 8-byte window)
+        let stmts = vec![stmt(100, "event_start"), stmt(120, "event_stmt")];
+        let a = "EventA".to_string();
+        let labels: Vec<(usize, &String)> = vec![(97, &a)];
+
+        let segments = split_stmts_by_labels(&stmts, &labels);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].0, "EventA");
+        assert_eq!(segments[0].1.len(), 2);
+    }
+
+    #[test]
+    fn split_rejects_match_beyond_8_bytes() {
+        // Label offset 90 does NOT match stmt at offset 100 (10 bytes off, beyond window)
+        let stmts = vec![stmt(100, "event_start"), stmt(120, "event_stmt")];
+        let a = "EventA".to_string();
+        let labels: Vec<(usize, &String)> = vec![(90, &a)];
+
+        let segments = split_stmts_by_labels(&stmts, &labels);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].0, ""); // unmatched — no label found
+    }
+
+    #[test]
+    fn cross_segment_jump_past_end_not_rewritten() {
+        // jump 0x2000 is past max offset (120) → find_target_idx_or_end resolves
+        // this as jump-to-end, so resolve_cross_segment_jumps leaves it alone
+        let mut stmts = vec![
+            stmt(100, "some_call()"),
+            stmt(110, "jump 0x2000"),
+            stmt(120, "return nop"),
+        ];
+        resolve_cross_segment_jumps(&mut stmts);
+        assert_eq!(stmts[1].text, "jump 0x2000"); // unchanged — past-end is resolvable
+                                                  // Sentinel still appended
+        assert_eq!(stmts.last().unwrap().text, "return nop");
+        assert_eq!(stmts.last().unwrap().mem_offset, 121);
+    }
+
+    #[test]
+    fn unresolvable_jump_rewritten() {
+        // jump 0x50 (=80) is before the segment start and >4 bytes from any
+        // statement → find_target_idx would return None → rewritten to sentinel
+        let mut stmts = vec![
+            stmt(100, "some_call()"),
+            stmt(110, "jump 0x50"),
+            stmt(120, "return nop"),
+        ];
+        resolve_cross_segment_jumps(&mut stmts);
+        assert_eq!(stmts[1].text, "jump 0x79"); // rewritten to sentinel (121)
+    }
+
+    #[test]
+    fn unresolvable_conditional_jump_rewritten() {
+        // if !(cond) jump 0x50 — target not resolvable → rewritten
+        let mut stmts = vec![
+            stmt(100, "if !(IsValid(X)) jump 0x50"),
+            stmt(110, "DoThing()"),
+            stmt(120, "return nop"),
+        ];
+        resolve_cross_segment_jumps(&mut stmts);
+        assert_eq!(stmts[0].text, "if !(IsValid(X)) jump 0x79");
+    }
+
+    #[test]
+    fn local_jump_preserved() {
+        // jump 0x78 (=120) is within the segment → preserved
+        let mut stmts = vec![
+            stmt(100, "some_call()"),
+            stmt(110, "jump 0x78"),
+            stmt(120, "return nop"),
+        ];
+        resolve_cross_segment_jumps(&mut stmts);
+        assert_eq!(stmts[1].text, "jump 0x78"); // unchanged
+    }
+
+    #[test]
+    fn local_fuzzy_jump_preserved() {
+        // jump 0x75 (=117) is within ±4 of offset 120 → preserved as local
+        let mut stmts = vec![
+            stmt(100, "some_call()"),
+            stmt(110, "jump 0x75"),
+            stmt(120, "return nop"),
+        ];
+        resolve_cross_segment_jumps(&mut stmts);
+        assert_eq!(stmts[1].text, "jump 0x75"); // unchanged — fuzzy match
+    }
+
+    #[test]
+    fn fuzzy_jump_beyond_4_bytes_rewritten() {
+        // jump 0x73 (=115) is 5 bytes from offset 120, outside ±4 window
+        // and >4 from offset 110 too → unresolvable → rewritten
+        let mut stmts = vec![
+            stmt(100, "some_call()"),
+            stmt(110, "jump 0x73"),
+            stmt(120, "return nop"),
+        ];
+        resolve_cross_segment_jumps(&mut stmts);
+        assert_eq!(stmts[1].text, "jump 0x79"); // rewritten — outside ±4
+    }
+
+    #[test]
+    fn strip_orphaned_empty_if() {
+        let mut lines = vec![
+            "if (cond) {".to_string(),
+            "}".to_string(),
+            "DoThing()".to_string(),
+        ];
+        strip_orphaned_blocks(&mut lines);
+        assert_eq!(lines, vec!["DoThing()"]);
+    }
+
+    #[test]
+    fn strip_orphaned_empty_if_else() {
+        let mut lines = vec![
+            "if (cond) {".to_string(),
+            "} else {".to_string(),
+            "    DoThing()".to_string(),
+            "}".to_string(),
+        ];
+        strip_orphaned_blocks(&mut lines);
+        assert_eq!(lines, vec!["    DoThing()"]);
+    }
+
+    #[test]
+    fn strip_orphaned_else_empty() {
+        let mut lines = vec![
+            "    DoThing()".to_string(),
+            "} else {".to_string(),
+            "}".to_string(),
+        ];
+        strip_orphaned_blocks(&mut lines);
+        assert_eq!(lines, vec!["    DoThing()"]);
+    }
+
+    #[test]
+    fn strip_goto_label_at_end() {
+        // goto L_01fa where label is at end of output (convergence to end)
+        let mut lines = vec![
+            "if (cast(X)) {".to_string(),
+            "    iface(X).CanConsume(Y)".to_string(),
+            "    L_01fa:".to_string(),
+            "}".to_string(),
+            "goto L_01fa".to_string(),
+        ];
+        strip_orphaned_blocks(&mut lines);
+        assert_eq!(
+            lines,
+            vec![
+                "if (cast(X)) {".to_string(),
+                "    iface(X).CanConsume(Y)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn strip_backward_goto_to_start() {
+        // backward goto to label at start of segment (Sequence artifact)
+        let mut lines = vec![
+            "L_0c3e:".to_string(),
+            "AttemptGrip(true)".to_string(),
+            "goto L_0c3e".to_string(),
+        ];
+        strip_orphaned_blocks(&mut lines);
+        assert_eq!(lines, vec!["AttemptGrip(true)"]);
+    }
+
+    #[test]
+    fn strip_goto_fall_through() {
+        // goto immediately before its label with only } between (fall-through)
+        // The } is structural (closes an if-block) and stays
+        let mut lines = vec![
+            "DoThing()".to_string(),
+            "goto L_0100".to_string(),
+            "}".to_string(),
+            "L_0100:".to_string(),
+            "DoOther()".to_string(),
+        ];
+        strip_orphaned_blocks(&mut lines);
+        assert_eq!(
+            lines,
+            vec![
+                "DoThing()".to_string(),
+                "}".to_string(),
+                "DoOther()".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn preserve_multi_ref_goto() {
+        // Labels with 2+ gotos are preserved (handled by extract_convergence)
+        let mut lines = vec![
+            "goto L_0100".to_string(),
+            "L_0100:".to_string(),
+            "DoThing()".to_string(),
+            "goto L_0100".to_string(),
+        ];
+        strip_orphaned_blocks(&mut lines);
+        assert!(lines.iter().any(|l| l.contains("L_0100")));
+    }
+
+    #[test]
+    fn strip_bare_temp_expression() {
+        let mut lines = vec![
+            "$InputActionEvent_Key_4".to_string(),
+            "self.EnableDebugHandRotation = true".to_string(),
+        ];
+        strip_orphaned_blocks(&mut lines);
+        assert_eq!(lines, vec!["self.EnableDebugHandRotation = true"]);
+    }
+
+    #[test]
+    fn strip_bare_boolean_literal() {
+        let mut lines = vec!["false".to_string()];
+        strip_orphaned_blocks(&mut lines);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn keep_indented_bare_expression() {
+        // Inside a block, bare expressions should be preserved
+        let mut lines = vec![
+            "if (cond) {".to_string(),
+            "    $SomeVar".to_string(),
+            "}".to_string(),
+        ];
+        strip_orphaned_blocks(&mut lines);
+        assert!(lines.iter().any(|l| l.contains("$SomeVar")));
+    }
 }

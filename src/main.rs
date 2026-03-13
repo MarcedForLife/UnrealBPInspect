@@ -86,6 +86,16 @@ fn collect_from_dir(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+fn read_file_or_exit(path: &Path) -> Vec<u8> {
+    match std::fs::read(path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("failed to read {}: {}", path.display(), e);
+            std::process::exit(2);
+        }
+    }
+}
+
 fn process_file(path: &Path, mode: &OutputMode, filters: &[String], debug: bool) -> Result<String> {
     let data = std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     let asset =
@@ -137,20 +147,8 @@ fn main() {
             eprintln!("--diff requires exactly 2 .uasset files");
             std::process::exit(2);
         }
-        let before = match std::fs::read(&files[0]) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("failed to read {}: {}", files[0].display(), e);
-                std::process::exit(2);
-            }
-        };
-        let after = match std::fs::read(&files[1]) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("failed to read {}: {}", files[1].display(), e);
-                std::process::exit(2);
-            }
-        };
+        let before = read_file_or_exit(&files[0]);
+        let after = read_file_or_exit(&files[1]);
         let label_a = files[0].display().to_string();
         let label_b = files[1].display().to_string();
         match format_diff(&before, &after, &label_a, &label_b, &filters, cli.context) {
