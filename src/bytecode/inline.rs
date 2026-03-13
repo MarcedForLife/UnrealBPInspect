@@ -1,5 +1,5 @@
 use super::decode::BcStatement;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Inline single-use `$temp` variables to reduce noise.
 /// Only inlines vars that:
@@ -178,10 +178,32 @@ fn substitute_var(text: &str, var: &str, expr: &str) -> String {
     text.to_string()
 }
 
+/// Check if an expression contains a function/method call (i.e., has side effects).
+/// Returns true if there's an identifier followed by `(` where the identifier is not
+/// a keyword like `switch` or `if`.  Pure expressions like `switch(X) { ... }` or
+/// `(A + B)` return false.
+fn expr_has_call(expr: &str) -> bool {
+    let bytes = expr.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'(' && i > 0 {
+            // Walk backward to find the identifier before the paren
+            let mut j = i;
+            while j > 0 && (bytes[j - 1].is_ascii_alphanumeric() || bytes[j - 1] == b'_') {
+                j -= 1;
+            }
+            let word = &expr[j..i];
+            if !word.is_empty() && word != "switch" && word != "if" && word != "bool" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn expr_is_compound(expr: &str) -> bool {
     const TOKENS: &[&str] = &[
         " && ", " || ", " + ", " - ", " * ", " / ", " % ", " < ", " <= ", " > ", " >= ", " == ",
-        " != ", " >> ", " << ",
+        " != ", " >> ", " << ", " ? ",
     ];
     TOKENS.iter().any(|tok| expr.contains(tok)) || expr.starts_with('!')
 }
@@ -222,9 +244,82 @@ fn used_in_operator_context(text: &str, pos: usize, after: usize) -> bool {
     op_before || op_after
 }
 
+/// Inline `Temp_*` / `$temp` variables that are always assigned the same value.
+/// UE4 Select nodes re-assign the index input before every use; this pass
+/// collapses `Temp_bool_Variable = LeftHand` + `switch(Temp_bool_Variable)`
+/// into `switch(LeftHand)`.
+pub fn inline_constant_temps(stmts: &mut Vec<BcStatement>) {
+    // Collect all assignments for each temp variable: (stmt_index, expr)
+    let mut assignments: HashMap<String, Vec<(usize, String)>> = HashMap::new();
+    for (i, s) in stmts.iter().enumerate() {
+        if let Some((var, expr)) = parse_temp_assignment(&s.text) {
+            assignments
+                .entry(var.to_string())
+                .or_default()
+                .push((i, expr.to_string()));
+        }
+    }
+
+    // Keep only variables where ALL assignments have the same expression.
+    // - Multi-assignment (any prefix): UE4 Select pattern re-assigns before each use
+    // - Single-assignment (Temp_* only): safe to inline since Temp_ vars are read-only
+    //   Select indices, never out-parameters.  $-prefixed temps may be out-params
+    //   modified by function calls, so single assignments are left to inline_single_use_temps.
+    let constant_vars: BTreeMap<String, String> = assignments
+        .into_iter()
+        .filter(|(var, entries)| {
+            let all_same = entries.iter().all(|(_, e)| *e == entries[0].1);
+            let multi = entries.len() > 1;
+            all_same && (multi || var.starts_with("Temp_"))
+        })
+        .map(|(var, entries)| (var, entries[0].1.clone()))
+        .collect();
+
+    if constant_vars.is_empty() {
+        return;
+    }
+
+    // Collect assignment indices to remove
+    let mut remove_indices: HashSet<usize> = HashSet::new();
+    for (i, s) in stmts.iter().enumerate() {
+        if let Some((var, _)) = parse_temp_assignment(&s.text) {
+            if constant_vars.contains_key(var) {
+                remove_indices.insert(i);
+            }
+        }
+    }
+
+    // Substitute the constant expression into all references
+    for s in stmts.iter_mut() {
+        for (var, expr) in &constant_vars {
+            if count_var_refs(&s.text, var) > 0 {
+                // Substitute all occurrences
+                let mut text = s.text.clone();
+                loop {
+                    let new_text = substitute_var(&text, var, expr);
+                    if new_text == text {
+                        break;
+                    }
+                    text = new_text;
+                }
+                s.text = text;
+            }
+        }
+    }
+
+    // Remove the dead assignment statements
+    let mut idx = 0;
+    stmts.retain(|_| {
+        let keep = !remove_indices.contains(&idx);
+        idx += 1;
+        keep
+    });
+}
+
 /// Discard assignments to `$temp` variables that are never referenced.
-/// Keeps the RHS call (side effects) but drops the `$var = ` prefix.
-pub fn discard_unused_assignments(stmts: &mut [BcStatement]) {
+/// Keeps the RHS expression only if it has side effects (contains a function call).
+/// Pure expressions (no function call) are removed entirely.
+pub fn discard_unused_assignments(stmts: &mut Vec<BcStatement>) {
     // Count how many times each var is assigned
     let mut assign_counts: HashMap<String, usize> = HashMap::new();
     for s in stmts.iter() {
@@ -250,11 +345,19 @@ pub fn discard_unused_assignments(stmts: &mut [BcStatement]) {
     for s in stmts.iter_mut() {
         if let Some((var, expr)) = parse_temp_assignment(&s.text) {
             if ref_counts.get(var).copied() == Some(0) {
-                // Drop the assignment, keep just the expression (function call)
-                s.text = expr.to_string();
+                if expr_has_call(expr) {
+                    // Keep: expression has side effects (function/method call)
+                    s.text = expr.to_string();
+                } else {
+                    // Remove: pure expression with no side effects
+                    s.text.clear();
+                }
             }
         }
     }
+
+    // Remove cleared statements
+    stmts.retain(|s| !s.text.is_empty());
 }
 
 /// Clean up structured output lines: double negation, extra parens, trailing returns.
@@ -284,6 +387,16 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
             i += 1;
         }
     }
+    // Remove "return" immediately before "// sequence [N]:" markers.
+    // These are sentinel leaks from Sequence body boundaries (return nop).
+    let mut i = 0;
+    while i + 1 < lines.len() {
+        if lines[i].trim() == "return" && lines[i + 1].trim().starts_with("// sequence [") {
+            lines.remove(i);
+            continue;
+        }
+        i += 1;
+    }
 
     // Pass 3: suppress dead code after unconditional return at indent 0
     // Only in non-ubergraph functions (no "---" labels)
@@ -307,6 +420,22 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
 
     // Pass 4: rewrite negated guards with compound conditions
     rewrite_negated_guards(lines);
+
+    // Pass 5: strip trailing unmatched closing braces.
+    // The structurer's safety net (`while indent > 0`) emits a `}` for every
+    // remaining open block.  When flow patterns (Sequences, loops) consume
+    // statements that opened blocks but not those that close them, the output
+    // ends with orphaned `}`.  Count block-level braces and strip the excess.
+    let opens: usize = lines.iter().filter(|l| l.trim().ends_with('{')).count();
+    let closes: usize = lines.iter().filter(|l| l.trim().starts_with('}')).count();
+    let excess = closes.saturating_sub(opens);
+    for _ in 0..excess {
+        if lines.last().is_some_and(|l| l.trim() == "}") {
+            lines.pop();
+        } else {
+            break;
+        }
+    }
 }
 
 fn clean_line(text: &str) -> String {
@@ -384,55 +513,192 @@ fn clean_line(text: &str) -> String {
         break;
     }
 
+    // Boolean switch → ternary: switch(COND) { false: F, true: T } → COND ? T : F
+    s = rewrite_bool_switches(&s);
+
     s
 }
 
-/// Check if a string contains ` && ` or ` || ` at paren depth 0.
-/// Used to determine if `!` only negates the first operand in a compound expression.
-fn has_toplevel_logical_op(s: &str) -> bool {
+/// Rewrite `switch(COND) { false: F, true: T }` → `COND ? T : F` in a single line.
+/// Handles both orderings (false-first and true-first), nested switches, and
+/// method chains after the closing `}`.
+fn rewrite_bool_switches(line: &str) -> String {
+    let mut s = line.to_string();
+    // Loop to handle multiple switches per line (process left-to-right)
+    loop {
+        let Some(result) = rewrite_one_bool_switch(&s) else {
+            break;
+        };
+        s = result;
+    }
+    s
+}
+
+/// Find and rewrite the first `switch(COND) { false: F, true: T }` in the string.
+/// Returns None if no bool switch was found.
+fn rewrite_one_bool_switch(s: &str) -> Option<String> {
+    let switch_pos = s.find("switch(")?;
+
+    // Extract COND by matching parens from the `(` after `switch`
+    let paren_start = switch_pos + 6; // index of '('
+    let cond_close = find_matching_paren(&s[paren_start..])?;
+    let cond = &s[paren_start + 1..paren_start + cond_close];
+
+    // Expect ` { ` after the closing paren
+    let after_cond = &s[paren_start + cond_close + 1..];
+    let after_cond = after_cond.strip_prefix(" { ")?;
+    let brace_content_start = paren_start + cond_close + 1 + 3; // absolute pos of content after " { "
+
+    // Parse the two cases. Track paren/brace depth to find `, ` and ` }` boundaries.
+    let (expr_true, expr_false) = parse_bool_switch_cases(after_cond)?;
+
+    // Find where the switch expression ends: scan for matching ` }` in original string
+    let switch_end = find_switch_end(s, brace_content_start)?;
+
+    // Identical branches: emit the expression directly (drop condition)
+    if expr_true == expr_false {
+        return Some(format!(
+            "{}{}{}",
+            &s[..switch_pos],
+            expr_true,
+            &s[switch_end..]
+        ));
+    }
+
+    // Build ternary. Wrap condition in parens if compound.
+    let cond_str = if expr_is_compound(cond) {
+        format!("({})", cond)
+    } else {
+        cond.to_string()
+    };
+
+    let after_switch = &s[switch_end..];
+    let before_switch = s[..switch_pos].trim_end();
+
+    // Wrap ternary in parens when in operator context or method chain
+    let needs_wrap = after_switch.starts_with('.')
+        || before_switch.ends_with('+')
+        || before_switch.ends_with('-')
+        || before_switch.ends_with('*')
+        || before_switch.ends_with('/')
+        || before_switch.ends_with('%')
+        || before_switch.ends_with("&&")
+        || before_switch.ends_with("||")
+        || after_switch.trim_start().starts_with("+ ")
+        || after_switch.trim_start().starts_with("- ")
+        || after_switch.trim_start().starts_with("* ")
+        || after_switch.trim_start().starts_with("/ ")
+        || after_switch.trim_start().starts_with("&& ")
+        || after_switch.trim_start().starts_with("|| ");
+    let ternary = format!("{} ? {} : {}", cond_str, expr_true, expr_false);
+    let replacement = if needs_wrap {
+        format!("({})", ternary)
+    } else {
+        ternary
+    };
+
+    Some(format!(
+        "{}{}{}",
+        &s[..switch_pos],
+        replacement,
+        after_switch
+    ))
+}
+
+/// Parse the case expressions inside `{ false: F, true: T }` or `{ true: T, false: F }`.
+/// Returns (true_expr, false_expr). Returns None for non-bool switches (3+ cases, default:).
+fn parse_bool_switch_cases(content: &str) -> Option<(String, String)> {
+    // Determine case order
+    let (first_label, second_label, starts_false) = if content.starts_with("false: ") {
+        ("false: ", "true: ", true)
+    } else if content.starts_with("true: ") {
+        ("true: ", "false: ", false)
+    } else {
+        return None;
+    };
+
+    let after_first_label = &content[first_label.len()..];
+
+    // Find the `, second_label` separator at depth 0
+    let sep = format!(", {}", second_label);
+    let sep_pos = find_at_depth_zero(after_first_label, &sep)?;
+    let first_expr = &after_first_label[..sep_pos];
+
+    let after_sep = &after_first_label[sep_pos + sep.len()..];
+
+    // Find closing ` }` at depth 0 for second expr
+    let close_pos = find_at_depth_zero(after_sep, " }")?;
+    let second_expr = &after_sep[..close_pos];
+
+    // Reject if either expr is empty
+    if first_expr.is_empty() || second_expr.is_empty() {
+        return None;
+    }
+
+    // Reject if there's a `default:` anywhere (non-bool switch)
+    if content.contains("default:") {
+        return None;
+    }
+
+    if starts_false {
+        Some((second_expr.to_string(), first_expr.to_string()))
+    } else {
+        Some((first_expr.to_string(), second_expr.to_string()))
+    }
+}
+
+/// Find the position of `needle` in `s` at paren/brace depth 0.
+fn find_at_depth_zero(s: &str, needle: &str) -> Option<usize> {
     let mut depth = 0i32;
     let bytes = s.as_bytes();
-    let len = bytes.len();
-    for i in 0..len {
+    let needle_bytes = needle.as_bytes();
+    let nlen = needle_bytes.len();
+    for i in 0..bytes.len() {
         match bytes[i] {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
-            b' ' if depth == 0 && i + 3 < len => {
-                if &s[i..i + 4] == " && " || &s[i..i + 4] == " || " {
-                    return true;
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && i + nlen <= bytes.len() && &bytes[i..i + nlen] == needle_bytes {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Find the absolute position just past the closing ` }` of a switch expression.
+/// `content_start` is the absolute position in `s` where the brace content begins.
+fn find_switch_end(s: &str, content_start: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, &b) in s.as_bytes().iter().enumerate().skip(content_start) {
+        match b {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b'}' => {
+                if depth == 0 {
+                    return Some(i + 1); // past the '}'
                 }
+                depth -= 1;
             }
             _ => {}
         }
     }
-    false
+    None
+}
+
+/// Check if a string contains ` && ` or ` || ` at paren/bracket depth 0.
+fn has_toplevel_logical_op(s: &str) -> bool {
+    find_at_depth_zero(s, " && ").is_some() || find_at_depth_zero(s, " || ").is_some()
 }
 
 /// Strip one layer of redundant outer parentheses if they match.
 fn strip_outer_parens(s: &str) -> &str {
-    if !s.starts_with('(') || !s.ends_with(')') {
-        return s;
-    }
-    // Verify the open paren at 0 matches the close at end
-    let inner = &s[1..s.len() - 1];
-    let mut depth = 0i32;
-    for ch in inner.chars() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth < 0 {
-                    return s;
-                } // close paren matched the outer open
-            }
-            _ => {}
+    if let Some(close) = find_matching_paren(s) {
+        if close == s.len() - 1 {
+            return &s[1..close];
         }
     }
-    if depth == 0 {
-        inner
-    } else {
-        s
-    }
+    s
 }
 
 /// Find the position of the closing ')' matching the '(' at position 0.
@@ -592,12 +858,17 @@ fn process_section(lines: &mut Vec<String>) {
     rewrite_foreach_loops(lines);
     fold_delegate_bindings(lines);
     fold_cast_guards(lines);
+    fold_cast_inline(lines);
     fold_break_patterns(lines);
     fold_struct_construction(lines);
     dedup_completion_paths(lines);
     fold_section_temps(lines);
+    simplify_bool_comparisons(lines);
+    hoist_repeated_ternaries(lines);
     suppress_unused_outparams(lines);
+    fold_outparam_calls(lines);
     compact_large_break_calls(lines);
+    fold_switch_enum_cascade(lines);
 }
 
 /// Rewrite ForEach loop boilerplate into `for (ITEM in ARRAY)`.
@@ -967,6 +1238,82 @@ fn parse_cast_assignment(text: &str) -> Option<(&str, &str)> {
     }
 }
 
+/// Inline cast-and-use patterns: `$X = cast<T>(expr)` + `if ($X) { ... $X ... }`
+/// where `$X` is used only in the if-guard and a few body references.
+/// Substitutes the cast expression everywhere and removes the assignment line.
+fn fold_cast_inline(lines: &mut Vec<String>) {
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim().to_string();
+        let indent_len = lines[i].len() - trimmed.len();
+
+        // Line i: $VAR = cast<T>(expr)
+        let Some((var, rhs)) = parse_cast_assignment(&trimmed) else {
+            i += 1;
+            continue;
+        };
+        // Skip if already folded to "else return"
+        if trimmed.ends_with("else return") {
+            i += 1;
+            continue;
+        }
+        let var = var.to_string();
+        let rhs = rhs.to_string();
+
+        // Next line must be `if ($VAR) {` at same indent
+        if i + 1 >= lines.len() {
+            i += 1;
+            continue;
+        }
+        let next_trimmed = lines[i + 1].trim();
+        let next_indent = lines[i + 1].len() - next_trimmed.len();
+        let expected_if = format!("if ({}) {{", var);
+        if next_indent != indent_len || next_trimmed != expected_if {
+            i += 1;
+            continue;
+        }
+
+        // Count total refs to $VAR in all lines except the assignment
+        let mut total_refs = 0usize;
+        for (j, line) in lines.iter().enumerate() {
+            if j == i {
+                continue;
+            }
+            total_refs += count_var_refs(line.trim(), &var);
+        }
+
+        // if-guard = 1 ref, body uses ≤ 2 refs → total ≤ 3
+        if total_refs > 3 {
+            i += 1;
+            continue;
+        }
+
+        // Substitute cast expression for $VAR everywhere
+        for (j, line) in lines.iter_mut().enumerate() {
+            if j == i {
+                continue;
+            }
+            let li = line.len() - line.trim_start().len();
+            let content = &line[li..];
+            if count_var_refs(content, &var) > 0 {
+                let mut text = content.to_string();
+                loop {
+                    let new_text = replace_all_var_refs(&text, &var, &rhs);
+                    if new_text == text {
+                        break;
+                    }
+                    text = new_text;
+                }
+                *line = format!("{}{}", &line[..li], text);
+            }
+        }
+
+        // Remove the assignment line
+        lines.remove(i);
+        // Don't advance — recheck current position
+    }
+}
+
 /// Fold small Break* calls into field accessors using dynamic field name inference.
 /// `BreakTransform($src, $BreakTransform_Location, ...)` → replace with `$src.Location` etc.
 /// Only applies when output arg count ≤ BREAK_INLINE_MAX_ARGS and all outputs are `$temp`.
@@ -1126,6 +1473,299 @@ fn fold_struct_construction(lines: &mut Vec<String>) {
 }
 
 /// Replace unused `$temp` out-params with `_` in function calls.
+/// Hoist repeated parenthesized ternary expressions into named local variables.
+/// When the same `(COND ? T : F)` appears 3+ times in a section, insert
+/// `$VarName = COND ? T : F` before the first use and replace all occurrences.
+fn hoist_repeated_ternaries(lines: &mut Vec<String>) {
+    // Phase 1: Extract and count all parenthesized ternary expressions
+    let mut ternary_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for line in lines.iter() {
+        for ternary in extract_parenthesized_ternaries(line.trim()) {
+            *ternary_counts.entry(ternary).or_default() += 1;
+        }
+    }
+
+    // Phase 2: Collect ternaries appearing 3+ times, longest first
+    let mut to_hoist: Vec<(String, String)> = Vec::new();
+    for (ternary, count) in &ternary_counts {
+        if *count >= 3 {
+            let var_name = generate_ternary_var_name(ternary, to_hoist.len());
+            to_hoist.push((ternary.clone(), var_name));
+        }
+    }
+    to_hoist.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+
+    // Phase 3: For each hoisted ternary, insert assignment and replace
+    for (ternary, var_name) in &to_hoist {
+        let first_use = lines.iter().position(|l| l.contains(ternary.as_str()));
+        let Some(idx) = first_use else { continue };
+        let indent = lines[idx].len() - lines[idx].trim_start().len();
+        let indent_str = " ".repeat(indent);
+        // Strip outer parens for the assignment RHS
+        let rhs = strip_outer_parens(ternary);
+        lines.insert(idx, format!("{}{} = {}", indent_str, var_name, rhs));
+        // Replace all occurrences in all lines
+        for line in lines.iter_mut() {
+            while line.contains(ternary.as_str()) {
+                *line = line.replacen(ternary.as_str(), var_name, 1);
+            }
+        }
+    }
+}
+
+/// Extract all parenthesized ternary expressions `(COND ? T : F)` from a line.
+fn extract_parenthesized_ternaries(s: &str) -> Vec<String> {
+    let mut results = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'(' {
+            if let Some(close) = find_matching_paren(&s[i..]) {
+                let inner = &s[i + 1..i + close];
+                // Check for ` ? ` and ` : ` at paren depth 0 inside
+                if has_ternary_at_depth_zero(inner) {
+                    results.push(s[i..i + close + 1].to_string());
+                }
+                // Don't skip past close — there may be nested ternaries inside
+                i += 1;
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    results
+}
+
+/// Check if a string contains ` ? ` and ` : ` at paren/brace depth 0.
+fn has_ternary_at_depth_zero(s: &str) -> bool {
+    let mut depth = 0i32;
+    let mut has_question = false;
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    for i in 0..len {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'?' if depth == 0 => {
+                if i > 0 && i + 1 < len && bytes[i - 1] == b' ' && bytes[i + 1] == b' ' {
+                    has_question = true;
+                }
+            }
+            b':' if depth == 0 && has_question => {
+                if i > 0 && i + 1 < len && bytes[i - 1] == b' ' && bytes[i + 1] == b' ' {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Generate a descriptive variable name for a hoisted ternary.
+/// Tries to extract a common suffix from Left/Right branch patterns;
+/// falls back to `$ternary_N`.
+fn generate_ternary_var_name(ternary: &str, index: usize) -> String {
+    let inner = strip_outer_parens(ternary);
+    // Find ` ? ` and ` : ` at depth 0
+    let mut depth = 0i32;
+    let mut q_pos = None;
+    let mut c_pos = None;
+    let bytes = inner.as_bytes();
+    let len = bytes.len();
+    for i in 0..len {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'?' if depth == 0 && q_pos.is_none() => {
+                if i > 0 && i + 1 < len && bytes[i - 1] == b' ' && bytes[i + 1] == b' ' {
+                    q_pos = Some(i);
+                }
+            }
+            b':' if depth == 0 && q_pos.is_some() && c_pos.is_none() => {
+                if i > 0 && i + 1 < len && bytes[i - 1] == b' ' && bytes[i + 1] == b' ' {
+                    c_pos = Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let (Some(q), Some(c)) = (q_pos, c_pos) {
+        let true_expr = inner[q + 2..c - 1].trim();
+        let false_expr = inner[c + 2..].trim();
+        // Try Left/Right suffix extraction
+        if let Some(name) = extract_left_right_suffix(true_expr, false_expr) {
+            return format!("${}", name);
+        }
+        // Use last dot-component of the true branch
+        if let Some(dot) = true_expr.rfind('.') {
+            let suffix = &true_expr[dot + 1..];
+            if !suffix.is_empty()
+                && suffix
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                return format!("${}", suffix);
+            }
+        }
+    }
+    format!("$ternary_{}", index)
+}
+
+/// Given two branch expressions like `self.LeftVRHand` and `self.RightVRHand`,
+/// extract the common suffix after stripping `Left`/`Right` prefixes.
+fn extract_left_right_suffix(true_expr: &str, false_expr: &str) -> Option<String> {
+    // Strip `self.` prefix if present on both
+    let t = true_expr.strip_prefix("self.").unwrap_or(true_expr);
+    let f = false_expr.strip_prefix("self.").unwrap_or(false_expr);
+    // Try stripping Left/Right from true and Right/Left from false
+    let suffix = if let Some(ts) = t.strip_prefix("Left") {
+        if let Some(fs) = f.strip_prefix("Right") {
+            if ts == fs {
+                Some(ts)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else if let Some(ts) = t.strip_prefix("Right") {
+        if let Some(fs) = f.strip_prefix("Left") {
+            if ts == fs {
+                Some(ts)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    suffix.map(|s| s.to_string())
+}
+
+/// Simplify redundant boolean comparisons: `!Func() == 1` → `!Func()`, etc.
+/// Fixes precedence ambiguity where `!Func() == 1` reads as `!(Func() == 1)`.
+fn simplify_bool_comparisons(lines: &mut [String]) {
+    for line in lines.iter_mut() {
+        let indent_len = line.len() - line.trim_start().len();
+        let content = &line[indent_len..];
+        let simplified = simplify_negated_bool_comparison(content);
+        if simplified != content {
+            *line = format!("{}{}", &line[..indent_len], simplified);
+        }
+    }
+}
+
+/// Rewrite `!CALL(...) == 1` → `!CALL(...)`, `!CALL(...) == 0` → `CALL(...)`, etc.
+/// Only matches function-call patterns (identifier followed by parens) to avoid
+/// false positives on member access like `!self.Flag == 1`.
+fn simplify_negated_bool_comparison(s: &str) -> String {
+    let mut result = s.to_string();
+    // Process all occurrences in the string
+    let mut search_from = 0;
+    loop {
+        let remaining = &result[search_from..];
+        // Find `!` that precedes an identifier (not `!(` or `! `)
+        let Some(bang_rel) = remaining.find('!') else {
+            break;
+        };
+        let bang_pos = search_from + bang_rel;
+
+        // Must be followed by an identifier char (start of function name), not `(` or space
+        let after_bang = &result[bang_pos + 1..];
+        if after_bang.is_empty()
+            || after_bang.starts_with('(')
+            || after_bang.starts_with(' ')
+            || after_bang.starts_with('=')
+        {
+            search_from = bang_pos + 1;
+            continue;
+        }
+
+        // The char before `!` should be a non-identifier boundary (space, `(`, start, `=`)
+        if bang_pos > 0 {
+            let prev = result.as_bytes()[bang_pos - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'.' || prev == b'$' {
+                search_from = bang_pos + 1;
+                continue;
+            }
+        }
+
+        // Find the opening paren of the call
+        let call_start = bang_pos + 1;
+        let Some(paren_offset) = result[call_start..].find('(') else {
+            search_from = bang_pos + 1;
+            continue;
+        };
+        let paren_abs = call_start + paren_offset;
+
+        // Between `!` and `(` must be a simple identifier (no spaces, dots — avoids !self.X)
+        let ident = &result[call_start..paren_abs];
+        if ident.is_empty() || !ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            search_from = bang_pos + 1;
+            continue;
+        }
+
+        // Match the closing paren
+        let Some(close_rel) = find_matching_paren(&result[paren_abs..]) else {
+            search_from = bang_pos + 1;
+            continue;
+        };
+        let call_end = paren_abs + close_rel + 1; // position after closing `)`
+
+        // Check what follows: ` == 0`, ` == 1`, ` != 0`, ` != 1`
+        let after_call = &result[call_end..];
+        let (op, val, suffix_len) = if let Some(rest) = after_call.strip_prefix(" == 1") {
+            ("==", 1, 5 + (after_call.len() - rest.len() - 5))
+        } else if let Some(rest) = after_call.strip_prefix(" == 0") {
+            ("==", 0, 5 + (after_call.len() - rest.len() - 5))
+        } else if let Some(rest) = after_call.strip_prefix(" != 0") {
+            ("!=", 0, 5 + (after_call.len() - rest.len() - 5))
+        } else if let Some(rest) = after_call.strip_prefix(" != 1") {
+            ("!=", 1, 5 + (after_call.len() - rest.len() - 5))
+        } else {
+            search_from = bang_pos + 1;
+            continue;
+        };
+
+        // Ensure what follows the ` == N` is a boundary (not more digits/identifiers)
+        let after_cmp = &result[call_end + suffix_len..];
+        if !after_cmp.is_empty() {
+            let next = after_cmp.as_bytes()[0];
+            if next.is_ascii_alphanumeric() || next == b'_' {
+                search_from = bang_pos + 1;
+                continue;
+            }
+        }
+
+        // Apply rewrite rules:
+        // !CALL == 1  →  !CALL     (negated == true → negated)
+        // !CALL == 0  →  CALL      (negated == false → not negated)
+        // !CALL != 0  →  !CALL     (negated != false → negated)
+        // !CALL != 1  →  CALL      (negated != true → not negated)
+        let keep_negation = (op == "==" && val == 1) || (op == "!=" && val == 0);
+        let call_expr = &result[call_start..call_end];
+        let replacement = if keep_negation {
+            format!("!{}", call_expr)
+        } else {
+            call_expr.to_string()
+        };
+
+        result = format!(
+            "{}{}{}",
+            &result[..bang_pos],
+            replacement,
+            &result[call_end + suffix_len..]
+        );
+        search_from = bang_pos + replacement.len();
+    }
+    result
+}
+
 /// A var is "unused" if it only ever appears as a simple argument in calls
 /// to exactly one function name (i.e., it's never read by any other code).
 fn suppress_unused_outparams(lines: &mut [String]) {
@@ -1152,6 +1792,113 @@ fn suppress_unused_outparams(lines: &mut [String]) {
                 *line = format!("{}{}", &line[..indent_len], new_content);
             }
         }
+    }
+}
+
+/// Fold single-out-param function calls into their usage site.
+/// `obj.Func($outParam)` where `$outParam` is referenced exactly once later
+/// → substitute `obj.Func()` for `$outParam` and remove the standalone call.
+fn fold_outparam_calls(lines: &mut Vec<String>) {
+    const MAX_LINE: usize = 120;
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim().to_string();
+
+        // Must be a bare function call: contains `(`, no ` = `, no `if `, no `} `
+        if !trimmed.contains('(')
+            || trimmed.contains(" = ")
+            || trimmed.starts_with("if ")
+            || trimmed.starts_with("} ")
+            || trimmed.starts_with("for ")
+            || trimmed.starts_with("while ")
+        {
+            i += 1;
+            continue;
+        }
+
+        // Extract args from the outermost call
+        let Some(paren_start) = trimmed.find('(') else {
+            i += 1;
+            continue;
+        };
+        if !trimmed.ends_with(')') {
+            i += 1;
+            continue;
+        }
+        let args_str = &trimmed[paren_start + 1..trimmed.len() - 1];
+        let args = split_args(args_str);
+
+        // Find $-prefixed args that could be out-params
+        let dollar_args: Vec<(usize, &str)> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.starts_with('$'))
+            .map(|(idx, a)| (idx, *a))
+            .collect();
+
+        // Must have exactly 1 foldable $-prefixed out-param
+        if dollar_args.len() != 1 {
+            i += 1;
+            continue;
+        }
+        let (arg_idx, out_var) = dollar_args[0];
+        let out_var = out_var.to_string();
+
+        // The out-param must NOT have a separate assignment line (it's populated by the call)
+        let has_assignment = lines.iter().any(|l| {
+            let t = l.trim();
+            parse_temp_assignment(t).is_some_and(|(v, _)| v == out_var)
+        });
+        if has_assignment {
+            i += 1;
+            continue;
+        }
+
+        // Count refs in other lines — must be exactly 1
+        let mut ref_count = 0usize;
+        let mut ref_line = None;
+        for (j, line) in lines.iter().enumerate() {
+            if j == i {
+                continue;
+            }
+            let refs = count_var_refs(line.trim(), &out_var);
+            ref_count += refs;
+            if refs > 0 && ref_line.is_none() {
+                ref_line = Some(j);
+            }
+        }
+        if ref_count != 1 {
+            i += 1;
+            continue;
+        }
+        let ref_line = ref_line.unwrap();
+
+        // Build the call expression with the out-param removed
+        let mut new_args: Vec<&str> = Vec::new();
+        for (idx, arg) in args.iter().enumerate() {
+            if idx != arg_idx {
+                new_args.push(arg);
+            }
+        }
+        let call_prefix = &trimmed[..paren_start];
+        let call_expr = format!("{}({})", call_prefix, new_args.join(", "));
+
+        // Substitute $outParam with the call expression in the reference line
+        let ref_indent = lines[ref_line].len() - lines[ref_line].trim_start().len();
+        let ref_content = &lines[ref_line][ref_indent..];
+        let replacement = replace_all_var_refs(ref_content, &out_var, &call_expr);
+
+        // Check line length
+        if ref_indent + replacement.len() > MAX_LINE {
+            i += 1;
+            continue;
+        }
+
+        lines[ref_line] = format!("{}{}", &lines[ref_line][..ref_indent], replacement);
+
+        // Remove the standalone call line
+        lines.remove(i);
+        // Don't advance — recheck current position
     }
 }
 
@@ -1218,6 +1965,126 @@ fn compact_large_break_calls(lines: &mut [String]) {
         lines[i] = new_call;
         i += 1;
     }
+}
+
+/// Fold `$SwitchEnum_CmpSuccess` cascades into `// switch (VAR):` comments.
+///
+/// UE4's "Switch on Enum" node compiles to cascading comparisons:
+///   `$SwitchEnum_CmpSuccess = VAR != N` / `if (!...) return` or `if (...) { ... }`
+/// After structuring, this produces deeply nested if-blocks. This pass detects the
+/// cascade fingerprint and replaces it with a readable switch comment, labeling the
+/// first case body that follows.
+fn fold_switch_enum_cascade(lines: &mut Vec<String>) {
+    let mut i = 0;
+    while i < lines.len() {
+        // Look for: INDENT $SwitchEnum_CmpSuccess... = VAR != VALUE
+        let Some((switch_var, compared_var, first_value, base_indent)) =
+            parse_switch_enum_assign(lines[i].trim(), &lines[i])
+        else {
+            i += 1;
+            continue;
+        };
+
+        let cascade_start = i;
+        let mut case_values = vec![first_value];
+
+        // Scan forward to find the full cascade extent.
+        // Track brace depth to find the matching closing braces.
+        let mut j = i + 1;
+        let mut brace_depth = 0i32;
+        let mut cascade_end = i; // inclusive last cascade line
+
+        while j < lines.len() {
+            let trimmed = lines[j].trim();
+
+            // Another assignment to the same SwitchEnum variable
+            if let Some((sv, cv, val, _)) = parse_switch_enum_assign(trimmed, &lines[j]) {
+                if sv == switch_var && cv == compared_var {
+                    case_values.push(val);
+                    cascade_end = j;
+                    j += 1;
+                    continue;
+                }
+            }
+
+            // if ($SwitchEnum...) { or if (!$SwitchEnum...) return/break
+            if trimmed.contains(&switch_var) {
+                if trimmed.ends_with('{') {
+                    brace_depth += 1;
+                }
+                cascade_end = j;
+                j += 1;
+                continue;
+            }
+
+            // Closing brace belonging to the cascade
+            if trimmed == "}" && brace_depth > 0 {
+                brace_depth -= 1;
+                cascade_end = j;
+                j += 1;
+                continue;
+            }
+
+            break;
+        }
+
+        // Need at least 2 case values to be a valid switch
+        if case_values.len() < 2 {
+            i += 1;
+            continue;
+        }
+
+        // Build replacement lines
+        let indent_str = " ".repeat(base_indent);
+        let cases_str = case_values
+            .iter()
+            .map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let switch_line = format!(
+            "{}// switch ({}) [cases: {}]:",
+            indent_str, compared_var, cases_str
+        );
+
+        // Check if there's a meaningful body after the cascade (not just return/break/})
+        let has_body_after = j < lines.len()
+            && !lines[j].trim().is_empty()
+            && lines[j].trim() != "return"
+            && lines[j].trim() != "break"
+            && lines[j].trim() != "}";
+
+        let mut replacement = vec![switch_line];
+        if has_body_after {
+            replacement.push(format!(
+                "{}// case {} == {}:",
+                indent_str, compared_var, case_values[0]
+            ));
+        }
+
+        lines.splice(cascade_start..=cascade_end, replacement);
+        i = cascade_start + 1;
+    }
+}
+
+/// Parse `$SwitchEnum_CmpSuccess... = VAR != VALUE` from a trimmed line.
+/// Returns (switch_var_name, compared_var, value, indent_len).
+fn parse_switch_enum_assign(
+    trimmed: &str,
+    full_line: &str,
+) -> Option<(String, String, String, usize)> {
+    // Must start with $SwitchEnum_CmpSuccess
+    if !trimmed.starts_with("$SwitchEnum_CmpSuccess") {
+        return None;
+    }
+    let eq_pos = trimmed.find(" = ")?;
+    let switch_var = &trimmed[..eq_pos];
+    let rhs = &trimmed[eq_pos + 3..];
+    // RHS must be `VAR != VALUE`
+    let neq_pos = rhs.find(" != ")?;
+    let compared_var = rhs[..neq_pos].to_string();
+    let value = rhs[neq_pos + 4..].to_string();
+    let indent_len = full_line.len() - full_line.trim_start().len();
+    Some((switch_var.to_string(), compared_var, value, indent_len))
 }
 
 /// Rename Make* functions by stripping the `Make` prefix: MakeVector → Vector, etc.
@@ -1592,7 +2459,9 @@ fn extract_dollar_vars(text: &str) -> Vec<String> {
 
 /// Check if a `$temp` var is an unused output parameter.
 /// True when every occurrence is a simple comma-separated argument in calls
-/// to exactly one function name, meaning it's never read by other code.
+/// to exactly one function name, AND the variable name contains the function name
+/// (UE4 names out-params as `$FuncName_ParamName`). This prevents false positives
+/// where a computed value like `$Add_FloatFloat` is used as an in-param to `FClamp`.
 fn is_unused_outparam(lines: &[String], var: &str) -> bool {
     let mut func_names: HashSet<String> = HashSet::new();
 
@@ -1623,8 +2492,16 @@ fn is_unused_outparam(lines: &[String], var: &str) -> bool {
         }
     }
 
-    // Must appear in exactly one function (all occurrences are out-params of same function)
-    func_names.len() == 1
+    // Must appear in exactly one function
+    if func_names.len() != 1 {
+        return false;
+    }
+
+    // Variable name must contain the function name (UE4 out-param naming: $FuncName_ParamName).
+    // Strip leading `$` from the var for matching.
+    let var_body = var.strip_prefix('$').unwrap_or(var);
+    let func_name = func_names.iter().next().unwrap();
+    var_body.starts_with(func_name)
 }
 
 /// From the text before a function argument, find the name of the containing function.
@@ -1664,6 +2541,195 @@ fn extract_containing_func_name(before_text: &str) -> Option<String> {
         None
     } else {
         Some(name.to_string())
+    }
+}
+
+/// Clean up structural artifacts from structuring.
+///
+/// Removes:
+/// - Trailing orphaned `}` lines
+/// - Empty `if (...) { }` blocks (if followed by content or end)
+/// - Orphaned `} else {` ... `}` where the if-body was empty
+/// - Leftover generated labels (`L_XXXX:`) with no corresponding goto
+pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
+    // Strip bare standalone expressions at top level (indent 0).
+    // In UberGraph event segments, InputAction events start with an unused
+    // key parameter read ($InputActionEvent_Key_N) and sometimes bare true/false
+    // literals.  These are Kismet stack pushes with no consumer.
+    lines.retain(|l| {
+        let t = l.trim();
+        // Standalone iface() calls — interface dispatch artifacts with no side effects.
+        // Only strip when the closing `)` matches the opening `iface(` paren
+        // (i.e., there's no method chain like `iface(X).Method()`).
+        if t.starts_with("iface(") && !t.contains(" = ") {
+            if let Some(close) = find_matching_paren(&t[5..]) {
+                if 5 + close + 1 == t.len() {
+                    return false;
+                }
+            }
+        }
+        let has_indent = l.len() > t.len();
+        if !has_indent {
+            // Bare temp variable (no assignment or call)
+            if t.starts_with('$') && !t.contains('=') && !t.contains('(') {
+                return false;
+            }
+            // Bare boolean literal
+            if t == "true" || t == "false" {
+                return false;
+            }
+        }
+        true
+    });
+
+    // Collect all goto targets so we know which labels are still referenced
+    let goto_targets: HashSet<String> = lines
+        .iter()
+        .filter_map(|l| l.trim().strip_prefix("goto ").map(|s| s.to_string()))
+        .collect();
+
+    // Remove unreferenced generated labels (L_XXXX:)
+    lines.retain(|line| {
+        let trimmed = line.trim();
+        if let Some(label) = trimmed.strip_suffix(':') {
+            if label.starts_with("L_") && !goto_targets.contains(label) {
+                return false;
+            }
+        }
+        true
+    });
+
+    // Remove goto/label pairs that serve no structural purpose.
+    strip_redundant_gotos(lines);
+
+    // Iteratively remove empty if-blocks, orphaned else-blocks, and trailing braces.
+    // Each pass may expose new patterns, so loop until stable.
+    loop {
+        let mut changed = false;
+
+        // Strip trailing orphaned closing braces and else-blocks
+        while lines
+            .last()
+            .is_some_and(|l| l.trim() == "}" || l.trim() == "} else {")
+        {
+            lines.pop();
+            changed = true;
+        }
+
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let trimmed = lines[i].trim();
+            let next_trimmed = lines[i + 1].trim();
+
+            // Pattern: "if (...) {" followed by "} else {"
+            // → remove the if line and the } else {, keep else body
+            if trimmed.starts_with("if ") && trimmed.ends_with(" {") && next_trimmed == "} else {" {
+                lines.remove(i);
+                lines.remove(i); // was i+1, now shifted
+                changed = true;
+                continue;
+            }
+
+            // Pattern: "if (...) {" followed by "}"
+            // → remove both (empty if-block)
+            if trimmed.starts_with("if ") && trimmed.ends_with(" {") && next_trimmed == "}" {
+                lines.remove(i);
+                lines.remove(i);
+                changed = true;
+                continue;
+            }
+
+            // Pattern: "} else {" followed by "}"
+            // → remove both (empty else-block)
+            if trimmed == "} else {" && next_trimmed == "}" {
+                lines.remove(i);
+                lines.remove(i);
+                changed = true;
+                continue;
+            }
+
+            i += 1;
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// Remove goto/label pairs that are redundant in structured output.
+///
+/// A generated goto (to `L_XXXX`) is redundant when:
+/// 1. Its label has only 1 referencing goto (no convergence from multiple paths)
+/// 2. The label is either at/near the end of output, at the start (backward jump),
+///    or immediately after the goto (fall-through)
+fn strip_redundant_gotos(lines: &mut Vec<String>) {
+    // Build goto → label index map (only for generated L_XXXX labels)
+    let mut goto_count: HashMap<String, usize> = HashMap::new();
+    for line in lines.iter() {
+        if let Some(label) = line.trim().strip_prefix("goto ") {
+            if label.starts_with("L_") {
+                *goto_count.entry(label.to_string()).or_default() += 1;
+            }
+        }
+    }
+
+    // Only process single-reference gotos (multi-ref handled by extract_convergence)
+    let singles: HashSet<String> = goto_count
+        .into_iter()
+        .filter(|(_, count)| *count == 1)
+        .map(|(label, _)| label)
+        .collect();
+    if singles.is_empty() {
+        return;
+    }
+
+    // Find positions of each single-ref goto and its label
+    let mut to_remove: HashSet<usize> = HashSet::new();
+    for label_name in &singles {
+        let label_line = format!("{}:", label_name);
+        let goto_line = format!("goto {}", label_name);
+
+        let label_idx = lines.iter().position(|l| l.trim() == label_line);
+        let goto_idx = lines.iter().position(|l| l.trim() == goto_line);
+
+        let (Some(li), Some(gi)) = (label_idx, goto_idx) else {
+            continue;
+        };
+
+        // Check if label is at/near end: no meaningful code after the label
+        // (excluding the goto itself, closing braces, and return)
+        let has_code_after_label = lines[li + 1..].iter().enumerate().any(|(j, l)| {
+            let idx = li + 1 + j;
+            if idx == gi {
+                return false; // skip the goto line itself
+            }
+            let t = l.trim();
+            !t.is_empty() && t != "}" && t != "return" && !t.ends_with(':')
+        });
+
+        // Check if goto is immediately before the label (fall-through)
+        // allowing only closing braces between them
+        let is_fall_through = gi < li
+            && lines[gi + 1..li]
+                .iter()
+                .all(|l| l.trim() == "}" || l.trim().is_empty());
+
+        // Backward goto to label at segment start (Sequence artifact)
+        let is_backward_to_start = gi > li && li == 0;
+
+        if !has_code_after_label || is_fall_through || is_backward_to_start {
+            to_remove.insert(li);
+            to_remove.insert(gi);
+        }
+    }
+
+    if !to_remove.is_empty() {
+        let mut idx = 0;
+        lines.retain(|_| {
+            let keep = !to_remove.contains(&idx);
+            idx += 1;
+            keep
+        });
     }
 }
 
@@ -1967,5 +3033,598 @@ mod tests {
     #[test]
     fn count_refs_dollar_prefix_safe() {
         assert_eq!(count_var_refs("pre$Foo + 1", "$Foo"), 1);
+    }
+
+    // inline_constant_temps
+    #[test]
+    fn inline_constant_temps_same_expr() {
+        let mut stmts = vec![
+            BcStatement {
+                mem_offset: 0,
+                text: "Temp_bool_Variable = LeftHand".into(),
+            },
+            BcStatement {
+                mem_offset: 10,
+                text: "x = switch(Temp_bool_Variable) { false: A, true: B }".into(),
+            },
+            BcStatement {
+                mem_offset: 20,
+                text: "Temp_bool_Variable = LeftHand".into(),
+            },
+            BcStatement {
+                mem_offset: 30,
+                text: "y = switch(Temp_bool_Variable) { false: C, true: D }".into(),
+            },
+        ];
+        inline_constant_temps(&mut stmts);
+        assert_eq!(stmts.len(), 2);
+        assert_eq!(stmts[0].text, "x = switch(LeftHand) { false: A, true: B }");
+        assert_eq!(stmts[1].text, "y = switch(LeftHand) { false: C, true: D }");
+    }
+
+    #[test]
+    fn inline_constant_temps_different_exprs_skipped() {
+        let mut stmts = vec![
+            BcStatement {
+                mem_offset: 0,
+                text: "Temp_bool_Variable = LeftHand".into(),
+            },
+            BcStatement {
+                mem_offset: 10,
+                text: "x = Temp_bool_Variable".into(),
+            },
+            BcStatement {
+                mem_offset: 20,
+                text: "Temp_bool_Variable = RightHand".into(),
+            },
+            BcStatement {
+                mem_offset: 30,
+                text: "y = Temp_bool_Variable".into(),
+            },
+        ];
+        inline_constant_temps(&mut stmts);
+        // Different exprs → not inlined, all 4 remain
+        assert_eq!(stmts.len(), 4);
+    }
+
+    #[test]
+    fn inline_constant_temps_single_assign_multi_ref() {
+        // Single Temp_* assignment, multiple references — should be inlined
+        let mut stmts = vec![
+            BcStatement {
+                mem_offset: 0,
+                text: "Temp_0 = foo".into(),
+            },
+            BcStatement {
+                mem_offset: 10,
+                text: "bar(Temp_0)".into(),
+            },
+            BcStatement {
+                mem_offset: 20,
+                text: "baz(Temp_0)".into(),
+            },
+        ];
+        inline_constant_temps(&mut stmts);
+        assert_eq!(stmts.len(), 2);
+        assert_eq!(stmts[0].text, "bar(foo)");
+        assert_eq!(stmts[1].text, "baz(foo)");
+    }
+
+    #[test]
+    fn inline_constant_temps_dollar_single_assign_skipped() {
+        // $-prefixed single assignment may be out-param — skip
+        let mut stmts = vec![
+            BcStatement {
+                mem_offset: 0,
+                text: "$Param = _".into(),
+            },
+            BcStatement {
+                mem_offset: 10,
+                text: "Foo($Param)".into(),
+            },
+            BcStatement {
+                mem_offset: 20,
+                text: "x = $Param + 1".into(),
+            },
+        ];
+        inline_constant_temps(&mut stmts);
+        assert_eq!(stmts.len(), 3); // unchanged
+    }
+
+    // discard_unused_assignments: pure expression removal
+    #[test]
+    fn discard_removes_pure_unused_assignment() {
+        let mut stmts = vec![
+            BcStatement {
+                mem_offset: 0,
+                text: "$Temp = SomeValue".into(),
+            },
+            BcStatement {
+                mem_offset: 10,
+                text: "DoWork()".into(),
+            },
+        ];
+        discard_unused_assignments(&mut stmts);
+        assert_eq!(stmts.len(), 1);
+        assert_eq!(stmts[0].text, "DoWork()");
+    }
+
+    #[test]
+    fn discard_keeps_call_unused_assignment() {
+        let mut stmts = vec![
+            BcStatement {
+                mem_offset: 0,
+                text: "$Temp = SomeCall()".into(),
+            },
+            BcStatement {
+                mem_offset: 10,
+                text: "DoWork()".into(),
+            },
+        ];
+        discard_unused_assignments(&mut stmts);
+        assert_eq!(stmts.len(), 2);
+        assert_eq!(stmts[0].text, "SomeCall()");
+    }
+
+    #[test]
+    fn discard_removes_switch_unused_assignment() {
+        let mut stmts = vec![
+            BcStatement {
+                mem_offset: 0,
+                text: "$Temp = switch(X) { false: A, true: B }".into(),
+            },
+            BcStatement {
+                mem_offset: 10,
+                text: "DoWork()".into(),
+            },
+        ];
+        discard_unused_assignments(&mut stmts);
+        assert_eq!(stmts.len(), 1);
+        assert_eq!(stmts[0].text, "DoWork()");
+    }
+
+    // expr_has_call
+    #[test]
+    fn expr_has_call_function() {
+        assert!(expr_has_call("IsValid(x)"));
+    }
+
+    #[test]
+    fn expr_has_call_method() {
+        assert!(expr_has_call("Foo.Bar()"));
+    }
+
+    #[test]
+    fn expr_has_call_switch() {
+        assert!(!expr_has_call("switch(X) { false: A, true: B }"));
+    }
+
+    #[test]
+    fn expr_has_call_parens() {
+        assert!(!expr_has_call("(A + B)"));
+    }
+
+    #[test]
+    fn expr_has_call_none() {
+        assert!(!expr_has_call("SomeValue"));
+    }
+
+    // cleanup_structured_output: return before sequence marker
+    #[test]
+    fn cleanup_strips_return_before_sequence_marker() {
+        let mut lines = vec![
+            "AdjustStatus(x, 0)".to_string(),
+            "return".to_string(),
+            "// sequence [1]:".to_string(),
+            "AdjustStatus(y, 1)".to_string(),
+        ];
+        cleanup_structured_output(&mut lines);
+        assert!(!lines.iter().any(|l| l.trim() == "return"));
+        assert!(lines.iter().any(|l| l.trim() == "// sequence [1]:"));
+    }
+
+    // cleanup_structured_output: trailing unmatched braces
+    #[test]
+    fn cleanup_strips_trailing_unmatched_braces() {
+        let mut lines = vec![
+            "if (cond) {".to_string(),
+            "    do_something()".to_string(),
+            "}".to_string(),
+            "}".to_string(),
+            "}".to_string(),
+        ];
+        cleanup_structured_output(&mut lines);
+        assert_eq!(lines, vec!["if (cond) {", "    do_something()", "}",]);
+    }
+
+    #[test]
+    fn cleanup_keeps_matched_braces() {
+        let mut lines = vec![
+            "if (a) {".to_string(),
+            "    if (b) {".to_string(),
+            "        code()".to_string(),
+            "    }".to_string(),
+            "}".to_string(),
+        ];
+        cleanup_structured_output(&mut lines);
+        assert_eq!(lines.len(), 5); // all lines preserved
+    }
+
+    // ========== rewrite_bool_switches tests ==========
+
+    #[test]
+    fn bool_switch_basic() {
+        assert_eq!(
+            rewrite_bool_switches("switch(LeftHand) { false: self.Right, true: self.Left }"),
+            "LeftHand ? self.Left : self.Right"
+        );
+    }
+
+    #[test]
+    fn bool_switch_true_first() {
+        assert_eq!(
+            rewrite_bool_switches("switch(X) { true: A, false: B }"),
+            "X ? A : B"
+        );
+    }
+
+    #[test]
+    fn bool_switch_method_chain() {
+        assert_eq!(
+            rewrite_bool_switches(
+                "switch(LeftHand) { false: self.RightHandle, true: self.LeftHandle }.SetTarget(x)"
+            ),
+            "(LeftHand ? self.LeftHandle : self.RightHandle).SetTarget(x)"
+        );
+    }
+
+    #[test]
+    fn bool_switch_compound_condition() {
+        assert_eq!(
+            rewrite_bool_switches("switch(self.Hunger == 0.0000) { false: 0.0000, true: rate }"),
+            "(self.Hunger == 0.0000) ? rate : 0.0000"
+        );
+    }
+
+    #[test]
+    fn bool_switch_nested() {
+        // Inner switch rewrites first (left-to-right), then outer.
+        // Result is right-associative: X ? C : (Y ? B : A) ≡ X ? C : Y ? B : A
+        assert_eq!(
+            rewrite_bool_switches("switch(X) { false: switch(Y) { false: A, true: B }, true: C }"),
+            "X ? C : Y ? B : A"
+        );
+    }
+
+    #[test]
+    fn bool_switch_in_assignment() {
+        assert_eq!(
+            rewrite_bool_switches(
+                "Grip = switch(LeftHand) { false: self.RightGrip, true: self.LeftGrip }"
+            ),
+            "Grip = LeftHand ? self.LeftGrip : self.RightGrip"
+        );
+    }
+
+    #[test]
+    fn bool_switch_non_bool_not_rewritten() {
+        let input = "switch(X) { 0: A, 1: B, 2: C }";
+        assert_eq!(rewrite_bool_switches(input), input);
+    }
+
+    #[test]
+    fn bool_switch_default_not_rewritten() {
+        let input = "switch(X) { false: A, true: B, default: C }";
+        assert_eq!(rewrite_bool_switches(input), input);
+    }
+
+    #[test]
+    fn bool_switch_multiple_per_line() {
+        assert_eq!(
+            rewrite_bool_switches(
+                "Foo(switch(A) { false: X, true: Y }, switch(B) { false: P, true: Q })"
+            ),
+            "Foo(A ? Y : X, B ? Q : P)"
+        );
+    }
+
+    #[test]
+    fn bool_switch_identical_branches() {
+        assert_eq!(
+            rewrite_bool_switches("out X = switch(IsValid) { false: src.Field, true: src.Field }"),
+            "out X = src.Field"
+        );
+    }
+
+    #[test]
+    fn bool_switch_in_arithmetic_context() {
+        assert_eq!(
+            rewrite_bool_switches("0.0 + switch(A) { false: 0, true: X }"),
+            "0.0 + (A ? X : 0)"
+        );
+    }
+
+    #[test]
+    fn bool_switch_chained_arithmetic() {
+        assert_eq!(
+            rewrite_bool_switches(
+                "switch(A) { false: 0, true: X } + switch(B) { false: 0, true: Y }"
+            ),
+            "(A ? X : 0) + (B ? Y : 0)"
+        );
+    }
+
+    #[test]
+    fn bool_switch_simple_assignment_no_wrap() {
+        assert_eq!(
+            rewrite_bool_switches("x = switch(C) { false: A, true: B }"),
+            "x = C ? B : A"
+        );
+    }
+
+    // ========== fold_cast_inline tests ==========
+
+    #[test]
+    fn cast_inline_basic() {
+        let mut lines = vec![
+            "$Cast = cast<MyType>(GetObj())".to_string(),
+            "if ($Cast) {".to_string(),
+            "    self.Foo = $Cast".to_string(),
+            "}".to_string(),
+        ];
+        fold_cast_inline(&mut lines);
+        assert_eq!(lines[0], "if (cast<MyType>(GetObj())) {");
+        assert_eq!(lines[1], "    self.Foo = cast<MyType>(GetObj())");
+        assert_eq!(lines[2], "}");
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn cast_inline_too_many_refs() {
+        let mut lines = vec![
+            "$Cast = cast<T>(expr)".to_string(),
+            "if ($Cast) {".to_string(),
+            "    A($Cast)".to_string(),
+            "    B($Cast)".to_string(),
+            "    C($Cast)".to_string(),
+            "}".to_string(),
+        ];
+        fold_cast_inline(&mut lines);
+        // 4 refs (if + 3 body) > 3, should NOT inline
+        assert_eq!(lines.len(), 6);
+        assert_eq!(lines[0], "$Cast = cast<T>(expr)");
+    }
+
+    #[test]
+    fn cast_inline_already_else_return() {
+        let mut lines = vec![
+            "$Cast = cast<T>(expr) else return".to_string(),
+            "self.Foo = $Cast".to_string(),
+        ];
+        fold_cast_inline(&mut lines);
+        // Should not touch "else return" lines
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0], "$Cast = cast<T>(expr) else return");
+    }
+
+    // ========== hoist_repeated_ternaries tests ==========
+
+    #[test]
+    fn hoist_repeated_ternary_3_uses() {
+        let mut lines = vec![
+            "    A((X ? self.Left : self.Right).Foo())".to_string(),
+            "    B((X ? self.Left : self.Right).Bar())".to_string(),
+            "    C((X ? self.Left : self.Right).Baz())".to_string(),
+        ];
+        hoist_repeated_ternaries(&mut lines);
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].contains(" = X ? self.Left : self.Right"));
+        assert!(!lines[1].contains("X ? self.Left"));
+        assert!(!lines[2].contains("X ? self.Left"));
+        assert!(!lines[3].contains("X ? self.Left"));
+    }
+
+    #[test]
+    fn hoist_no_change_for_2_uses() {
+        let mut lines = vec![
+            "    A((X ? L : R).Foo())".to_string(),
+            "    B((X ? L : R).Bar())".to_string(),
+        ];
+        let original = lines.clone();
+        hoist_repeated_ternaries(&mut lines);
+        assert_eq!(lines, original);
+    }
+
+    #[test]
+    fn hoist_left_right_naming() {
+        let mut lines = vec![
+            "    A((H ? self.LeftVRHand : self.RightVRHand).M())".to_string(),
+            "    B((H ? self.LeftVRHand : self.RightVRHand).N())".to_string(),
+            "    C((H ? self.LeftVRHand : self.RightVRHand).O())".to_string(),
+        ];
+        hoist_repeated_ternaries(&mut lines);
+        assert_eq!(lines.len(), 4);
+        assert!(lines[0].contains("$VRHand = "));
+        assert!(lines[1].contains("$VRHand.M()"));
+    }
+
+    #[test]
+    fn hoist_preserves_indent() {
+        let mut lines = vec![
+            "        A((X ? L : R).F())".to_string(),
+            "        B((X ? L : R).G())".to_string(),
+            "        C((X ? L : R).H())".to_string(),
+        ];
+        hoist_repeated_ternaries(&mut lines);
+        assert!(lines[0].starts_with("        $"));
+    }
+
+    #[test]
+    fn extract_ternaries_basic() {
+        let result = extract_parenthesized_ternaries("A((X ? L : R).Foo(), (Y ? A : B))");
+        assert_eq!(result.len(), 2);
+        assert!(result.contains(&"(X ? L : R)".to_string()));
+        assert!(result.contains(&"(Y ? A : B)".to_string()));
+    }
+
+    #[test]
+    fn extract_left_right_suffix_test() {
+        assert_eq!(
+            extract_left_right_suffix("self.LeftVRHand", "self.RightVRHand"),
+            Some("VRHand".to_string())
+        );
+        assert_eq!(
+            extract_left_right_suffix("self.LeftMotionController", "self.RightMotionController"),
+            Some("MotionController".to_string())
+        );
+        assert_eq!(extract_left_right_suffix("self.Foo", "self.Bar"), None);
+    }
+
+    // ========== simplify_bool_comparisons tests ==========
+
+    #[test]
+    fn simplify_not_call_eq_1() {
+        let mut lines = vec!["    if (!GetIsHMDWorn() == 1) {".to_string()];
+        simplify_bool_comparisons(&mut lines);
+        assert_eq!(lines[0], "    if (!GetIsHMDWorn()) {");
+    }
+
+    #[test]
+    fn simplify_not_call_eq_0() {
+        let mut lines = vec!["    if (!GetIsHMDWorn() == 0) {".to_string()];
+        simplify_bool_comparisons(&mut lines);
+        assert_eq!(lines[0], "    if (GetIsHMDWorn()) {");
+    }
+
+    #[test]
+    fn simplify_not_call_ne_0() {
+        let mut lines = vec!["    x = !Func() != 0".to_string()];
+        simplify_bool_comparisons(&mut lines);
+        assert_eq!(lines[0], "    x = !Func()");
+    }
+
+    #[test]
+    fn simplify_not_call_ne_1() {
+        let mut lines = vec!["    x = !Func() != 1".to_string()];
+        simplify_bool_comparisons(&mut lines);
+        assert_eq!(lines[0], "    x = Func()");
+    }
+
+    #[test]
+    fn simplify_does_not_match_member_access() {
+        let mut lines = vec!["    if (!self.Flag == 1) {".to_string()];
+        let original = lines.clone();
+        simplify_bool_comparisons(&mut lines);
+        assert_eq!(lines, original);
+    }
+
+    // ========== fold_outparam_calls tests ==========
+
+    #[test]
+    fn outparam_basic_fold() {
+        let mut lines = vec![
+            "self.Constraint.GetRotationAlpha($GetRotation_Alpha)".to_string(),
+            "out Angle = ($GetRotation_Alpha * 2.0) - 1.0".to_string(),
+        ];
+        fold_outparam_calls(&mut lines);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0],
+            "out Angle = (self.Constraint.GetRotationAlpha() * 2.0) - 1.0"
+        );
+    }
+
+    #[test]
+    fn outparam_multiple_dollar_args_skipped() {
+        let mut lines = vec!["Func($A, $B)".to_string(), "x = $A + $B".to_string()];
+        fold_outparam_calls(&mut lines);
+        // Multiple $-args → skip
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[test]
+    fn outparam_referenced_twice_skipped() {
+        let mut lines = vec![
+            "Func($Out)".to_string(),
+            "x = $Out + 1".to_string(),
+            "y = $Out + 2".to_string(),
+        ];
+        fold_outparam_calls(&mut lines);
+        // Used twice → skip
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn outparam_with_assignment_skipped() {
+        let mut lines = vec![
+            "$Out = someExpr".to_string(),
+            "Func($Out)".to_string(),
+            "x = $Out".to_string(),
+        ];
+        fold_outparam_calls(&mut lines);
+        // Has assignment → it's a regular temp, not an out-param
+        assert_eq!(lines.len(), 3);
+    }
+
+    // is_unused_outparam — requires var name to match function name
+    #[test]
+    fn unused_outparam_matching_name() {
+        let lines = vec![
+            "BreakHitResult(src, $BreakHitResult_Location)".to_string(),
+            "x = $BreakHitResult_Location".to_string(),
+        ];
+        // $BreakHitResult_Location starts with "BreakHitResult" → not suppressed
+        // (it appears in non-arg context too, so it returns false anyway)
+        assert!(!is_unused_outparam(&lines, "$BreakHitResult_Location"));
+    }
+
+    #[test]
+    fn unused_outparam_non_matching_name() {
+        let lines = vec!["FClamp($Add_FloatFloat, 0.0, 1.0)".to_string()];
+        // $Add_FloatFloat doesn't start with "FClamp" → false
+        assert!(!is_unused_outparam(&lines, "$Add_FloatFloat"));
+    }
+
+    #[test]
+    fn unused_outparam_genuine() {
+        let lines = vec![
+            "GetFoo($GetFoo_Result)".to_string(),
+            "GetFoo($GetFoo_Result)".to_string(),
+        ];
+        // $GetFoo_Result starts with "GetFoo", only appears as arg → true
+        assert!(is_unused_outparam(&lines, "$GetFoo_Result"));
+    }
+
+    // fold_switch_enum_cascade
+    #[test]
+    fn switch_enum_cascade_flat() {
+        let mut lines = vec![
+            "$SwitchEnum_CmpSuccess = Status != 0".to_string(),
+            "if ($SwitchEnum_CmpSuccess) {".to_string(),
+            "    $SwitchEnum_CmpSuccess = Status != 1".to_string(),
+            "    if (!$SwitchEnum_CmpSuccess) return".to_string(),
+            "}".to_string(),
+            "body_after_cascade()".to_string(),
+        ];
+        fold_switch_enum_cascade(&mut lines);
+        assert!(lines[0].contains("// switch (Status)"));
+        assert!(lines[1].contains("// case Status == 0:"));
+        assert_eq!(lines[2], "body_after_cascade()");
+    }
+
+    #[test]
+    fn switch_enum_cascade_no_body() {
+        let mut lines = vec![
+            "$SwitchEnum_CmpSuccess = X != 0".to_string(),
+            "if ($SwitchEnum_CmpSuccess) {".to_string(),
+            "    $SwitchEnum_CmpSuccess = X != 1".to_string(),
+            "    if (!$SwitchEnum_CmpSuccess) return".to_string(),
+            "}".to_string(),
+            "return".to_string(),
+        ];
+        fold_switch_enum_cascade(&mut lines);
+        assert!(lines[0].contains("// switch (X)"));
+        // No case label before return
+        assert_eq!(lines[1], "return");
     }
 }
