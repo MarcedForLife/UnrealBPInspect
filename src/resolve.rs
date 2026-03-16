@@ -98,53 +98,30 @@ pub fn prop_value_short(
     }
 }
 
+const FUNC_FLAG_NAMES: &[(u32, &str)] = &[
+    (0x00000001, "Final"),
+    (0x00000400, "Native"),
+    (0x00000800, "Event"),
+    (0x00002000, "Static"),
+    (0x00004000, "MulticastDelegate"),
+    (0x00020000, "Public"),
+    (0x00040000, "Private"),
+    (0x00080000, "Protected"),
+    (0x00100000, "Delegate"),
+    (0x00400000, "HasOutParms"),
+    (0x01000000, "BlueprintCallable"),
+    (0x02000000, "BlueprintEvent"),
+    (0x04000000, "BlueprintPure"),
+    (0x10000000, "Const"),
+    (0x40000000, "HasDefaults"),
+];
+
 pub fn format_func_flags(flags: u32) -> String {
-    let mut parts = Vec::new();
-    if flags & 0x00000001 != 0 {
-        parts.push("Final");
-    }
-    if flags & 0x00000400 != 0 {
-        parts.push("Native");
-    }
-    if flags & 0x00000800 != 0 {
-        parts.push("Event");
-    }
-    if flags & 0x00002000 != 0 {
-        parts.push("Static");
-    }
-    if flags & 0x00004000 != 0 {
-        parts.push("MulticastDelegate");
-    }
-    if flags & 0x00020000 != 0 {
-        parts.push("Public");
-    }
-    if flags & 0x00040000 != 0 {
-        parts.push("Private");
-    }
-    if flags & 0x00080000 != 0 {
-        parts.push("Protected");
-    }
-    if flags & 0x00100000 != 0 {
-        parts.push("Delegate");
-    }
-    if flags & 0x00400000 != 0 {
-        parts.push("HasOutParms");
-    }
-    if flags & 0x01000000 != 0 {
-        parts.push("BlueprintCallable");
-    }
-    if flags & 0x02000000 != 0 {
-        parts.push("BlueprintEvent");
-    }
-    if flags & 0x04000000 != 0 {
-        parts.push("BlueprintPure");
-    }
-    if flags & 0x10000000 != 0 {
-        parts.push("Const");
-    }
-    if flags & 0x40000000 != 0 {
-        parts.push("HasDefaults");
-    }
+    let parts: Vec<&str> = FUNC_FLAG_NAMES
+        .iter()
+        .filter(|(mask, _)| flags & mask != 0)
+        .map(|(_, name)| *name)
+        .collect();
     if parts.is_empty() {
         format!("0x{:08x}", flags)
     } else {
