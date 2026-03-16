@@ -1,11 +1,11 @@
 # Unreal Blueprint Inspect
 
-A standalone CLI that makes Unreal Engine Blueprint `.uasset` files readable outside the editor — in terminals, AI assistants, code review, CI pipelines, and documentation.
+A standalone CLI that makes Unreal Engine Blueprint `.uasset` files readable outside the editor: in terminals, AI assistants, code review, CI pipelines, and documentation.
 
 Parses the binary format directly and outputs component trees, variable declarations, function signatures, decoded bytecode pseudo-code, and graph node summaries. No editor, no project context, no dependencies.
 
 > [!NOTE]
-> This project is in early development. Core parsing works well for uncooked assets, but expect rough edges, missing opcodes, and breaking changes. Bug reports and sample files welcome.
+> This project is in early development. Core parsing works well for uncooked assets, but expect rough edges, missing opcodes, and breaking changes.
 >
 > This started as a personal prototype to see if Blueprint bytecode could be made readable outside the editor. AI-assisted development made it practical to explore as a solo side project.
 
@@ -33,11 +33,11 @@ The install scripts download the latest binary, add it to your PATH, and configu
 
 ### Install options
 
-| Option | Shell | PowerShell |
-| --- | --- | --- |
-| Specific version | `BP_INSPECT_VERSION=v0.1.0 curl ... \| sh` | `.\install.ps1 -Version v0.1.0` |
-| Custom directory | `INSTALL_DIR=/usr/local/bin curl ... \| sh` | `.\install.ps1 -InstallDir C:\Tools` |
-| With Claude Code skill | `curl ... \| sh -s -- --with-skill` | `.\install.ps1 -WithSkill` |
+| Option                 | Shell                                       | PowerShell                           |
+| ---------------------- | ------------------------------------------- | ------------------------------------ |
+| Specific version       | `BP_INSPECT_VERSION=v0.1.0 curl ... \| sh`  | `.\install.ps1 -Version v0.1.0`      |
+| Custom directory       | `INSTALL_DIR=/usr/local/bin curl ... \| sh` | `.\install.ps1 -InstallDir C:\Tools` |
+| With Claude Code skill | `curl ... \| sh -s -- --with-skill`         | `.\install.ps1 -WithSkill`           |
 
 ### From source
 
@@ -55,16 +55,16 @@ bp-inspect [OPTIONS] <PATH>...
 
 Accepts one or more `.uasset` files or directories. Directories are scanned recursively.
 
-| Flag               | Description                                                              |
-| ------------------ | ------------------------------------------------------------------------ |
-| `--dump`           | Full import/export/property dump (verbose diagnostic view)               |
-| `--json`           | Full structured output as JSON                                           |
-| `--diff`           | Compare two `.uasset` files (unified diff of summaries)                  |
-| `--filter <name>`  | Filter exports by name (substring match, comma-separated)                |
-| `--update`         | Update bp-inspect to the latest release                                  |
-| `--context <N>`    | Context lines in diff output (default: 3)                                |
-| `--debug`          | Dump raw table data for format investigation                             |
-| `-V` / `--version` | Print version                                                            |
+| Flag               | Description                                                |
+| ------------------ | ---------------------------------------------------------- |
+| `--dump`           | Full import/export/property dump (verbose diagnostic view) |
+| `--json`           | Full structured output as JSON                             |
+| `--diff`           | Compare two `.uasset` files (unified diff of summaries)    |
+| `--filter <name>`  | Filter exports by name (substring match, comma-separated)  |
+| `--update`         | Update bp-inspect to the latest release                    |
+| `--context <N>`    | Context lines in diff output (default: 3)                  |
+| `--debug`          | Dump raw table data for format investigation               |
+| `-V` / `--version` | Print version                                              |
 
 ### Default output
 
@@ -132,7 +132,7 @@ Outputs a unified diff of the decoded summaries. Exit code 0 means identical, 1 
 
 ### JSON mode
 
-Full structured output for programmatic use. Includes top-level `imports`, `exports`, and `functions` arrays — functions have pre-extracted signatures, flags, and structured bytecode:
+Full structured output for programmatic use. Includes top-level `imports`, `exports`, and `functions` arrays. Functions have pre-extracted signatures, flags, and structured bytecode:
 
 ```sh
 bp-inspect Helm_BP.uasset --json | jq '.functions[] | {name, signature, flags}'
@@ -144,13 +144,13 @@ bp-inspect can act as a Git [textconv](https://git-scm.com/docs/gitattributes#_p
 
 ### Setup
 
-**1. `.gitattributes`** — add to your UE project repo (committed, shared with teammates):
+**1. `.gitattributes`** - add to your UE project repo (committed, shared with teammates):
 
 ```
 *.uasset diff=bp-inspect
 ```
 
-**2. Git config** — run once (globally, so it applies to all repos):
+**2. Git config** - run once (globally, so it applies to all repos):
 
 ```sh
 git config --global diff.bp-inspect.textconv bp-inspect
@@ -163,7 +163,7 @@ If bp-inspect isn't on PATH, use the full path instead:
 # macOS / Linux
 git config --global diff.bp-inspect.textconv /path/to/bp-inspect
 
-# Windows — use forward slashes
+# Windows - use forward slashes
 git config --global diff.bp-inspect.textconv C:/Tools/bp-inspect.exe
 ```
 
@@ -182,7 +182,7 @@ $ git diff Content/Blueprints/VRHand_BP.uasset
 
 ### Notes
 
-- **Read-only** — textconv only affects diff display. Git still treats `.uasset` as binary for merge/conflict resolution.
+- **Read-only** - textconv only affects diff display. Git still treats `.uasset` as binary for merge/conflict resolution.
 - **`cachetextconv = true`** caches converted text per blob SHA, so repeated diffs are fast.
 - Works with `git log -p`, `git show`, `git diff --cached`, and any tool that uses Git's diff machinery.
 
@@ -196,11 +196,11 @@ Install it alongside bp-inspect using `--with-skill` (see [Install options](#ins
 cp -r skill/ ~/.claude/skills/unreal-bp/
 ```
 
-Once installed, Claude can read any `.uasset` file you point it at — ask it to explain what a Blueprint does, debug a specific function, or plan a Blueprint-to-C++ migration.
+Once installed, Claude can read any `.uasset` file you point it at. Ask it to explain what a Blueprint does, debug a specific function, or plan a Blueprint-to-C++ migration.
 
 ## How it works
 
-bp-inspect reads the compiled bytecode from the binary file directly, with zero UE dependency. A 1MB Blueprint with 18 functions parses in ~15ms — the entire Blueprint, not one graph at a time.
+bp-inspect reads the compiled bytecode from the binary file directly, with zero UE dependency. A 1MB Blueprint with 18 functions parses in ~15ms, the entire Blueprint, not one graph at a time.
 
 The hard part is making bytecode *readable*. bp-inspect:
 
@@ -217,12 +217,12 @@ The goal is output that reads like hand-written pseudocode, not a bytecode dump.
 
 **How it compares to existing tools:**
 
-| Tool | Approach | Limitations |
-| --- | --- | --- |
-| **UAssetAPI** | .NET serialisation library for modding | Raw property trees and byte arrays — no disassembly or readable output |
-| **UE commandlets** | Editor-based dump tools | Requires full editor instance with project loaded and all dependencies compiled |
-| **[NodeToCode](https://github.com/protospatial/NodeToCode)** | Editor plugin, BP→C++ via LLM | Requires running editor + AI API key; reads live graph, not binary files |
-| **bp-inspect** | Standalone binary, reads `.uasset` directly | No editor, no project context, no network — works in terminals, CI, and AI assistants |
+| Tool                                                         | Approach                                    | Limitations                                                                           |
+| ------------------------------------------------------------ | ------------------------------------------- | ------------------------------------------------------------------------------------- |
+| **UAssetAPI**                                                | .NET serialisation library for modding      | Raw property trees and byte arrays, no disassembly or readable output                 |
+| **UE commandlets**                                           | Editor-based dump tools                     | Requires full editor instance with project loaded and all dependencies compiled       |
+| **[NodeToCode](https://github.com/protospatial/NodeToCode)** | Editor plugin, BP→C++ via LLM               | Requires running editor + AI API key; reads live graph, not binary files              |
+| **bp-inspect**                                               | Standalone binary, reads `.uasset` directly | No editor, no project context, no network. Works in terminals, CI, and AI assistants  |
 
 ## Supported formats
 
@@ -260,11 +260,24 @@ cargo test inline                  # run tests matching "inline"
 UPDATE_SNAPSHOTS=1 cargo test      # update snapshot files after intentional output changes
 ```
 
-**Unit tests** live inline in source files (`#[cfg(test)]`) — they test private helpers that aren't accessible from outside their module. **Integration tests** in `tests/` exercise the public API end-to-end with snapshot regression and structural assertions.
+**Unit tests** live inline in source files (`#[cfg(test)]`). They test private helpers that aren't accessible from outside their module. **Integration tests** in `tests/` exercise the public API end-to-end with snapshot regression and structural assertions.
 
 **Snapshot tests**: expected outputs live in `tests/snapshots/`. After intentional output changes, run with `UPDATE_SNAPSHOTS=1` to regenerate, then review diffs before committing.
 
 **Test fixtures**: place `.uasset` files in `samples/`. The committed `Helm_BP.uasset` is used by integration tests. Additional files are gitignored and used by `tests/extended.rs` (auto-skips when absent).
+
+### Contributing
+
+Branch from `main` and open a pull request when ready.
+
+| Convention        | Details                                                                        |
+| ----------------- | ------------------------------------------------------------------------------ |
+| Branch naming     | `feature/short-description` or `bugfix/short-description`                      |
+| Commit hygiene    | Squash fixups and WIP commits; keep logically distinct changes separate        |
+| Before submitting | `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`         |
+| Merge strategy    | Merge commit when history is curated, squash merge for single-concern branches |
+
+Bug reports and sample `.uasset` files are also welcome as issues.
 
 ## License
 
