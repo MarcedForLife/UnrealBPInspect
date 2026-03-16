@@ -391,9 +391,8 @@
       [2]: "0059: $Subtract_FloatFloat = $Multiply_FloatFloat - 1.0000"
       [3]: "0084: out SteeringAngle = $Subtract_FloatFloat"
       [4]: "00a0: return nop"
-    BytecodeSummary: [StrProperty; 2 items]
-      [0]: "self.WinchConstraintInstance.GetRotationAlpha($GetRotationAlpha_RotationAlpha)"
-      [1]: "out SteeringAngle = ($GetRotationAlpha_RotationAlpha * 2.0000) - 1.0000"
+    BytecodeSummary: [StrProperty; 1 items]
+      [0]: "out SteeringAngle = (self.WinchConstraintInstance.GetRotationAlpha() * 2.0000) - 1.0000"
     FunctionFlags: "Public|HasOutParms|BlueprintPure|Const"
 
   [15] UserConstructionScript (class: /Script/CoreUObject.Function, parent: /Script/Engine.Actor.UserConstructionScript)
@@ -405,11 +404,9 @@
       [2]: "005b: if !($Cast_bSuccess) jump 0x7f"
       [3]: "006b: self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP"
       [4]: "007f: return nop"
-    BytecodeSummary: [StrProperty; 4 items]
-      [0]: "$Cast_AsWinch_Constraint_BP = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)"
-      [1]: "if ($Cast_AsWinch_Constraint_BP) {"
-      [2]: "    self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP"
-      [3]: "}"
+    BytecodeSummary: [StrProperty; 2 items]
+      [0]: "if (cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)) {"
+      [1]: "    self.WinchConstraintInstance = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)"
     FunctionFlags: "Event|Public|BlueprintPure"
 
   [16] Wheel_GEN_VARIABLE (class: /Script/VRExpansionPlugin.GrippableStaticMeshComponent)

@@ -125,6 +125,131 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
         i = inline_end + 1;
     }
 
+    // Detect alternating push_flow/jump sequence chains (UberGraph pattern).
+    // Regular functions use grouped push_flows, but UberGraph interleaves them:
+    //   push_flow A; jump body0; push_flow B; jump body1; ... inline_code; pop_flow
+    // Each body ends with pop_flow. We locate bodies by their jump target offset.
+    {
+        let offset_to_idx: std::collections::HashMap<usize, usize> = stmts
+            .iter()
+            .enumerate()
+            .map(|(idx, s)| (s.mem_offset, idx))
+            .collect();
+
+        let resolve_offset = |target: usize| -> Option<usize> {
+            offset_to_idx.get(&target).copied().or_else(|| {
+                // Fuzzy match: allow ±4 bytes for skipped opcodes
+                (1..=4).find_map(|d| {
+                    offset_to_idx
+                        .get(&(target + d))
+                        .or_else(|| offset_to_idx.get(&(target.wrapping_sub(d))))
+                        .copied()
+                })
+            })
+        };
+
+        let mut i = 0;
+        while i + 1 < stmts.len() {
+            if used[i] {
+                i += 1;
+                continue;
+            }
+            // Look for push_flow immediately followed by jump
+            let Some(_resume) = parse_push_flow(&stmts[i].text) else {
+                i += 1;
+                continue;
+            };
+            let Some(_body_off) = parse_jump(&stmts[i + 1].text) else {
+                i += 1;
+                continue;
+            };
+
+            // Collect alternating push_flow/jump pairs
+            let chain_start = i;
+            let mut jump_targets: Vec<usize> = Vec::new(); // body offsets
+            let mut j = i;
+            while j + 1 < stmts.len() && !used[j] {
+                let Some(_resume) = parse_push_flow(&stmts[j].text) else {
+                    break;
+                };
+                let Some(body_off) = parse_jump(&stmts[j + 1].text) else {
+                    break;
+                };
+                jump_targets.push(body_off);
+                j += 2;
+            }
+            if jump_targets.is_empty() {
+                i += 1;
+                continue;
+            }
+
+            // After the chain: inline body until pop_flow (exact).
+            // pop_flow_if_not is a conditional branch WITHIN the body, not the terminator.
+            let inline_start = j;
+            let inline_end = stmts[inline_start..]
+                .iter()
+                .position(|s| s.text == "pop_flow")
+                .map(|p| p + inline_start);
+            let Some(inline_end) = inline_end else {
+                i += 1;
+                continue;
+            };
+
+            // Locate body blocks by jump target offset
+            let mut pins: Vec<SequencePin> = Vec::new();
+            let mut all_found = true;
+            for &target in &jump_targets {
+                let Some(body_start) = resolve_offset(target) else {
+                    all_found = false;
+                    break;
+                };
+                // Find body end: first pop_flow from body_start
+                let body_end = stmts[body_start..]
+                    .iter()
+                    .position(|s| s.text == "pop_flow")
+                    .map(|p| p + body_start);
+                let Some(body_end) = body_end else {
+                    all_found = false;
+                    break;
+                };
+                pins.push(SequencePin {
+                    body_start_idx: body_start,
+                    body_end_idx: body_end,
+                });
+            }
+            if !all_found || pins.len() != jump_targets.len() {
+                i += 1;
+                continue;
+            }
+
+            // For single-pair sequences, require the inline body to have at least
+            // 2 meaningful statements (not just pop_flow/push_flow). This prevents
+            // false positives on trivial UberGraph stubs.
+            if jump_targets.len() == 1 {
+                let meaningful = stmts[inline_start..inline_end]
+                    .iter()
+                    .filter(|s| {
+                        s.text != "pop_flow"
+                            && !s.text.starts_with("push_flow ")
+                            && !s.text.starts_with("pop_flow_if_not(")
+                    })
+                    .count();
+                if meaningful < 2 {
+                    i += 1;
+                    continue;
+                }
+            }
+
+            sequences.push(SequenceNode {
+                chain_start,
+                chain_end: inline_start,
+                inline_end,
+                pins,
+            });
+            i = inline_end + 1;
+        }
+    }
+
     // Detect for-loops (including ForEach)
     struct ForLoop {
         cond_text: String,
@@ -251,9 +376,11 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
 
         let cond = stmts[i].text[5..stmts[i].text.rfind(") jump 0x").unwrap()].to_string();
 
-        let overlaps_sequence = sequences
-            .iter()
-            .any(|seq| i >= seq.chain_start && i <= seq.inline_end);
+        let overlaps_sequence = sequences.iter().any(|seq| {
+            // Check if any of the loop's ranges overlap the sequence's range
+            let loop_end = loop_ctrl_end.max(body_end);
+            i <= seq.inline_end && loop_end >= seq.chain_start
+        });
         if overlaps_sequence {
             continue;
         }
@@ -293,27 +420,43 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
     }
 
     let mut output: Vec<BcStatement> = Vec::new();
-    let marker = |text: &str| BcStatement {
-        mem_offset: 0,
+    let marker = |offset: usize, text: &str| BcStatement {
+        mem_offset: offset,
         text: text.to_string(),
     };
 
     let mut i = 0;
     while i < stmts.len() {
         if let Some(seq) = sequences.iter().find(|s| s.chain_start == i) {
+            let seq_offset = stmts[seq.chain_start].mem_offset;
             for (pi, pin) in seq.pins.iter().enumerate() {
-                output.push(marker(&format!("// sequence [{}]:", pi)));
+                output.push(marker(seq_offset, &format!("// sequence [{}]:", pi)));
                 output.extend_from_slice(&stmts[pin.body_start_idx..pin.body_end_idx]);
+                // Sentinel at pop_flow offset so if-else exit jumps within
+                // the body can resolve (the pop_flow itself is excluded).
+                output.push(BcStatement {
+                    mem_offset: stmts[pin.body_end_idx].mem_offset,
+                    text: "return nop".to_string(),
+                });
             }
-            output.push(marker(&format!("// sequence [{}]:", seq.pins.len())));
+            output.push(marker(
+                seq_offset,
+                &format!("// sequence [{}]:", seq.pins.len()),
+            ));
             output.extend_from_slice(&stmts[seq.chain_end..seq.inline_end]);
+            // Sentinel for inline body's pop_flow
+            output.push(BcStatement {
+                mem_offset: stmts[seq.inline_end].mem_offset,
+                text: "return nop".to_string(),
+            });
 
             i = seq.inline_end + 1;
             continue;
         }
 
         if let Some(lp) = loops.iter().find(|l| l.if_idx == i) {
-            output.push(marker(&format!("while ({}) {{", lp.cond_text)));
+            let lp_offset = stmts[lp.if_idx].mem_offset;
+            output.push(marker(lp_offset, &format!("while ({}) {{", lp.cond_text)));
             if lp.extra_start < lp.extra_end {
                 output.extend_from_slice(&stmts[lp.extra_start..lp.extra_end]);
             }
@@ -324,10 +467,10 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
             };
             output.extend_from_slice(&stmts[lp.body_start_idx..body_end]);
             output.extend_from_slice(&stmts[lp.incr_start..lp.back_jump_idx]);
-            output.push(marker("}"));
+            output.push(marker(lp_offset, "}"));
             // Emit ForEach completion path after the loop
             if let (Some(cs), Some(ce)) = (lp.completion_start, lp.completion_end) {
-                output.push(marker("// on loop complete:"));
+                output.push(marker(lp_offset, "// on loop complete:"));
                 for stmt in &stmts[cs..=ce] {
                     // Skip push_flow/pop_flow/jump that are loop control artifacts
                     if parse_push_flow(&stmt.text).is_some()
@@ -382,54 +525,8 @@ pub fn reorder_convergence(stmts: &mut Vec<BcStatement>) {
 fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
     use std::collections::{HashMap, HashSet};
 
-    // Build offset → index map. find_idx falls back to 4-byte bidirectional tolerance
-    // when exact lookup misses — jump targets can land on skipped opcodes (wire_trace,
-    // tracepoint) that were filtered during decode, so the nearest statement may be
-    // a few bytes away from the target address.
-    let exact_map: HashMap<usize, usize> = stmts
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.mem_offset > 0)
-        .map(|(i, s)| (s.mem_offset, i))
-        .collect();
-    let mut sorted_offsets: Vec<(usize, usize)> =
-        exact_map.iter().map(|(&off, &idx)| (off, idx)).collect();
-    sorted_offsets.sort_by_key(|&(off, _)| off);
-
-    let find_idx = |target: usize| -> Option<usize> {
-        if let Some(&idx) = exact_map.get(&target) {
-            return Some(idx);
-        }
-        let pos = sorted_offsets.partition_point(|&(off, _)| off <= target);
-        let below = if pos > 0 {
-            Some(sorted_offsets[pos - 1])
-        } else {
-            None
-        };
-        let above = if pos < sorted_offsets.len() {
-            Some(sorted_offsets[pos])
-        } else {
-            None
-        };
-        let best = match (below, above) {
-            (Some((bo, bi)), Some((ao, ai))) => {
-                let bd = target.saturating_sub(bo);
-                let ad = ao.saturating_sub(target);
-                if bd <= ad {
-                    Some((bd, bi))
-                } else {
-                    Some((ad, ai))
-                }
-            }
-            (Some((bo, bi)), None) => Some((target.saturating_sub(bo), bi)),
-            (None, Some((ao, ai))) => Some((ao.saturating_sub(target), ai)),
-            (None, None) => None,
-        };
-        match best {
-            Some((dist, idx)) if dist <= 4 => Some(idx),
-            _ => None,
-        }
-    };
+    let offset_map = super::OffsetMap::build(stmts);
+    let find_idx = |target: usize| -> Option<usize> { offset_map.find_fuzzy(target, 4) };
 
     // Find backward unconditional jumps (target resolves to earlier index)
     let mut backward_jumps: Vec<(usize, usize)> = Vec::new(); // (jump_idx, target_idx)
