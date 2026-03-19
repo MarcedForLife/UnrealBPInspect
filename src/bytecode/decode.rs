@@ -1,7 +1,7 @@
 use super::readers::*;
 use super::resolve::*;
 use crate::binary::NameTable;
-use crate::types::ImportEntry;
+use crate::types::{ImportEntry, VER_UE5_LARGE_WORLD_COORDINATES};
 
 use super::opcodes::*;
 
@@ -142,7 +142,7 @@ fn decode_context(
 }
 
 fn strip_func_prefix(name: &str) -> String {
-    if let Some(dot_pos) = name.rfind('.') {
+    let result = if let Some(dot_pos) = name.rfind('.') {
         let class_part = &name[..dot_pos];
         let func = &name[dot_pos + 1..];
         let stripped = func
@@ -160,7 +160,15 @@ fn strip_func_prefix(name: &str) -> String {
             .or_else(|| name.strip_prefix("Conv_"))
             .unwrap_or(name);
         stripped.to_string()
-    }
+    };
+    normalize_lwc_func(&result)
+}
+
+/// Normalize UE5 LWC function name variants back to their UE4 equivalents
+/// so diffs between engine versions are clean.
+fn normalize_lwc_func(name: &str) -> String {
+    name.replace("_DoubleDouble", "_FloatFloat")
+        .replace("SelectDouble", "SelectFloat")
 }
 
 fn is_ue4_library_class(name: &str) -> bool {
@@ -341,9 +349,9 @@ pub fn decode_expr(
             Some(format!("{} = {}", var, val))
         }
         EX_BITFIELD_CONST => {
-            let path = read_bc_field_path(bc, pos, nt, mem_adj);
-            let expr = decode_next!();
-            Some(format!("bitfield({}, {})", path, expr))
+            let _path = read_bc_field_path(bc, pos, nt, mem_adj);
+            let value = read_bc_u8(bc, pos) != 0;
+            Some(format!("{}", value))
         }
         // --- Context / member access ---
         EX_CLASS_CONTEXT => {
@@ -399,11 +407,11 @@ pub fn decode_expr(
             Some(format!("'{}'", name))
         }
         EX_ROTATION_CONST => {
-            let (p, y, r) = read_bc_xyz(bc, pos, ue5 >= 1004);
+            let (p, y, r) = read_bc_xyz(bc, pos, ue5 >= VER_UE5_LARGE_WORLD_COORDINATES);
             Some(format!("Rot({:.1},{:.1},{:.1})", p, y, r))
         }
         EX_VECTOR_CONST => {
-            let (x, y, z) = read_bc_xyz(bc, pos, ue5 >= 1004);
+            let (x, y, z) = read_bc_xyz(bc, pos, ue5 >= VER_UE5_LARGE_WORLD_COORDINATES);
             Some(format!("Vec({:.1},{:.1},{:.1})", x, y, z))
         }
         EX_BYTE_CONST => Some(format!("{}", read_bc_u8(bc, pos))),
@@ -436,7 +444,7 @@ pub fn decode_expr(
         }
         EX_NO_OBJECT => Some("null".into()),
         EX_TRANSFORM_CONST => {
-            let lwc = ue5 >= 1004;
+            let lwc = ue5 >= VER_UE5_LARGE_WORLD_COORDINATES;
             let (rx, ry, rz, rw) = read_bc_xyzw(bc, pos, lwc);
             let (tx, ty, tz) = read_bc_xyz(bc, pos, lwc);
             let (sx, sy, sz) = read_bc_xyz(bc, pos, lwc);
@@ -499,8 +507,12 @@ pub fn decode_expr(
         EX_PRIMITIVE_CAST => {
             let cast_type = read_bc_u8(bc, pos);
             let expr = decode_next!();
-            let name = primitive_cast_name(cast_type);
-            Some(format!("{}({})", name, expr))
+            let name = primitive_cast_name(cast_type, ue5);
+            if name.is_empty() {
+                Some(expr) // transparent cast (LWC float↔double, obj-to-iface)
+            } else {
+                Some(format!("{}({})", name, expr))
+            }
         }
         EX_SET_SET => {
             let target = decode_next!();
@@ -552,7 +564,7 @@ pub fn decode_expr(
         }
         EX_END_MAP_CONST => None,
         EX_VECTOR3F_CONST => {
-            if ue5 > 0 {
+            if ue5 >= VER_UE5_LARGE_WORLD_COORDINATES {
                 // UE5: explicit float vector
                 let x = read_bc_f32(bc, pos);
                 let y = read_bc_f32(bc, pos);
@@ -776,13 +788,25 @@ fn decode_func_args(
     args
 }
 
-fn primitive_cast_name(cast_type: u8) -> String {
-    match cast_type {
-        0x41 => "iface_to_obj".into(), // CST_InterfaceToObject
-        0x46 => "obj_to_iface".into(), // CST_ObjectToInterface
-        0x47 => "bool".into(),         // CST_ObjectToBool
-        73 => "bool".into(),           // CST_InterfaceToBool (0x49)
-        _ => format!("cast_{}", cast_type),
+fn primitive_cast_name(cast_type: u8, ue5: i32) -> String {
+    if ue5 >= VER_UE5_LARGE_WORLD_COORDINATES {
+        // UE5 renumbered cast types and added LWC float↔double conversions.
+        match cast_type {
+            0x00 => String::new(), // CST_ObjectToInterface — transparent
+            0x01 => "bool".into(), // CST_ObjectToBool
+            0x02 => "bool".into(), // CST_InterfaceToBool
+            0x03 => String::new(), // CST_DoubleToFloat — implicit narrowing
+            0x04 => String::new(), // CST_FloatToDouble — implicit widening
+            _ => format!("cast_{}", cast_type),
+        }
+    } else {
+        match cast_type {
+            0x41 => "iface_to_obj".into(), // CST_InterfaceToObject
+            0x46 => "obj_to_iface".into(), // CST_ObjectToInterface
+            0x47 => "bool".into(),         // CST_ObjectToBool
+            0x49 => "bool".into(),         // CST_InterfaceToBool
+            _ => format!("cast_{}", cast_type),
+        }
     }
 }
 
@@ -956,7 +980,7 @@ mod tests {
         push_f32(&mut bc, 1.0);
         push_f32(&mut bc, 2.0);
         push_f32(&mut bc, 3.0);
-        let (result, _) = expr(&bc, 1000);
+        let (result, _) = expr(&bc, 1004);
         assert_eq!(result.unwrap(), "Vec3f(1.0,2.0,3.0)");
     }
 
@@ -986,10 +1010,10 @@ mod tests {
     fn bitfield_const() {
         let mut bc = vec![0x11];
         push_field_path(&mut bc, 0); // FFieldPath → "TestVar"
-        bc.push(0x27); // EX_True
+        bc.push(0x01); // uint8 value = true
         let names = nt(&["TestVar"]);
         let result = expr_with_nt(&bc, &names, 0);
-        assert_eq!(result.unwrap(), "bitfield(TestVar, true)");
+        assert_eq!(result.unwrap(), "true");
     }
 
     // --- 0x33: EX_PropertyConst ---

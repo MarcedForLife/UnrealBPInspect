@@ -1,19 +1,38 @@
+// -- UE4 file_ver gates --
+pub const VER_UE4_TEMPLATE_INDEX: i32 = 459;
+pub const VER_UE4_PROPERTY_GUID: i32 = 503;
+pub const VER_UE4_LOCALIZATION_ID: i32 = 516;
+pub const VER_UE4_PACKAGE_NAME_IN_IMPORT: i32 = 518;
+
+// -- UE5 file_ver_ue5 gates --
+pub const VER_UE5_OPTIONAL_RESOURCES: i32 = 1003;
+pub const VER_UE5_LARGE_WORLD_COORDINATES: i32 = 1004;
+pub const VER_UE5_REMOVE_EXPORT_GUID: i32 = 1005;
+pub const VER_UE5_TRACK_INHERITED: i32 = 1006;
+pub const VER_UE5_SOFT_OBJECT_PATH_LIST: i32 = 1007;
+pub const VER_UE5_SCRIPT_SERIALIZATION_OFFSET: i32 = 1010;
+pub const VER_UE5_PROPERTY_TAG_EXTENSION: i32 = 1011;
+pub const VER_UE5_COMPLETE_TYPE_NAME: i32 = 1012;
+
 /// Tracks the .uasset file format version across UE4 and UE5.
-///
-/// Epic added a separate UE5 version track in the binary header rather than
-/// continuing to increment the UE4 version number. `file_ver_ue5` is only
-/// present in the file when `legacy_ver <= -8` (UE5-era); for UE4 assets
-/// it defaults to 0. Each field gates different format variations:
-/// - `file_ver`: property GUIDs (>=503), template indices (>=459), localization IDs (>=516)
-/// - `file_ver_ue5`: LWC/f64 vectors (>=1004), removed export GUIDs (>=1005), optional resources (>=1003)
 #[derive(Clone, Copy)]
 pub struct AssetVersion {
     pub file_ver: i32,     // UE4 version (e.g. 522 for UE4.27)
     pub file_ver_ue5: i32, // UE5 version (0 for UE4 assets, 1000+ for UE5)
 }
 
+impl AssetVersion {
+    /// UE5 Large World Coordinates: vectors/rotators use f64, math ops renamed.
+    pub fn is_lwc(&self) -> bool {
+        self.file_ver_ue5 >= VER_UE5_LARGE_WORLD_COORDINATES
+    }
+    /// UE5.2+: FPropertyTag uses recursive FPropertyTypeName format.
+    pub fn has_complete_type_name(&self) -> bool {
+        self.file_ver_ue5 >= VER_UE5_COMPLETE_TYPE_NAME
+    }
+}
+
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct ImportEntry {
     pub class_package: String,
     pub class_name: String,

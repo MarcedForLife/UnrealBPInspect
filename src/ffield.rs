@@ -64,8 +64,10 @@ pub fn resolve_ffield_type(
     end: u64,
 ) -> Result<String> {
     match field_class {
-        "FloatProperty" => Ok("float".into()),
-        "DoubleProperty" => Ok("double".into()),
+        // UE5 LWC promotes float → double internally, but we display as "float"
+        // for consistency with UE4 and the Blueprint editor. Actual values are
+        // parsed at full f64 precision regardless.
+        "FloatProperty" | "DoubleProperty" => Ok("float".into()),
         "IntProperty" | "Int32Property" | "UInt32Property" => Ok("int".into()),
         "Int64Property" | "UInt64Property" => Ok("int64".into()),
         "Int16Property" | "UInt16Property" => Ok("int16".into()),
@@ -140,11 +142,12 @@ pub fn resolve_ffield_type(
     }
 }
 
-pub fn format_signature(func_name: &str, params: &[(String, String, u64)]) -> String {
-    const CPF_PARM: u64 = 0x80;
-    const CPF_OUT_PARM: u64 = 0x100;
-    const CPF_RETURN_PARM: u64 = 0x200;
+// UE property flags used to classify function parameters
+const CPF_PARM: u64 = 0x80;
+const CPF_OUT_PARM: u64 = 0x100;
+const CPF_RETURN_PARM: u64 = 0x200;
 
+pub fn format_signature(func_name: &str, params: &[(String, String, u64)]) -> String {
     let mut inputs = Vec::new();
     let mut ret_type = None;
 
