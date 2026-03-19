@@ -24,9 +24,12 @@ pub fn skip_ffield_child(c: &mut R, nt: &NameTable, end: u64) -> Result<()> {
     let _rep_func = nt.fname(c)?;
     let _bp_rep = read_u8(c)?;
     match field_class.as_str() {
-        "ObjectProperty" | "WeakObjectProperty" | "ClassProperty" | "SoftObjectProperty"
-        | "SoftClassProperty" | "InterfaceProperty" => {
+        "ObjectProperty" | "WeakObjectProperty" | "SoftObjectProperty" | "InterfaceProperty" => {
             let _ref = read_i32(c)?;
+        }
+        "ClassProperty" | "SoftClassProperty" => {
+            let _prop_class = read_i32(c)?;
+            let _meta_class = read_i32(c)?;
         }
         "StructProperty" => {
             let _ref = read_i32(c)?;
