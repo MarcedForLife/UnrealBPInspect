@@ -111,14 +111,14 @@ Functions:
 Drill into a specific function while keeping class context:
 
 ```sh
-bp-inspect Helm_BP.uasset --filter GetSteeringAngle
+bp-inspect MyBlueprint.uasset --filter MyFunction
 ```
 
 ### Batch / directory mode
 
 ```sh
 bp-inspect Content/Blueprints/                          # all .uasset files under directory
-bp-inspect Helm_BP.uasset VRHand_BP.uasset              # multiple files
+bp-inspect A_BP.uasset B_BP.uasset                      # multiple files
 bp-inspect Content/ --json | jq '.[].functions[].name'   # multi-file JSON array
 ```
 
@@ -135,7 +135,7 @@ Outputs a unified diff of the decoded summaries. Exit code 0 means identical, 1 
 Full structured output for programmatic use. Includes top-level `imports`, `exports`, and `functions` arrays. Functions have pre-extracted signatures, flags, and structured bytecode:
 
 ```sh
-bp-inspect Helm_BP.uasset --json | jq '.functions[] | {name, signature, flags}'
+bp-inspect MyBlueprint.uasset --json | jq '.functions[] | {name, signature, flags}'
 ```
 
 ## Git integration
@@ -170,7 +170,7 @@ git config --global diff.bp-inspect.textconv C:/Tools/bp-inspect.exe
 ### What it looks like
 
 ```diff
-$ git diff Content/Blueprints/VRHand_BP.uasset
+$ git diff Content/Blueprints/MyBlueprint.uasset
 
 -  GripStrength: float = 0.8
 +  GripStrength: float = 1.2
@@ -226,8 +226,9 @@ The goal is output that reads like hand-written pseudocode, not a bytecode dump.
 
 ## Supported formats
 
-- UE4 uncooked `.uasset` files (UE4.14–4.27, file versions 459–522)
-- UE5 uncooked `.uasset` files (UE5.0–5.5) with Large World Coordinates support
+- **UE4** uncooked `.uasset` files (4.14-4.27, file versions 459-522)
+- **UE5** uncooked `.uasset` files (5.0-5.5) with Large World Coordinates support
+- Tested with UE 4.27 (version 522), 5.3 (version 1009), and 5.5 (version 1012+). Other UE5 versions should work but are unverified.
 - Animation Blueprints and Widget Blueprints partially work (event graphs and functions parse correctly; AnimGraph state machines and widget hierarchy display are planned)
 - Cooked assets (split `.uasset`/`.uexp`) and UE5 IoStore format are not yet supported
 
@@ -243,12 +244,12 @@ cargo build --release              # optimised build → target/release/bp-inspe
 ### Running locally
 
 ```sh
-cargo run -- samples/Helm_BP.uasset                      # human-readable summary (default)
-cargo run -- samples/Helm_BP.uasset --dump               # full import/export/property dump
-cargo run -- samples/Helm_BP.uasset --json               # full JSON output
-cargo run -- samples/Helm_BP.uasset --filter GetSteeringAngle        # single function
-cargo run -- --diff samples/Helm_BP.uasset samples/VRHand_BP.uasset  # compare two files
-cargo run -- samples/                                    # all .uasset files in directory
+cargo run -- samples/ue_4.27/MyBlueprint.uasset                       # human-readable summary (default)
+cargo run -- samples/ue_4.27/MyBlueprint.uasset --dump                # full import/export/property dump
+cargo run -- samples/ue_4.27/MyBlueprint.uasset --json                # full JSON output
+cargo run -- samples/ue_4.27/MyBlueprint.uasset --filter MyFunction   # single function
+cargo run -- --diff samples/ue_4.27/A.uasset samples/ue_5.5/A.uasset # compare two files
+cargo run -- samples/                                                 # all .uasset files in directory
 ```
 
 ### Testing
@@ -264,7 +265,7 @@ UPDATE_SNAPSHOTS=1 cargo test      # update snapshot files after intentional out
 
 **Snapshot tests**: expected outputs live in `tests/snapshots/`. After intentional output changes, run with `UPDATE_SNAPSHOTS=1` to regenerate, then review diffs before committing.
 
-**Test fixtures**: place `.uasset` files in `samples/`. The committed `Helm_BP.uasset` is used by integration tests. Additional files are gitignored and used by `tests/extended.rs` (auto-skips when absent).
+**Test fixtures**: place `.uasset` files in `samples/ue_4.27/` or `samples/ue_5.5/`. Small committed fixtures are used by integration tests; larger files are gitignored for local testing.
 
 ### Contributing
 

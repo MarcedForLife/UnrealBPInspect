@@ -50,7 +50,7 @@ pub fn read_bc_field_path(bc: &[u8], pos: &mut usize, nt: &NameTable, mem_adj: &
         let _owner = read_bc_i32(bc, pos);
         return "???".to_string();
     }
-    // disk: 8 + N*8 bytes (path_num + N FNames + owner), mem: 8 bytes (pointer)
+    // disk: 4 + N*8 + 4 bytes (path_num + N FNames + owner), mem: 8 bytes (pointer)
     *mem_adj -= path_num * 8;
     let mut names = Vec::new();
     for _ in 0..path_num {

@@ -85,10 +85,10 @@ pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
 
             let replacement = substitute_var(&stmts[target_idx].text, var_name, &current_expr);
 
-            // Bypass MAX_LINE when expression (even with parens) is shorter than the variable —
-            // the resulting line can only get shorter or stay the same length.
+            // Bypass MAX_LINE for trivial expressions (property chains, $temp refs, literals)
             let shortens = current_expr.len() + 2 <= var_name.len(); // +2 for possible (...)
-            if !shortens && replacement.len() > MAX_LINE {
+            let trivial = is_trivial_expr(&current_expr);
+            if !shortens && !trivial && replacement.len() > MAX_LINE {
                 continue;
             }
 
@@ -178,6 +178,18 @@ fn substitute_var(text: &str, var: &str, expr: &str) -> String {
     text.to_string()
 }
 
+/// Substitute ALL occurrences of `var` in `text`, repeating until stable.
+fn substitute_var_all(text: &str, var: &str, expr: &str) -> String {
+    let mut result = text.to_string();
+    loop {
+        let next = substitute_var(&result, var, expr);
+        if next == result {
+            return result;
+        }
+        result = next;
+    }
+}
+
 /// Check if an expression contains a function/method call (i.e., has side effects).
 /// Returns true if there's an identifier followed by `(` where the identifier is not
 /// a keyword like `switch` or `if`.  Pure expressions like `switch(X) { ... }` or
@@ -206,6 +218,12 @@ fn expr_is_compound(expr: &str) -> bool {
         " != ", " >> ", " << ", " ? ",
     ];
     TOKENS.iter().any(|tok| expr.contains(tok)) || expr.starts_with('!')
+}
+
+/// Check if an expression is trivial enough to inline regardless of line length.
+/// Trivial = property chains, `$temp` refs, or literals (no calls, operators, or brackets).
+fn is_trivial_expr(expr: &str) -> bool {
+    !expr.is_empty() && !expr.contains(['(', ')', '[', ']']) && !expr_is_compound(expr)
 }
 
 fn used_in_operator_context(text: &str, pos: usize, after: usize) -> bool {
@@ -265,7 +283,7 @@ pub fn inline_constant_temps(stmts: &mut Vec<BcStatement>) {
     // - Single-assignment (Temp_* only): safe to inline since Temp_ vars are read-only
     //   Select indices, never out-parameters.  $-prefixed temps may be out-params
     //   modified by function calls, so single assignments are left to inline_single_use_temps.
-    let constant_vars: BTreeMap<String, String> = assignments
+    let mut constant_vars: BTreeMap<String, String> = assignments
         .into_iter()
         .filter(|(var, entries)| {
             let all_same = entries.iter().all(|(_, e)| *e == entries[0].1);
@@ -279,30 +297,48 @@ pub fn inline_constant_temps(stmts: &mut Vec<BcStatement>) {
         return;
     }
 
-    // Collect assignment indices to remove
-    let mut remove_indices: HashSet<usize> = HashSet::new();
-    for (i, s) in stmts.iter().enumerate() {
-        if let Some((var, _)) = parse_temp_assignment(&s.text) {
-            if constant_vars.contains_key(var) {
-                remove_indices.insert(i);
+    // Resolve expressions transitively: a constant var's expression may
+    // reference another constant var.  Iterate until stable so that
+    // substitution order in the per-statement pass doesn't matter.
+    let keys: Vec<String> = constant_vars.keys().cloned().collect();
+    for _ in 0..6 {
+        let mut changed = false;
+        for key in &keys {
+            let expr = constant_vars[key].clone();
+            let mut resolved = expr.clone();
+            for (other_var, other_expr) in constant_vars.iter() {
+                if other_var == key {
+                    continue;
+                }
+                if count_var_refs(&resolved, other_var) > 0 {
+                    resolved = substitute_var_all(&resolved, other_var, other_expr);
+                }
+            }
+            if resolved != expr {
+                constant_vars.insert(key.clone(), resolved);
+                changed = true;
             }
         }
+        if !changed {
+            break;
+        }
     }
+
+    // Collect assignment indices to remove
+    let remove_indices: HashSet<usize> = stmts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            let (var, _) = parse_temp_assignment(&s.text)?;
+            constant_vars.contains_key(var).then_some(i)
+        })
+        .collect();
 
     // Substitute the constant expression into all references
     for s in stmts.iter_mut() {
         for (var, expr) in &constant_vars {
             if count_var_refs(&s.text, var) > 0 {
-                // Substitute all occurrences
-                let mut text = s.text.clone();
-                loop {
-                    let new_text = substitute_var(&text, var, expr);
-                    if new_text == text {
-                        break;
-                    }
-                    text = new_text;
-                }
-                s.text = text;
+                s.text = substitute_var_all(&s.text, var, expr);
             }
         }
     }
@@ -855,14 +891,19 @@ pub fn fold_summary_patterns(lines: &mut Vec<String>) {
 }
 
 fn process_section(lines: &mut Vec<String>) {
-    rewrite_foreach_loops(lines);
-    fold_delegate_bindings(lines);
-    fold_cast_guards(lines);
-    fold_cast_inline(lines);
-    fold_break_patterns(lines);
-    fold_struct_construction(lines);
-    dedup_completion_paths(lines);
-    fold_section_temps(lines);
+    // Pipeline ordering: each pass may create patterns consumed by later passes.
+    // 1. Structural rewrites (change control flow shape)
+    rewrite_foreach_loops(lines); // foreach before temp inlining (creates new temps)
+    fold_delegate_bindings(lines); // bind() + AddDelegate -> +=
+    fold_cast_guards(lines); // cast-then-branch -> if let
+    fold_cast_inline(lines); // inline single-use cast results
+                             // 2. Expression folding (collapse multi-statement patterns into expressions)
+    fold_break_patterns(lines); // Break/Make struct folding
+    fold_struct_construction(lines); // constructor patterns
+    dedup_completion_paths(lines); // remove duplicate completion branches
+                                   // 3. Temp variable inlining (must run after folding creates final expressions)
+    fold_section_temps(lines); // inline temps + constant folding
+                               // 4. Cosmetic cleanup (simplify what remains)
     simplify_bool_comparisons(lines);
     hoist_repeated_ternaries(lines);
     suppress_unused_outparams(lines);
@@ -1412,8 +1453,11 @@ fn fold_struct_construction(lines: &mut Vec<String>) {
         let indent_str = lines[i][..lines[i].len() - trimmed.len()].to_string();
         let expected_var = struct_var.to_string();
 
-        // Collect consecutive field assignments
+        // Collect consecutive field assignments, tolerating interleaved
+        // $MakeStruct_* intermediate temps (UE5 pattern: temp assigned first,
+        // then stored into struct field on the next line).
         let mut fields: Vec<(String, String)> = Vec::new();
+        let mut intermediate_temps: Vec<(String, String)> = Vec::new();
         while i < lines.len() {
             let t = lines[i].trim();
             if let Some((sv, field, value)) = parse_make_struct_field(t) {
@@ -1423,7 +1467,25 @@ fn fold_struct_construction(lines: &mut Vec<String>) {
                     continue;
                 }
             }
+            // Also consume $MakeStruct_* temp assignments (no dot) that feed
+            // into subsequent field assignments
+            if let Some((var, expr)) = parse_temp_assignment(t) {
+                if var.starts_with("$MakeStruct_") {
+                    intermediate_temps.push((var.to_string(), expr.to_string()));
+                    i += 1;
+                    continue;
+                }
+            }
             break;
+        }
+
+        // Resolve intermediate temps in field values
+        for (_, value) in &mut fields {
+            for (temp_var, temp_expr) in &intermediate_temps {
+                if count_var_refs(value, temp_var) > 0 {
+                    *value = replace_all_var_refs(value, temp_var, temp_expr);
+                }
+            }
         }
 
         if fields.is_empty() {
@@ -2218,7 +2280,8 @@ fn fold_section_temps(lines: &mut Vec<String>) {
             let replacement = substitute_var(content, var_name, &current_expr);
 
             let shortens = current_expr.len() + 2 <= var_name.len();
-            if !shortens && (indent_len + replacement.len()) > MAX_LINE {
+            let trivial = is_trivial_expr(&current_expr);
+            if !shortens && !trivial && (indent_len + replacement.len()) > MAX_LINE {
                 continue;
             }
 
