@@ -34,12 +34,14 @@ install.sh             macOS/Linux install script (curl | sh)
 install.ps1            Windows install script (irm | iex)
 skill/SKILL.md         Claude Code skill instructions
 skill/README.md        Skill install guide
-samples/               Test .uasset files (UE4.27, uncooked); Helm_BP.uasset is committed as test fixture
+samples/
+  ue_4.27/           UE4.27 test assets
+  ue_5.3/            UE5.3 test assets
+  ue_5.5/            UE5.5 test assets
 tests/
   common/mod.rs      Test utilities (fixture loading, snapshot comparison)
-  integration.rs     Snapshot and structural tests using Helm_BP.uasset
-  extended.rs        Optional tests using gitignored sample files (auto-skip when absent)
-  snapshots/         Expected output files for regression detection
+  integration.rs     Snapshot and structural tests
+snapshots/         Expected output files for regression detection
 ```
 
 ## Building and testing
@@ -62,13 +64,16 @@ cargo build --release                          # release build
 CI enforces `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` on every push and PR.
 
 ### Test structure
-- `src/**/*.rs` — inline `#[cfg(test)]` unit tests for private helpers (decode.rs, inline.rs, structure.rs, names.rs, flow.rs, resolve.rs)
-- `tests/integration.rs` — snapshot and structural tests using `samples/Helm_BP.uasset`
-- `tests/extended.rs` — optional tests using gitignored sample files (auto-skip when absent)
+- `src/**/*.rs` — inline `#[cfg(test)]` unit tests for private helpers
+- `tests/integration.rs` — snapshot and structural tests using committed fixtures
 - `tests/snapshots/` — expected output for regression detection
 - `tests/common/mod.rs` — test utilities (fixture loading, snapshot comparison)
 
-JSON mode should always produce valid JSON (`| python3 -m json.tool`).
+JSON mode should always produce valid JSON. When validating, redirect stderr so cargo build output doesn't pollute stdout:
+
+```bash
+cargo run -- samples/<file>.uasset --json 2>/dev/null | python3 -m json.tool
+```
 
 ## Architecture
 
@@ -91,7 +96,9 @@ Key things to know:
 - **UStruct::Children** is `int32 count + int32[count]` (array of package indices), not a single pointer.
 - All FName references on disk are 8 bytes (int32 index + int32 instance number). In memory with `WITH_CASE_PRESERVING_NAME` (typical for uncooked), FName is 12 bytes (adds DisplayIndex). This +4 difference affects mem_adj for bytecode FName operands.
 - Uncooked assets have everything in one `.uasset` file. Cooked assets split into `.uasset` header + `.uexp` data (not yet supported).
-- **UE5 versioning**: `AssetVersion { file_ver, file_ver_ue5 }` is threaded through parsing. `file_ver_ue5` is 0 for UE4 assets, 1000+ for UE5. Key gates: 1003 (OptionalResources), 1004 (LWC — double vectors/rotators), 1005 (remove export GUID), 1007 (SoftObjectPaths). The `ue5: i32` parameter is threaded through bytecode decoding for LWC opcode branching.
+- **UE5 versioning**: `AssetVersion { file_ver, file_ver_ue5 }` is threaded through parsing. `file_ver_ue5` is 0 for UE4 assets, 1000+ for UE5. Key gates: 1003 (OptionalResources), 1004 (LWC -- double vectors/rotators), 1005 (remove export GUID), 1007 (SoftObjectPaths), 1010 (ScriptSerializationOffset), 1011 (PropertyTagExtension -- extension byte before tagged properties; UE source gates on `bIsUClass` but uncooked assets emit it for all exports), 1012 (PROPERTY_TAG_COMPLETE_TYPE_NAME -- new FPropertyTag format with recursive FPropertyTypeName and Flags byte). The `ue5: i32` parameter is threaded through bytecode decoding for LWC opcode branching.
+- **UE5.2+ tagged properties** (ue5 >= 1012): FPropertyTag uses `FPropertyTypeName` (recursive: `FName + i32 innerCount + children`) instead of separate Type FName + type-specific fields. A `Flags` byte replaces `ArrayIndex` + `HasPropertyGuid`. All exports have a 1-byte `EClassSerializationControlExtension` before the property stream (0x00 = NoExtension). The extension byte gate and complete type name gate are both checked as `>= 1012` in the code; version 1011 (extension without new tag format) is untested.
+- **LWC display normalization**: UE5 renames float math functions to double variants (`Add_FloatFloat` → `Add_DoubleDouble`, `SelectFloat` → `SelectDouble`) and promotes `float` properties to `double`. For output consistency and clean cross-version diffs, all display names are normalized back to their UE4 equivalents (`float`, `_FloatFloat`, `SelectFloat`). Actual data is always parsed at full f64 precision. Normalization happens in `bytecode/names.rs`, `bytecode/decode.rs`, and `ffield.rs`.
 
 ## Conventions
 
@@ -99,7 +106,7 @@ Key things to know:
 - Modular architecture: `lib.rs` + `main.rs` pattern with focused modules
 - Default output is the summary mode (human-readable, designed for AI assistant use)
 - `--json` is for programmatic access and should always be valid JSON
-- Sample files in `samples/` are from a UE4.27 project called "LastResort" (gitignored, not in repo)
+- Sample files in `samples/` are organized into `ue_4.27/`, `ue_5.3/`, and `ue_5.5/` subdirectories. Small fixtures are committed; larger samples are gitignored for local testing only
 - **Deterministic output**: All output must be identical across runs for the same input. Never iterate a `HashMap`/`HashSet` when the order affects output or substitution results — use `BTreeMap`, `BTreeSet`, or collect-and-sort instead.
 - Always check if the `README.md`, `CLAUDE.md`, and other documentation files need updating
 
