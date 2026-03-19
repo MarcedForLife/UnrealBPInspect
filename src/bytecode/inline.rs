@@ -178,6 +178,18 @@ fn substitute_var(text: &str, var: &str, expr: &str) -> String {
     text.to_string()
 }
 
+/// Substitute ALL occurrences of `var` in `text`, repeating until stable.
+fn substitute_var_all(text: &str, var: &str, expr: &str) -> String {
+    let mut result = text.to_string();
+    loop {
+        let next = substitute_var(&result, var, expr);
+        if next == result {
+            return result;
+        }
+        result = next;
+    }
+}
+
 /// Check if an expression contains a function/method call (i.e., has side effects).
 /// Returns true if there's an identifier followed by `(` where the identifier is not
 /// a keyword like `switch` or `if`.  Pure expressions like `switch(X) { ... }` or
@@ -271,7 +283,7 @@ pub fn inline_constant_temps(stmts: &mut Vec<BcStatement>) {
     // - Single-assignment (Temp_* only): safe to inline since Temp_ vars are read-only
     //   Select indices, never out-parameters.  $-prefixed temps may be out-params
     //   modified by function calls, so single assignments are left to inline_single_use_temps.
-    let constant_vars: BTreeMap<String, String> = assignments
+    let mut constant_vars: BTreeMap<String, String> = assignments
         .into_iter()
         .filter(|(var, entries)| {
             let all_same = entries.iter().all(|(_, e)| *e == entries[0].1);
@@ -285,30 +297,48 @@ pub fn inline_constant_temps(stmts: &mut Vec<BcStatement>) {
         return;
     }
 
-    // Collect assignment indices to remove
-    let mut remove_indices: HashSet<usize> = HashSet::new();
-    for (i, s) in stmts.iter().enumerate() {
-        if let Some((var, _)) = parse_temp_assignment(&s.text) {
-            if constant_vars.contains_key(var) {
-                remove_indices.insert(i);
+    // Resolve expressions transitively: a constant var's expression may
+    // reference another constant var.  Iterate until stable so that
+    // substitution order in the per-statement pass doesn't matter.
+    let keys: Vec<String> = constant_vars.keys().cloned().collect();
+    for _ in 0..6 {
+        let mut changed = false;
+        for key in &keys {
+            let expr = constant_vars[key].clone();
+            let mut resolved = expr.clone();
+            for (other_var, other_expr) in constant_vars.iter() {
+                if other_var == key {
+                    continue;
+                }
+                if count_var_refs(&resolved, other_var) > 0 {
+                    resolved = substitute_var_all(&resolved, other_var, other_expr);
+                }
+            }
+            if resolved != expr {
+                constant_vars.insert(key.clone(), resolved);
+                changed = true;
             }
         }
+        if !changed {
+            break;
+        }
     }
+
+    // Collect assignment indices to remove
+    let remove_indices: HashSet<usize> = stmts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            let (var, _) = parse_temp_assignment(&s.text)?;
+            constant_vars.contains_key(var).then_some(i)
+        })
+        .collect();
 
     // Substitute the constant expression into all references
     for s in stmts.iter_mut() {
         for (var, expr) in &constant_vars {
             if count_var_refs(&s.text, var) > 0 {
-                // Substitute all occurrences
-                let mut text = s.text.clone();
-                loop {
-                    let new_text = substitute_var(&text, var, expr);
-                    if new_text == text {
-                        break;
-                    }
-                    text = new_text;
-                }
-                s.text = text;
+                s.text = substitute_var_all(&s.text, var, expr);
             }
         }
     }
