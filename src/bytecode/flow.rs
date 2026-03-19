@@ -374,7 +374,10 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
             }
         }
 
-        let cond = stmts[i].text[5..stmts[i].text.rfind(") jump 0x").unwrap()].to_string();
+        let Some(jump_pos) = stmts[i].text.rfind(") jump 0x") else {
+            continue;
+        };
+        let cond = stmts[i].text[5..jump_pos].to_string();
 
         let overlaps_sequence = sequences.iter().any(|seq| {
             // Check if any of the loop's ranges overlap the sequence's range
@@ -601,7 +604,9 @@ fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
     // Each backward jump terminates a block; blocks are contiguous between conv_end+1
     // and the last backward jump.
     let all_displaced_start = conv_end + 1;
-    let all_displaced_end = *jump_indices.last().unwrap(); // inclusive
+    let Some(&all_displaced_end) = jump_indices.last() else {
+        return false;
+    };
 
     if all_displaced_start > all_displaced_end || all_displaced_end >= stmts.len() {
         return false;

@@ -85,10 +85,10 @@ pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
 
             let replacement = substitute_var(&stmts[target_idx].text, var_name, &current_expr);
 
-            // Bypass MAX_LINE when expression (even with parens) is shorter than the variable —
-            // the resulting line can only get shorter or stay the same length.
+            // Bypass MAX_LINE for trivial expressions (property chains, $temp refs, literals)
             let shortens = current_expr.len() + 2 <= var_name.len(); // +2 for possible (...)
-            if !shortens && replacement.len() > MAX_LINE {
+            let trivial = is_trivial_expr(&current_expr);
+            if !shortens && !trivial && replacement.len() > MAX_LINE {
                 continue;
             }
 
@@ -206,6 +206,12 @@ fn expr_is_compound(expr: &str) -> bool {
         " != ", " >> ", " << ", " ? ",
     ];
     TOKENS.iter().any(|tok| expr.contains(tok)) || expr.starts_with('!')
+}
+
+/// Check if an expression is trivial enough to inline regardless of line length.
+/// Trivial = property chains, `$temp` refs, or literals (no calls, operators, or brackets).
+fn is_trivial_expr(expr: &str) -> bool {
+    !expr.is_empty() && !expr.contains(['(', ')', '[', ']']) && !expr_is_compound(expr)
 }
 
 fn used_in_operator_context(text: &str, pos: usize, after: usize) -> bool {
@@ -855,14 +861,19 @@ pub fn fold_summary_patterns(lines: &mut Vec<String>) {
 }
 
 fn process_section(lines: &mut Vec<String>) {
-    rewrite_foreach_loops(lines);
-    fold_delegate_bindings(lines);
-    fold_cast_guards(lines);
-    fold_cast_inline(lines);
-    fold_break_patterns(lines);
-    fold_struct_construction(lines);
-    dedup_completion_paths(lines);
-    fold_section_temps(lines);
+    // Pipeline ordering: each pass may create patterns consumed by later passes.
+    // 1. Structural rewrites (change control flow shape)
+    rewrite_foreach_loops(lines); // foreach before temp inlining (creates new temps)
+    fold_delegate_bindings(lines); // bind() + AddDelegate -> +=
+    fold_cast_guards(lines); // cast-then-branch -> if let
+    fold_cast_inline(lines); // inline single-use cast results
+                             // 2. Expression folding (collapse multi-statement patterns into expressions)
+    fold_break_patterns(lines); // Break/Make struct folding
+    fold_struct_construction(lines); // constructor patterns
+    dedup_completion_paths(lines); // remove duplicate completion branches
+                                   // 3. Temp variable inlining (must run after folding creates final expressions)
+    fold_section_temps(lines); // inline temps + constant folding
+                               // 4. Cosmetic cleanup (simplify what remains)
     simplify_bool_comparisons(lines);
     hoist_repeated_ternaries(lines);
     suppress_unused_outparams(lines);
@@ -1412,8 +1423,11 @@ fn fold_struct_construction(lines: &mut Vec<String>) {
         let indent_str = lines[i][..lines[i].len() - trimmed.len()].to_string();
         let expected_var = struct_var.to_string();
 
-        // Collect consecutive field assignments
+        // Collect consecutive field assignments, tolerating interleaved
+        // $MakeStruct_* intermediate temps (UE5 pattern: temp assigned first,
+        // then stored into struct field on the next line).
         let mut fields: Vec<(String, String)> = Vec::new();
+        let mut intermediate_temps: Vec<(String, String)> = Vec::new();
         while i < lines.len() {
             let t = lines[i].trim();
             if let Some((sv, field, value)) = parse_make_struct_field(t) {
@@ -1423,7 +1437,25 @@ fn fold_struct_construction(lines: &mut Vec<String>) {
                     continue;
                 }
             }
+            // Also consume $MakeStruct_* temp assignments (no dot) that feed
+            // into subsequent field assignments
+            if let Some((var, expr)) = parse_temp_assignment(t) {
+                if var.starts_with("$MakeStruct_") {
+                    intermediate_temps.push((var.to_string(), expr.to_string()));
+                    i += 1;
+                    continue;
+                }
+            }
             break;
+        }
+
+        // Resolve intermediate temps in field values
+        for (_, value) in &mut fields {
+            for (temp_var, temp_expr) in &intermediate_temps {
+                if count_var_refs(value, temp_var) > 0 {
+                    *value = replace_all_var_refs(value, temp_var, temp_expr);
+                }
+            }
         }
 
         if fields.is_empty() {
@@ -2218,7 +2250,8 @@ fn fold_section_temps(lines: &mut Vec<String>) {
             let replacement = substitute_var(content, var_name, &current_expr);
 
             let shortens = current_expr.len() + 2 <= var_name.len();
-            if !shortens && (indent_len + replacement.len()) > MAX_LINE {
+            let trivial = is_trivial_expr(&current_expr);
+            if !shortens && !trivial && (indent_len + replacement.len()) > MAX_LINE {
                 continue;
             }
 

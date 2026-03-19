@@ -1,3 +1,4 @@
+// Each test binary only uses a subset of these shared utilities.
 #![allow(dead_code)]
 
 use std::path::PathBuf;
