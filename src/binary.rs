@@ -141,7 +141,14 @@ impl NameTable {
     pub fn peek_is_ffield_class(&self, c: &mut R) -> Result<bool> {
         let pos = c.position();
         let index = read_i32(c)?;
+        let instance = read_i32(c)?;
         c.seek(SeekFrom::Start(pos))?;
+        // FField class names always have instance number 0. Checking this
+        // prevents false positives where bytecode data (e.g. bytecode_size
+        // followed by storage_size) coincidentally maps to a "Property" name.
+        if instance != 0 {
+            return Ok(false);
+        }
         let base = self.get(index);
         Ok(base.ends_with("Property"))
     }

@@ -1,5 +1,20 @@
 use crate::binary::NameTable;
 
+macro_rules! read_bc_num {
+    ($name:ident, $ty:ty, $default:expr) => {
+        pub fn $name(bc: &[u8], pos: &mut usize) -> $ty {
+            const SIZE: usize = std::mem::size_of::<$ty>();
+            if *pos + SIZE > bc.len() {
+                *pos = bc.len();
+                return $default;
+            }
+            let v = <$ty>::from_le_bytes(bc[*pos..*pos + SIZE].try_into().unwrap());
+            *pos += SIZE;
+            v
+        }
+    };
+}
+
 pub fn read_bc_u8(bc: &[u8], pos: &mut usize) -> u8 {
     if *pos >= bc.len() {
         *pos = bc.len();
@@ -10,54 +25,13 @@ pub fn read_bc_u8(bc: &[u8], pos: &mut usize) -> u8 {
     v
 }
 
-pub fn read_bc_i32(bc: &[u8], pos: &mut usize) -> i32 {
-    if *pos + 4 > bc.len() {
-        *pos = bc.len();
-        return 0;
-    }
-    let v = i32::from_le_bytes([bc[*pos], bc[*pos + 1], bc[*pos + 2], bc[*pos + 3]]);
-    *pos += 4;
-    v
-}
-
-pub fn read_bc_u32(bc: &[u8], pos: &mut usize) -> u32 {
-    if *pos + 4 > bc.len() {
-        *pos = bc.len();
-        return 0;
-    }
-    let v = u32::from_le_bytes([bc[*pos], bc[*pos + 1], bc[*pos + 2], bc[*pos + 3]]);
-    *pos += 4;
-    v
-}
-
-pub fn read_bc_i64(bc: &[u8], pos: &mut usize) -> i64 {
-    if *pos + 8 > bc.len() {
-        *pos = bc.len();
-        return 0;
-    }
-    let v = i64::from_le_bytes([
-        bc[*pos],
-        bc[*pos + 1],
-        bc[*pos + 2],
-        bc[*pos + 3],
-        bc[*pos + 4],
-        bc[*pos + 5],
-        bc[*pos + 6],
-        bc[*pos + 7],
-    ]);
-    *pos += 8;
-    v
-}
-
-pub fn read_bc_f32(bc: &[u8], pos: &mut usize) -> f32 {
-    if *pos + 4 > bc.len() {
-        *pos = bc.len();
-        return 0.0;
-    }
-    let v = f32::from_le_bytes([bc[*pos], bc[*pos + 1], bc[*pos + 2], bc[*pos + 3]]);
-    *pos += 4;
-    v
-}
+read_bc_num!(read_bc_i32, i32, 0);
+read_bc_num!(read_bc_u32, u32, 0);
+read_bc_num!(read_bc_i64, i64, 0);
+read_bc_num!(read_bc_u16, u16, 0);
+read_bc_num!(read_bc_u64, u64, 0);
+read_bc_num!(read_bc_f32, f32, 0.0);
+read_bc_num!(read_bc_f64, f64, 0.0);
 
 pub fn read_bc_fname(bc: &[u8], pos: &mut usize, nt: &NameTable) -> String {
     let index = read_bc_i32(bc, pos);
@@ -68,54 +42,6 @@ pub fn read_bc_fname(bc: &[u8], pos: &mut usize, nt: &NameTable) -> String {
     } else {
         base.to_string()
     }
-}
-
-pub fn read_bc_u16(bc: &[u8], pos: &mut usize) -> u16 {
-    if *pos + 2 > bc.len() {
-        *pos = bc.len();
-        return 0;
-    }
-    let v = u16::from_le_bytes([bc[*pos], bc[*pos + 1]]);
-    *pos += 2;
-    v
-}
-
-pub fn read_bc_u64(bc: &[u8], pos: &mut usize) -> u64 {
-    if *pos + 8 > bc.len() {
-        *pos = bc.len();
-        return 0;
-    }
-    let v = u64::from_le_bytes([
-        bc[*pos],
-        bc[*pos + 1],
-        bc[*pos + 2],
-        bc[*pos + 3],
-        bc[*pos + 4],
-        bc[*pos + 5],
-        bc[*pos + 6],
-        bc[*pos + 7],
-    ]);
-    *pos += 8;
-    v
-}
-
-pub fn read_bc_f64(bc: &[u8], pos: &mut usize) -> f64 {
-    if *pos + 8 > bc.len() {
-        *pos = bc.len();
-        return 0.0;
-    }
-    let v = f64::from_le_bytes([
-        bc[*pos],
-        bc[*pos + 1],
-        bc[*pos + 2],
-        bc[*pos + 3],
-        bc[*pos + 4],
-        bc[*pos + 5],
-        bc[*pos + 6],
-        bc[*pos + 7],
-    ]);
-    *pos += 8;
-    v
 }
 
 /// Read 3 floats as f64 values. `lwc` = Large World Coordinates (UE5 >= 1004):

@@ -27,9 +27,9 @@ pub fn strip_guid_suffix(name: &str) -> &str {
 
 pub fn clean_bc_name(name: &str) -> String {
     let name = strip_guid_suffix(name);
+    let name = normalize_lwc_name(name);
     if let Some(rest) = name.strip_prefix("CallFunc_") {
         let rest = rest.strip_suffix("_ReturnValue").unwrap_or(rest);
-        // Strip K2_ from function-derived variable names
         let rest = rest.strip_prefix("K2_").unwrap_or(rest);
         return format!("${}", rest);
     }
@@ -40,6 +40,32 @@ pub fn clean_bc_name(name: &str) -> String {
         return format!("${}", rest);
     }
     name.to_string()
+}
+
+/// Normalize UE5 LWC (Large World Coordinates) name differences so that
+/// UE4 and UE5 produce identical temp variable and function names.
+/// UE5 renamed float math functions to double variants; this maps them back
+/// so diffs between engine versions show only real code changes.
+/// Display only — actual values are still parsed at full f64 precision.
+fn normalize_lwc_name(name: &str) -> String {
+    let mut s = name.to_string();
+    // Binary math ops: _DoubleDouble → _FloatFloat
+    s = s.replace("_DoubleDouble", "_FloatFloat");
+    // Standalone function renames
+    s = s.replace("SelectDouble", "SelectFloat");
+    // Strip UE5 implicit cast intermediary suffixes — these are transparent
+    // pass-through assignments that clutter output and block temp inlining.
+    if let Some(base) = s.strip_suffix("_ImplicitCast") {
+        s = base.to_string();
+    } else if let Some(pos) = s.rfind("_ImplicitCast_") {
+        // _ImplicitCast_N suffix (numbered variant)
+        let suffix = &s[pos + "_ImplicitCast_".len()..];
+        if suffix.chars().all(|c| c.is_ascii_digit()) {
+            // Keep the _N disambiguator but drop _ImplicitCast
+            s = format!("{}_{}", &s[..pos], suffix);
+        }
+    }
+    s
 }
 
 // Inline tests: strip_guid_suffix and clean_bytecode_name are private helpers.
@@ -103,5 +129,52 @@ mod tests {
             clean_bc_name("CallFunc_K2_SetWorldLocationAndRotation_ReturnValue"),
             "$SetWorldLocationAndRotation"
         );
+    }
+
+    // --- LWC normalization ---
+
+    #[test]
+    fn lwc_double_double_to_float_float() {
+        assert_eq!(
+            clean_bc_name("CallFunc_Add_DoubleDouble_ReturnValue"),
+            "$Add_FloatFloat"
+        );
+    }
+
+    #[test]
+    fn lwc_select_double_to_select_float() {
+        assert_eq!(
+            clean_bc_name("CallFunc_SelectDouble_ReturnValue"),
+            "$SelectFloat"
+        );
+    }
+
+    #[test]
+    fn lwc_strip_implicit_cast_suffix() {
+        assert_eq!(
+            clean_bc_name("CallFunc_Subtract_DoubleDouble_A_ImplicitCast"),
+            "$Subtract_FloatFloat_A"
+        );
+    }
+
+    #[test]
+    fn lwc_strip_implicit_cast_numbered() {
+        assert_eq!(
+            clean_bc_name("CallFunc_Subtract_DoubleDouble_B_ImplicitCast_1"),
+            "$Subtract_FloatFloat_B_1"
+        );
+    }
+
+    #[test]
+    fn lwc_k2node_implicit_cast() {
+        assert_eq!(
+            clean_bc_name("K2Node_VariableSet_Health_ImplicitCast"),
+            "$VariableSet_Health"
+        );
+    }
+
+    #[test]
+    fn lwc_plain_name_no_change() {
+        assert_eq!(clean_bc_name("MyVariable"), "MyVariable");
     }
 }

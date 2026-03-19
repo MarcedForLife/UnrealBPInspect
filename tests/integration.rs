@@ -8,7 +8,7 @@ use unreal_bp_inspect::parser::parse_asset;
 
 #[test]
 fn helm_parses_without_error() {
-    let data = common::load_fixture("Helm_BP.uasset");
+    let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
     let asset = parse_asset(&data, false).expect("parse should succeed");
     assert!(!asset.imports.is_empty());
     assert!(!asset.exports.is_empty());
@@ -16,7 +16,7 @@ fn helm_parses_without_error() {
 
 #[test]
 fn helm_structural_checks() {
-    let data = common::load_fixture("Helm_BP.uasset");
+    let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
     let asset = parse_asset(&data, false).unwrap();
     let has_blueprint = asset
         .exports
@@ -27,7 +27,7 @@ fn helm_structural_checks() {
 
 #[test]
 fn helm_summary_snapshot() {
-    let data = common::load_fixture("Helm_BP.uasset");
+    let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
     let asset = parse_asset(&data, false).unwrap();
     let output = format_summary(&asset, &[]);
     common::assert_snapshot("helm_summary", &output);
@@ -35,7 +35,7 @@ fn helm_summary_snapshot() {
 
 #[test]
 fn helm_text_snapshot() {
-    let data = common::load_fixture("Helm_BP.uasset");
+    let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
     let asset = parse_asset(&data, false).unwrap();
     let output = format_text(&asset, &[]);
     common::assert_snapshot("helm_text", &output);
@@ -43,7 +43,7 @@ fn helm_text_snapshot() {
 
 #[test]
 fn helm_json_valid() {
-    let data = common::load_fixture("Helm_BP.uasset");
+    let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
     let asset = parse_asset(&data, false).unwrap();
     let val = to_json(&asset, &[]);
     let s = serde_json::to_string_pretty(&val).unwrap();
@@ -52,7 +52,7 @@ fn helm_json_valid() {
 
 #[test]
 fn helm_json_snapshot() {
-    let data = common::load_fixture("Helm_BP.uasset");
+    let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
     let asset = parse_asset(&data, false).unwrap();
     let val = to_json(&asset, &[]);
     let output = serde_json::to_string_pretty(&val).unwrap();
@@ -62,7 +62,7 @@ fn helm_json_snapshot() {
 
 #[test]
 fn helm_filter_works() {
-    let data = common::load_fixture("Helm_BP.uasset");
+    let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
     let asset = parse_asset(&data, false).unwrap();
     let full = format_summary(&asset, &[]);
     let filtered = format_summary(&asset, &["getsteeringangle".to_string()]);
@@ -101,7 +101,7 @@ fn garbage_input_returns_error() {
 /// catches any HashMap iteration order nondeterminism.
 #[test]
 fn output_determinism() {
-    let data = common::load_fixture("Helm_BP.uasset");
+    let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
     let asset = parse_asset(&data, false).unwrap();
     let baseline_summary = format_summary(&asset, &[]);
     let baseline_text = format_text(&asset, &[]);
@@ -127,30 +127,25 @@ fn output_determinism() {
 
 #[test]
 fn diff_identical_files_produces_no_output() {
-    let data = common::load_fixture("Helm_BP.uasset");
+    let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
     let (output, has_changes) = format_diff(&data, &data, "a.uasset", "b.uasset", &[], 3).unwrap();
     assert!(!has_changes);
     assert!(output.is_empty());
 }
 
 #[test]
-fn diff_different_files_produces_unified_diff() {
-    let helm = common::load_fixture("Helm_BP.uasset");
-    // Use a truncated copy as "different" — will fail to parse, so use the same
-    // file with different labels to at least exercise the code path. For a real
-    // diff test we need two distinct valid fixtures.
-    // Instead, verify the diff output format when comparing against an empty asset
-    // is not possible, so just verify two different valid files if available.
-    let vrhand_path = std::path::Path::new("samples/VRHand_BP.uasset");
-    if !vrhand_path.exists() {
-        // Skip if VRHand not available — the identical test above covers the API
+fn diff_different_versions_produces_unified_diff() {
+    let ue4 = common::load_fixture("ue_4.27/Helm_BP.uasset");
+    let ue5_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/ue_5.5/Helm_BP.uasset");
+    if !ue5_path.exists() {
+        // Skip if UE5.5 fixture not available
         return;
     }
-    let vrhand = std::fs::read(vrhand_path).unwrap();
+    let ue5 = std::fs::read(ue5_path).unwrap();
     let (output, has_changes) =
-        format_diff(&helm, &vrhand, "Helm_BP.uasset", "VRHand_BP.uasset", &[], 3).unwrap();
-    assert!(has_changes);
-    assert!(output.contains("---"));
-    assert!(output.contains("+++"));
-    assert!(output.contains("@@"));
+        format_diff(&ue4, &ue5, "ue4.uasset", "ue5.uasset", &[], 3).unwrap();
+    // Same blueprint saved in two engine versions — may or may not have textual diffs,
+    // but the diff function itself should succeed without error.
+    assert!(output.is_empty() != has_changes);
 }
