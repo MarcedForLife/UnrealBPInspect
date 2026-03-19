@@ -59,6 +59,58 @@
     SimpleConstructionScript: -> SimpleConstructionScript_0
     UbergraphPages: [ObjectProperty; 1 items]
       [0]: -> EventGraph
+    FunctionGraphs: [ObjectProperty; 2 items]
+      [0]: -> UserConstructionScript
+      [1]: -> GetSteeringAngle
+    NewVariables: [StructProperty; 1 items]
+      [0]: () {
+        NewVariables: (BPVariableDescription) {
+          VarName: WinchConstraintInstance
+          VarGuid: (Guid) {
+            Guid: "[07, fe, e3, 81, bd, 94, 2c, 43, 82, 4c, 82, 51, 97, 18, da, e2]"
+          }
+          VarType: (EdGraphPinType) {}
+          FriendlyName: "Winch Constraint Instance"
+          Category: "KismetSchemaDefaultDefault"
+          PropertyFlags: 67589
+          RepNotifyFunc: None
+          ReplicationCondition: COND_None (ELifetimeCondition)
+          MetaDataArray: [StructProperty; 1 items]
+            [0]: () {
+              MetaDataArray: (BPVariableMetaDataEntry) {
+                DataKey: MultiLine
+                DataValue: "true"
+              }
+            }
+          DefaultValue: ""
+        }
+      }
+    CategorySorting: [NameProperty; 5 items]
+      [0]: Default
+      [1]: None
+      [2]: Event Graph
+      [3]: Config
+      [4]: State
+    LastEditedDocuments: [StructProperty; 1 items]
+      [0]: () {
+        LastEditedDocuments: (EditedDocumentInfo) {
+          EditedObjectPath: (SoftObjectPath) {}
+          SavedViewOffset: (Vector2D) {
+            X: -313.8830
+            Y: -392.1807
+          }
+          SavedZoomAmount: 1.0000
+        }
+      }
+    ComponentTemplateNameIndex: {NameProperty->IntProperty; 1 entries}
+      [0].key: StaticMeshComponent
+      [0].val: 1
+    ThumbnailInfo: -> SceneThumbnailInfo_0
+    GeneratedClass: -> Helm_BP_C
+    bLegacyNeedToPurgeSkelRefs: false
+    BlueprintGuid: (Guid) {
+      Guid: "[52, 16, c0, 74, 38, b1, f4, 42, 88, 4c, b1, 6b, 1a, bd, 76, ea]"
+    }
 
   [2] Helm_BP_C (class: /Script/Engine.BlueprintGeneratedClass, parent: /Script/Engine.Actor)
     SimpleConstructionScript: -> SimpleConstructionScript_0
@@ -91,20 +143,13 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 8 items]
+        ResponseArray: [StructProperty; 1 items]
           [0]: () {
             ResponseArray: (ResponseChannel) {
               Channel: WorldStatic
               Response: ECR_Ignore (ECollisionResponse)
             }
           }
-          [1]: () {}
-          [2]: () {}
-          [3]: () {}
-          [4]: () {}
-          [5]: () {}
-          [6]: () {}
-          [7]: () {}
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
@@ -130,20 +175,13 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 8 items]
+        ResponseArray: [StructProperty; 1 items]
           [0]: () {
             ResponseArray: (ResponseChannel) {
               Channel: WorldStatic
               Response: ECR_Ignore (ECollisionResponse)
             }
           }
-          [1]: () {}
-          [2]: () {}
-          [3]: () {}
-          [4]: () {}
-          [5]: () {}
-          [6]: () {}
-          [7]: () {}
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
@@ -169,20 +207,13 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 8 items]
+        ResponseArray: [StructProperty; 1 items]
           [0]: () {
             ResponseArray: (ResponseChannel) {
               Channel: WorldStatic
               Response: ECR_Ignore (ECollisionResponse)
             }
           }
-          [1]: () {}
-          [2]: () {}
-          [3]: () {}
-          [4]: () {}
-          [5]: () {}
-          [6]: () {}
-          [7]: () {}
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
@@ -208,20 +239,13 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 8 items]
+        ResponseArray: [StructProperty; 1 items]
           [0]: () {
             ResponseArray: (ResponseChannel) {
               Channel: WorldStatic
               Response: ECR_Ignore (ECollisionResponse)
             }
           }
-          [1]: () {}
-          [2]: () {}
-          [3]: () {}
-          [4]: () {}
-          [5]: () {}
-          [6]: () {}
-          [7]: () {}
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
@@ -247,20 +271,13 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 8 items]
+        ResponseArray: [StructProperty; 1 items]
           [0]: () {
             ResponseArray: (ResponseChannel) {
               Channel: WorldStatic
               Response: ECR_Ignore (ECollisionResponse)
             }
           }
-          [1]: () {}
-          [2]: () {}
-          [3]: () {}
-          [4]: () {}
-          [5]: () {}
-          [6]: () {}
-          [7]: () {}
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
@@ -286,20 +303,13 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 8 items]
+        ResponseArray: [StructProperty; 1 items]
           [0]: () {
             ResponseArray: (ResponseChannel) {
               Channel: WorldStatic
               Response: ECR_Ignore (ECollisionResponse)
             }
           }
-          [1]: () {}
-          [2]: () {}
-          [3]: () {}
-          [4]: () {}
-          [5]: () {}
-          [6]: () {}
-          [7]: () {}
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
@@ -321,20 +331,13 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 8 items]
+        ResponseArray: [StructProperty; 1 items]
           [0]: () {
             ResponseArray: (ResponseChannel) {
               Channel: WorldStatic
               Response: ECR_Ignore (ECollisionResponse)
             }
           }
-          [1]: () {}
-          [2]: () {}
-          [3]: () {}
-          [4]: () {}
-          [5]: () {}
-          [6]: () {}
-          [7]: () {}
       }
     }
     RelativeLocation: (Vector) {
@@ -373,6 +376,9 @@
       [3]: -> K2Node_CommutativeAssociativeBinaryOperator_0
       [4]: -> K2Node_CallFunction_1
       [5]: -> K2Node_CallFunction_2
+    GraphGuid: (Guid) {
+      Guid: "[40, 3f, a2, 5c, f9, aa, 79, 4c, 87, 95, bc, 62, 0c, b9, 41, 77]"
+    }
 
   [13] UserConstructionScript (class: /Script/Engine.EdGraph)
     Schema: -> /Script/BlueprintGraph.EdGraphSchema_K2
@@ -382,6 +388,10 @@
       [2]: -> K2Node_VariableGet_1
       [3]: -> K2Node_DynamicCast_0
       [4]: -> K2Node_VariableSet_0
+    bAllowDeletion: false
+    GraphGuid: (Guid) {
+      Guid: "[79, 1c, 06, 78, 85, 8a, 96, 4f, 81, 97, 2e, 00, b9, 13, a9, b6]"
+    }
 
   [14] GetSteeringAngle (class: /Script/CoreUObject.Function)
     Signature: "GetSteeringAngle(out SteeringAngle: float)"
@@ -659,6 +669,10 @@
       [7]: -> SCS_Node_6
       [8]: -> SCS_Node_4
       [9]: -> SCS_Node_2
+    VariableGuid: (Guid) {
+      Guid: "[ee, 62, 2a, 42, d6, 2f, 09, 46, bc, 50, 71, 2d, 23, 5f, 2d, 73]"
+    }
+    InternalVariableName: Scene
 
   [41] SCS_Node_6 (class: /Script/Engine.SCS_Node)
     ComponentClass: -> /Script/Engine.BoxComponent
@@ -699,6 +713,19 @@
   [45] SimpleConstructionScript_0 (class: /Script/Engine.SimpleConstructionScript)
     RootNodes: [ObjectProperty; 1 items]
       [0]: -> SCS_Node_5
+    AllNodes: [ObjectProperty; 11 items]
+      [0]: -> SCS_Node_5
+      [1]: -> SCS_Node_1
+      [2]: -> SCS_Node_11
+      [3]: -> SCS_Node_3
+      [4]: -> SCS_Node_10
+      [5]: -> SCS_Node_8
+      [6]: -> SCS_Node_9
+      [7]: -> SCS_Node_7
+      [8]: -> SCS_Node_6
+      [9]: -> SCS_Node_4
+      [10]: -> SCS_Node_2
+    DefaultSceneRootNode: -> SCS_Node_0
 
   [46] Stand_GEN_VARIABLE (class: /Script/Engine.StaticMeshComponent)
     StaticMesh: -> /Game/LastResort/Blueprints/Vehicles/Ships/Schooner/Parts/Helm/helm_elemnt_02.helm_elemnt_02

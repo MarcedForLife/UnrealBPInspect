@@ -25,6 +25,211 @@
               "EventGraph"
             ]
           }
+        },
+        {
+          "name": "FunctionGraphs",
+          "value": {
+            "inner_type": "ObjectProperty",
+            "items": [
+              "UserConstructionScript",
+              "GetSteeringAngle"
+            ]
+          }
+        },
+        {
+          "name": "NewVariables",
+          "value": {
+            "inner_type": "StructProperty",
+            "items": [
+              {
+                "fields": [
+                  {
+                    "name": "NewVariables",
+                    "value": {
+                      "fields": [
+                        {
+                          "name": "VarName",
+                          "value": "WinchConstraintInstance"
+                        },
+                        {
+                          "name": "VarGuid",
+                          "value": {
+                            "fields": [
+                              {
+                                "name": "Guid",
+                                "value": "[07, fe, e3, 81, bd, 94, 2c, 43, 82, 4c, 82, 51, 97, 18, da, e2]"
+                              }
+                            ],
+                            "type": "Guid"
+                          }
+                        },
+                        {
+                          "name": "VarType",
+                          "value": {
+                            "fields": [],
+                            "type": "EdGraphPinType"
+                          }
+                        },
+                        {
+                          "name": "FriendlyName",
+                          "value": "Winch Constraint Instance"
+                        },
+                        {
+                          "name": "Category",
+                          "value": "KismetSchemaDefaultDefault"
+                        },
+                        {
+                          "name": "PropertyFlags",
+                          "value": 67589
+                        },
+                        {
+                          "name": "RepNotifyFunc",
+                          "value": "None"
+                        },
+                        {
+                          "name": "ReplicationCondition",
+                          "value": "COND_None"
+                        },
+                        {
+                          "name": "MetaDataArray",
+                          "value": {
+                            "inner_type": "StructProperty",
+                            "items": [
+                              {
+                                "fields": [
+                                  {
+                                    "name": "MetaDataArray",
+                                    "value": {
+                                      "fields": [
+                                        {
+                                          "name": "DataKey",
+                                          "value": "MultiLine"
+                                        },
+                                        {
+                                          "name": "DataValue",
+                                          "value": "true"
+                                        }
+                                      ],
+                                      "type": "BPVariableMetaDataEntry"
+                                    }
+                                  }
+                                ],
+                                "type": ""
+                              }
+                            ]
+                          }
+                        },
+                        {
+                          "name": "DefaultValue",
+                          "value": ""
+                        }
+                      ],
+                      "type": "BPVariableDescription"
+                    }
+                  }
+                ],
+                "type": ""
+              }
+            ]
+          }
+        },
+        {
+          "name": "CategorySorting",
+          "value": {
+            "inner_type": "NameProperty",
+            "items": [
+              "Default",
+              "None",
+              "Event Graph",
+              "Config",
+              "State"
+            ]
+          }
+        },
+        {
+          "name": "LastEditedDocuments",
+          "value": {
+            "inner_type": "StructProperty",
+            "items": [
+              {
+                "fields": [
+                  {
+                    "name": "LastEditedDocuments",
+                    "value": {
+                      "fields": [
+                        {
+                          "name": "EditedObjectPath",
+                          "value": {
+                            "fields": [],
+                            "type": "SoftObjectPath"
+                          }
+                        },
+                        {
+                          "name": "SavedViewOffset",
+                          "value": {
+                            "fields": [
+                              {
+                                "name": "X",
+                                "value": -313.88299560546875
+                              },
+                              {
+                                "name": "Y",
+                                "value": -392.18072509765625
+                              }
+                            ],
+                            "type": "Vector2D"
+                          }
+                        },
+                        {
+                          "name": "SavedZoomAmount",
+                          "value": 1.0
+                        }
+                      ],
+                      "type": "EditedDocumentInfo"
+                    }
+                  }
+                ],
+                "type": ""
+              }
+            ]
+          }
+        },
+        {
+          "name": "ComponentTemplateNameIndex",
+          "value": {
+            "entries": [
+              {
+                "key": "StaticMeshComponent",
+                "value": 1
+              }
+            ],
+            "key_type": "NameProperty",
+            "value_type": "IntProperty"
+          }
+        },
+        {
+          "name": "ThumbnailInfo",
+          "value": "SceneThumbnailInfo_0"
+        },
+        {
+          "name": "GeneratedClass",
+          "value": "Helm_BP_C"
+        },
+        {
+          "name": "bLegacyNeedToPurgeSkelRefs",
+          "value": false
+        },
+        {
+          "name": "BlueprintGuid",
+          "value": {
+            "fields": [
+              {
+                "name": "Guid",
+                "value": "[52, 16, c0, 74, 38, b1, f4, 42, 88, 4c, b1, 6b, 1a, bd, 76, ea]"
+              }
+            ],
+            "type": "Guid"
+          }
         }
       ]
     },
@@ -149,34 +354,6 @@
                                 }
                               }
                             ],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
                             "type": ""
                           }
                         ]
@@ -306,34 +483,6 @@
                               }
                             ],
                             "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
                           }
                         ]
                       }
@@ -461,34 +610,6 @@
                                 }
                               }
                             ],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
                             "type": ""
                           }
                         ]
@@ -618,34 +739,6 @@
                               }
                             ],
                             "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
                           }
                         ]
                       }
@@ -773,34 +866,6 @@
                                 }
                               }
                             ],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
                             "type": ""
                           }
                         ]
@@ -930,34 +995,6 @@
                               }
                             ],
                             "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
                           }
                         ]
                       }
@@ -1069,34 +1106,6 @@
                                 }
                               }
                             ],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
-                            "type": ""
-                          },
-                          {
-                            "fields": [],
                             "type": ""
                           }
                         ]
@@ -1236,6 +1245,18 @@
               "K2Node_CallFunction_2"
             ]
           }
+        },
+        {
+          "name": "GraphGuid",
+          "value": {
+            "fields": [
+              {
+                "name": "Guid",
+                "value": "[40, 3f, a2, 5c, f9, aa, 79, 4c, 87, 95, bc, 62, 0c, b9, 41, 77]"
+              }
+            ],
+            "type": "Guid"
+          }
         }
       ]
     },
@@ -1259,6 +1280,22 @@
               "K2Node_DynamicCast_0",
               "K2Node_VariableSet_0"
             ]
+          }
+        },
+        {
+          "name": "bAllowDeletion",
+          "value": false
+        },
+        {
+          "name": "GraphGuid",
+          "value": {
+            "fields": [
+              {
+                "name": "Guid",
+                "value": "[79, 1c, 06, 78, 85, 8a, 96, 4f, 81, 97, 2e, 00, b9, 13, a9, b6]"
+              }
+            ],
+            "type": "Guid"
           }
         }
       ]
@@ -2287,6 +2324,22 @@
               "SCS_Node_2"
             ]
           }
+        },
+        {
+          "name": "VariableGuid",
+          "value": {
+            "fields": [
+              {
+                "name": "Guid",
+                "value": "[ee, 62, 2a, 42, d6, 2f, 09, 46, bc, 50, 71, 2d, 23, 5f, 2d, 73]"
+              }
+            ],
+            "type": "Guid"
+          }
+        },
+        {
+          "name": "InternalVariableName",
+          "value": "Scene"
         }
       ]
     },
@@ -2443,6 +2496,29 @@
               "SCS_Node_5"
             ]
           }
+        },
+        {
+          "name": "AllNodes",
+          "value": {
+            "inner_type": "ObjectProperty",
+            "items": [
+              "SCS_Node_5",
+              "SCS_Node_1",
+              "SCS_Node_11",
+              "SCS_Node_3",
+              "SCS_Node_10",
+              "SCS_Node_8",
+              "SCS_Node_9",
+              "SCS_Node_7",
+              "SCS_Node_6",
+              "SCS_Node_4",
+              "SCS_Node_2"
+            ]
+          }
+        },
+        {
+          "name": "DefaultSceneRootNode",
+          "value": "SCS_Node_0"
         }
       ]
     },
