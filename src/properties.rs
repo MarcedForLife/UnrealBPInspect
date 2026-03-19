@@ -140,7 +140,6 @@ fn read_property_value_ue4(
     ver: AssetVersion,
 ) -> Result<PropValue> {
     let file_ver = ver.file_ver;
-    let data_start = c.position();
 
     // BoolProperty has a unique UE4 layout: value byte before PropertyGuid
     if type_name == "BoolProperty" {
@@ -173,8 +172,8 @@ fn read_property_value_ue4(
     }
     skip_property_guid(c, file_ver)?;
 
-    // For collection types, compute the end of value data using tag_overhead
-    let value_data_end = data_start + tag_overhead(type_name, file_ver) + size as u64;
+    // The cursor is now past all tag-specific fields; value data is next.
+    let value_data_end = c.position() + size as u64;
 
     let value = read_value_with_meta(c, nt, type_name, size, &meta, value_data_end, ver)?;
 
@@ -196,24 +195,6 @@ fn skip_property_guid(c: &mut R, file_ver: i32) -> Result<()> {
         }
     }
     Ok(())
-}
-
-/// Bytes between the tag's Size field and the start of actual value data (UE4 only).
-fn tag_overhead(type_name: &str, file_ver: i32) -> u64 {
-    let guid_byte: u64 = if file_ver >= VER_UE4_PROPERTY_GUID {
-        1
-    } else {
-        0
-    };
-    match type_name {
-        "ArrayProperty" => 8 + guid_byte + 4,
-        "SetProperty" => 8 + guid_byte + 8,
-        "MapProperty" => 16 + guid_byte + 8,
-        "EnumProperty" => 8 + guid_byte,
-        "ByteProperty" => 8 + guid_byte,
-        "StructProperty" => 8 + 16 + guid_byte,
-        _ => guid_byte,
-    }
 }
 
 // ---------------------------------------------------------------------------
