@@ -200,7 +200,7 @@ Once installed, Claude can read any `.uasset` file you point it at. Ask it to ex
 
 ## How it works
 
-bp-inspect reads the compiled bytecode from the binary file directly, with zero UE dependency. A 1MB Blueprint with 18 functions parses in ~15ms, the entire Blueprint, not one graph at a time.
+bp-inspect reads the compiled bytecode from the binary file directly, with zero UE dependency. A large Blueprint with 90 functions parses in under 100ms.
 
 The hard part is making bytecode *readable*. bp-inspect:
 
@@ -221,7 +221,7 @@ The goal is output that reads like hand-written pseudocode, not a bytecode dump.
 | ------------------------------------------------------------ | ------------------------------------------- | ------------------------------------------------------------------------------------- |
 | **UAssetAPI**                                                | .NET serialisation library for modding      | Raw property trees and byte arrays, no disassembly or readable output                 |
 | **UE commandlets**                                           | Editor-based dump tools                     | Requires full editor instance with project loaded and all dependencies compiled       |
-| **[NodeToCode](https://github.com/protospatial/NodeToCode)** | Editor plugin, BP→C++ via LLM               | Requires running editor + AI API key; reads live graph, not binary files              |
+| **[NodeToCode](https://github.com/protospatial/NodeToCode)** | Editor plugin, translates graphs via LLM    | Requires running editor and LLM service (cloud or local); reads live graph, not files |
 | **bp-inspect**                                               | Standalone binary, reads `.uasset` directly | No editor, no project context, no network. Works in terminals, CI, and AI assistants  |
 
 ## Supported formats

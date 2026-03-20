@@ -102,7 +102,7 @@ Key things to know:
 
 ## Conventions
 
-- Minimal dependencies: `clap`, `serde_json`, `anyhow`, `similar`, `ureq` (for self-update). ~15ms to parse a 1MB Blueprint
+- Minimal dependencies: `clap`, `serde_json`, `anyhow`, `similar`, `ureq` (for self-update)
 - Modular architecture: `lib.rs` + `main.rs` pattern with focused modules
 - Default output is the summary mode (human-readable, designed for AI assistant use)
 - `--json` is for programmatic access and should always be valid JSON

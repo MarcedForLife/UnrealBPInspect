@@ -4,7 +4,7 @@ use std::fmt::Write;
 use crate::bytecode::{
     cleanup_structured_output, discard_unused_assignments, fold_summary_patterns,
     inline_constant_temps, inline_single_use_temps, reorder_convergence, reorder_flow_patterns,
-    strip_orphaned_blocks, structure_bytecode, BcStatement,
+    strip_orphaned_blocks, strip_unmatched_braces, structure_bytecode, BcStatement,
 };
 use crate::resolve::*;
 use crate::types::*;
@@ -1247,6 +1247,11 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                             }
                         }
                     }
+                    // Final cleanup: strip cross-body orphaned braces left
+                    // over from per-body processing, then remove any empty
+                    // if-blocks or else-blocks that the brace removal exposed.
+                    strip_unmatched_braces(&mut all_lines);
+                    strip_orphaned_blocks(&mut all_lines);
                     if all_lines.is_empty() {
                         None
                     } else {
