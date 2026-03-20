@@ -1370,7 +1370,8 @@
             "inner_type": "StrProperty",
             "items": [
               "if (cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)) {",
-              "    self.WinchConstraintInstance = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)"
+              "    self.WinchConstraintInstance = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)",
+              "}"
             ]
           }
         },
@@ -2602,7 +2603,8 @@
     {
       "bytecode": [
         "if (cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)) {",
-        "    self.WinchConstraintInstance = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)"
+        "    self.WinchConstraintInstance = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)",
+        "}"
       ],
       "export_index": 15,
       "flags": "Event|Public|BlueprintPure",

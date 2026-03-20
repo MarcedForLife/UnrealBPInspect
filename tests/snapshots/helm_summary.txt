@@ -82,4 +82,5 @@ Functions:
   UserConstructionScript() [Event|Public|BlueprintPure]
     if (cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)) {
         self.WinchConstraintInstance = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)
+    }
 

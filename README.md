@@ -76,6 +76,7 @@ $ bp-inspect Helm_BP.uasset
 Blueprint: Helm_BP (extends Actor)
 
 Components:
+  DefaultSceneRoot (SceneComponent)
   Scene (SceneComponent)
     Stand (StaticMeshComponent)
       StaticMesh: helm_elemnt_02
@@ -90,19 +91,16 @@ Components:
         WinchMesh: helm_elemnt_01
         WinchComponentName: "Wheel"
         InitialRotationAlpha: 0.5000
-  DefaultSceneRoot (SceneComponent)
 
 Variables:
   WinchConstraintInstance: WinchConstraint_BP_C*
 
 Functions:
   GetSteeringAngle(out SteeringAngle: float) [Public|HasOutParms|BlueprintPure|Const]
-    self.WinchConstraintInstance.GetRotationAlpha($GetRotationAlpha_RotationAlpha)
-    out SteeringAngle = ($GetRotationAlpha_RotationAlpha * 2.0000) - 1.0000
+    out SteeringAngle = (self.WinchConstraintInstance.GetRotationAlpha() * 2.0000) - 1.0000
   UserConstructionScript() [Event|Public|BlueprintPure]
-    $Cast_AsWinch_Constraint_BP = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)
-    if ($Cast_AsWinch_Constraint_BP) {
-        self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP
+    if (cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)) {
+        self.WinchConstraintInstance = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)
     }
 ```
 
@@ -200,7 +198,7 @@ Once installed, Claude can read any `.uasset` file you point it at. Ask it to ex
 
 ## How it works
 
-bp-inspect reads the compiled bytecode from the binary file directly, with zero UE dependency. A 1MB Blueprint with 18 functions parses in ~15ms, the entire Blueprint, not one graph at a time.
+bp-inspect reads the compiled bytecode from the binary file directly, with zero UE dependency. A large Blueprint with 90 functions parses in under 100ms.
 
 The hard part is making bytecode *readable*. bp-inspect:
 
@@ -221,7 +219,7 @@ The goal is output that reads like hand-written pseudocode, not a bytecode dump.
 | ------------------------------------------------------------ | ------------------------------------------- | ------------------------------------------------------------------------------------- |
 | **UAssetAPI**                                                | .NET serialisation library for modding      | Raw property trees and byte arrays, no disassembly or readable output                 |
 | **UE commandlets**                                           | Editor-based dump tools                     | Requires full editor instance with project loaded and all dependencies compiled       |
-| **[NodeToCode](https://github.com/protospatial/NodeToCode)** | Editor plugin, BP→C++ via LLM               | Requires running editor + AI API key; reads live graph, not binary files              |
+| **[NodeToCode](https://github.com/protospatial/NodeToCode)** | Editor plugin, translates graphs via LLM    | Requires running editor and LLM service (cloud or local); reads live graph, not files |
 | **bp-inspect**                                               | Standalone binary, reads `.uasset` directly | No editor, no project context, no network. Works in terminals, CI, and AI assistants  |
 
 ## Supported formats

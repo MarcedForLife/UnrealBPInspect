@@ -35,6 +35,88 @@ pub fn parse_jump_computed(text: &str) -> bool {
     text.starts_with("jump_computed(")
 }
 
+/// Iteratively expand a Sequence pin's body boundary by following `if/jump`
+/// targets beyond the current end. Used during body detection to grow the
+/// boundary until all reachable displaced blocks (e.g. switch case bodies)
+/// are included. Rescans after each expansion since newly included code
+/// may contain further jumps. Returns the expanded body_end index.
+fn expand_body_end(
+    stmts: &[BcStatement],
+    body_start: usize,
+    initial_end: usize,
+    existing_pins: &[(usize, usize)],
+    resolve_offset: &dyn Fn(usize) -> Option<usize>,
+) -> usize {
+    let mut be = initial_end;
+    let mut scan_from = body_start;
+    loop {
+        let mut expanded = false;
+        let mut idx = scan_from;
+        while idx <= be {
+            if let Some((_, jump_target)) = parse_if_jump(&stmts[idx].text) {
+                if let Some(target_idx) = resolve_offset(jump_target) {
+                    let in_other_pin = existing_pins
+                        .iter()
+                        .any(|&(ps, pe)| target_idx >= ps && target_idx <= pe);
+                    if target_idx > be && !in_other_pin {
+                        if let Some(displaced_end) = stmts[target_idx..]
+                            .iter()
+                            .position(|s| s.text == "pop_flow")
+                            .map(|p| p + target_idx)
+                        {
+                            if displaced_end > be {
+                                scan_from = be + 1;
+                                be = displaced_end;
+                                expanded = true;
+                            }
+                        }
+                    }
+                }
+            }
+            idx += 1;
+        }
+        if !expanded {
+            break;
+        }
+    }
+    be
+}
+
+/// Single-pass enumeration of displaced blocks reachable from the inline
+/// body's if/jump targets. Unlike expand_body_end (which iteratively grows
+/// a boundary), this collects specific block ranges for non-contiguous
+/// emission. Returns `(start_idx, pop_flow_idx)` pairs; use `[start..end)`
+/// to exclude the pop_flow itself.
+fn find_displaced_blocks(
+    stmts: &[BcStatement],
+    body_start: usize,
+    body_end: usize,
+    resolve_offset: &dyn Fn(usize) -> Option<usize>,
+) -> Vec<(usize, usize)> {
+    let mut blocks = Vec::new();
+    for idx in body_start..body_end {
+        let Some((_, jump_target)) = parse_if_jump(&stmts[idx].text) else {
+            continue;
+        };
+        let Some(target_idx) = resolve_offset(jump_target) else {
+            continue;
+        };
+        if target_idx <= body_end {
+            continue;
+        }
+        // Find the pop_flow that ends this displaced block
+        let Some(displaced_end) = stmts[target_idx..]
+            .iter()
+            .position(|s| s.text == "pop_flow")
+            .map(|p| p + target_idx)
+        else {
+            continue;
+        };
+        blocks.push((target_idx, displaced_end));
+    }
+    blocks
+}
+
 /// Reorder bytecode stmts to place sequence/loop bodies in logical execution order.
 pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
     if stmts.is_empty() {
@@ -42,6 +124,23 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
     }
 
     let mut used = vec![false; stmts.len()];
+
+    // Offset-to-index map for resolving jump targets across both patterns
+    let offset_to_idx: std::collections::HashMap<usize, usize> = stmts
+        .iter()
+        .enumerate()
+        .map(|(idx, s)| (s.mem_offset, idx))
+        .collect();
+    let resolve_offset = |target: usize| -> Option<usize> {
+        offset_to_idx.get(&target).copied().or_else(|| {
+            (1..=4).find_map(|d| {
+                offset_to_idx
+                    .get(&(target + d))
+                    .or_else(|| offset_to_idx.get(&(target.wrapping_sub(d))))
+                    .copied()
+            })
+        })
+    };
 
     struct SequencePin {
         body_start_idx: usize,
@@ -99,11 +198,19 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
                 break;
             }
             let body_start = body_scan;
-            let body_end = stmts[body_start..]
+            let Some(initial_end) = stmts[body_start..]
                 .iter()
                 .position(|s| s.text == "pop_flow")
-                .map(|p| p + body_start);
-            let Some(body_end) = body_end else { break };
+                .map(|p| p + body_start)
+            else {
+                break;
+            };
+            let pin_ranges: Vec<(usize, usize)> = pins
+                .iter()
+                .map(|p| (p.body_start_idx, p.body_end_idx))
+                .collect();
+            let body_end =
+                expand_body_end(stmts, body_start, initial_end, &pin_ranges, &resolve_offset);
             pins.push(SequencePin {
                 body_start_idx: body_start,
                 body_end_idx: body_end,
@@ -130,24 +237,6 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
     //   push_flow A; jump body0; push_flow B; jump body1; ... inline_code; pop_flow
     // Each body ends with pop_flow. We locate bodies by their jump target offset.
     {
-        let offset_to_idx: std::collections::HashMap<usize, usize> = stmts
-            .iter()
-            .enumerate()
-            .map(|(idx, s)| (s.mem_offset, idx))
-            .collect();
-
-        let resolve_offset = |target: usize| -> Option<usize> {
-            offset_to_idx.get(&target).copied().or_else(|| {
-                // Fuzzy match: allow ±4 bytes for skipped opcodes
-                (1..=4).find_map(|d| {
-                    offset_to_idx
-                        .get(&(target + d))
-                        .or_else(|| offset_to_idx.get(&(target.wrapping_sub(d))))
-                        .copied()
-                })
-            })
-        };
-
         let mut i = 0;
         while i + 1 < stmts.len() {
             if used[i] {
@@ -203,15 +292,22 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
                     all_found = false;
                     break;
                 };
-                // Find body end: first pop_flow from body_start
-                let body_end = stmts[body_start..]
+                // Find body end: first pop_flow from body_start, then expand
+                // to include displaced blocks (switch case bodies, etc.)
+                let Some(initial_end) = stmts[body_start..]
                     .iter()
                     .position(|s| s.text == "pop_flow")
-                    .map(|p| p + body_start);
-                let Some(body_end) = body_end else {
+                    .map(|p| p + body_start)
+                else {
                     all_found = false;
                     break;
                 };
+                let pin_ranges: Vec<(usize, usize)> = pins
+                    .iter()
+                    .map(|p| (p.body_start_idx, p.body_end_idx))
+                    .collect();
+                let body_end =
+                    expand_body_end(stmts, body_start, initial_end, &pin_ranges, &resolve_offset);
                 pins.push(SequencePin {
                     body_start_idx: body_start,
                     body_end_idx: body_end,
@@ -412,6 +508,14 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
         for pin in &seq.pins {
             used[pin.body_start_idx..=pin.body_end_idx].fill(true);
         }
+        // Mark displaced blocks reachable from the inline body
+        for &(ds, de) in
+            &find_displaced_blocks(stmts, seq.chain_end, seq.inline_end, &resolve_offset)
+        {
+            if de < used.len() {
+                used[ds..=de].fill(true);
+            }
+        }
     }
     for lp in &loops {
         used[lp.if_idx..=lp.loop_ctrl_end].fill(true);
@@ -447,11 +551,24 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
                 &format!("// sequence [{}]:", seq.pins.len()),
             ));
             output.extend_from_slice(&stmts[seq.chain_end..seq.inline_end]);
-            // Sentinel for inline body's pop_flow
+            // Sentinel for inline body's pop_flow. This must appear before
+            // displaced blocks so the structurer can detect if/else patterns
+            // where the true branch returns via pop_flow.
             output.push(BcStatement {
                 mem_offset: stmts[seq.inline_end].mem_offset,
                 text: "return nop".to_string(),
             });
+            // Append displaced blocks reachable from the inline body's
+            // if/jump targets (e.g. else branches at distant offsets).
+            let displaced =
+                find_displaced_blocks(stmts, seq.chain_end, seq.inline_end, &resolve_offset);
+            for &(ds, de) in &displaced {
+                output.extend_from_slice(&stmts[ds..de]);
+                output.push(BcStatement {
+                    mem_offset: stmts[de].mem_offset,
+                    text: "return nop".to_string(),
+                });
+            }
 
             i = seq.inline_end + 1;
             continue;
