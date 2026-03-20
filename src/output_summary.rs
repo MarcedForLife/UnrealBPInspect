@@ -229,6 +229,21 @@ fn split_stmts_by_labels(
     segments
 }
 
+/// Run the full structuring pipeline on a slice of BcStatements:
+/// resolve cross-segment jumps, inline temps, structure, cleanup.
+fn structure_segment(stmts: &[BcStatement]) -> Vec<String> {
+    let mut seg = stmts.to_vec();
+    resolve_cross_segment_jumps(&mut seg);
+    inline_constant_temps(&mut seg);
+    inline_single_use_temps(&mut seg);
+    discard_unused_assignments(&mut seg);
+    let mut structured = structure_bytecode(&seg, &HashMap::new());
+    cleanup_structured_output(&mut structured);
+    fold_summary_patterns(&mut structured);
+    strip_orphaned_blocks(&mut structured);
+    structured
+}
+
 /// Split a segment's BcStatements at `// sequence [N]:` markers.
 /// Returns a list of (optional marker text, body statements).
 /// When the segment has no sequence markers, returns a single entry.
@@ -1211,17 +1226,7 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                         if !segment_stmts.is_empty() {
                             let sub_segments = split_by_sequence_markers(segment_stmts);
                             if sub_segments.len() <= 1 {
-                                // No sequence markers — process as a single block
-                                let mut seg = segment_stmts.clone();
-                                resolve_cross_segment_jumps(&mut seg);
-                                inline_constant_temps(&mut seg);
-                                inline_single_use_temps(&mut seg);
-                                discard_unused_assignments(&mut seg);
-                                let mut structured = structure_bytecode(&seg, &HashMap::new());
-                                cleanup_structured_output(&mut structured);
-                                fold_summary_patterns(&mut structured);
-                                strip_orphaned_blocks(&mut structured);
-                                all_lines.extend(structured);
+                                all_lines.extend(structure_segment(segment_stmts));
                             } else {
                                 // Process each sequence body independently so that
                                 // cross-body jumps don't cause if-blocks to span
@@ -1230,19 +1235,9 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                                     if let Some(m) = marker {
                                         all_lines.push(m.clone());
                                     }
-                                    if body.is_empty() {
-                                        continue;
+                                    if !body.is_empty() {
+                                        all_lines.extend(structure_segment(body));
                                     }
-                                    let mut seg = body.clone();
-                                    resolve_cross_segment_jumps(&mut seg);
-                                    inline_constant_temps(&mut seg);
-                                    inline_single_use_temps(&mut seg);
-                                    discard_unused_assignments(&mut seg);
-                                    let mut structured = structure_bytecode(&seg, &HashMap::new());
-                                    cleanup_structured_output(&mut structured);
-                                    fold_summary_patterns(&mut structured);
-                                    strip_orphaned_blocks(&mut structured);
-                                    all_lines.extend(structured);
                                 }
                             }
                         }

@@ -35,11 +35,11 @@ pub fn parse_jump_computed(text: &str) -> bool {
     text.starts_with("jump_computed(")
 }
 
-/// Expand a Sequence pin's body boundary by following `if !(cond) jump TARGET`
-/// statements whose targets resolve beyond the current end. Each displaced block
-/// (e.g. a switch case body) ends with its own `pop_flow`. Returns the expanded
-/// body_end index. `existing_pins` is a slice of `(body_start, body_end)` tuples
-/// for already-detected pins to avoid overlapping.
+/// Iteratively expand a Sequence pin's body boundary by following `if/jump`
+/// targets beyond the current end. Used during body detection to grow the
+/// boundary until all reachable displaced blocks (e.g. switch case bodies)
+/// are included. Rescans after each expansion since newly included code
+/// may contain further jumps. Returns the expanded body_end index.
 fn expand_body_end(
     stmts: &[BcStatement],
     body_start: usize,
@@ -82,9 +82,11 @@ fn expand_body_end(
     be
 }
 
-/// Find displaced blocks reachable from the inline body's if/jump targets.
-/// Returns a list of (start_idx, end_idx) ranges where end_idx is the pop_flow.
-/// The range is `[start..end)` for extend_from_slice (excludes the pop_flow).
+/// Single-pass enumeration of displaced blocks reachable from the inline
+/// body's if/jump targets. Unlike expand_body_end (which iteratively grows
+/// a boundary), this collects specific block ranges for non-contiguous
+/// emission. Returns `(start_idx, pop_flow_idx)` pairs; use `[start..end)`
+/// to exclude the pop_flow itself.
 fn find_displaced_blocks(
     stmts: &[BcStatement],
     body_start: usize,
