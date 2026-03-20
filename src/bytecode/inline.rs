@@ -2677,13 +2677,24 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
     loop {
         let mut changed = false;
 
-        // Strip trailing orphaned closing braces and else-blocks
-        while lines
-            .last()
-            .is_some_and(|l| l.trim() == "}" || l.trim() == "} else {")
-        {
-            lines.pop();
-            changed = true;
+        // Strip trailing `} else {` (always orphaned at the end — else
+        // with no body). Strip trailing `}` only when unmatched (depth < 0).
+        while let Some(last) = lines.last() {
+            let t = last.trim();
+            if t == "} else {" {
+                lines.pop();
+                changed = true;
+                continue;
+            }
+            if t == "}" {
+                let depth = brace_depth(lines);
+                if depth < 0 {
+                    lines.pop();
+                    changed = true;
+                    continue;
+                }
+            }
+            break;
         }
 
         let mut i = 0;
@@ -2726,6 +2737,21 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
     }
 }
 
+/// Count net brace depth across all lines. Positive = unclosed `{`, negative = unmatched `}`.
+fn brace_depth(lines: &[String]) -> i32 {
+    lines.iter().fold(0i32, |d, l| {
+        let t = l.trim();
+        if t.ends_with(" {") || t == "{" {
+            let close = i32::from(t.starts_with("} "));
+            d - close + 1
+        } else if t == "}" || t.starts_with("} ") {
+            d - 1
+        } else {
+            d
+        }
+    })
+}
+
 /// Remove unmatched braces left over from per-body processing.
 /// Resets depth at `---` and `// sequence [` boundaries. First pass
 /// removes orphaned `}`; second pass removes `... {` that are never
@@ -2745,6 +2771,13 @@ pub fn strip_unmatched_braces(lines: &mut Vec<String>) {
             return true;
         }
         if trimmed.ends_with(" {") || trimmed == "{" {
+            // "} else {" both closes and opens — net zero depth change
+            if trimmed.starts_with("} ") {
+                if depth == 0 {
+                    return false; // orphaned close
+                }
+                depth -= 1;
+            }
             depth += 1;
             true
         } else if trimmed == "}" || trimmed.starts_with("} ") {

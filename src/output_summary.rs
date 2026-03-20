@@ -2002,7 +2002,8 @@ mod tests {
 
     #[test]
     fn strip_goto_label_at_end() {
-        // goto L_01fa where label is at end of output (convergence to end)
+        // goto L_01fa where label is at end of output (convergence to end).
+        // The trailing `}` is balanced (closes the if-block) and preserved.
         let mut lines = vec![
             "if (cast(X)) {".to_string(),
             "    iface(X).CanConsume(Y)".to_string(),
@@ -2016,6 +2017,7 @@ mod tests {
             vec![
                 "if (cast(X)) {".to_string(),
                 "    iface(X).CanConsume(Y)".to_string(),
+                "}".to_string(),
             ]
         );
     }
