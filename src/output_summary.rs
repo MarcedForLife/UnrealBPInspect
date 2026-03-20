@@ -229,6 +229,47 @@ fn split_stmts_by_labels(
     segments
 }
 
+/// Split a segment's BcStatements at `// sequence [N]:` markers.
+/// Returns a list of (optional marker text, body statements).
+/// When the segment has no sequence markers, returns a single entry.
+fn split_by_sequence_markers(stmts: &[BcStatement]) -> Vec<(Option<String>, Vec<BcStatement>)> {
+    let marker_indices: Vec<usize> = stmts
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.text.starts_with("// sequence ["))
+        .map(|(i, _)| i)
+        .collect();
+
+    if marker_indices.is_empty() {
+        return vec![(None, stmts.to_vec())];
+    }
+
+    let mut result = Vec::new();
+
+    // Statements before the first marker (prefix)
+    if marker_indices[0] > 0 {
+        result.push((None, stmts[..marker_indices[0]].to_vec()));
+    }
+
+    for (i, &start) in marker_indices.iter().enumerate() {
+        let marker_text = stmts[start].text.clone();
+        let body_start = start + 1;
+        let body_end = if i + 1 < marker_indices.len() {
+            marker_indices[i + 1]
+        } else {
+            stmts.len()
+        };
+        let body: Vec<BcStatement> = if body_start < body_end {
+            stmts[body_start..body_end].to_vec()
+        } else {
+            Vec::new()
+        };
+        result.push((Some(marker_text), body));
+    }
+
+    result
+}
+
 /// Split structured ubergraph output into per-event sections and resume blocks.
 fn split_ubergraph_sections(lines: &[String]) -> (Vec<UbergraphSection>, Vec<ResumeBlock>) {
     let mut sections: Vec<UbergraphSection> = Vec::new();
@@ -1168,16 +1209,42 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                             all_lines.push("--- (latent resume) ---".to_string());
                         }
                         if !segment_stmts.is_empty() {
-                            let mut seg = segment_stmts.clone();
-                            resolve_cross_segment_jumps(&mut seg);
-                            inline_constant_temps(&mut seg);
-                            inline_single_use_temps(&mut seg);
-                            discard_unused_assignments(&mut seg);
-                            let mut structured = structure_bytecode(&seg, &HashMap::new());
-                            cleanup_structured_output(&mut structured);
-                            fold_summary_patterns(&mut structured);
-                            strip_orphaned_blocks(&mut structured);
-                            all_lines.extend(structured);
+                            let sub_segments = split_by_sequence_markers(segment_stmts);
+                            if sub_segments.len() <= 1 {
+                                // No sequence markers — process as a single block
+                                let mut seg = segment_stmts.clone();
+                                resolve_cross_segment_jumps(&mut seg);
+                                inline_constant_temps(&mut seg);
+                                inline_single_use_temps(&mut seg);
+                                discard_unused_assignments(&mut seg);
+                                let mut structured = structure_bytecode(&seg, &HashMap::new());
+                                cleanup_structured_output(&mut structured);
+                                fold_summary_patterns(&mut structured);
+                                strip_orphaned_blocks(&mut structured);
+                                all_lines.extend(structured);
+                            } else {
+                                // Process each sequence body independently so that
+                                // cross-body jumps don't cause if-blocks to span
+                                // across sequence boundaries.
+                                for (marker, body) in &sub_segments {
+                                    if let Some(m) = marker {
+                                        all_lines.push(m.clone());
+                                    }
+                                    if body.is_empty() {
+                                        continue;
+                                    }
+                                    let mut seg = body.clone();
+                                    resolve_cross_segment_jumps(&mut seg);
+                                    inline_constant_temps(&mut seg);
+                                    inline_single_use_temps(&mut seg);
+                                    discard_unused_assignments(&mut seg);
+                                    let mut structured = structure_bytecode(&seg, &HashMap::new());
+                                    cleanup_structured_output(&mut structured);
+                                    fold_summary_patterns(&mut structured);
+                                    strip_orphaned_blocks(&mut structured);
+                                    all_lines.extend(structured);
+                                }
+                            }
                         }
                     }
                     if all_lines.is_empty() {
