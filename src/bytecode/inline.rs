@@ -1904,6 +1904,13 @@ fn fold_outparam_calls(lines: &mut Vec<String>) {
             continue;
         }
         let (arg_idx, out_var) = dollar_args[0];
+
+        // In UE4, out-params always follow input params. A $-var that isn't the
+        // last argument in a multi-arg call is an input, not an out-param.
+        if args.len() > 1 && arg_idx != args.len() - 1 {
+            i += 1;
+            continue;
+        }
         let out_var = out_var.to_string();
 
         // The out-param must NOT have a separate assignment line (it's populated by the call)
