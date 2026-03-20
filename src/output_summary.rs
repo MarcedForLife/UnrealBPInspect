@@ -53,6 +53,14 @@ fn strip_offset_prefix(line: &str) -> &str {
     }
 }
 
+/// Emit a blank line separator between consecutive sections.
+fn section_sep(buf: &mut String, count: &mut usize) {
+    if *count > 0 {
+        writeln!(buf).unwrap();
+    }
+    *count += 1;
+}
+
 fn emit_comment(buf: &mut String, text: &str, indent: &str) {
     let prefix = format!("{}// ", indent);
     let avail = COMMENT_WRAP_WIDTH.saturating_sub(prefix.len() + 1);
@@ -1282,7 +1290,7 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
     }
 
     // Functions with signatures and bytecode
-    let mut has_functions = false;
+    let mut emitted_function_count = 0usize;
     let mut functions_with_bytecode: HashSet<String> = HashSet::new();
     for (hdr, props) in &asset.exports {
         let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
@@ -1317,10 +1325,10 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
         // For ubergraph: use pre-computed structured output
         if hdr.object_name.starts_with("ExecuteUbergraph_") && !ubergraph_labels.is_empty() {
             if let Some(ref structured) = ubergraph_structured {
-                if !has_functions {
+                if emitted_function_count == 0 {
                     writeln!(buf, "Functions:").unwrap();
-                    has_functions = true;
                 }
+                section_sep(&mut buf, &mut emitted_function_count);
                 let ug_comments = graph_comments.get("EventGraph").map(|v| v.as_slice());
                 let ug_nodes = graph_nodes.get("EventGraph").map(|v| v.as_slice());
                 emit_ubergraph_events(
@@ -1336,10 +1344,10 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
             continue;
         }
 
-        if !has_functions {
+        if emitted_function_count == 0 {
             writeln!(buf, "Functions:").unwrap();
-            has_functions = true;
         }
+        section_sep(&mut buf, &mut emitted_function_count);
         if let Some(callers) = callers_map.get(&hdr.object_name) {
             writeln!(buf, "  // called by: {}", callers.join(", ")).unwrap();
         }
@@ -1410,7 +1418,7 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
             functions_with_bytecode.insert(hdr.object_name.clone());
         }
     }
-    if has_functions {
+    if emitted_function_count > 0 {
         writeln!(buf).unwrap();
     }
 
@@ -1509,6 +1517,7 @@ fn emit_ubergraph_events(
         HashSet::new()
     };
     let mut emitted_group_comments: HashSet<usize> = HashSet::new();
+    let mut emitted_event_count = 0usize;
 
     // Emit each event section as a standalone function
     for (si, section) in sections.iter().enumerate() {
@@ -1529,6 +1538,8 @@ fn emit_ubergraph_events(
                 continue;
             }
         }
+
+        section_sep(buf, &mut emitted_event_count);
 
         // Classify comments for this event section
         let (top_level_comments, inline_comments) = if !section.name.is_empty() {
