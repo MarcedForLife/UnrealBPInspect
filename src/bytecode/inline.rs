@@ -2726,6 +2726,63 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
     }
 }
 
+/// Remove unmatched braces left over from per-body processing.
+/// Resets depth at `---` and `// sequence [` boundaries. First pass
+/// removes orphaned `}`; second pass removes `... {` that are never
+/// closed before the next boundary.
+pub fn strip_unmatched_braces(lines: &mut Vec<String>) {
+    fn is_boundary(trimmed: &str) -> bool {
+        (trimmed.starts_with("---") && trimmed.ends_with("---"))
+            || trimmed.starts_with("// sequence [")
+    }
+
+    // Pass 1: remove orphaned closing braces
+    let mut depth: i32 = 0;
+    lines.retain(|line| {
+        let trimmed = line.trim();
+        if is_boundary(trimmed) {
+            depth = 0;
+            return true;
+        }
+        if trimmed.ends_with(" {") || trimmed == "{" {
+            depth += 1;
+            true
+        } else if trimmed == "}" || trimmed.starts_with("} ") {
+            if depth > 0 {
+                depth -= 1;
+                true
+            } else {
+                false
+            }
+        } else {
+            true
+        }
+    });
+
+    // Pass 2: remove opening braces that aren't closed before the next boundary.
+    // Walk backwards within each section; if depth is positive at a boundary,
+    // strip the unclosed `{` lines.
+    let mut i = lines.len();
+    depth = 0;
+    while i > 0 {
+        i -= 1;
+        let trimmed = lines[i].trim().to_string();
+        if is_boundary(&trimmed) {
+            depth = 0;
+            continue;
+        }
+        if trimmed == "}" || trimmed.starts_with("} ") {
+            depth += 1;
+        } else if trimmed.ends_with(" {") || trimmed == "{" {
+            if depth > 0 {
+                depth -= 1;
+            } else {
+                lines.remove(i);
+            }
+        }
+    }
+}
+
 /// Remove goto/label pairs that are redundant in structured output.
 ///
 /// A generated goto (to `L_XXXX`) is redundant when:
