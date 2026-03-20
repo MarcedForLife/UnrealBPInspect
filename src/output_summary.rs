@@ -4,7 +4,7 @@ use std::fmt::Write;
 use crate::bytecode::{
     cleanup_structured_output, discard_unused_assignments, fold_summary_patterns,
     inline_constant_temps, inline_single_use_temps, reorder_convergence, reorder_flow_patterns,
-    strip_orphaned_blocks, structure_bytecode, BcStatement,
+    strip_orphaned_blocks, strip_unmatched_braces, structure_bytecode, BcStatement,
 };
 use crate::resolve::*;
 use crate::types::*;
@@ -227,6 +227,62 @@ fn split_stmts_by_labels(
         segments.push((current_name, current_stmts));
     }
     segments
+}
+
+/// Run the full structuring pipeline on a slice of BcStatements:
+/// resolve cross-segment jumps, inline temps, structure, cleanup.
+fn structure_segment(stmts: &[BcStatement]) -> Vec<String> {
+    let mut seg = stmts.to_vec();
+    resolve_cross_segment_jumps(&mut seg);
+    inline_constant_temps(&mut seg);
+    inline_single_use_temps(&mut seg);
+    discard_unused_assignments(&mut seg);
+    let mut structured = structure_bytecode(&seg, &HashMap::new());
+    cleanup_structured_output(&mut structured);
+    fold_summary_patterns(&mut structured);
+    strip_orphaned_blocks(&mut structured);
+    structured
+}
+
+/// Split a segment's BcStatements at `// sequence [N]:` markers.
+/// Returns a list of (optional marker text, body statements).
+/// When the segment has no sequence markers, returns a single entry.
+fn split_by_sequence_markers(stmts: &[BcStatement]) -> Vec<(Option<String>, Vec<BcStatement>)> {
+    let marker_indices: Vec<usize> = stmts
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.text.starts_with("// sequence ["))
+        .map(|(i, _)| i)
+        .collect();
+
+    if marker_indices.is_empty() {
+        return vec![(None, stmts.to_vec())];
+    }
+
+    let mut result = Vec::new();
+
+    // Statements before the first marker (prefix)
+    if marker_indices[0] > 0 {
+        result.push((None, stmts[..marker_indices[0]].to_vec()));
+    }
+
+    for (i, &start) in marker_indices.iter().enumerate() {
+        let marker_text = stmts[start].text.clone();
+        let body_start = start + 1;
+        let body_end = if i + 1 < marker_indices.len() {
+            marker_indices[i + 1]
+        } else {
+            stmts.len()
+        };
+        let body: Vec<BcStatement> = if body_start < body_end {
+            stmts[body_start..body_end].to_vec()
+        } else {
+            Vec::new()
+        };
+        result.push((Some(marker_text), body));
+    }
+
+    result
 }
 
 /// Split structured ubergraph output into per-event sections and resume blocks.
@@ -1168,18 +1224,29 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                             all_lines.push("--- (latent resume) ---".to_string());
                         }
                         if !segment_stmts.is_empty() {
-                            let mut seg = segment_stmts.clone();
-                            resolve_cross_segment_jumps(&mut seg);
-                            inline_constant_temps(&mut seg);
-                            inline_single_use_temps(&mut seg);
-                            discard_unused_assignments(&mut seg);
-                            let mut structured = structure_bytecode(&seg, &HashMap::new());
-                            cleanup_structured_output(&mut structured);
-                            fold_summary_patterns(&mut structured);
-                            strip_orphaned_blocks(&mut structured);
-                            all_lines.extend(structured);
+                            let sub_segments = split_by_sequence_markers(segment_stmts);
+                            if sub_segments.len() <= 1 {
+                                all_lines.extend(structure_segment(segment_stmts));
+                            } else {
+                                // Process each sequence body independently so that
+                                // cross-body jumps don't cause if-blocks to span
+                                // across sequence boundaries.
+                                for (marker, body) in &sub_segments {
+                                    if let Some(m) = marker {
+                                        all_lines.push(m.clone());
+                                    }
+                                    if !body.is_empty() {
+                                        all_lines.extend(structure_segment(body));
+                                    }
+                                }
+                            }
                         }
                     }
+                    // Final cleanup: strip cross-body orphaned braces left
+                    // over from per-body processing, then remove any empty
+                    // if-blocks or else-blocks that the brace removal exposed.
+                    strip_unmatched_braces(&mut all_lines);
+                    strip_orphaned_blocks(&mut all_lines);
                     if all_lines.is_empty() {
                         None
                     } else {
@@ -1930,7 +1997,8 @@ mod tests {
 
     #[test]
     fn strip_goto_label_at_end() {
-        // goto L_01fa where label is at end of output (convergence to end)
+        // goto L_01fa where label is at end of output (convergence to end).
+        // The trailing `}` is balanced (closes the if-block) and preserved.
         let mut lines = vec![
             "if (cast(X)) {".to_string(),
             "    iface(X).CanConsume(Y)".to_string(),
@@ -1944,6 +2012,7 @@ mod tests {
             vec![
                 "if (cast(X)) {".to_string(),
                 "    iface(X).CanConsume(Y)".to_string(),
+                "}".to_string(),
             ]
         );
     }

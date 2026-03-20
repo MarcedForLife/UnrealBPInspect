@@ -466,6 +466,13 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
                         end_idx = Some(eidx);
                     }
                 }
+            } else if (prev.text == "return nop" || prev.text == "return")
+                && target_idx < stmts.len()
+            {
+                // True body ends with return — both branches diverge.
+                // Treat as if/else where the else body extends to the end.
+                jump_idx = Some(check_idx);
+                end_idx = Some(stmts.len());
             }
         }
         if_blocks.push(IfBlock {
@@ -936,6 +943,28 @@ mod tests {
         assert!(text.contains("TrueBranch()"));
         assert!(text.contains("} else {"));
         assert!(text.contains("FalseBranch()"));
+    }
+
+    #[test]
+    fn if_else_with_return_terminated_true_body() {
+        // if !(cond) jump 0x30
+        // TrueBranch()
+        // return nop          (true body returns instead of jumping)
+        // FalseBranch()       (at jump target)
+        // return nop
+        let stmts = vec![
+            make_stmt(0x10, "if !(Cond) jump 0x30"),
+            make_stmt(0x20, "TrueBranch()"),
+            make_stmt(0x28, "return nop"),
+            make_stmt(0x30, "FalseBranch()"),
+            make_stmt(0x40, "return nop"),
+        ];
+        let result = structure_bytecode(&stmts, &HashMap::new());
+        let text = result.join("\n");
+        assert!(text.contains("if (Cond) {"), "missing if: {}", text);
+        assert!(text.contains("TrueBranch()"), "missing true: {}", text);
+        assert!(text.contains("} else {"), "missing else: {}", text);
+        assert!(text.contains("FalseBranch()"), "missing false: {}", text);
     }
 
     #[test]

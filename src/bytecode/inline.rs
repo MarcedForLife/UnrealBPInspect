@@ -1904,6 +1904,13 @@ fn fold_outparam_calls(lines: &mut Vec<String>) {
             continue;
         }
         let (arg_idx, out_var) = dollar_args[0];
+
+        // In UE4, out-params always follow input params. A $-var that isn't the
+        // last argument in a multi-arg call is an input, not an out-param.
+        if args.len() > 1 && arg_idx != args.len() - 1 {
+            i += 1;
+            continue;
+        }
         let out_var = out_var.to_string();
 
         // The out-param must NOT have a separate assignment line (it's populated by the call)
@@ -2670,13 +2677,24 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
     loop {
         let mut changed = false;
 
-        // Strip trailing orphaned closing braces and else-blocks
-        while lines
-            .last()
-            .is_some_and(|l| l.trim() == "}" || l.trim() == "} else {")
-        {
-            lines.pop();
-            changed = true;
+        // Strip trailing `} else {` (always orphaned at the end — else
+        // with no body). Strip trailing `}` only when unmatched (depth < 0).
+        while let Some(last) = lines.last() {
+            let t = last.trim();
+            if t == "} else {" {
+                lines.pop();
+                changed = true;
+                continue;
+            }
+            if t == "}" {
+                let depth = brace_depth(lines);
+                if depth < 0 {
+                    lines.pop();
+                    changed = true;
+                    continue;
+                }
+            }
+            break;
         }
 
         let mut i = 0;
@@ -2715,6 +2733,85 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
         }
         if !changed {
             break;
+        }
+    }
+}
+
+/// Count net brace depth across all lines. Positive = unclosed `{`, negative = unmatched `}`.
+fn brace_depth(lines: &[String]) -> i32 {
+    lines.iter().fold(0i32, |d, l| {
+        let t = l.trim();
+        if t.ends_with(" {") || t == "{" {
+            let close = i32::from(t.starts_with("} "));
+            d - close + 1
+        } else if t == "}" || t.starts_with("} ") {
+            d - 1
+        } else {
+            d
+        }
+    })
+}
+
+/// Remove unmatched braces left over from per-body processing.
+/// Resets depth at `---` and `// sequence [` boundaries. First pass
+/// removes orphaned `}`; second pass removes `... {` that are never
+/// closed before the next boundary.
+pub fn strip_unmatched_braces(lines: &mut Vec<String>) {
+    fn is_boundary(trimmed: &str) -> bool {
+        (trimmed.starts_with("---") && trimmed.ends_with("---"))
+            || trimmed.starts_with("// sequence [")
+    }
+
+    // Pass 1: remove orphaned closing braces
+    let mut depth: i32 = 0;
+    lines.retain(|line| {
+        let trimmed = line.trim();
+        if is_boundary(trimmed) {
+            depth = 0;
+            return true;
+        }
+        if trimmed.ends_with(" {") || trimmed == "{" {
+            // "} else {" both closes and opens — net zero depth change
+            if trimmed.starts_with("} ") {
+                if depth == 0 {
+                    return false; // orphaned close
+                }
+                depth -= 1;
+            }
+            depth += 1;
+            true
+        } else if trimmed == "}" || trimmed.starts_with("} ") {
+            if depth > 0 {
+                depth -= 1;
+                true
+            } else {
+                false
+            }
+        } else {
+            true
+        }
+    });
+
+    // Pass 2: remove opening braces that aren't closed before the next boundary.
+    // Walk backwards within each section; if depth is positive at a boundary,
+    // strip the unclosed `{` lines.
+    let mut i = lines.len();
+    depth = 0;
+    while i > 0 {
+        i -= 1;
+        let trimmed = lines[i].trim().to_string();
+        if is_boundary(&trimmed) {
+            depth = 0;
+            continue;
+        }
+        if trimmed == "}" || trimmed.starts_with("} ") {
+            depth += 1;
+        } else if trimmed.ends_with(" {") || trimmed == "{" {
+            if depth > 0 {
+                depth -= 1;
+            } else {
+                lines.remove(i);
+            }
         }
     }
 }

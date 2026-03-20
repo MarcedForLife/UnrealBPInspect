@@ -15,7 +15,7 @@ pub use flow::{
 };
 pub use inline::{
     cleanup_structured_output, discard_unused_assignments, fold_summary_patterns,
-    inline_constant_temps, inline_single_use_temps, strip_orphaned_blocks,
+    inline_constant_temps, inline_single_use_temps, strip_orphaned_blocks, strip_unmatched_braces,
 };
 pub use structure::structure_bytecode;
 
