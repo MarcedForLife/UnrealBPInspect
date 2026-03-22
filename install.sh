@@ -2,7 +2,7 @@
 # Install bp-inspect (Unreal Blueprint Inspector)
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/MarcedForLife/unreal-bp-inspect/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/MarcedForLife/UnrealBPInspect/main/install.sh | sh
 #   curl -fsSL .../install.sh | sh -s -- --with-skill
 #
 # Environment variables:
@@ -11,7 +11,7 @@
 
 set -eu
 
-REPO="MarcedForLife/unreal-bp-inspect"
+REPO="MarcedForLife/UnrealBPInspect"
 BINARY="bp-inspect"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${BP_INSPECT_VERSION:-latest}"
