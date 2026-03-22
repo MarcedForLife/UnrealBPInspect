@@ -16,10 +16,10 @@ Use `bp-inspect` to read and understand Unreal Engine Blueprint `.uasset` files 
 
 ```bash
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/MarcedForLife/unreal-bp-inspect/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/MarcedForLife/UnrealBPInspect/main/install.sh | sh
 
 # Windows PowerShell
-irm https://raw.githubusercontent.com/MarcedForLife/unreal-bp-inspect/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/MarcedForLife/UnrealBPInspect/main/install.ps1 | iex
 ```
 
 To update to the latest version:

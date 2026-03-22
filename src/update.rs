@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use std::io::Read;
 use std::path::Path;
 
-const REPO: &str = "MarcedForLife/unreal-bp-inspect";
+const REPO: &str = "MarcedForLife/UnrealBPInspect";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Update bp-inspect to the latest (or a specific) version from GitHub releases.

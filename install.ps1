@@ -11,7 +11,7 @@
 .PARAMETER WithSkill
     Also install the Claude Code skill for Blueprint debugging.
 .EXAMPLE
-    irm https://raw.githubusercontent.com/MarcedForLife/unreal-bp-inspect/main/install.ps1 | iex
+    irm https://raw.githubusercontent.com/MarcedForLife/UnrealBPInspect/main/install.ps1 | iex
 .EXAMPLE
     .\install.ps1 -WithSkill
 .EXAMPLE
@@ -24,7 +24,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Repo = "MarcedForLife/unreal-bp-inspect"
+$Repo = "MarcedForLife/UnrealBPInspect"
 $BinaryName = "bp-inspect.exe"
 $Asset = "bp-inspect-windows-x86_64.exe"
 

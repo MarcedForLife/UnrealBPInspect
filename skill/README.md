@@ -8,7 +8,7 @@ Install alongside bp-inspect using the `--with-skill` flag:
 
 ```bash
 # macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/MarcedForLife/unreal-bp-inspect/main/install.sh | sh -s -- --with-skill
+curl -fsSL https://raw.githubusercontent.com/MarcedForLife/UnrealBPInspect/main/install.sh | sh -s -- --with-skill
 
 # Windows PowerShell
 .\install.ps1 -WithSkill
