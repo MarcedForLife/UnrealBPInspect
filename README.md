@@ -14,13 +14,13 @@ Parses the binary format directly and outputs component trees, variable declarat
 ### Windows (PowerShell)
 
 ```powershell
-irm https://raw.githubusercontent.com/MarcedForLife/unreal-bp-inspect/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/MarcedForLife/UnrealBPInspect/main/install.ps1 | iex
 ```
 
 ### macOS / Linux
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/MarcedForLife/unreal-bp-inspect/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/MarcedForLife/UnrealBPInspect/main/install.sh | sh
 ```
 
 ### With Cargo
@@ -42,8 +42,8 @@ The install scripts download the latest binary, add it to your PATH, and configu
 ### From source
 
 ```sh
-git clone https://github.com/MarcedForLife/unreal-bp-inspect.git
-cd unreal-bp-inspect
+git clone https://github.com/MarcedForLife/UnrealBPInspect.git
+cd UnrealBPInspect
 cargo install --path .
 ```
 
