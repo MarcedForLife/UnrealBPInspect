@@ -29,6 +29,20 @@ pub struct DecodeCtx<'a> {
     ue5: i32,
 }
 
+impl<'a> DecodeCtx<'a> {
+    fn read_obj_ref(&self, pos: &mut usize, mem_adj: &mut i32) -> String {
+        read_bc_obj_ref(self.bytecode, pos, self.imports, self.export_names, mem_adj)
+    }
+
+    fn read_field_path(&self, pos: &mut usize, mem_adj: &mut i32) -> String {
+        read_bc_field_path(self.bytecode, pos, self.name_table, mem_adj)
+    }
+
+    fn read_fname_with_adj(&self, pos: &mut usize, mem_adj: &mut i32) -> String {
+        read_bc_fname_with_adj(self.bytecode, pos, self.name_table, mem_adj)
+    }
+}
+
 /// Check if an expression contains an infix operator and needs parenthesization.
 fn needs_parens(expr: &str) -> bool {
     const TOKENS: &[&str] = &[
@@ -136,14 +150,13 @@ fn decode_context(
     sep: &str,
     elide_library: bool,
 ) -> Option<String> {
-    let (bytecode, name_table) = (ctx.bytecode, ctx.name_table);
     macro_rules! decode_next {
         () => {
             decode_expr(ctx, pos, mem_adj).unwrap_or_default()
         };
     }
     let obj = decode_next!();
-    read_bc_context_rvalue(bytecode, pos, name_table, mem_adj);
+    read_bc_context_rvalue(ctx.bytecode, pos, ctx.name_table, mem_adj);
     let expr = decode_next!();
     let expr = expr.strip_prefix("self.").unwrap_or(&expr);
     if elide_library && is_ue4_library_class(&obj) {
@@ -264,13 +277,12 @@ fn decode_expr_list(
     mem_adj: &mut i32,
     terminator: u8,
 ) -> Vec<String> {
-    let bytecode = ctx.bytecode;
     let mut items = Vec::new();
     loop {
-        if *pos >= bytecode.len() {
+        if *pos >= ctx.bytecode.len() {
             break;
         }
-        if bytecode[*pos] == terminator {
+        if ctx.bytecode[*pos] == terminator {
             *pos += 1;
             break;
         }
@@ -292,13 +304,7 @@ fn decode_constant(
     pos: &mut usize,
     mem_adj: &mut i32,
 ) -> Option<Option<String>> {
-    let (bytecode, name_table, imports, export_names, ue5) = (
-        ctx.bytecode,
-        ctx.name_table,
-        ctx.imports,
-        ctx.export_names,
-        ctx.ue5,
-    );
+    let bytecode = ctx.bytecode;
     macro_rules! decode_next {
         () => {
             decode_expr(ctx, pos, mem_adj).unwrap_or_default()
@@ -309,19 +315,19 @@ fn decode_constant(
         EX_FLOAT_CONST => Some(format!("{:.4}", read_bc_f32(bytecode, pos))),
         EX_STRING_CONST => Some(format!("\"{}\"", read_bc_string(bytecode, pos))),
         EX_OBJECT_CONST => {
-            let obj = read_bc_obj_ref(bytecode, pos, imports, export_names, mem_adj);
+            let obj = ctx.read_obj_ref(pos, mem_adj);
             Some(obj)
         }
         EX_NAME_CONST => {
-            let name = read_bc_fname_with_adj(bytecode, pos, name_table, mem_adj);
+            let name = ctx.read_fname_with_adj(pos, mem_adj);
             Some(format!("'{}'", name))
         }
         EX_ROTATION_CONST => {
-            let (p, y, r) = read_bc_xyz(bytecode, pos, ue5 >= VER_UE5_LARGE_WORLD_COORDINATES);
+            let (p, y, r) = read_bc_xyz(bytecode, pos, ctx.ue5 >= VER_UE5_LARGE_WORLD_COORDINATES);
             Some(format!("Rot({:.1},{:.1},{:.1})", p, y, r))
         }
         EX_VECTOR_CONST => {
-            let (x, y, z) = read_bc_xyz(bytecode, pos, ue5 >= VER_UE5_LARGE_WORLD_COORDINATES);
+            let (x, y, z) = read_bc_xyz(bytecode, pos, ctx.ue5 >= VER_UE5_LARGE_WORLD_COORDINATES);
             Some(format!("Vec({:.1},{:.1},{:.1})", x, y, z))
         }
         EX_BYTE_CONST => Some(format!("{}", read_bc_u8(bytecode, pos))),
@@ -344,7 +350,7 @@ fn decode_constant(
                     Some(val)
                 }
                 4 => {
-                    let _table = read_bc_obj_ref(bytecode, pos, imports, export_names, mem_adj);
+                    let _table = ctx.read_obj_ref(pos, mem_adj);
                     let key = decode_next!();
                     Some(format!("STRTABLE({})", key))
                 }
@@ -354,7 +360,7 @@ fn decode_constant(
         }
         EX_NO_OBJECT => Some("null".into()),
         EX_TRANSFORM_CONST => {
-            let lwc = ue5 >= VER_UE5_LARGE_WORLD_COORDINATES;
+            let lwc = ctx.ue5 >= VER_UE5_LARGE_WORLD_COORDINATES;
             let (rx, ry, rz, rw) = read_bc_xyzw(bytecode, pos, lwc);
             let (tx, ty, tz) = read_bc_xyz(bytecode, pos, lwc);
             let (sx, sy, sz) = read_bc_xyz(bytecode, pos, lwc);
@@ -364,7 +370,7 @@ fn decode_constant(
         EX_INT_CONST_BYTE => Some(format!("{}", read_bc_u8(bytecode, pos))),
         EX_NO_INTERFACE => Some("null_iface".into()),
         EX_STRUCT_CONST => {
-            let struct_ref = read_bc_obj_ref(bytecode, pos, imports, export_names, mem_adj);
+            let struct_ref = ctx.read_obj_ref(pos, mem_adj);
             let _serial_size = read_bc_i32(bytecode, pos);
             let fields = decode_expr_list(ctx, pos, mem_adj, EX_END_STRUCT_CONST);
             Some(format!("{}({})", struct_ref, fields.join(", ")))
@@ -387,36 +393,36 @@ fn decode_constant(
         EX_UINT64_CONST => Some(format!("{}UL", read_bc_u64(bytecode, pos))),
         EX_DOUBLE_CONST => Some(format!("{:.4}", read_bc_f64(bytecode, pos))),
         EX_PROPERTY_CONST => {
-            let path = read_bc_field_path(bytecode, pos, name_table, mem_adj);
+            let path = ctx.read_field_path(pos, mem_adj);
             Some(format!("prop({})", path))
         }
         EX_SOFT_OBJECT_CONST => {
             let path = decode_next!();
             Some(format!("soft({})", path))
         }
-        EX_VECTOR3F_CONST if ue5 >= VER_UE5_LARGE_WORLD_COORDINATES => {
+        EX_VECTOR3F_CONST if ctx.ue5 >= VER_UE5_LARGE_WORLD_COORDINATES => {
             let x = read_bc_f32(bytecode, pos);
             let y = read_bc_f32(bytecode, pos);
             let z = read_bc_f32(bytecode, pos);
             Some(format!("Vec3f({:.1},{:.1},{:.1})", x, y, z))
         }
         EX_ARRAY_CONST => {
-            let _inner = read_bc_obj_ref(bytecode, pos, imports, export_names, mem_adj);
+            let _inner = ctx.read_obj_ref(pos, mem_adj);
             let _count = read_bc_i32(bytecode, pos);
             let items = decode_expr_list(ctx, pos, mem_adj, EX_END_ARRAY_CONST);
             Some(format!("[{}]", items.join(", ")))
         }
         EX_END_ARRAY_CONST => None,
         EX_SET_CONST => {
-            let _inner = read_bc_obj_ref(bytecode, pos, imports, export_names, mem_adj);
+            let _inner = ctx.read_obj_ref(pos, mem_adj);
             let _count = read_bc_i32(bytecode, pos);
             let items = decode_expr_list(ctx, pos, mem_adj, EX_END_SET_CONST);
             Some(format!("set{{{}}}", items.join(", ")))
         }
         EX_END_SET_CONST => None,
         EX_MAP_CONST => {
-            let _key_prop = read_bc_obj_ref(bytecode, pos, imports, export_names, mem_adj);
-            let _val_prop = read_bc_obj_ref(bytecode, pos, imports, export_names, mem_adj);
+            let _key_prop = ctx.read_obj_ref(pos, mem_adj);
+            let _val_prop = ctx.read_obj_ref(pos, mem_adj);
             let _count = read_bc_i32(bytecode, pos);
             let items = decode_expr_list(ctx, pos, mem_adj, EX_END_MAP_CONST);
             Some(format!("map{{{}}}", items.join(", ")))
@@ -436,8 +442,6 @@ fn decode_delegate(
     pos: &mut usize,
     mem_adj: &mut i32,
 ) -> Option<Option<String>> {
-    let (bytecode, name_table, imports, export_names) =
-        (ctx.bytecode, ctx.name_table, ctx.imports, ctx.export_names);
     macro_rules! decode_next {
         () => {
             decode_expr(ctx, pos, mem_adj).unwrap_or_default()
@@ -445,11 +449,11 @@ fn decode_delegate(
     }
     let result = match opcode {
         EX_INSTANCE_DELEGATE => {
-            let name = read_bc_fname_with_adj(bytecode, pos, name_table, mem_adj);
+            let name = ctx.read_fname_with_adj(pos, mem_adj);
             Some(format!("delegate({})", name))
         }
         EX_BIND_DELEGATE => {
-            let name = read_bc_fname_with_adj(bytecode, pos, name_table, mem_adj);
+            let name = ctx.read_fname_with_adj(pos, mem_adj);
             let delegate = decode_next!();
             let obj = decode_next!();
             Some(format!("bind({}, {}, {})", name, delegate, obj))
@@ -469,7 +473,7 @@ fn decode_delegate(
             Some(format!("{} -= {}", delegate, func))
         }
         EX_CALL_MULTICAST_DELEGATE => {
-            let func = read_bc_obj_ref(bytecode, pos, imports, export_names, mem_adj);
+            let func = ctx.read_obj_ref(pos, mem_adj);
             let args = decode_func_args(ctx, pos, mem_adj);
             Some(format!("{}.Broadcast({})", func, args.join(", ")))
         }
@@ -487,7 +491,6 @@ fn decode_container_mutation(
     pos: &mut usize,
     mem_adj: &mut i32,
 ) -> Option<Option<String>> {
-    let bytecode = ctx.bytecode;
     macro_rules! decode_next {
         () => {
             decode_expr(ctx, pos, mem_adj).unwrap_or_default()
@@ -502,14 +505,14 @@ fn decode_container_mutation(
         EX_END_ARRAY => None,
         EX_SET_SET => {
             let target = decode_next!();
-            let _count = read_bc_i32(bytecode, pos);
+            let _count = read_bc_i32(ctx.bytecode, pos);
             let items = decode_expr_list(ctx, pos, mem_adj, EX_END_SET);
             Some(format!("{} = set{{{}}}", target, items.join(", ")))
         }
         EX_END_SET => None,
         EX_SET_MAP => {
             let target = decode_next!();
-            let _count = read_bc_i32(bytecode, pos);
+            let _count = read_bc_i32(ctx.bytecode, pos);
             let items = decode_expr_list(ctx, pos, mem_adj, EX_END_MAP);
             Some(format!("{} = map{{{}}}", target, items.join(", ")))
         }
@@ -522,13 +525,7 @@ fn decode_container_mutation(
 /// Decode a single Kismet expression, returning a string representation.
 /// Returns None if at end of script or unknown opcode.
 pub fn decode_expr(ctx: &DecodeCtx, pos: &mut usize, mem_adj: &mut i32) -> Option<String> {
-    let (bytecode, name_table, imports, export_names, ue5) = (
-        ctx.bytecode,
-        ctx.name_table,
-        ctx.imports,
-        ctx.export_names,
-        ctx.ue5,
-    );
+    let bytecode = ctx.bytecode;
     if *pos >= bytecode.len() {
         return None;
     }
@@ -546,15 +543,15 @@ pub fn decode_expr(ctx: &DecodeCtx, pos: &mut usize, mem_adj: &mut i32) -> Optio
     match opcode {
         // --- Variables (local, instance, default, out) ---
         EX_LOCAL_VARIABLE => {
-            let prop = read_bc_field_path(bytecode, pos, name_table, mem_adj);
+            let prop = ctx.read_field_path(pos, mem_adj);
             Some(prop)
         }
         EX_INSTANCE_VARIABLE => {
-            let prop = read_bc_field_path(bytecode, pos, name_table, mem_adj);
+            let prop = ctx.read_field_path(pos, mem_adj);
             Some(format!("self.{}", prop))
         }
         EX_DEFAULT_VARIABLE => {
-            let prop = read_bc_field_path(bytecode, pos, name_table, mem_adj);
+            let prop = ctx.read_field_path(pos, mem_adj);
             Some(format!("default.{}", prop))
         }
         // --- Control flow (return, jump, assert, switch, flow stack) ---
@@ -584,13 +581,13 @@ pub fn decode_expr(ctx: &DecodeCtx, pos: &mut usize, mem_adj: &mut i32) -> Optio
         }
         // --- Assignment (Let variants) ---
         EX_LET | EX_LET_MULTICAST_DELEGATE | EX_LET_DELEGATE => {
-            let _prop = read_bc_field_path(bytecode, pos, name_table, mem_adj);
+            let _prop = ctx.read_field_path(pos, mem_adj);
             let var = decode_next!();
             let val = decode_next!();
             Some(format!("{} = {}", var, val))
         }
         EX_BITFIELD_CONST => {
-            let _path = read_bc_field_path(bytecode, pos, name_table, mem_adj);
+            let _path = ctx.read_field_path(pos, mem_adj);
             let value = read_bc_u8(bytecode, pos) != 0;
             Some(format!("{}", value))
         }
@@ -598,7 +595,7 @@ pub fn decode_expr(ctx: &DecodeCtx, pos: &mut usize, mem_adj: &mut i32) -> Optio
         EX_CLASS_CONTEXT => decode_context(ctx, pos, mem_adj, ".", false),
         // --- Casts ---
         EX_META_CAST | EX_DYNAMIC_CAST => {
-            let class = read_bc_obj_ref(bytecode, pos, imports, export_names, mem_adj);
+            let class = ctx.read_obj_ref(pos, mem_adj);
             let expr = decode_next!();
             Some(format!("cast<{}>({})", class, expr))
         }
@@ -618,12 +615,12 @@ pub fn decode_expr(ctx: &DecodeCtx, pos: &mut usize, mem_adj: &mut i32) -> Optio
         EX_CONTEXT_FAIL_SILENT => decode_context(ctx, pos, mem_adj, "?.", true),
         // --- Function calls ---
         EX_VIRTUAL_FUNCTION | EX_LOCAL_VIRTUAL_FUNCTION => {
-            let name = read_bc_fname_with_adj(bytecode, pos, name_table, mem_adj);
+            let name = ctx.read_fname_with_adj(pos, mem_adj);
             let args = decode_func_args(ctx, pos, mem_adj);
             Some(format_call_or_operator(&name, args))
         }
         EX_FINAL_FUNCTION | EX_LOCAL_FINAL_FUNCTION => {
-            let func = read_bc_obj_ref(bytecode, pos, imports, export_names, mem_adj);
+            let func = ctx.read_obj_ref(pos, mem_adj);
             let args = decode_func_args(ctx, pos, mem_adj);
             Some(format_call_or_operator(&func, args))
         }
@@ -660,12 +657,12 @@ pub fn decode_expr(ctx: &DecodeCtx, pos: &mut usize, mem_adj: &mut i32) -> Optio
         | EX_MAP_CONST
         | EX_END_MAP_CONST => decode_constant(opcode, ctx, pos, mem_adj).unwrap(),
         // UE5 LWC: float vector; UE4 path falls through to decode_constant -> None -> here
-        EX_VECTOR3F_CONST if ue5 >= VER_UE5_LARGE_WORLD_COORDINATES => {
+        EX_VECTOR3F_CONST if ctx.ue5 >= VER_UE5_LARGE_WORLD_COORDINATES => {
             decode_constant(opcode, ctx, pos, mem_adj).unwrap()
         }
         EX_VECTOR3F_CONST => {
             // UE4: unused opcode, treat as StructMemberContext fallback
-            let prop = read_bc_field_path(bytecode, pos, name_table, mem_adj);
+            let prop = ctx.read_field_path(pos, mem_adj);
             let struct_expr = decode_next!();
             Some(format!("{}.{}", struct_expr, prop))
         }
@@ -676,7 +673,7 @@ pub fn decode_expr(ctx: &DecodeCtx, pos: &mut usize, mem_adj: &mut i32) -> Optio
         EX_PRIMITIVE_CAST => {
             let cast_type = read_bc_u8(bytecode, pos);
             let expr = decode_next!();
-            let name = primitive_cast_name(cast_type, ue5);
+            let name = primitive_cast_name(cast_type, ctx.ue5);
             if name.is_empty() {
                 Some(expr) // transparent cast (LWC float/double, obj-to-iface)
             } else {
@@ -684,12 +681,12 @@ pub fn decode_expr(ctx: &DecodeCtx, pos: &mut usize, mem_adj: &mut i32) -> Optio
             }
         }
         EX_STRUCT_MEMBER_CONTEXT => {
-            let prop = read_bc_field_path(bytecode, pos, name_table, mem_adj);
+            let prop = ctx.read_field_path(pos, mem_adj);
             let struct_expr = decode_next!();
             Some(format!("{}.{}", struct_expr, prop))
         }
         EX_LOCAL_OUT_VARIABLE => {
-            let prop = read_bc_field_path(bytecode, pos, name_table, mem_adj);
+            let prop = ctx.read_field_path(pos, mem_adj);
             Some(format!("out {}", prop))
         }
         // --- Delegates ---
@@ -730,13 +727,13 @@ pub fn decode_expr(ctx: &DecodeCtx, pos: &mut usize, mem_adj: &mut i32) -> Optio
             }
         }
         EX_OBJ_TO_IFACE_CAST | EX_CROSS_IFACE_CAST => {
-            let class = read_bc_obj_ref(bytecode, pos, imports, export_names, mem_adj);
+            let class = ctx.read_obj_ref(pos, mem_adj);
             let expr = decode_next!();
             Some(format!("icast<{}>({})", class, expr))
         }
         EX_END_OF_SCRIPT => None,
         EX_IFACE_TO_OBJ_CAST => {
-            let class = read_bc_obj_ref(bytecode, pos, imports, export_names, mem_adj);
+            let class = ctx.read_obj_ref(pos, mem_adj);
             let expr = decode_next!();
             Some(format!("obj_cast<{}>({})", class, expr))
         }
@@ -755,12 +752,12 @@ pub fn decode_expr(ctx: &DecodeCtx, pos: &mut usize, mem_adj: &mut i32) -> Optio
             // Persistent frame vars live on the ubergraph's persistent stack frame, surviving
             // across latent action resumes (e.g. Delay). The [persistent] marker prevents
             // inlining since their value must persist across event boundaries.
-            let prop = read_bc_field_path(bytecode, pos, name_table, mem_adj);
+            let prop = ctx.read_field_path(pos, mem_adj);
             let val = decode_next!();
             Some(format!("{} = {} [persistent]", prop, val))
         }
         EX_CALL_MATH => {
-            let func = read_bc_obj_ref(bytecode, pos, imports, export_names, mem_adj);
+            let func = ctx.read_obj_ref(pos, mem_adj);
             let args = decode_func_args(ctx, pos, mem_adj);
             Some(format_call_or_operator(&func, args))
         }
@@ -791,7 +788,7 @@ pub fn decode_expr(ctx: &DecodeCtx, pos: &mut usize, mem_adj: &mut i32) -> Optio
         EX_INSTRUMENTATION_EVENT => {
             let event_type = read_bc_u8(bytecode, pos);
             if event_type == 4 {
-                let _name = read_bc_fname_with_adj(bytecode, pos, name_table, mem_adj);
+                let _name = ctx.read_fname_with_adj(pos, mem_adj);
             }
             Some("instrumentation".into())
         }
@@ -801,11 +798,11 @@ pub fn decode_expr(ctx: &DecodeCtx, pos: &mut usize, mem_adj: &mut i32) -> Optio
             Some(format!("{}[{}]", array, index))
         }
         EX_CLASS_SPARSE_DATA_VARIABLE => {
-            let path = read_bc_field_path(bytecode, pos, name_table, mem_adj);
+            let path = ctx.read_field_path(pos, mem_adj);
             Some(format!("sparse.{}", path))
         }
         EX_FIELD_PATH_CONST => {
-            let path = read_bc_field_path(bytecode, pos, name_table, mem_adj);
+            let path = ctx.read_field_path(pos, mem_adj);
             Some(format!("fieldpath({})", path))
         }
         EX_AUTO_RTFM_TRANSACT => {
@@ -825,13 +822,12 @@ pub fn decode_expr(ctx: &DecodeCtx, pos: &mut usize, mem_adj: &mut i32) -> Optio
 }
 
 fn decode_func_args(ctx: &DecodeCtx, pos: &mut usize, mem_adj: &mut i32) -> Vec<String> {
-    let bytecode = ctx.bytecode;
     let mut args = Vec::new();
     loop {
-        if *pos >= bytecode.len() {
+        if *pos >= ctx.bytecode.len() {
             break;
         }
-        if bytecode[*pos] == EX_END_FUNCTION_PARMS {
+        if ctx.bytecode[*pos] == EX_END_FUNCTION_PARMS {
             *pos += 1;
             break;
         }
