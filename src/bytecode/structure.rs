@@ -1,20 +1,35 @@
+//! If/else block structuring: reconstructs control flow from flat jump patterns.
+//!
+//! Takes the reordered statement list from [`super::flow`] and builds structured
+//! if/else/while blocks by matching `jump_if_not` + `push_flow` pairs, detecting
+//! else branches via unconditional jumps, and handling nested blocks through a region
+//! tree. Post-processing converts remaining `goto` to `break` where applicable and
+//! extracts convergence code shared by multiple branches.
+
 use super::decode::BcStatement;
 use super::flow::{
     parse_if_jump, parse_jump, parse_jump_computed, parse_pop_flow_if_not, parse_push_flow,
 };
 use std::collections::{HashMap, HashSet};
 
+/// Indentation string per nesting level (4 spaces).
+const INDENT: &str = "    ";
+
+/// Fuzzy offset tolerance for jump target resolution. Structure runs after flow
+/// reordering, so targets may be slightly shifted; 8 bytes is generous enough.
+const STRUCTURE_OFFSET_TOLERANCE: usize = 8;
+
 /// Negate a condition string for if/else inversion.
 ///
 /// Three cases:
-/// - `!X` → `X` (strip simple negation, but only if X has no spaces/operators)
-/// - `!(expr)` → `expr` (strip negated parens, but only if parens are balanced)
-/// - Otherwise → `!(cond)` (wraps compound conditions to preserve precedence)
+/// - `!X` -> `X` (strip simple negation, but only if X has no spaces/operators)
+/// - `!(expr)` -> `expr` (strip negated parens, but only if parens are balanced)
+/// - Otherwise -> `!(cond)` (wraps compound conditions to preserve precedence)
 ///
 /// The wrapping is critical: `!A && B` means `(!A) && B`, not `!(A && B)`,
 /// so compound conditions must get `!()` not just `!` prefix.
 fn negate_cond(cond: &str) -> String {
-    // Already negated simple expr: !X → X
+    // Already negated simple expr: !X -> X
     if cond.starts_with('!') && !cond.starts_with("!(") {
         let rest = &cond[1..];
         // Only strip if rest has no top-level operators (it's a simple !ident)
@@ -22,7 +37,7 @@ fn negate_cond(cond: &str) -> String {
             return rest.to_string();
         }
     }
-    // Already negated parenthesized expr: !(X) → X
+    // Already negated parenthesized expr: !(X) -> X
     if cond.starts_with("!(") {
         if let Some(inner) = cond.strip_prefix("!(").and_then(|s| s.strip_suffix(')')) {
             // Verify parens are balanced (the stripped ')' is the matching one)
@@ -75,7 +90,7 @@ enum RegionKind {
 #[derive(Debug, Clone)]
 struct Region {
     kind: RegionKind,
-    /// Statement index range [start, end) — inclusive start, exclusive end
+    /// Statement index range [start, end), inclusive start, exclusive end
     start: usize,
     end: usize,
     /// Ordered child regions (non-overlapping, contained within [start, end))
@@ -94,15 +109,21 @@ impl Region {
 }
 
 struct IfBlock {
+    /// Statement index of the `if !(cond) jump` instruction.
     if_idx: usize,
     cond: String,
+    /// Where the false branch starts (the jump target).
     target_idx: usize,
+    /// Unconditional jump at the end of the true branch (to skip the else). None if no else.
     jump_idx: Option<usize>,
+    /// Statement index where both branches converge.
     end_idx: Option<usize>,
+    /// If the else block has an early exit jump, the statement after that jump.
+    /// Used to avoid the else engulfing subsequent code in nested patterns.
     else_close_idx: Option<usize>,
 }
 
-/// Track block types for pop_flow → break/return disambiguation
+/// Track block types for pop_flow -> break/return disambiguation
 #[derive(Clone, Copy, PartialEq)]
 enum BlockType {
     If,
@@ -128,9 +149,8 @@ struct EmitCtx<'a> {
 
 /// Build a region tree from detected if-blocks.
 ///
-/// Each if-block becomes one or two child regions (IfThen + optional Else)
-/// inserted into the deepest containing region. Overlapping blocks are skipped
-/// (they'll be emitted as guards during output).
+/// Each if-block becomes IfThen + optional Else regions. Overlapping blocks
+/// are skipped (emitted as guards during output).
 fn build_region_tree(num_stmts: usize, if_blocks: &[IfBlock], skip: &mut HashSet<usize>) -> Region {
     let mut root = Region::new(RegionKind::Root, 0, num_stmts);
 
@@ -203,10 +223,10 @@ fn insert_if_block(
 
     // Check if this is an else-if chain BEFORE recursing into children.
     // If our if_idx is the start of an existing Else region in this region's
-    // children, convert that Else → ElseIf (don't recurse into it).
+    // children, convert that Else to ElseIf (don't recurse into it).
     for (ci, child) in region.children.iter().enumerate() {
         if matches!(child.kind, RegionKind::Else) && child.start == blk.if_idx {
-            // Found an Else that starts at our if_idx — convert to ElseIf
+            // Found an Else that starts at our if_idx; convert to ElseIf
             skip.insert(blk.if_idx);
             if let Some(ji) = blk.jump_idx {
                 skip.insert(ji);
@@ -225,7 +245,7 @@ fn insert_if_block(
                     insert_child_sorted(region, else_region);
                 }
             } else {
-                // No else: just convert Else → ElseIf, adjust end
+                // No else: just convert Else to ElseIf, adjust end
                 child.kind = RegionKind::ElseIf(cond_text);
                 child.end = blk.target_idx;
             }
@@ -341,10 +361,10 @@ fn emit_stmts_range(
             // Closing brace from flow.rs (loop end)
             block_stack.pop();
             let close_indent = indent.saturating_sub(1);
-            output.push(format!("{}}}", "    ".repeat(close_indent)));
+            output.push(format!("{}}}", INDENT.repeat(close_indent)));
         } else if stmt.text.ends_with(" {") {
             let is_loop = stmt.text.starts_with("while ") || stmt.text.starts_with("for ");
-            output.push(format!("{}{}", "    ".repeat(indent), stmt.text));
+            output.push(format!("{}{}", INDENT.repeat(indent), stmt.text));
             block_stack.push(if is_loop {
                 BlockType::Loop
             } else {
@@ -356,7 +376,7 @@ fn emit_stmts_range(
             } else {
                 "return"
             };
-            output.push(format!("{}{}", "    ".repeat(indent), keyword));
+            output.push(format!("{}{}", INDENT.repeat(indent), keyword));
         } else if let Some(cond) = parse_pop_flow_if_not(&stmt.text) {
             let keyword = if in_loop(block_stack) {
                 "break"
@@ -366,12 +386,12 @@ fn emit_stmts_range(
             let negated = negate_cond(cond);
             output.push(format!(
                 "{}if ({}) {}",
-                "    ".repeat(indent),
+                INDENT.repeat(indent),
                 negated,
                 keyword
             ));
         } else if let Some((cond, _target)) = parse_if_jump(&stmt.text) {
-            // Unresolvable conditional jump — treat as guard
+            // Unresolvable conditional jump, treat as guard
             let negated = negate_cond(cond);
             let keyword = if in_loop(block_stack) {
                 "break"
@@ -380,7 +400,7 @@ fn emit_stmts_range(
             };
             output.push(format!(
                 "{}if ({}) {}",
-                "    ".repeat(indent),
+                INDENT.repeat(indent),
                 negated,
                 keyword
             ));
@@ -391,15 +411,15 @@ fn emit_stmts_range(
                         && ctx.stmts[target_idx].text == "return nop");
                 if is_jump_to_end {
                     if in_loop(block_stack) {
-                        output.push(format!("{}break", "    ".repeat(indent)));
+                        output.push(format!("{}break", INDENT.repeat(indent)));
                     }
                 } else if let Some(goto_text) = ctx.label_targets.get(&i) {
-                    output.push(format!("{}{}", "    ".repeat(indent), goto_text));
+                    output.push(format!("{}{}", INDENT.repeat(indent), goto_text));
                 } else {
-                    output.push(format!("{}{}", "    ".repeat(indent), stmt.text));
+                    output.push(format!("{}{}", INDENT.repeat(indent), stmt.text));
                 }
             } else if in_loop(block_stack) {
-                output.push(format!("{}break", "    ".repeat(indent)));
+                output.push(format!("{}break", INDENT.repeat(indent)));
             }
         } else {
             let text = if stmt.text == "return nop" {
@@ -407,28 +427,31 @@ fn emit_stmts_range(
             } else {
                 &stmt.text
             };
-            output.push(format!("{}{}", "    ".repeat(indent), text));
+            output.push(format!("{}{}", INDENT.repeat(indent), text));
         }
     }
 }
 
 // ── Main entry point ─────────────────────────────────────────────────────
 
-/// Convert flat bytecode statements into structured pseudo-code with if/else blocks.
+/// Convert flat bytecode statements into indented pseudo-code lines.
 ///
-/// **Condition fidelity:** `&&` and `||` in decoded bytecode are ALWAYS faithful to the
-/// original Blueprint. They come from `BooleanAND`/`BooleanOR` Kismet function calls
-/// inlined by `try_inline_operator()` in `decode.rs`. The structuring pass NEVER merges
-/// separate Branch nodes into compound conditions — it only detects if/else blocks from
-/// `JumpIfNot` opcodes and chains them into else-if when they share the same end target.
+/// `labels` maps memory offsets to display names (e.g. `--- EventName ---` markers).
+///
+/// **Condition fidelity:** `&&`/`||` in decoded bytecode are faithful to the original
+/// Blueprint (from `BooleanAND`/`BooleanOR` calls inlined by `try_inline_operator`).
+/// This pass never merges separate Branch nodes into compound conditions; it only
+/// detects if/else blocks from `JumpIfNot` opcodes and chains them into else-if
+/// when they share the same end target.
 pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>) -> Vec<String> {
     if stmts.is_empty() {
         return Vec::new();
     }
 
     let offset_map = super::OffsetMap::build(stmts);
-    let find_target_idx_or_end =
-        |target: usize| -> Option<usize> { offset_map.find_fuzzy_or_end(target, 8, stmts.len()) };
+    let find_target_idx_or_end = |target: usize| -> Option<usize> {
+        offset_map.find_fuzzy_or_end(target, STRUCTURE_OFFSET_TOLERANCE, stmts.len())
+    };
 
     let label_at: HashMap<usize, &String> = labels
         .iter()
@@ -469,7 +492,7 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
             } else if (prev.text == "return nop" || prev.text == "return")
                 && target_idx < stmts.len()
             {
-                // True body ends with return — both branches diverge.
+                // True body ends with return, both branches diverge.
                 // Treat as if/else where the else body extends to the end.
                 jump_idx = Some(check_idx);
                 end_idx = Some(stmts.len());
@@ -596,10 +619,10 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
             if let Some(label) = trimmed.strip_prefix("goto ") {
                 if break_labels.contains(label) {
                     let indent_str = " ".repeat(output[i].len() - trimmed.len());
-                    let line_indent = indent_str.len() / 4;
+                    let line_indent = indent_str.len() / INDENT.len();
                     let in_loop = output[..i].iter().rev().any(|l| {
                         let lt = l.trim();
-                        let li = (l.len() - l.trim_start().len()) / 4;
+                        let li = (l.len() - l.trim_start().len()) / INDENT.len();
                         li < line_indent && (lt.starts_with("while ") || lt.starts_with("for "))
                     });
                     if in_loop {
@@ -633,11 +656,7 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
     output
 }
 
-/// Emit the region tree, handling if/else group closing braces.
-///
-/// This wrapper calls `emit_region` and manages the "}" placement for
-/// if/else/else-if groups. An IfThen followed by Else/ElseIf forms a group;
-/// the final region in the group gets the closing "}".
+/// Emit the region tree, managing `}` placement for if/else/else-if groups.
 fn emit_region_tree(
     region: &Region,
     ctx: &EmitCtx,
@@ -654,14 +673,14 @@ fn emit_region_tree(
     match &region.kind {
         RegionKind::Root => {}
         RegionKind::IfThen(cond) => {
-            output.push(format!("{}if ({}) {{", "    ".repeat(indent), cond));
+            output.push(format!("{}if ({}) {{", INDENT.repeat(indent), cond));
             block_stack.push(BlockType::If);
         }
         RegionKind::Else => {
-            output.push(format!("{}}} else {{", "    ".repeat(indent)));
+            output.push(format!("{}}} else {{", INDENT.repeat(indent)));
         }
         RegionKind::ElseIf(cond) => {
-            output.push(format!("{}}} else if ({}) {{", "    ".repeat(indent), cond));
+            output.push(format!("{}}} else if ({}) {{", INDENT.repeat(indent), cond));
         }
     }
 
@@ -697,7 +716,7 @@ fn emit_region_tree(
             }
 
             // Close the if/else group
-            output.push(format!("{}}}", "    ".repeat(body_indent)));
+            output.push(format!("{}}}", INDENT.repeat(body_indent)));
             block_stack.pop();
         } else {
             // Non-if child (shouldn't happen with current data, but handle gracefully)
@@ -830,7 +849,7 @@ fn extract_convergence(output: &mut Vec<String>) {
         let removed_before = to_remove.iter().filter(|&&idx| idx < insert_pos).count();
         let adjusted_pos = insert_pos.saturating_sub(removed_before);
 
-        let indent_str = "    ".repeat(target_indent / 4);
+        let indent_str = INDENT.repeat(target_indent / INDENT.len());
         for (i, content) in conv_content.iter().enumerate() {
             let line = if content.is_empty() {
                 String::new()
@@ -910,7 +929,7 @@ mod tests {
 
     #[test]
     fn simple_if_block() {
-        // if !(cond) jump 0x30 → negated to "if (cond) {"
+        // if !(cond) jump 0x30 -> negated to "if (cond) {"
         // body
         // return nop
         let stmts = vec![
