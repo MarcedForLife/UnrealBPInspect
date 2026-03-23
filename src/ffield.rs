@@ -9,6 +9,78 @@ use crate::binary::*;
 use crate::resolve::*;
 use crate::types::*;
 
+/// Extra data layout that follows the common FProperty header for each field class.
+/// Used by both `skip_ffield_child` and `resolve_ffield_type` so the field class
+/// groupings are defined once.
+enum FieldExtra {
+    /// No extra bytes (simple scalar types like Float, Int, Str, Name, Text).
+    None,
+    /// Single package index: object/interface ref, struct ref, enum ref, delegate sig.
+    OneRef,
+    /// Two package indices: property class + meta class.
+    TwoRefs,
+    /// 6 bytes: FieldSize, ByteOffset, ByteMask, FieldMask, NativeBool, Value.
+    Bool,
+    /// One recursive FField child (ArrayProperty, SetProperty).
+    OneChild,
+    /// Two recursive FField children (MapProperty key + value).
+    TwoChildren,
+}
+
+fn field_extra(class: &str) -> FieldExtra {
+    match class {
+        "ObjectProperty"
+        | "WeakObjectProperty"
+        | "LazyObjectProperty"
+        | "SoftObjectProperty"
+        | "InterfaceProperty"
+        | "StructProperty"
+        | "ByteProperty"
+        | "EnumProperty"
+        | "DelegateProperty"
+        | "MulticastDelegateProperty"
+        | "MulticastInlineDelegateProperty"
+        | "MulticastSparseDelegateProperty" => FieldExtra::OneRef,
+        "ClassProperty" | "SoftClassProperty" => FieldExtra::TwoRefs,
+        "BoolProperty" => FieldExtra::Bool,
+        "ArrayProperty" | "SetProperty" => FieldExtra::OneChild,
+        "MapProperty" => FieldExtra::TwoChildren,
+        _ => FieldExtra::None,
+    }
+}
+
+/// Skip past one serialized FField child without extracting type information.
+fn skip_ffield_extra(
+    class: &str,
+    reader: &mut Reader,
+    name_table: &NameTable,
+    end: u64,
+) -> Result<()> {
+    match field_extra(class) {
+        FieldExtra::None => {}
+        FieldExtra::OneRef => {
+            read_i32(reader)?;
+        }
+        FieldExtra::TwoRefs => {
+            read_i32(reader)?;
+            read_i32(reader)?;
+        }
+        FieldExtra::Bool => {
+            for _ in 0..6 {
+                read_u8(reader)?;
+            }
+        }
+        FieldExtra::OneChild => {
+            skip_ffield_child(reader, name_table, end)?;
+        }
+        FieldExtra::TwoChildren => {
+            skip_ffield_child(reader, name_table, end)?;
+            skip_ffield_child(reader, name_table, end)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn skip_ffield_child(reader: &mut Reader, name_table: &NameTable, end: u64) -> Result<()> {
     if reader.position() + 8 > end {
         return Ok(());
@@ -27,39 +99,7 @@ pub fn skip_ffield_child(reader: &mut Reader, name_table: &NameTable, end: u64) 
     reader.read_exact(&mut rep_bytes)?;
     let _rep_func = name_table.fname(reader)?;
     let _bp_rep = read_u8(reader)?;
-    match field_class.as_str() {
-        "ObjectProperty" | "WeakObjectProperty" | "SoftObjectProperty" | "InterfaceProperty" => {
-            let _ref = read_i32(reader)?;
-        }
-        "ClassProperty" | "SoftClassProperty" => {
-            let _prop_class = read_i32(reader)?;
-            let _meta_class = read_i32(reader)?;
-        }
-        "StructProperty" => {
-            let _ref = read_i32(reader)?;
-        }
-        "ByteProperty" | "EnumProperty" => {
-            let _ref = read_i32(reader)?;
-        }
-        "BoolProperty" => {
-            // 6 bytes: FieldSize(1) + ByteOffset(1) + ByteMask(1) + FieldMask(1) + NativeBool(1) + Value(1)
-            for _ in 0..6 {
-                read_u8(reader)?;
-            }
-        }
-        "ArrayProperty" | "SetProperty" => {
-            skip_ffield_child(reader, name_table, end)?;
-        }
-        "MapProperty" => {
-            skip_ffield_child(reader, name_table, end)?;
-            skip_ffield_child(reader, name_table, end)?;
-        }
-        "DelegateProperty" | "MulticastDelegateProperty" | "MulticastInlineDelegateProperty" => {
-            let _ref = read_i32(reader)?;
-        }
-        _ => {}
-    }
-    Ok(())
+    skip_ffield_extra(&field_class, reader, name_table, end)
 }
 
 pub fn resolve_ffield_type(
@@ -70,59 +110,66 @@ pub fn resolve_ffield_type(
     export_names: &[String],
     end: u64,
 ) -> Result<String> {
-    match field_class {
+    // Simple types: no extra bytes to read, just return the display name.
+    let simple = match field_class {
         // UE5 LWC promotes float -> double internally, but we display as "float"
         // for consistency with UE4 and the Blueprint editor. Actual values are
         // parsed at full f64 precision regardless.
-        "FloatProperty" | "DoubleProperty" => Ok("float".into()),
-        "IntProperty" | "Int32Property" | "UInt32Property" => Ok("int".into()),
-        "Int64Property" | "UInt64Property" => Ok("int64".into()),
-        "Int16Property" | "UInt16Property" => Ok("int16".into()),
-        "Int8Property" => Ok("int8".into()),
-        "BoolProperty" => {
-            // 6 bytes: FieldSize, ByteOffset, ByteMask, FieldMask, NativeBool, Value
+        "FloatProperty" | "DoubleProperty" => Some("float"),
+        "IntProperty" | "Int32Property" | "UInt32Property" => Some("int"),
+        "Int64Property" | "UInt64Property" => Some("int64"),
+        "Int16Property" | "UInt16Property" => Some("int16"),
+        "Int8Property" => Some("int8"),
+        "StrProperty" => Some("FString"),
+        "NameProperty" => Some("FName"),
+        "TextProperty" => Some("FText"),
+        _ => None,
+    };
+    if let Some(name) = simple {
+        return Ok(name.into());
+    }
+
+    // Types that need extra bytes read. Use field_extra() for the read layout,
+    // then interpret the values per field class.
+    match field_extra(field_class) {
+        FieldExtra::Bool => {
             for _ in 0..6 {
                 read_u8(reader)?;
             }
             Ok("bool".into())
         }
-        "StrProperty" => Ok("FString".into()),
-        "NameProperty" => Ok("FName".into()),
-        "TextProperty" => Ok("FText".into()),
-        "ObjectProperty" | "WeakObjectProperty" | "LazyObjectProperty" | "SoftObjectProperty"
-        | "InterfaceProperty" => {
-            let class_ref = read_i32(reader)?;
-            if class_ref != 0 {
-                Ok(format!(
-                    "{}*",
-                    short_class(&resolve_index(imports, export_names, class_ref))
-                ))
-            } else {
-                Ok("UObject*".into())
-            }
-        }
-        "ClassProperty" | "SoftClassProperty" => {
-            let _prop_class = read_i32(reader)?;
-            let _meta_class = read_i32(reader)?;
+        FieldExtra::TwoRefs => {
+            read_i32(reader)?;
+            read_i32(reader)?;
             Ok("UClass*".into())
         }
-        "StructProperty" => {
-            let struct_ref = read_i32(reader)?;
-            Ok(short_class(&resolve_index(
-                imports,
-                export_names,
-                struct_ref,
-            )))
-        }
-        "ByteProperty" | "EnumProperty" => {
-            let enum_ref = read_i32(reader)?;
-            if enum_ref != 0 {
-                Ok(short_class(&resolve_index(imports, export_names, enum_ref)))
-            } else {
-                Ok("byte".into())
+        FieldExtra::OneRef => {
+            let ref_idx = read_i32(reader)?;
+            match field_class {
+                "ObjectProperty" | "WeakObjectProperty" | "LazyObjectProperty"
+                | "SoftObjectProperty" | "InterfaceProperty" => {
+                    if ref_idx != 0 {
+                        Ok(format!(
+                            "{}*",
+                            short_class(&resolve_index(imports, export_names, ref_idx))
+                        ))
+                    } else {
+                        Ok("UObject*".into())
+                    }
+                }
+                "StructProperty" => Ok(short_class(&resolve_index(imports, export_names, ref_idx))),
+                "ByteProperty" | "EnumProperty" => {
+                    if ref_idx != 0 {
+                        Ok(short_class(&resolve_index(imports, export_names, ref_idx)))
+                    } else {
+                        Ok("byte".into())
+                    }
+                }
+                // Delegate variants
+                _ => Ok("Delegate".into()),
             }
         }
-        "ArrayProperty" | "SetProperty" => {
+        FieldExtra::OneChild => {
             skip_ffield_child(reader, name_table, end)?;
             Ok(if field_class == "SetProperty" {
                 "TSet<>".into()
@@ -130,19 +177,12 @@ pub fn resolve_ffield_type(
                 "TArray<>".into()
             })
         }
-        "MapProperty" => {
+        FieldExtra::TwoChildren => {
             skip_ffield_child(reader, name_table, end)?;
             skip_ffield_child(reader, name_table, end)?;
             Ok("TMap<>".into())
         }
-        "DelegateProperty"
-        | "MulticastDelegateProperty"
-        | "MulticastInlineDelegateProperty"
-        | "MulticastSparseDelegateProperty" => {
-            let _sig = read_i32(reader)?;
-            Ok("Delegate".into())
-        }
-        _ => Ok(field_class
+        FieldExtra::None => Ok(field_class
             .strip_suffix("Property")
             .unwrap_or(field_class)
             .to_string()),

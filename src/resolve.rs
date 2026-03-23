@@ -71,6 +71,42 @@ pub fn find_prop_i32(props: &[Property], name: &str) -> Option<i32> {
     })
 }
 
+/// Extract an Object property as a resolved index string.
+pub fn find_prop_object(
+    props: &[Property],
+    name: &str,
+    imports: &[ImportEntry],
+    export_names: &[String],
+) -> Option<String> {
+    find_prop(props, name).and_then(|p| match &p.value {
+        PropValue::Object(idx) => Some(resolve_index(imports, export_names, *idx)),
+        _ => None,
+    })
+}
+
+/// Extract an Array of Object properties as resolved index strings.
+pub fn find_prop_object_array(
+    props: &[Property],
+    name: &str,
+    imports: &[ImportEntry],
+    export_names: &[String],
+) -> Vec<String> {
+    find_prop(props, name)
+        .and_then(|p| match &p.value {
+            PropValue::Array { items, .. } => Some(
+                items
+                    .iter()
+                    .filter_map(|i| match i {
+                        PropValue::Object(idx) => Some(resolve_index(imports, export_names, *idx)),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 pub fn prop_value_short(
     val: &PropValue,
     imports: &[ImportEntry],
