@@ -96,12 +96,15 @@ pub(super) fn expr_has_call(expr: &str) -> bool {
     false
 }
 
+const OPERATORS: &[&str] = &[
+    "&&", "||", "+", "-", "*", "/", "%", ">=", "<=", "==", "!=", ">>", "<<", ">", "<", "?",
+];
+
 pub(super) fn expr_is_compound(expr: &str) -> bool {
-    const TOKENS: &[&str] = &[
-        " && ", " || ", " + ", " - ", " * ", " / ", " % ", " < ", " <= ", " > ", " >= ", " == ",
-        " != ", " >> ", " << ", " ? ",
-    ];
-    TOKENS.iter().any(|tok| expr.contains(tok)) || expr.starts_with('!')
+    OPERATORS
+        .iter()
+        .any(|op| expr.contains(&format!(" {} ", op)))
+        || expr.starts_with('!')
 }
 
 /// True if `expr` is trivial enough to inline regardless of line length (no calls, operators, or brackets).
@@ -110,39 +113,14 @@ pub(super) fn is_trivial_expr(expr: &str) -> bool {
 }
 
 fn used_in_operator_context(text: &str, pos: usize, after: usize) -> bool {
-    let before = &text[..pos];
-    let after_text = &text[after..];
-    let op_before = before.ends_with("!(")
+    let before = text[..pos].trim_end();
+    let after_text = text[after..].trim_start();
+
+    let before_op = before.ends_with("!(")
         || before.ends_with("! ")
-        || before.trim_end().ends_with("&&")
-        || before.trim_end().ends_with("||")
-        || before.trim_end().ends_with('+')
-        || before.trim_end().ends_with('-')
-        || before.trim_end().ends_with('*')
-        || before.trim_end().ends_with('/')
-        || before.trim_end().ends_with(">=")
-        || before.trim_end().ends_with("<=")
-        || before.trim_end().ends_with("==")
-        || before.trim_end().ends_with("!=")
-        || before.trim_end().ends_with(">>")
-        || before.trim_end().ends_with("<<")
-        || before.trim_end().ends_with('>')
-        || before.trim_end().ends_with('<');
-    let op_after = after_text.trim_start().starts_with("&&")
-        || after_text.trim_start().starts_with("||")
-        || after_text.trim_start().starts_with("+ ")
-        || after_text.trim_start().starts_with("- ")
-        || after_text.trim_start().starts_with("* ")
-        || after_text.trim_start().starts_with("/ ")
-        || after_text.trim_start().starts_with(">= ")
-        || after_text.trim_start().starts_with("<= ")
-        || after_text.trim_start().starts_with("== ")
-        || after_text.trim_start().starts_with("!= ")
-        || after_text.trim_start().starts_with(">> ")
-        || after_text.trim_start().starts_with("<< ")
-        || after_text.trim_start().starts_with("> ")
-        || after_text.trim_start().starts_with("< ");
-    op_before || op_after
+        || OPERATORS.iter().any(|op| before.ends_with(op));
+    let after_op = OPERATORS.iter().any(|op| after_text.starts_with(op));
+    before_op || after_op
 }
 
 pub(super) fn find_matching_paren(input: &str) -> Option<usize> {
