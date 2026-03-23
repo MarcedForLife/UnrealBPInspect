@@ -6,7 +6,11 @@ use crate::types::*;
 
 /// UE "package index" convention: negative = import table (1-based), positive = export table (1-based), zero = null.
 pub fn resolve_import_path(imports: &[ImportEntry], index: i32) -> String {
-    if index >= 0 {
+    resolve_import_path_inner(imports, index, 0)
+}
+
+fn resolve_import_path_inner(imports: &[ImportEntry], index: i32, depth: usize) -> String {
+    if depth > 32 || index >= 0 {
         return "?".to_string();
     }
     let idx = (-index - 1) as usize;
@@ -17,7 +21,7 @@ pub fn resolve_import_path(imports: &[ImportEntry], index: i32) -> String {
     if imp.outer_index == 0 {
         imp.object_name.clone()
     } else {
-        let outer = resolve_import_path(imports, imp.outer_index);
+        let outer = resolve_import_path_inner(imports, imp.outer_index, depth + 1);
         format!("{}.{}", outer, imp.object_name)
     }
 }

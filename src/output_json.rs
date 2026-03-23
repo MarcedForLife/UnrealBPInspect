@@ -101,8 +101,8 @@ pub fn to_json(asset: &ParsedAsset, filters: &[String]) -> Value {
     })
 }
 
-fn prop_to_json(prop: &Property, imports: &[ImportEntry], export_names: &[String]) -> Value {
-    let val = match &prop.value {
+fn value_to_json(value: &PropValue, imports: &[ImportEntry], export_names: &[String]) -> Value {
+    match value {
         PropValue::Bool(v) => json!(v),
         PropValue::Int(v) => json!(v),
         PropValue::Int64(v) => json!(v),
@@ -122,10 +122,7 @@ fn prop_to_json(prop: &Property, imports: &[ImportEntry], export_names: &[String
         }),
         PropValue::Array { inner_type, items } => json!({
             "inner_type": inner_type,
-            "items": items.iter().map(|item| {
-                let child = Property { name: String::new(), value: item.clone() };
-                prop_to_json(&child, imports, export_names)["value"].clone()
-            }).collect::<Vec<_>>(),
+            "items": items.iter().map(|item| value_to_json(item, imports, export_names)).collect::<Vec<_>>(),
         }),
         PropValue::Map {
             key_type,
@@ -134,18 +131,17 @@ fn prop_to_json(prop: &Property, imports: &[ImportEntry], export_names: &[String
         } => json!({
             "key_type": key_type,
             "value_type": value_type,
-            "entries": entries.iter().map(|(k, v)| {
-                let key_prop = Property { name: String::new(), value: k.clone() };
-                let val_prop = Property { name: String::new(), value: v.clone() };
-                json!({
-                    "key": prop_to_json(&key_prop, imports, export_names)["value"],
-                    "value": prop_to_json(&val_prop, imports, export_names)["value"],
-                })
-            }).collect::<Vec<_>>(),
+            "entries": entries.iter().map(|(k, v)| json!({
+                "key": value_to_json(k, imports, export_names),
+                "value": value_to_json(v, imports, export_names),
+            })).collect::<Vec<_>>(),
         }),
         PropValue::Text(v) => json!(v),
         PropValue::SoftObject(v) => json!(v),
         PropValue::Unknown { type_name, size } => json!({"unknown_type": type_name, "size": size}),
-    };
-    json!({ "name": prop.name, "value": val })
+    }
+}
+
+fn prop_to_json(prop: &Property, imports: &[ImportEntry], export_names: &[String]) -> Value {
+    json!({ "name": prop.name, "value": value_to_json(&prop.value, imports, export_names) })
 }

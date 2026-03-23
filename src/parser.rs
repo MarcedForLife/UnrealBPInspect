@@ -388,59 +388,68 @@ fn parse_ustruct_header(
     Ok(())
 }
 
+fn read_one_ffield_child(
+    reader: &mut Reader,
+    pctx: &ParseCtx,
+    end: u64,
+) -> Result<(String, String, u64)> {
+    let (name_table, imports, export_names, debug) =
+        (pctx.name_table, pctx.imports, pctx.export_names, pctx.debug);
+    let field_class = name_table.fname(reader)?;
+    let field_name = name_table.fname(reader)?;
+    let _flags = read_u32(reader)?;
+    name_table.skip_metadata(reader)?;
+    let _array_dim = read_i32(reader)?;
+    let _elem_size = read_i32(reader)?;
+    let prop_flags = read_i64(reader)? as u64;
+    let mut rep_bytes = [0u8; 2];
+    reader.read_exact(&mut rep_bytes)?;
+    let _rep_notify_func = name_table.fname(reader)?;
+    let _bp_rep_condition = read_u8(reader)?;
+    let type_name =
+        resolve_ffield_type(&field_class, reader, name_table, imports, export_names, end)?;
+    if debug {
+        eprintln!(
+            "    param: {} {} flags=0x{:x} @ {}",
+            field_class,
+            field_name,
+            prop_flags,
+            reader.position()
+        );
+    }
+    Ok((field_name, type_name, prop_flags))
+}
+
 fn parse_ffield_children(
     reader: &mut Reader,
     pctx: &ParseCtx,
     end: u64,
     name: &str,
 ) -> Result<Vec<(String, String, u64)>> {
-    let (name_table, imports, export_names, debug) =
-        (pctx.name_table, pctx.imports, pctx.export_names, pctx.debug);
     let mut children = Vec::new();
     if reader.position() + 4 > end {
         return Ok(children);
     }
     let child_prop_count = read_i32(reader)?;
-    if debug && child_prop_count > 0 {
+    if pctx.debug && child_prop_count > 0 {
         eprintln!("  {} child properties: {}", name, child_prop_count);
     }
-    let mut ci = 0;
-    loop {
+    // Phase 1: read declared children
+    for _ in 0..child_prop_count {
         if reader.position() + 16 > end {
             break;
         }
-        if ci >= child_prop_count {
-            if !name_table.peek_is_ffield_class(reader)? {
-                break;
-            }
-            if debug {
-                eprintln!("  {} extra child property at {}", name, reader.position());
-            }
+        children.push(read_one_ffield_child(reader, pctx, end)?);
+    }
+    // Phase 2: some UE versions emit more children than declared
+    while reader.position() + 16 <= end {
+        if !pctx.name_table.peek_is_ffield_class(reader)? {
+            break;
         }
-        let field_class = name_table.fname(reader)?;
-        let field_name = name_table.fname(reader)?;
-        let _flags = read_u32(reader)?;
-        name_table.skip_metadata(reader)?;
-        let _array_dim = read_i32(reader)?;
-        let _elem_size = read_i32(reader)?;
-        let prop_flags = read_i64(reader)? as u64;
-        let mut rep_bytes = [0u8; 2];
-        reader.read_exact(&mut rep_bytes)?;
-        let _rep_notify_func = name_table.fname(reader)?;
-        let _bp_rep_condition = read_u8(reader)?;
-        let type_name =
-            resolve_ffield_type(&field_class, reader, name_table, imports, export_names, end)?;
-        children.push((field_name.clone(), type_name, prop_flags));
-        if debug {
-            eprintln!(
-                "    param: {} {} flags=0x{:x} @ {}",
-                field_class,
-                field_name,
-                prop_flags,
-                reader.position()
-            );
+        if pctx.debug {
+            eprintln!("  {} extra child property at {}", name, reader.position());
         }
-        ci += 1;
+        children.push(read_one_ffield_child(reader, pctx, end)?);
     }
     Ok(children)
 }
