@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser as ClapParser;
 use std::path::{Path, PathBuf};
 
@@ -86,16 +86,6 @@ fn collect_from_dir(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn read_file_or_exit(path: &Path) -> Vec<u8> {
-    match std::fs::read(path) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("failed to read {}: {}", path.display(), e);
-            std::process::exit(2);
-        }
-    }
-}
-
 fn process_file(path: &Path, mode: &OutputMode, filters: &[String], debug: bool) -> Result<String> {
     let data = std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
     let asset =
@@ -107,20 +97,15 @@ fn process_file(path: &Path, mode: &OutputMode, filters: &[String], debug: bool)
     })
 }
 
-fn main() {
-    let cli = Cli::parse();
-
+fn run(cli: Cli) -> Result<bool> {
     if let Some(version) = cli.update {
         let target = if version == "latest" {
             None
         } else {
             Some(version)
         };
-        if let Err(e) = run_update(target.as_deref()) {
-            eprintln!("Update failed: {:#}", e);
-            std::process::exit(1);
-        }
-        return;
+        run_update(target.as_deref())?;
+        return Ok(true);
     }
 
     let mode = if cli.json {
@@ -138,43 +123,45 @@ fn main() {
 
     let files = collect_uasset_paths(&cli.paths);
     if files.is_empty() {
-        eprintln!("No .uasset files found");
-        std::process::exit(1);
+        bail!("No .uasset files found");
     }
 
     if cli.diff {
-        run_diff(&files, &filters, cli.context);
-    } else if matches!(mode, OutputMode::Json) && files.len() > 1 {
-        run_batch_json(&files, &mode, &filters, cli.debug);
+        return run_diff(&files, &filters, cli.context);
+    }
+
+    let single = files.len() == 1;
+    if matches!(mode, OutputMode::Json) && !single {
+        run_batch_json(&files, &mode, &filters, cli.debug)
     } else {
-        run_batch_text(&files, &mode, &filters, cli.debug, files.len() == 1);
+        run_batch_text(&files, &mode, &filters, cli.debug, single)
     }
 }
 
-fn run_diff(files: &[PathBuf], filters: &[String], context: usize) {
+fn run_diff(files: &[PathBuf], filters: &[String], context: usize) -> Result<bool> {
     if files.len() != 2 {
-        eprintln!("--diff requires exactly 2 .uasset files");
-        std::process::exit(2);
+        bail!("--diff requires exactly 2 .uasset files");
     }
-    let before = read_file_or_exit(&files[0]);
-    let after = read_file_or_exit(&files[1]);
+    let before = std::fs::read(&files[0])
+        .with_context(|| format!("failed to read {}", files[0].display()))?;
+    let after = std::fs::read(&files[1])
+        .with_context(|| format!("failed to read {}", files[1].display()))?;
     let label_a = files[0].display().to_string();
     let label_b = files[1].display().to_string();
-    match format_diff(&before, &after, &label_a, &label_b, filters, context) {
-        Ok((output, has_changes)) => {
-            if has_changes {
-                print!("{}", output);
-                std::process::exit(1);
-            }
-        }
-        Err(e) => {
-            eprintln!("{:#}", e);
-            std::process::exit(2);
-        }
+    let (output, has_changes) = format_diff(&before, &after, &label_a, &label_b, filters, context)?;
+    if has_changes {
+        print!("{}", output);
+        return Ok(false);
     }
+    Ok(true)
 }
 
-fn run_batch_json(files: &[PathBuf], mode: &OutputMode, filters: &[String], debug: bool) {
+fn run_batch_json(
+    files: &[PathBuf],
+    mode: &OutputMode,
+    filters: &[String],
+    debug: bool,
+) -> Result<bool> {
     let mut results = Vec::new();
     let mut failures = 0;
     for path in files {
@@ -192,7 +179,7 @@ fn run_batch_json(files: &[PathBuf], mode: &OutputMode, filters: &[String], debu
         }
     }
     if results.is_empty() {
-        std::process::exit(1);
+        bail!("all files failed to parse");
     }
     println!(
         "{}",
@@ -201,6 +188,7 @@ fn run_batch_json(files: &[PathBuf], mode: &OutputMode, filters: &[String], debu
     if failures > 0 {
         eprintln!("{} of {} files failed", failures, failures + results.len());
     }
+    Ok(true)
 }
 
 fn run_batch_text(
@@ -209,7 +197,7 @@ fn run_batch_text(
     filters: &[String],
     debug: bool,
     single: bool,
-) {
+) -> Result<bool> {
     let mut successes = 0;
     let mut failures = 0;
     for path in files {
@@ -223,8 +211,7 @@ fn run_batch_text(
             }
             Err(e) => {
                 if single {
-                    eprintln!("{:#}", e);
-                    std::process::exit(1);
+                    return Err(e);
                 }
                 eprintln!("Warning: {:#}", e);
                 failures += 1;
@@ -232,9 +219,22 @@ fn run_batch_text(
         }
     }
     if successes == 0 {
-        std::process::exit(1);
+        bail!("all files failed to parse");
     }
     if failures > 0 {
         eprintln!("{} of {} files failed", failures, failures + successes);
+    }
+    Ok(true)
+}
+
+fn main() {
+    let cli = Cli::parse();
+    match run(cli) {
+        Ok(true) => {}
+        Ok(false) => std::process::exit(1),
+        Err(e) => {
+            eprintln!("{:#}", e);
+            std::process::exit(1);
+        }
     }
 }
