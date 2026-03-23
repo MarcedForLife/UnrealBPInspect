@@ -119,40 +119,9 @@ fn rewrite_foreach_loops(lines: &mut Vec<String>) {
             }
         }
 
-        // Post-rewrite cleanup: remove redundant Array_Get re-fetches inside the loop body.
-        // These reference the now-stale index variable and fetch into the same item variable
-        // that the `for` header already provides.
-        {
-            // Adjust for_idx since lines before `i` were removed
-            let for_idx = i - removed_before_i;
-            let mut depth = 0i32;
-            let mut new_close = for_idx;
-            for (j, line) in lines.iter().enumerate().skip(for_idx) {
-                let trimmed = line.trim();
-                if trimmed.ends_with('{') {
-                    depth += 1;
-                }
-                if trimmed == "}" {
-                    depth -= 1;
-                    if depth == 0 {
-                        new_close = j;
-                        break;
-                    }
-                }
-            }
-            // Scan body for ITEM = ARRAY[INDEX_VAR] re-fetches and remove
-            let redundant_get = format!("{} = {}[{}]", item, array, index_var);
-            let mut j = for_idx + 1;
-            while j < new_close {
-                let trimmed = lines[j].trim();
-                if trimmed == redundant_get {
-                    lines.remove(j);
-                    new_close -= 1;
-                    continue; // don't advance j
-                }
-                j += 1;
-            }
-        }
+        // Adjust for_idx since lines before `i` were removed
+        let for_idx = i - removed_before_i;
+        remove_redundant_gets(lines, for_idx, &item, &array, &index_var);
 
         // Don't advance; recheck in case of nested loops
         i = 0;
@@ -304,6 +273,43 @@ fn find_close_and_increment(
     Some((close_idx, incr_idx?))
 }
 
+/// After rewriting a while-loop to a for-each, remove redundant Array_Get
+/// re-fetches that reference the now-stale index variable.
+fn remove_redundant_gets(
+    lines: &mut Vec<String>,
+    for_idx: usize,
+    item: &str,
+    array: &str,
+    index_var: &str,
+) {
+    let mut depth = 0i32;
+    let mut close = for_idx;
+    for (j, line) in lines.iter().enumerate().skip(for_idx) {
+        let trimmed = line.trim();
+        if trimmed.ends_with('{') {
+            depth += 1;
+        }
+        if trimmed == "}" {
+            depth -= 1;
+            if depth == 0 {
+                close = j;
+                break;
+            }
+        }
+    }
+
+    let redundant_get = format!("{} = {}[{}]", item, array, index_var);
+    let mut j = for_idx + 1;
+    while j < close {
+        if lines[j].trim() == redundant_get {
+            lines.remove(j);
+            close -= 1;
+            continue;
+        }
+        j += 1;
+    }
+}
+
 /// Fold `bind(FUNC, $DELEGATE, OBJ)` + `TARGET +=/-= $DELEGATE` into `TARGET +=/-= OBJ.FUNC`.
 fn fold_delegate_bindings(lines: &mut Vec<String>) {
     let mut i = 0;
@@ -431,55 +437,55 @@ fn parse_cast_assignment(text: &str) -> Option<(&str, &str)> {
     }
 }
 
+/// Check if line `i` is a cast assignment followed by an if-guard on the same variable.
+/// Returns (var_name, cast_rhs) if the pattern matches.
+fn parse_cast_guard_pair(lines: &[String], i: usize) -> Option<(String, String)> {
+    let trimmed = lines[i].trim();
+    let indent_len = lines[i].len() - trimmed.len();
+
+    let (var, rhs) = parse_cast_assignment(trimmed)?;
+
+    // Skip if already folded to "else return"
+    if trimmed.ends_with("else return") {
+        return None;
+    }
+
+    // Next line must be `if ($VAR) {` at same indent
+    let next = lines.get(i + 1)?;
+    let next_trimmed = next.trim();
+    let next_indent = next.len() - next_trimmed.len();
+    let expected_if = format!("if ({}) {{", var);
+    if next_indent != indent_len || next_trimmed != expected_if {
+        return None;
+    }
+
+    // Count total refs to $VAR in all lines except the assignment
+    let mut total_refs = 0usize;
+    for (j, line) in lines.iter().enumerate() {
+        if j == i {
+            continue;
+        }
+        total_refs += count_var_refs(line.trim(), var);
+    }
+
+    // if-guard = 1 ref, body uses <= 2 refs -> total <= 3
+    if total_refs > 3 {
+        return None;
+    }
+
+    Some((var.to_string(), rhs.to_string()))
+}
+
 /// Inline cast-and-use patterns: `$X = cast<T>(expr)` + `if ($X) { ... $X ... }`
 /// where `$X` is used only in the if-guard and a few body references.
 /// Substitutes the cast expression everywhere and removes the assignment line.
 pub(super) fn fold_cast_inline(lines: &mut Vec<String>) {
     let mut i = 0;
     while i < lines.len() {
-        let trimmed = lines[i].trim().to_string();
-        let indent_len = lines[i].len() - trimmed.len();
-
-        // Line i: $VAR = cast<T>(expr)
-        let Some((var, rhs)) = parse_cast_assignment(&trimmed) else {
+        let Some((var, rhs)) = parse_cast_guard_pair(lines, i) else {
             i += 1;
             continue;
         };
-        // Skip if already folded to "else return"
-        if trimmed.ends_with("else return") {
-            i += 1;
-            continue;
-        }
-        let var = var.to_string();
-        let rhs = rhs.to_string();
-
-        // Next line must be `if ($VAR) {` at same indent
-        if i + 1 >= lines.len() {
-            i += 1;
-            continue;
-        }
-        let next_trimmed = lines[i + 1].trim();
-        let next_indent = lines[i + 1].len() - next_trimmed.len();
-        let expected_if = format!("if ({}) {{", var);
-        if next_indent != indent_len || next_trimmed != expected_if {
-            i += 1;
-            continue;
-        }
-
-        // Count total refs to $VAR in all lines except the assignment
-        let mut total_refs = 0usize;
-        for (j, line) in lines.iter().enumerate() {
-            if j == i {
-                continue;
-            }
-            total_refs += count_var_refs(line.trim(), &var);
-        }
-
-        // if-guard = 1 ref, body uses <= 2 refs -> total <= 3
-        if total_refs > 3 {
-            i += 1;
-            continue;
-        }
 
         // Substitute cast expression for $VAR everywhere
         for (j, line) in lines.iter_mut().enumerate() {
@@ -879,105 +885,103 @@ pub(super) fn simplify_bool_comparisons(lines: &mut [String]) {
 /// false positives on member access like `!self.Flag == 1`.
 fn simplify_negated_bool_comparison(input: &str) -> String {
     let mut result = input.to_string();
-    // Process all occurrences in the string
     let mut search_from = 0;
     loop {
         let remaining = &result[search_from..];
-        // Find `!` that precedes an identifier (not `!(` or `! `)
         let Some(bang_rel) = remaining.find('!') else {
             break;
         };
         let bang_pos = search_from + bang_rel;
 
-        // Must be followed by an identifier char (start of function name), not `(` or space
-        let after_bang = &result[bang_pos + 1..];
-        if after_bang.is_empty()
-            || after_bang.starts_with('(')
-            || after_bang.starts_with(' ')
-            || after_bang.starts_with('=')
-        {
-            search_from = bang_pos + 1;
-            continue;
-        }
-
-        // The char before `!` should be a non-identifier boundary (space, `(`, start, `=`)
-        if bang_pos > 0 {
-            let prev = result.as_bytes()[bang_pos - 1];
-            if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'.' || prev == b'$' {
-                search_from = bang_pos + 1;
-                continue;
-            }
-        }
-
-        // Find the opening paren of the call
-        let call_start = bang_pos + 1;
-        let Some(paren_offset) = result[call_start..].find('(') else {
-            search_from = bang_pos + 1;
-            continue;
-        };
-        let paren_abs = call_start + paren_offset;
-
-        // Between `!` and `(` must be a simple identifier (no spaces or dots, avoids !self.X)
-        let ident = &result[call_start..paren_abs];
-        if ident.is_empty() || !ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            search_from = bang_pos + 1;
-            continue;
-        }
-
-        // Match the closing paren
-        let Some(close_rel) = find_matching_paren(&result[paren_abs..]) else {
-            search_from = bang_pos + 1;
-            continue;
-        };
-        let call_end = paren_abs + close_rel + 1; // position after closing `)`
-
-        // Check what follows: ` == 0`, ` == 1`, ` != 0`, ` != 1`
-        let after_call = &result[call_end..];
-        let (op, val, suffix_len) = if let Some(rest) = after_call.strip_prefix(" == 1") {
-            ("==", 1, 5 + (after_call.len() - rest.len() - 5))
-        } else if let Some(rest) = after_call.strip_prefix(" == 0") {
-            ("==", 0, 5 + (after_call.len() - rest.len() - 5))
-        } else if let Some(rest) = after_call.strip_prefix(" != 0") {
-            ("!=", 0, 5 + (after_call.len() - rest.len() - 5))
-        } else if let Some(rest) = after_call.strip_prefix(" != 1") {
-            ("!=", 1, 5 + (after_call.len() - rest.len() - 5))
+        if let Some(rewrite) = parse_negated_bool_at(&result, bang_pos) {
+            let replacement = if rewrite.keep_negation {
+                format!("!{}", &result[bang_pos + 1..rewrite.call_end])
+            } else {
+                result[bang_pos + 1..rewrite.call_end].to_string()
+            };
+            result = format!(
+                "{}{}{}",
+                &result[..bang_pos],
+                replacement,
+                &result[rewrite.call_end + rewrite.suffix_len..]
+            );
+            search_from = bang_pos + replacement.len();
         } else {
             search_from = bang_pos + 1;
-            continue;
-        };
-
-        // Ensure what follows the ` == N` is a boundary (not more digits/identifiers)
-        let after_cmp = &result[call_end + suffix_len..];
-        if !after_cmp.is_empty() {
-            let next = after_cmp.as_bytes()[0];
-            if next.is_ascii_alphanumeric() || next == b'_' {
-                search_from = bang_pos + 1;
-                continue;
-            }
         }
-
-        // Apply rewrite rules:
-        // !CALL == 1  ->  !CALL     (negated == true -> negated)
-        // !CALL == 0  ->  CALL      (negated == false -> not negated)
-        // !CALL != 0  ->  !CALL     (negated != false -> negated)
-        // !CALL != 1  ->  CALL      (negated != true -> not negated)
-        let keep_negation = (op == "==" && val == 1) || (op == "!=" && val == 0);
-        let call_expr = &result[call_start..call_end];
-        let replacement = if keep_negation {
-            format!("!{}", call_expr)
-        } else {
-            call_expr.to_string()
-        };
-
-        result = format!(
-            "{}{}{}",
-            &result[..bang_pos],
-            replacement,
-            &result[call_end + suffix_len..]
-        );
-        search_from = bang_pos + replacement.len();
     }
     result
+}
+
+/// Result of parsing a `!Func(...) == N` pattern at a given `!` position.
+struct NegatedBoolRewrite {
+    call_end: usize,   // position after closing `)`
+    suffix_len: usize, // length of the ` == N` suffix
+    keep_negation: bool,
+}
+
+/// Try to parse `!Func(...) == N` starting at the `!` at `bang_pos`.
+/// Returns None if the pattern doesn't match.
+fn parse_negated_bool_at(text: &str, bang_pos: usize) -> Option<NegatedBoolRewrite> {
+    let after_bang = &text[bang_pos + 1..];
+
+    // Must be followed by an identifier char (start of function name)
+    let first = after_bang.as_bytes().first()?;
+    if matches!(first, b'(' | b' ' | b'=') || !first.is_ascii_alphanumeric() {
+        return None;
+    }
+
+    // Char before `!` must be a non-identifier boundary
+    if bang_pos > 0 {
+        let prev = text.as_bytes()[bang_pos - 1];
+        if prev.is_ascii_alphanumeric() || matches!(prev, b'_' | b'.' | b'$') {
+            return None;
+        }
+    }
+
+    // Find the call: simple identifier followed by matched parens
+    let call_start = bang_pos + 1;
+    let paren_offset = text[call_start..].find('(')?;
+    let paren_abs = call_start + paren_offset;
+
+    // Between `!` and `(` must be a simple identifier (no spaces/dots, avoids !self.X)
+    let ident = &text[call_start..paren_abs];
+    if ident.is_empty() || !ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+
+    let close_rel = find_matching_paren(&text[paren_abs..])?;
+    let call_end = paren_abs + close_rel + 1;
+
+    // Parse the comparison suffix: ` == 0`, ` == 1`, ` != 0`, ` != 1`
+    let after_call = &text[call_end..];
+    let (op, val) = if after_call.starts_with(" == 1") {
+        ("==", 1)
+    } else if after_call.starts_with(" == 0") {
+        ("==", 0)
+    } else if after_call.starts_with(" != 0") {
+        ("!=", 0)
+    } else if after_call.starts_with(" != 1") {
+        ("!=", 1)
+    } else {
+        return None;
+    };
+    let suffix_len = 5; // " == N" or " != N"
+
+    // Ensure what follows is a boundary (not more digits/identifiers)
+    let after_cmp = &text[call_end + suffix_len..];
+    if let Some(&next) = after_cmp.as_bytes().first() {
+        if next.is_ascii_alphanumeric() || next == b'_' {
+            return None;
+        }
+    }
+
+    let keep_negation = (op == "==" && val == 1) || (op == "!=" && val == 0);
+    Some(NegatedBoolRewrite {
+        call_end,
+        suffix_len,
+        keep_negation,
+    })
 }
 
 /// A var is "unused" if it only ever appears as a simple argument in calls
@@ -1018,108 +1022,123 @@ pub(super) fn fold_outparam_calls(lines: &mut Vec<String>) {
     while i < lines.len() {
         let trimmed = lines[i].trim().to_string();
 
-        // Must be a bare function call: contains `(`, no ` = `, no `if `, no `} `
-        if !trimmed.contains('(')
-            || trimmed.contains(" = ")
-            || trimmed.starts_with("if ")
-            || trimmed.starts_with("} ")
-            || trimmed.starts_with("for ")
-            || trimmed.starts_with("while ")
-        {
-            i += 1;
-            continue;
-        }
-
-        // Extract args from the outermost call
-        let Some(paren_start) = trimmed.find('(') else {
+        let Some(candidate) = parse_outparam_call(&trimmed) else {
             i += 1;
             continue;
         };
-        if !trimmed.ends_with(')') {
-            i += 1;
-            continue;
-        }
-        let args_str = &trimmed[paren_start + 1..trimmed.len() - 1];
-        let args = split_args(args_str);
 
-        // Find $-prefixed args that could be out-params
-        let dollar_args: Vec<(usize, &str)> = args
-            .iter()
-            .enumerate()
-            .filter(|(_, a)| a.starts_with('$'))
-            .map(|(idx, a)| (idx, *a))
-            .collect();
-
-        // Must have exactly 1 foldable $-prefixed out-param
-        if dollar_args.len() != 1 {
-            i += 1;
-            continue;
-        }
-        let (arg_idx, out_var) = dollar_args[0];
-
-        // In UE4, out-params always follow input params. A $-var that isn't the
-        // last argument in a multi-arg call is an input, not an out-param.
-        if args.len() > 1 && arg_idx != args.len() - 1 {
-            i += 1;
-            continue;
-        }
-        let out_var = out_var.to_string();
-
-        // The out-param must NOT have a separate assignment line (it's populated by the call)
-        let has_assignment = lines.iter().any(|l| {
-            let trimmed = l.trim();
-            parse_temp_assignment(trimmed).is_some_and(|(v, _)| v == out_var)
-        });
-        if has_assignment {
+        // The out-param must not have a separate assignment (it's populated by the call itself)
+        if has_temp_assignment(lines, &candidate.out_var) {
             i += 1;
             continue;
         }
 
-        // Count refs in other lines; must be exactly 1
-        let mut ref_count = 0usize;
-        let mut ref_line = None;
-        for (j, line) in lines.iter().enumerate() {
-            if j == i {
-                continue;
-            }
-            let refs = count_var_refs(line.trim(), &out_var);
-            ref_count += refs;
-            if refs > 0 && ref_line.is_none() {
-                ref_line = Some(j);
-            }
-        }
-        if ref_count != 1 {
+        // Must be referenced exactly once in other lines
+        let Some(ref_line) = find_single_ref(lines, i, &candidate.out_var) else {
             i += 1;
             continue;
-        }
-        let ref_line = ref_line.unwrap();
+        };
 
-        // Build the call expression with the out-param removed
-        let mut new_args: Vec<&str> = Vec::new();
-        for (idx, arg) in args.iter().enumerate() {
-            if idx != arg_idx {
-                new_args.push(arg);
-            }
-        }
-        let call_prefix = &trimmed[..paren_start];
-        let call_expr = format!("{}({})", call_prefix, new_args.join(", "));
-
-        // Substitute $outParam with the call expression in the reference line
+        // Substitute $outParam with the rewritten call expression
         let ref_indent = lines[ref_line].len() - lines[ref_line].trim_start().len();
         let ref_content = &lines[ref_line][ref_indent..];
-        let replacement = replace_all_var_refs(ref_content, &out_var, &call_expr);
+        let replacement =
+            replace_all_var_refs(ref_content, &candidate.out_var, &candidate.call_expr);
 
-        // Check line length
         if ref_indent + replacement.len() > MAX_LINE {
             i += 1;
             continue;
         }
 
         lines[ref_line] = format!("{}{}", &lines[ref_line][..ref_indent], replacement);
-
-        // Remove the standalone call line
         lines.remove(i);
-        // Don't advance; recheck current position
+    }
+}
+
+/// A bare function call with exactly one $-prefixed out-param.
+struct OutparamCall {
+    out_var: String,
+    call_expr: String, // the call with the out-param removed
+}
+
+/// Parse a line as a bare function call with exactly one $-prefixed out-param.
+fn parse_outparam_call(trimmed: &str) -> Option<OutparamCall> {
+    // Must be a bare call: has parens, no assignment/control flow
+    if !trimmed.contains('(')
+        || trimmed.contains(" = ")
+        || trimmed.starts_with("if ")
+        || trimmed.starts_with("} ")
+        || trimmed.starts_with("for ")
+        || trimmed.starts_with("while ")
+    {
+        return None;
+    }
+
+    let paren_start = trimmed.find('(')?;
+    if !trimmed.ends_with(')') {
+        return None;
+    }
+    let args_str = &trimmed[paren_start + 1..trimmed.len() - 1];
+    let args = split_args(args_str);
+
+    // Find exactly one $-prefixed arg
+    let dollar_args: Vec<(usize, &str)> = args
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.starts_with('$'))
+        .map(|(idx, a)| (idx, *a))
+        .collect();
+    if dollar_args.len() != 1 {
+        return None;
+    }
+    let (arg_idx, out_var) = dollar_args[0];
+
+    // Out-params are always last in UE4 calling convention
+    if args.len() > 1 && arg_idx != args.len() - 1 {
+        return None;
+    }
+
+    // Build the call with the out-param removed
+    let new_args: Vec<&str> = args
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| *idx != arg_idx)
+        .map(|(_, a)| *a)
+        .collect();
+    let call_prefix = &trimmed[..paren_start];
+    let call_expr = format!("{}({})", call_prefix, new_args.join(", "));
+
+    Some(OutparamCall {
+        out_var: out_var.to_string(),
+        call_expr,
+    })
+}
+
+fn has_temp_assignment(lines: &[String], var: &str) -> bool {
+    lines
+        .iter()
+        .any(|line| parse_temp_assignment(line.trim()).is_some_and(|(name, _)| name == var))
+}
+
+/// Find the single line (other than `skip_idx`) that references `var`.
+/// Returns None if there are zero or multiple references.
+fn find_single_ref(lines: &[String], skip_idx: usize, var: &str) -> Option<usize> {
+    let mut ref_count = 0;
+    let mut ref_line = None;
+    for (j, line) in lines.iter().enumerate() {
+        if j == skip_idx {
+            continue;
+        }
+        let refs = count_var_refs(line.trim(), var);
+        ref_count += refs;
+        if refs > 0 && ref_line.is_none() {
+            ref_line = Some(j);
+        }
+    }
+    if ref_count == 1 {
+        ref_line
+    } else {
+        None
     }
 }
 
@@ -1459,6 +1478,61 @@ fn fold_section_temps(lines: &mut Vec<String>) {
     }
 }
 
+/// Find the completion block extent (lines after "// on loop complete:" until the next boundary).
+/// Returns (comp_start, comp_end) indices.
+fn find_completion_block(
+    lines: &[String],
+    marker_idx: usize,
+    marker_indent: usize,
+) -> Option<(usize, usize)> {
+    let comp_start = marker_idx + 1;
+    let mut comp_end = comp_start;
+    while comp_end < lines.len() {
+        let trimmed = lines[comp_end].trim();
+        if trimmed.is_empty() {
+            comp_end += 1;
+            continue;
+        }
+        let line_indent = lines[comp_end].len() - lines[comp_end].trim_start().len();
+        if line_indent <= marker_indent && (trimmed.starts_with('}') || trimmed.starts_with("---"))
+        {
+            break;
+        }
+        comp_end += 1;
+    }
+    if comp_end <= comp_start {
+        None
+    } else {
+        Some((comp_start, comp_end))
+    }
+}
+
+/// Find the pre-loop setup lines: lines at the same indent as the while/for loop
+/// immediately before it. Returns (pre_start, while_idx, while_indent).
+fn find_pre_loop_setup(lines: &[String], marker_idx: usize) -> Option<(usize, usize, usize)> {
+    let while_idx = (0..marker_idx).rev().find(|&j| {
+        let trimmed = lines[j].trim();
+        trimmed.starts_with("while ") || trimmed.starts_with("for ")
+    })?;
+
+    let while_indent = lines[while_idx].len() - lines[while_idx].trim_start().len();
+    let mut pre_start = while_idx;
+    for j in (0..while_idx).rev() {
+        let trimmed = lines[j].trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let line_indent = lines[j].len() - lines[j].trim_start().len();
+        if line_indent == while_indent && !trimmed.starts_with('}') && !trimmed.starts_with("//") {
+            pre_start = j;
+        } else {
+            break;
+        }
+    }
+
+    Some((pre_start, while_idx, while_indent))
+}
+
 /// Deduplicate ForEach completion paths that repeat pre-loop setup code.
 /// Removes lines from the completion block that are exact duplicates of
 /// pre-loop lines, keeping only unique (non-duplicated) lines.
@@ -1473,56 +1547,16 @@ fn dedup_completion_paths(lines: &mut Vec<String>) {
         let marker_idx = i;
         let marker_indent = lines[i].len() - lines[i].trim_start().len();
 
-        // Collect completion block lines (until next structural boundary)
-        let comp_start = marker_idx + 1;
-        let mut comp_end = comp_start;
-        while comp_end < lines.len() {
-            let trimmed = lines[comp_end].trim();
-            if trimmed.is_empty() {
-                comp_end += 1;
-                continue;
-            }
-            let line_indent = lines[comp_end].len() - lines[comp_end].trim_start().len();
-            if line_indent <= marker_indent
-                && (trimmed.starts_with('}') || trimmed.starts_with("---"))
-            {
-                break;
-            }
-            comp_end += 1;
-        }
-        if comp_end <= comp_start {
+        let Some((comp_start, comp_end)) = find_completion_block(lines, marker_idx, marker_indent)
+        else {
             i += 1;
-            continue;
-        }
-
-        // Find the while/for loop above
-        let while_idx = (0..marker_idx).rev().find(|&j| {
-            let trimmed = lines[j].trim();
-            trimmed.starts_with("while ") || trimmed.starts_with("for ")
-        });
-        let Some(while_idx) = while_idx else {
-            i = comp_end;
             continue;
         };
 
-        // Collect pre-loop lines at same indent level
-        let while_indent = lines[while_idx].len() - lines[while_idx].trim_start().len();
-        let mut pre_start = while_idx;
-        for j in (0..while_idx).rev() {
-            let trimmed = lines[j].trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let line_indent = lines[j].len() - lines[j].trim_start().len();
-            if line_indent == while_indent
-                && !trimmed.starts_with('}')
-                && !trimmed.starts_with("//")
-            {
-                pre_start = j;
-            } else {
-                break;
-            }
-        }
+        let Some((pre_start, while_idx, _)) = find_pre_loop_setup(lines, marker_idx) else {
+            i = comp_end;
+            continue;
+        };
 
         // Build set of pre-loop lines (trimmed) for duplicate detection
         let pre_set: HashSet<&str> = lines[pre_start..while_idx]
