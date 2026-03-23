@@ -403,8 +403,8 @@ pub(super) fn emit_ubergraph_events(
         // Skip empty unnamed preamble sections
         if section.name.is_empty() {
             let has_content = section.lines.iter().any(|l| {
-                let t = l.trim();
-                !t.is_empty() && t != "return"
+                let trimmed = l.trim();
+                !trimmed.is_empty() && trimmed != "return"
             });
             if !has_content {
                 continue;
@@ -466,8 +466,8 @@ pub(super) fn emit_ubergraph_events(
                             if multi_event_idxs.contains(i) {
                                 return false;
                             }
-                            let cy = if c.is_bubble { c.y } else { c.y + c.height / 2 };
-                            cy >= scope_y_min && cy <= scope_y_max
+                            let center_y = if c.is_bubble { c.y } else { c.y + c.height / 2 };
+                            center_y >= scope_y_min && center_y <= scope_y_max
                         })
                         .map(|(_, c)| c)
                         .collect();
@@ -556,8 +556,8 @@ pub(super) fn emit_ubergraph_events(
                 && drm_pos < delay_resume_map.len()
                 && delay_resume_map[drm_pos].0 == si
             {
-                let ri = delay_resume_map[drm_pos].1;
-                if let Some(rb) = resume_blocks.get(ri) {
+                let resume_idx = delay_resume_map[drm_pos].1;
+                if let Some(rb) = resume_blocks.get(resume_idx) {
                     writeln!(buf, "{}// after delay:", body_indent).unwrap();
                     for rline in &rb.lines {
                         writeln!(buf, "{}{}", body_indent, rline).unwrap();
@@ -697,9 +697,9 @@ mod tests {
             stmt(1000, "event_b_start"),
             stmt(1020, "event_b_stmt"),
         ];
-        let a = "EventA".to_string();
-        let b = "EventB".to_string();
-        let labels: Vec<(usize, &String)> = vec![(100, &a), (1000, &b)];
+        let event_a = "EventA".to_string();
+        let event_b = "EventB".to_string();
+        let labels: Vec<(usize, &String)> = vec![(100, &event_a), (1000, &event_b)];
 
         let segments = split_stmts_by_labels(&stmts, &labels);
 
@@ -717,8 +717,8 @@ mod tests {
             stmt(100, "event_start"),
             stmt(120, "event_stmt"),
         ];
-        let a = "EventA".to_string();
-        let labels: Vec<(usize, &String)> = vec![(100, &a)];
+        let event_a = "EventA".to_string();
+        let labels: Vec<(usize, &String)> = vec![(100, &event_a)];
 
         let segments = split_stmts_by_labels(&stmts, &labels);
 
@@ -733,8 +733,8 @@ mod tests {
     fn split_fuzzy_match_within_8_bytes() {
         // Label offset 97 matches first stmt at offset 100 (3 bytes off, within 8-byte window)
         let stmts = vec![stmt(100, "event_start"), stmt(120, "event_stmt")];
-        let a = "EventA".to_string();
-        let labels: Vec<(usize, &String)> = vec![(97, &a)];
+        let event_a = "EventA".to_string();
+        let labels: Vec<(usize, &String)> = vec![(97, &event_a)];
 
         let segments = split_stmts_by_labels(&stmts, &labels);
 
@@ -747,8 +747,8 @@ mod tests {
     fn split_rejects_match_beyond_8_bytes() {
         // Label offset 90 does NOT match stmt at offset 100 (10 bytes off, beyond window)
         let stmts = vec![stmt(100, "event_start"), stmt(120, "event_stmt")];
-        let a = "EventA".to_string();
-        let labels: Vec<(usize, &String)> = vec![(90, &a)];
+        let event_a = "EventA".to_string();
+        let labels: Vec<(usize, &String)> = vec![(90, &event_a)];
 
         let segments = split_stmts_by_labels(&stmts, &labels);
 

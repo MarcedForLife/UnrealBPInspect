@@ -178,16 +178,16 @@ pub(super) fn rewrite_bool_switches(line: &str) -> String {
 }
 
 /// Find and rewrite the first bool switch in the string.
-fn rewrite_one_bool_switch(s: &str) -> Option<String> {
-    let switch_pos = s.find("switch(")?;
+fn rewrite_one_bool_switch(input: &str) -> Option<String> {
+    let switch_pos = input.find("switch(")?;
 
     // Extract COND by matching parens from the `(` after `switch`
     let paren_start = switch_pos + 6; // index of '('
-    let cond_close = find_matching_paren(&s[paren_start..])?;
-    let cond = &s[paren_start + 1..paren_start + cond_close];
+    let cond_close = find_matching_paren(&input[paren_start..])?;
+    let cond = &input[paren_start + 1..paren_start + cond_close];
 
     // Expect ` { ` after the closing paren
-    let after_cond = &s[paren_start + cond_close + 1..];
+    let after_cond = &input[paren_start + cond_close + 1..];
     let after_cond = after_cond.strip_prefix(" { ")?;
     let brace_content_start = paren_start + cond_close + 1 + 3; // absolute pos of content after " { "
 
@@ -195,15 +195,15 @@ fn rewrite_one_bool_switch(s: &str) -> Option<String> {
     let (expr_true, expr_false) = parse_bool_switch_cases(after_cond)?;
 
     // Find where the switch expression ends: scan for matching ` }` in original string
-    let switch_end = find_switch_end(s, brace_content_start)?;
+    let switch_end = find_switch_end(input, brace_content_start)?;
 
     // Identical branches: emit the expression directly (drop condition)
     if expr_true == expr_false {
         return Some(format!(
             "{}{}{}",
-            &s[..switch_pos],
+            &input[..switch_pos],
             expr_true,
-            &s[switch_end..]
+            &input[switch_end..]
         ));
     }
 
@@ -214,8 +214,8 @@ fn rewrite_one_bool_switch(s: &str) -> Option<String> {
         cond.to_string()
     };
 
-    let after_switch = &s[switch_end..];
-    let before_switch = s[..switch_pos].trim_end();
+    let after_switch = &input[switch_end..];
+    let before_switch = input[..switch_pos].trim_end();
 
     // Wrap ternary in parens when in operator context or method chain
     let needs_wrap = after_switch.starts_with('.')
@@ -241,7 +241,7 @@ fn rewrite_one_bool_switch(s: &str) -> Option<String> {
 
     Some(format!(
         "{}{}{}",
-        &s[..switch_pos],
+        &input[..switch_pos],
         replacement,
         after_switch
     ))
@@ -289,9 +289,9 @@ fn parse_bool_switch_cases(content: &str) -> Option<(String, String)> {
 }
 
 /// Find the position just past the closing `}` of a switch expression.
-fn find_switch_end(s: &str, content_start: usize) -> Option<usize> {
+fn find_switch_end(input: &str, content_start: usize) -> Option<usize> {
     let mut depth = 0i32;
-    for (i, &b) in s.as_bytes().iter().enumerate().skip(content_start) {
+    for (i, &b) in input.as_bytes().iter().enumerate().skip(content_start) {
         match b {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' => depth -= 1,
@@ -307,8 +307,8 @@ fn find_switch_end(s: &str, content_start: usize) -> Option<usize> {
     None
 }
 
-pub(super) fn has_toplevel_logical_op(s: &str) -> bool {
-    find_at_depth_zero(s, " && ").is_some() || find_at_depth_zero(s, " || ").is_some()
+pub(super) fn has_toplevel_logical_op(input: &str) -> bool {
+    find_at_depth_zero(input, " && ").is_some() || find_at_depth_zero(input, " || ").is_some()
 }
 
 /// Rewrite `if (!(COMPOUND)) return` -> `if (COMPOUND) { body }` when the
@@ -359,19 +359,19 @@ fn rewrite_negated_guards(lines: &mut Vec<String>) {
         let guard_indent = indent_len;
         let mut body_end = i + 1;
         while body_end < lines.len() {
-            let t = lines[body_end].trim();
-            if t.starts_with("--- ") && t.ends_with(" ---") {
+            let trimmed = lines[body_end].trim();
+            if trimmed.starts_with("--- ") && trimmed.ends_with(" ---") {
                 break;
             }
-            if t.is_empty() {
+            if trimmed.is_empty() {
                 body_end += 1;
                 continue;
             }
-            let li = lines[body_end].len() - lines[body_end].trim_start().len();
-            if li < guard_indent {
+            let line_indent = lines[body_end].len() - lines[body_end].trim_start().len();
+            if line_indent < guard_indent {
                 break;
             }
-            if li == guard_indent && t == "}" {
+            if line_indent == guard_indent && trimmed == "}" {
                 break;
             }
             body_end += 1;
@@ -380,8 +380,8 @@ fn rewrite_negated_guards(lines: &mut Vec<String>) {
         // Trim trailing returns and empty lines from body
         let mut effective_end = body_end;
         while effective_end > i + 1 {
-            let t = lines[effective_end - 1].trim();
-            if t == "return" || t.is_empty() {
+            let trimmed = lines[effective_end - 1].trim();
+            if trimmed == "return" || trimmed.is_empty() {
                 effective_end -= 1;
             } else {
                 break;
@@ -410,25 +410,25 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
     // key parameter read ($InputActionEvent_Key_N) and sometimes bare true/false
     // literals.  These are Kismet stack pushes with no consumer.
     lines.retain(|l| {
-        let t = l.trim();
+        let trimmed = l.trim();
         // Standalone iface() calls, interface dispatch artifacts with no side effects.
         // Only strip when the closing `)` matches the opening `iface(` paren
         // (i.e., there's no method chain like `iface(X).Method()`).
-        if t.starts_with("iface(") && !t.contains(" = ") {
-            if let Some(close) = find_matching_paren(&t[5..]) {
-                if 5 + close + 1 == t.len() {
+        if trimmed.starts_with("iface(") && !trimmed.contains(" = ") {
+            if let Some(close) = find_matching_paren(&trimmed[5..]) {
+                if 5 + close + 1 == trimmed.len() {
                     return false;
                 }
             }
         }
-        let has_indent = l.len() > t.len();
+        let has_indent = l.len() > trimmed.len();
         if !has_indent {
             // Bare temp variable (no assignment or call)
-            if t.starts_with('$') && !t.contains('=') && !t.contains('(') {
+            if trimmed.starts_with('$') && !trimmed.contains('=') && !trimmed.contains('(') {
                 return false;
             }
             // Bare boolean literal
-            if t == "true" || t == "false" {
+            if trimmed == "true" || trimmed == "false" {
                 return false;
             }
         }
@@ -463,13 +463,13 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
         // Strip trailing `} else {` (always orphaned at the end; else
         // with no body). Strip trailing `}` only when unmatched (depth < 0).
         while let Some(last) = lines.last() {
-            let t = last.trim();
-            if t == "} else {" {
+            let trimmed = last.trim();
+            if trimmed == "} else {" {
                 lines.pop();
                 changed = true;
                 continue;
             }
-            if t == "}" {
+            if trimmed == "}" {
                 let depth = brace_depth(lines);
                 if depth < 0 {
                     lines.pop();
@@ -522,11 +522,11 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
 
 fn brace_depth(lines: &[String]) -> i32 {
     lines.iter().fold(0i32, |d, l| {
-        let t = l.trim();
-        if t.ends_with(" {") || t == "{" {
-            let close = i32::from(t.starts_with("} "));
+        let trimmed = l.trim();
+        if trimmed.ends_with(" {") || trimmed == "{" {
+            let close = i32::from(trimmed.starts_with("} "));
             d - close + 1
-        } else if t == "}" || t.starts_with("} ") {
+        } else if trimmed == "}" || trimmed.starts_with("} ") {
             d - 1
         } else {
             d
@@ -639,8 +639,8 @@ fn strip_redundant_gotos(lines: &mut Vec<String>) {
             if idx == gi {
                 return false; // skip the goto line itself
             }
-            let t = l.trim();
-            !t.is_empty() && t != "}" && t != "return" && !t.ends_with(':')
+            let trimmed = l.trim();
+            !trimmed.is_empty() && trimmed != "}" && trimmed != "return" && !trimmed.ends_with(':')
         });
 
         // Check if goto is immediately before the label (fall-through)

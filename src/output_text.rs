@@ -143,16 +143,16 @@ fn format_property(
             )
             .unwrap();
             for (j, (k, v)) in entries.iter().enumerate() {
-                let kp = Property {
+                let key_prop = Property {
                     name: format!("[{}].key", j),
                     value: k.clone(),
                 };
-                let vp = Property {
+                let val_prop = Property {
                     name: format!("[{}].val", j),
                     value: v.clone(),
                 };
-                format_property(buf, &kp, imports, export_names, indent + 2);
-                format_property(buf, &vp, imports, export_names, indent + 2);
+                format_property(buf, &key_prop, imports, export_names, indent + 2);
+                format_property(buf, &val_prop, imports, export_names, indent + 2);
             }
         }
         PropValue::Text(v) => writeln!(buf, "{}{}: \"{}\"", pad, prop.name, v).unwrap(),

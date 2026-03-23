@@ -145,12 +145,12 @@ fn used_in_operator_context(text: &str, pos: usize, after: usize) -> bool {
     op_before || op_after
 }
 
-pub(super) fn find_matching_paren(s: &str) -> Option<usize> {
-    if !s.starts_with('(') {
+pub(super) fn find_matching_paren(input: &str) -> Option<usize> {
+    if !input.starts_with('(') {
         return None;
     }
     let mut depth = 0i32;
-    for (i, ch) in s.chars().enumerate() {
+    for (i, ch) in input.chars().enumerate() {
         match ch {
             '(' => depth += 1,
             ')' => {
@@ -165,9 +165,9 @@ pub(super) fn find_matching_paren(s: &str) -> Option<usize> {
     None
 }
 
-pub(super) fn find_at_depth_zero(s: &str, needle: &str) -> Option<usize> {
+pub(super) fn find_at_depth_zero(input: &str, needle: &str) -> Option<usize> {
     let mut depth = 0i32;
-    let bytes = s.as_bytes();
+    let bytes = input.as_bytes();
     let needle_bytes = needle.as_bytes();
     let nlen = needle_bytes.len();
     for i in 0..bytes.len() {
@@ -183,13 +183,13 @@ pub(super) fn find_at_depth_zero(s: &str, needle: &str) -> Option<usize> {
     None
 }
 
-pub(super) fn strip_outer_parens(s: &str) -> &str {
-    if let Some(close) = find_matching_paren(s) {
-        if close == s.len() - 1 {
-            return &s[1..close];
+pub(super) fn strip_outer_parens(input: &str) -> &str {
+    if let Some(close) = find_matching_paren(input) {
+        if close == input.len() - 1 {
+            return &input[1..close];
         }
     }
-    s
+    input
 }
 
 // Inline tests: these test private functions (clean_line, parse_temp_assignment,

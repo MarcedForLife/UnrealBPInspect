@@ -7,27 +7,27 @@ use crate::binary::NameTable;
 
 macro_rules! read_bc_num {
     ($name:ident, $ty:ty, $default:expr) => {
-        pub fn $name(bc: &[u8], pos: &mut usize) -> $ty {
+        pub fn $name(bytecode: &[u8], pos: &mut usize) -> $ty {
             const SIZE: usize = std::mem::size_of::<$ty>();
-            if *pos + SIZE > bc.len() {
-                *pos = bc.len();
+            if *pos + SIZE > bytecode.len() {
+                *pos = bytecode.len();
                 return $default;
             }
-            let v = <$ty>::from_le_bytes(bc[*pos..*pos + SIZE].try_into().unwrap());
+            let val = <$ty>::from_le_bytes(bytecode[*pos..*pos + SIZE].try_into().unwrap());
             *pos += SIZE;
-            v
+            val
         }
     };
 }
 
-pub fn read_bc_u8(bc: &[u8], pos: &mut usize) -> u8 {
-    if *pos >= bc.len() {
-        *pos = bc.len();
+pub fn read_bc_u8(bytecode: &[u8], pos: &mut usize) -> u8 {
+    if *pos >= bytecode.len() {
+        *pos = bytecode.len();
         return 0;
     }
-    let v = bc[*pos];
+    let val = bytecode[*pos];
     *pos += 1;
-    v
+    val
 }
 
 read_bc_num!(read_bc_i32, i32, 0);
@@ -38,10 +38,10 @@ read_bc_num!(read_bc_u64, u64, 0);
 read_bc_num!(read_bc_f32, f32, 0.0);
 read_bc_num!(read_bc_f64, f64, 0.0);
 
-pub fn read_bc_fname(bc: &[u8], pos: &mut usize, nt: &NameTable) -> String {
-    let index = read_bc_i32(bc, pos);
-    let number = read_bc_i32(bc, pos);
-    let base = nt.get(index);
+pub fn read_bc_fname(bytecode: &[u8], pos: &mut usize, name_table: &NameTable) -> String {
+    let index = read_bc_i32(bytecode, pos);
+    let number = read_bc_i32(bytecode, pos);
+    let base = name_table.get(index);
     if number > 0 {
         format!("{}_{}", base, number - 1)
     } else {
@@ -51,50 +51,50 @@ pub fn read_bc_fname(bc: &[u8], pos: &mut usize, nt: &NameTable) -> String {
 
 /// Read 3 floats as f64 values. `lwc` = Large World Coordinates (UE5 >= 1004):
 /// vectors/rotators are serialized as f64 instead of f32.
-pub fn read_bc_xyz(bc: &[u8], pos: &mut usize, lwc: bool) -> (f64, f64, f64) {
+pub fn read_bc_xyz(bytecode: &[u8], pos: &mut usize, lwc: bool) -> (f64, f64, f64) {
     if lwc {
         (
-            read_bc_f64(bc, pos),
-            read_bc_f64(bc, pos),
-            read_bc_f64(bc, pos),
+            read_bc_f64(bytecode, pos),
+            read_bc_f64(bytecode, pos),
+            read_bc_f64(bytecode, pos),
         )
     } else {
         (
-            read_bc_f32(bc, pos) as f64,
-            read_bc_f32(bc, pos) as f64,
-            read_bc_f32(bc, pos) as f64,
+            read_bc_f32(bytecode, pos) as f64,
+            read_bc_f32(bytecode, pos) as f64,
+            read_bc_f32(bytecode, pos) as f64,
         )
     }
 }
 
 /// Read 4 floats (f32 or f64 depending on LWC) as f64 values.
-pub fn read_bc_xyzw(bc: &[u8], pos: &mut usize, lwc: bool) -> (f64, f64, f64, f64) {
+pub fn read_bc_xyzw(bytecode: &[u8], pos: &mut usize, lwc: bool) -> (f64, f64, f64, f64) {
     if lwc {
         (
-            read_bc_f64(bc, pos),
-            read_bc_f64(bc, pos),
-            read_bc_f64(bc, pos),
-            read_bc_f64(bc, pos),
+            read_bc_f64(bytecode, pos),
+            read_bc_f64(bytecode, pos),
+            read_bc_f64(bytecode, pos),
+            read_bc_f64(bytecode, pos),
         )
     } else {
         (
-            read_bc_f32(bc, pos) as f64,
-            read_bc_f32(bc, pos) as f64,
-            read_bc_f32(bc, pos) as f64,
-            read_bc_f32(bc, pos) as f64,
+            read_bc_f32(bytecode, pos) as f64,
+            read_bc_f32(bytecode, pos) as f64,
+            read_bc_f32(bytecode, pos) as f64,
+            read_bc_f32(bytecode, pos) as f64,
         )
     }
 }
 
-pub fn read_bc_string(bc: &[u8], pos: &mut usize) -> String {
+pub fn read_bc_string(bytecode: &[u8], pos: &mut usize) -> String {
     let mut s = Vec::new();
-    while *pos < bc.len() {
-        let b = bc[*pos];
+    while *pos < bytecode.len() {
+        let byte = bytecode[*pos];
         *pos += 1;
-        if b == 0 {
+        if byte == 0 {
             break;
         }
-        s.push(b);
+        s.push(byte);
     }
     String::from_utf8_lossy(&s).to_string()
 }

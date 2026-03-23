@@ -9,53 +9,53 @@ use crate::binary::*;
 use crate::resolve::*;
 use crate::types::*;
 
-pub fn skip_ffield_child(r: &mut Reader, nt: &NameTable, end: u64) -> Result<()> {
-    if r.position() + 8 > end {
+pub fn skip_ffield_child(reader: &mut Reader, name_table: &NameTable, end: u64) -> Result<()> {
+    if reader.position() + 8 > end {
         return Ok(());
     }
-    let field_class = nt.fname(r)?;
+    let field_class = name_table.fname(reader)?;
     if field_class == "None" {
         return Ok(());
     }
-    let _field_name = nt.fname(r)?;
-    let _flags = read_u32(r)?;
-    nt.skip_metadata(r)?;
-    let _array_dim = read_i32(r)?;
-    let _elem_size = read_i32(r)?;
-    let _prop_flags = read_i64(r)?;
+    let _field_name = name_table.fname(reader)?;
+    let _flags = read_u32(reader)?;
+    name_table.skip_metadata(reader)?;
+    let _array_dim = read_i32(reader)?;
+    let _elem_size = read_i32(reader)?;
+    let _prop_flags = read_i64(reader)?;
     let mut rep_bytes = [0u8; 2];
-    r.read_exact(&mut rep_bytes)?;
-    let _rep_func = nt.fname(r)?;
-    let _bp_rep = read_u8(r)?;
+    reader.read_exact(&mut rep_bytes)?;
+    let _rep_func = name_table.fname(reader)?;
+    let _bp_rep = read_u8(reader)?;
     match field_class.as_str() {
         "ObjectProperty" | "WeakObjectProperty" | "SoftObjectProperty" | "InterfaceProperty" => {
-            let _ref = read_i32(r)?;
+            let _ref = read_i32(reader)?;
         }
         "ClassProperty" | "SoftClassProperty" => {
-            let _prop_class = read_i32(r)?;
-            let _meta_class = read_i32(r)?;
+            let _prop_class = read_i32(reader)?;
+            let _meta_class = read_i32(reader)?;
         }
         "StructProperty" => {
-            let _ref = read_i32(r)?;
+            let _ref = read_i32(reader)?;
         }
         "ByteProperty" | "EnumProperty" => {
-            let _ref = read_i32(r)?;
+            let _ref = read_i32(reader)?;
         }
         "BoolProperty" => {
             // 6 bytes: FieldSize(1) + ByteOffset(1) + ByteMask(1) + FieldMask(1) + NativeBool(1) + Value(1)
             for _ in 0..6 {
-                read_u8(r)?;
+                read_u8(reader)?;
             }
         }
         "ArrayProperty" | "SetProperty" => {
-            skip_ffield_child(r, nt, end)?;
+            skip_ffield_child(reader, name_table, end)?;
         }
         "MapProperty" => {
-            skip_ffield_child(r, nt, end)?;
-            skip_ffield_child(r, nt, end)?;
+            skip_ffield_child(reader, name_table, end)?;
+            skip_ffield_child(reader, name_table, end)?;
         }
         "DelegateProperty" | "MulticastDelegateProperty" | "MulticastInlineDelegateProperty" => {
-            let _ref = read_i32(r)?;
+            let _ref = read_i32(reader)?;
         }
         _ => {}
     }
@@ -64,8 +64,8 @@ pub fn skip_ffield_child(r: &mut Reader, nt: &NameTable, end: u64) -> Result<()>
 
 pub fn resolve_ffield_type(
     field_class: &str,
-    r: &mut Reader,
-    nt: &NameTable,
+    reader: &mut Reader,
+    name_table: &NameTable,
     imports: &[ImportEntry],
     export_names: &[String],
     end: u64,
@@ -82,7 +82,7 @@ pub fn resolve_ffield_type(
         "BoolProperty" => {
             // 6 bytes: FieldSize, ByteOffset, ByteMask, FieldMask, NativeBool, Value
             for _ in 0..6 {
-                read_u8(r)?;
+                read_u8(reader)?;
             }
             Ok("bool".into())
         }
@@ -91,7 +91,7 @@ pub fn resolve_ffield_type(
         "TextProperty" => Ok("FText".into()),
         "ObjectProperty" | "WeakObjectProperty" | "LazyObjectProperty" | "SoftObjectProperty"
         | "InterfaceProperty" => {
-            let class_ref = read_i32(r)?;
+            let class_ref = read_i32(reader)?;
             if class_ref != 0 {
                 Ok(format!(
                     "{}*",
@@ -102,12 +102,12 @@ pub fn resolve_ffield_type(
             }
         }
         "ClassProperty" | "SoftClassProperty" => {
-            let _prop_class = read_i32(r)?;
-            let _meta_class = read_i32(r)?;
+            let _prop_class = read_i32(reader)?;
+            let _meta_class = read_i32(reader)?;
             Ok("UClass*".into())
         }
         "StructProperty" => {
-            let struct_ref = read_i32(r)?;
+            let struct_ref = read_i32(reader)?;
             Ok(short_class(&resolve_index(
                 imports,
                 export_names,
@@ -115,7 +115,7 @@ pub fn resolve_ffield_type(
             )))
         }
         "ByteProperty" | "EnumProperty" => {
-            let enum_ref = read_i32(r)?;
+            let enum_ref = read_i32(reader)?;
             if enum_ref != 0 {
                 Ok(short_class(&resolve_index(imports, export_names, enum_ref)))
             } else {
@@ -123,7 +123,7 @@ pub fn resolve_ffield_type(
             }
         }
         "ArrayProperty" | "SetProperty" => {
-            skip_ffield_child(r, nt, end)?;
+            skip_ffield_child(reader, name_table, end)?;
             Ok(if field_class == "SetProperty" {
                 "TSet<>".into()
             } else {
@@ -131,15 +131,15 @@ pub fn resolve_ffield_type(
             })
         }
         "MapProperty" => {
-            skip_ffield_child(r, nt, end)?;
-            skip_ffield_child(r, nt, end)?;
+            skip_ffield_child(reader, name_table, end)?;
+            skip_ffield_child(reader, name_table, end)?;
             Ok("TMap<>".into())
         }
         "DelegateProperty"
         | "MulticastDelegateProperty"
         | "MulticastInlineDelegateProperty"
         | "MulticastSparseDelegateProperty" => {
-            let _sig = read_i32(r)?;
+            let _sig = read_i32(reader)?;
             Ok("Delegate".into())
         }
         _ => Ok(field_class

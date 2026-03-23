@@ -170,8 +170,8 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                                 | PropValue::Array { .. }
                                 | PropValue::Map { .. } => None,
                                 _ => {
-                                    let v = prop_value_short(&f.value, imports, export_names);
-                                    Some(format!("{}: {}", f.name, v))
+                                    let val = prop_value_short(&f.value, imports, export_names);
+                                    Some(format!("{}: {}", f.name, val))
                                 }
                             })
                             .collect();
