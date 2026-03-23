@@ -1,4 +1,4 @@
-/// Strip UE compiler-generated GUID suffixes: `VarName_42_A1B2C3D4E5F6...` → `VarName`.
+/// Strip UE compiler-generated GUID suffixes: `VarName_42_A1B2C3D4E5F6...` -> `VarName`.
 /// The compiler appends `_<digits>_<32 hex chars>` to disambiguate generated names.
 pub fn strip_guid_suffix(name: &str) -> &str {
     let bytes = name.as_bytes();
@@ -46,14 +46,14 @@ pub fn clean_bc_name(name: &str) -> String {
 /// UE4 and UE5 produce identical temp variable and function names.
 /// UE5 renamed float math functions to double variants; this maps them back
 /// so diffs between engine versions show only real code changes.
-/// Display only — actual values are still parsed at full f64 precision.
+/// Display only; actual values are still parsed at full f64 precision.
 fn normalize_lwc_name(name: &str) -> String {
     let mut s = name.to_string();
-    // Binary math ops: _DoubleDouble → _FloatFloat
+    // Binary math ops: _DoubleDouble -> _FloatFloat
     s = s.replace("_DoubleDouble", "_FloatFloat");
     // Standalone function renames
     s = s.replace("SelectDouble", "SelectFloat");
-    // Strip UE5 implicit cast intermediary suffixes — these are transparent
+    // Strip UE5 implicit cast intermediary suffixes, these are transparent
     // pass-through assignments that clutter output and block temp inlining.
     if let Some(base) = s.strip_suffix("_ImplicitCast") {
         s = base.to_string();

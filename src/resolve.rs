@@ -1,8 +1,16 @@
+//! Index resolution and property lookup helpers.
+//!
+//! Package index convention: negative = import (1-based), positive = export (1-based), zero = null.
+
 use crate::types::*;
 
 /// UE "package index" convention: negative = import table (1-based), positive = export table (1-based), zero = null.
 pub fn resolve_import_path(imports: &[ImportEntry], index: i32) -> String {
-    if index >= 0 {
+    resolve_import_path_inner(imports, index, 0)
+}
+
+fn resolve_import_path_inner(imports: &[ImportEntry], index: i32, depth: usize) -> String {
+    if depth > 32 || index >= 0 {
         return "?".to_string();
     }
     let idx = (-index - 1) as usize;
@@ -13,7 +21,7 @@ pub fn resolve_import_path(imports: &[ImportEntry], index: i32) -> String {
     if imp.outer_index == 0 {
         imp.object_name.clone()
     } else {
-        let outer = resolve_import_path(imports, imp.outer_index);
+        let outer = resolve_import_path_inner(imports, imp.outer_index, depth + 1);
         format!("{}.{}", outer, imp.object_name)
     }
 }
@@ -61,6 +69,42 @@ pub fn find_prop_i32(props: &[Property], name: &str) -> Option<i32> {
         PropValue::Int(v) => Some(*v),
         _ => None,
     })
+}
+
+/// Extract an Object property as a resolved index string.
+pub fn find_prop_object(
+    props: &[Property],
+    name: &str,
+    imports: &[ImportEntry],
+    export_names: &[String],
+) -> Option<String> {
+    find_prop(props, name).and_then(|p| match &p.value {
+        PropValue::Object(idx) => Some(resolve_index(imports, export_names, *idx)),
+        _ => None,
+    })
+}
+
+/// Extract an Array of Object properties as resolved index strings.
+pub fn find_prop_object_array(
+    props: &[Property],
+    name: &str,
+    imports: &[ImportEntry],
+    export_names: &[String],
+) -> Vec<String> {
+    find_prop(props, name)
+        .and_then(|p| match &p.value {
+            PropValue::Array { items, .. } => Some(
+                items
+                    .iter()
+                    .filter_map(|i| match i {
+                        PropValue::Object(idx) => Some(resolve_index(imports, export_names, *idx)),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 pub fn prop_value_short(

@@ -1,3 +1,10 @@
+//! Kismet bytecode decoding and structuring pipeline.
+//!
+//! 1. [`decode`]: expression decoding into flat statements
+//! 2. [`flow`]: pattern detection (sequences, loops, convergence reorder)
+//! 3. [`structure`]: if/else reconstruction from jump patterns
+//! 4. [`inline`]: temp inlining, cleanup, summary pattern folding
+
 pub mod decode;
 pub mod flow;
 pub mod inline;
@@ -63,17 +70,21 @@ impl OffsetMap {
             None
         };
         let best = match (below, above) {
-            (Some((bo, bi)), Some((ao, ai))) => {
-                let bd = target.saturating_sub(bo);
-                let ad = ao.saturating_sub(target);
-                if bd <= ad {
-                    Some((bd, bi))
+            (Some((below_off, below_idx)), Some((above_off, above_idx))) => {
+                let below_dist = target.saturating_sub(below_off);
+                let above_dist = above_off.saturating_sub(target);
+                if below_dist <= above_dist {
+                    Some((below_dist, below_idx))
                 } else {
-                    Some((ad, ai))
+                    Some((above_dist, above_idx))
                 }
             }
-            (Some((bo, bi)), None) => Some((target.saturating_sub(bo), bi)),
-            (None, Some((ao, ai))) => Some((ao.saturating_sub(target), ai)),
+            (Some((below_off, below_idx)), None) => {
+                Some((target.saturating_sub(below_off), below_idx))
+            }
+            (None, Some((above_off, above_idx))) => {
+                Some((above_off.saturating_sub(target), above_idx))
+            }
             (None, None) => None,
         };
         match best {
