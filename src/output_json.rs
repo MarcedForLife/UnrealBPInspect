@@ -1,8 +1,11 @@
+//! JSON output mode (`--json`). Must always produce valid JSON.
+
 use serde_json::{json, Value};
 
 use crate::resolve::*;
 use crate::types::*;
 
+/// Convert a parsed asset to a JSON value. Filters restrict to matching export names.
 pub fn to_json(asset: &ParsedAsset, filters: &[String]) -> Value {
     let export_names: Vec<String> = asset
         .exports
@@ -98,8 +101,8 @@ pub fn to_json(asset: &ParsedAsset, filters: &[String]) -> Value {
     })
 }
 
-fn prop_to_json(prop: &Property, imports: &[ImportEntry], export_names: &[String]) -> Value {
-    let val = match &prop.value {
+fn value_to_json(value: &PropValue, imports: &[ImportEntry], export_names: &[String]) -> Value {
+    match value {
         PropValue::Bool(v) => json!(v),
         PropValue::Int(v) => json!(v),
         PropValue::Int64(v) => json!(v),
@@ -119,10 +122,7 @@ fn prop_to_json(prop: &Property, imports: &[ImportEntry], export_names: &[String
         }),
         PropValue::Array { inner_type, items } => json!({
             "inner_type": inner_type,
-            "items": items.iter().map(|item| {
-                let child = Property { name: String::new(), value: item.clone() };
-                prop_to_json(&child, imports, export_names)["value"].clone()
-            }).collect::<Vec<_>>(),
+            "items": items.iter().map(|item| value_to_json(item, imports, export_names)).collect::<Vec<_>>(),
         }),
         PropValue::Map {
             key_type,
@@ -131,18 +131,17 @@ fn prop_to_json(prop: &Property, imports: &[ImportEntry], export_names: &[String
         } => json!({
             "key_type": key_type,
             "value_type": value_type,
-            "entries": entries.iter().map(|(k, v)| {
-                let kp = Property { name: String::new(), value: k.clone() };
-                let vp = Property { name: String::new(), value: v.clone() };
-                json!({
-                    "key": prop_to_json(&kp, imports, export_names)["value"],
-                    "value": prop_to_json(&vp, imports, export_names)["value"],
-                })
-            }).collect::<Vec<_>>(),
+            "entries": entries.iter().map(|(k, v)| json!({
+                "key": value_to_json(k, imports, export_names),
+                "value": value_to_json(v, imports, export_names),
+            })).collect::<Vec<_>>(),
         }),
         PropValue::Text(v) => json!(v),
         PropValue::SoftObject(v) => json!(v),
         PropValue::Unknown { type_name, size } => json!({"unknown_type": type_name, "size": size}),
-    };
-    json!({ "name": prop.name, "value": val })
+    }
+}
+
+fn prop_to_json(prop: &Property, imports: &[ImportEntry], export_names: &[String]) -> Value {
+    json!({ "name": prop.name, "value": value_to_json(&prop.value, imports, export_names) })
 }

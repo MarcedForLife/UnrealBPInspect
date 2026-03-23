@@ -1,3 +1,5 @@
+//! Self-update from GitHub releases (`--update`).
+
 use anyhow::{bail, Context, Result};
 use std::io::Read;
 use std::path::Path;
@@ -96,9 +98,7 @@ pub fn run_update(target_version: Option<&str>) -> Result<()> {
         .read_to_end(&mut bytes)
         .context("Failed to read update data")?;
 
-    if bytes.len() < 1000 {
-        bail!("Downloaded file too small — possible error");
-    }
+    validate_binary(&bytes)?;
 
     // Replace current binary
     let current_exe =
@@ -106,6 +106,26 @@ pub fn run_update(target_version: Option<&str>) -> Result<()> {
     self_replace(&current_exe, &bytes)?;
 
     eprintln!("Updated to v{}", release_version);
+    Ok(())
+}
+
+fn validate_binary(bytes: &[u8]) -> Result<()> {
+    if bytes.len() < 1024 {
+        bail!("Downloaded file too small ({} bytes)", bytes.len());
+    }
+    let valid_magic = if cfg!(target_os = "linux") {
+        bytes.starts_with(b"\x7fELF")
+    } else if cfg!(target_os = "macos") {
+        let magic = u32::from_be_bytes(bytes[..4].try_into().unwrap_or_default());
+        matches!(magic, 0xFEEDFACE | 0xFEEDFACF | 0xCAFEBABE | 0xBEBAFECA)
+    } else if cfg!(target_os = "windows") {
+        bytes.starts_with(b"MZ")
+    } else {
+        true
+    };
+    if !valid_magic {
+        bail!("Downloaded file is not a valid executable");
+    }
     Ok(())
 }
 
