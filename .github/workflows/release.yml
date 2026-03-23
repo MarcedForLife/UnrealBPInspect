@@ -1,15 +1,75 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 permissions:
   contents: write
 
 jobs:
+  version-bump:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Calculate new version
+        id: bump
+        run: |
+          CURRENT=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          case "${{ inputs.bump }}" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+          NEW="$MAJOR.$MINOR.$PATCH"
+          echo "version=$NEW" >> "$GITHUB_OUTPUT"
+          echo "tag=v$NEW" >> "$GITHUB_OUTPUT"
+          echo "Bumping $CURRENT -> $NEW"
+
+      - name: Check tag doesn't exist
+        run: |
+          if git ls-remote --tags origin "refs/tags/${{ steps.bump.outputs.tag }}" | grep -q .; then
+            echo "::error::Tag ${{ steps.bump.outputs.tag }} already exists"
+            exit 1
+          fi
+
+      - name: Update Cargo.toml
+        run: |
+          sed -i "s/^version = \".*\"/version = \"${{ steps.bump.outputs.version }}\"/" Cargo.toml
+          grep -q "^version = \"${{ steps.bump.outputs.version }}\"" Cargo.toml || {
+            echo "::error::Version update failed - Cargo.toml not modified"
+            exit 1
+          }
+
+      - name: Update Cargo.lock
+        run: cargo check
+
+      - name: Commit and tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "Bump version to ${{ steps.bump.outputs.tag }} [skip ci]"
+          git tag "${{ steps.bump.outputs.tag }}"
+          git push origin main
+          git push origin "${{ steps.bump.outputs.tag }}"
+
   build:
+    needs: version-bump
     strategy:
       matrix:
         include:
@@ -30,6 +90,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version-bump.outputs.tag }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -56,7 +118,7 @@ jobs:
           path: ${{ matrix.artifact }}
 
   release:
-    needs: build
+    needs: [version-bump, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -69,6 +131,7 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.version-bump.outputs.tag }}
           files: |
             bp-inspect-*
             checksums.txt
