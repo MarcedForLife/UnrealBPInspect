@@ -2,6 +2,28 @@
 
 use super::{CommentBox, NodeInfo, MAX_BUBBLE_DISTANCE_SQ};
 
+/// Find the closest identifiable nodes to a bubble comment.
+/// When `right_only` is true, only considers nodes to the right (downstream in UE4 flow).
+fn nearest_nodes<'a>(
+    comment: &CommentBox,
+    nodes: &'a [NodeInfo],
+    right_only: bool,
+) -> Vec<&'a NodeInfo> {
+    let mut candidates: Vec<(&NodeInfo, i64)> = nodes
+        .iter()
+        .filter(|n| !right_only || n.x >= comment.x)
+        .map(|n| {
+            let dx = (n.x - comment.x) as i64;
+            let dy = (n.y - comment.y) as i64;
+            (n, dx * dx + dy * dy)
+        })
+        .filter(|&(_, d)| d < MAX_BUBBLE_DISTANCE_SQ)
+        .collect();
+    candidates.sort_by_key(|&(n, d)| (d, n.y, n.x));
+    candidates.truncate(5);
+    candidates.into_iter().map(|(n, _)| n).collect()
+}
+
 fn line_contains_identifier(line: &str, identifier: &str) -> bool {
     if identifier == "__branch__" {
         let trimmed = line.trim_start();
@@ -91,34 +113,11 @@ pub(super) fn find_comment_line(
         // identifier (e.g. K2Node_IfThenElse), so find the closest identifiable nodes.
         // UE4 execution flows left-to-right, so prefer nodes to the right (downstream).
         // Two-pass: first try right-side only, fall back to all directions.
-        let dist_limit = MAX_BUBBLE_DISTANCE_SQ;
-        let mut right: Vec<(&NodeInfo, i64)> = nodes
-            .iter()
-            .filter(|n| n.x >= comment.x)
-            .map(|n| {
-                let dx = (n.x - comment.x) as i64;
-                let dy = (n.y - comment.y) as i64;
-                (n, dx * dx + dy * dy)
-            })
-            .filter(|&(_, d)| d < dist_limit)
-            .collect();
-        right.sort_by_key(|&(n, d)| (d, n.y, n.x));
-        right.truncate(5);
+        let right = nearest_nodes(comment, nodes, true);
         if !right.is_empty() {
-            right.into_iter().map(|(n, _)| n).collect()
+            right
         } else {
-            let mut all: Vec<(&NodeInfo, i64)> = nodes
-                .iter()
-                .map(|n| {
-                    let dx = (n.x - comment.x) as i64;
-                    let dy = (n.y - comment.y) as i64;
-                    (n, dx * dx + dy * dy)
-                })
-                .filter(|&(_, d)| d < dist_limit)
-                .collect();
-            all.sort_by_key(|&(n, d)| (d, n.y, n.x));
-            all.truncate(5);
-            all.into_iter().map(|(n, _)| n).collect()
+            nearest_nodes(comment, nodes, false)
         }
     } else {
         nodes

@@ -69,41 +69,14 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
         }
         let comp_name = find_prop_str(props, "InternalVariableName")
             .or_else(|| {
-                find_prop(props, "ComponentTemplate").and_then(|p| match &p.value {
-                    PropValue::Object(idx) => {
-                        let tpl = resolve_index(&asset.imports, &export_names, *idx);
-                        Some(tpl.trim_end_matches("_GEN_VARIABLE").to_string())
-                    }
-                    _ => None,
-                })
+                find_prop_object(props, "ComponentTemplate", &asset.imports, &export_names)
+                    .map(|tpl| tpl.trim_end_matches("_GEN_VARIABLE").to_string())
             })
             .unwrap_or_else(|| hdr.object_name.clone());
-        let comp_class = find_prop(props, "ComponentClass")
-            .and_then(|p| match &p.value {
-                PropValue::Object(idx) => Some(short_class(&resolve_index(
-                    &asset.imports,
-                    &export_names,
-                    *idx,
-                ))),
-                _ => None,
-            })
+        let comp_class = find_prop_object(props, "ComponentClass", &asset.imports, &export_names)
+            .map(|class| short_class(&class))
             .unwrap_or_else(|| "?".into());
-        let children = find_prop(props, "ChildNodes")
-            .and_then(|p| match &p.value {
-                PropValue::Array { items, .. } => Some(
-                    items
-                        .iter()
-                        .filter_map(|i| match i {
-                            PropValue::Object(idx) => {
-                                Some(resolve_index(&asset.imports, &export_names, *idx))
-                            }
-                            _ => None,
-                        })
-                        .collect(),
-                ),
-                _ => None,
-            })
-            .unwrap_or_default();
+        let children = find_prop_object_array(props, "ChildNodes", &asset.imports, &export_names);
         components.push((comp_name.clone(), comp_class.clone()));
         scs_nodes.insert(hdr.object_name.clone(), (comp_name, comp_class, children));
     }
@@ -140,13 +113,19 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
         "CreationMethod",
     ];
 
+    struct SummaryCtx<'a> {
+        imports: &'a [ImportEntry],
+        export_names: &'a [String],
+        comp_props: &'a HashMap<String, &'a [Property]>,
+        cat_exports: &'a HashMap<String, (String, &'a [Property])>,
+    }
+
     fn fmt_prop_list(
         buf: &mut String,
         indent: &str,
         props: &[Property],
         skip: &[&str],
-        imports: &[ImportEntry],
-        export_names: &[String],
+        ctx: &SummaryCtx,
     ) {
         for prop in props {
             if skip.contains(&prop.name.as_str()) {
@@ -159,7 +138,7 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
             {
                 match struct_type.as_str() {
                     "Vector" | "Rotator" => {
-                        let val = prop_value_short(&prop.value, imports, export_names);
+                        let val = prop_value_short(&prop.value, ctx.imports, ctx.export_names);
                         writeln!(buf, "{}{}: {}", indent, prop.name, val).unwrap();
                     }
                     _ => {
@@ -170,7 +149,8 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                                 | PropValue::Array { .. }
                                 | PropValue::Map { .. } => None,
                                 _ => {
-                                    let val = prop_value_short(&f.value, imports, export_names);
+                                    let val =
+                                        prop_value_short(&f.value, ctx.imports, ctx.export_names);
                                     Some(format!("{}: {}", f.name, val))
                                 }
                             })
@@ -183,109 +163,61 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
                 }
                 continue;
             }
-            let val = prop_value_short(&prop.value, imports, export_names);
+            let val = prop_value_short(&prop.value, ctx.imports, ctx.export_names);
             writeln!(buf, "{}{}: {}", indent, prop.name, val).unwrap();
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn fmt_comp_props(
-        buf: &mut String,
-        name: &str,
-        class: &str,
-        depth: usize,
-        comp_props: &HashMap<String, &[Property]>,
-        cat_exports: &HashMap<String, (String, &[Property])>,
-        imports: &[ImportEntry],
-        export_names: &[String],
-    ) {
+    fn fmt_comp_props(buf: &mut String, name: &str, class: &str, depth: usize, ctx: &SummaryCtx) {
         let indent = "  ".repeat(depth + 1);
         let prop_indent = "  ".repeat(depth + 2);
         writeln!(buf, "{}{} ({})", indent, name, class).unwrap();
-        if let Some(props) = comp_props.get(name) {
+        if let Some(props) = ctx.comp_props.get(name) {
             let skip = &[
                 "ChildActorTemplate",
                 COMP_SKIP_PROPS[0],
                 COMP_SKIP_PROPS[1],
                 COMP_SKIP_PROPS[2],
             ];
-            fmt_prop_list(buf, &prop_indent, props, skip, imports, export_names);
+            fmt_prop_list(buf, &prop_indent, props, skip, ctx);
             // Handle ChildActorTemplate
-            let child_actor_tpl = props.iter().find_map(|p| {
-                if p.name == "ChildActorTemplate" {
-                    if let PropValue::Object(idx) = &p.value {
-                        return Some(resolve_index(imports, export_names, *idx));
-                    }
-                }
-                None
-            });
+            let child_actor_tpl =
+                find_prop_object(props, "ChildActorTemplate", ctx.imports, ctx.export_names);
             if let Some(tpl_name) = child_actor_tpl {
-                if let Some((tpl_class, tpl_props)) = cat_exports.get(&tpl_name) {
+                if let Some((tpl_class, tpl_props)) = ctx.cat_exports.get(&tpl_name) {
                     writeln!(buf, "{}[template: {}]", prop_indent, tpl_class).unwrap();
                     let tpl_indent = format!("{}  ", prop_indent);
-                    fmt_prop_list(
-                        buf,
-                        &tpl_indent,
-                        tpl_props,
-                        COMP_SKIP_PROPS,
-                        imports,
-                        export_names,
-                    );
+                    fmt_prop_list(buf, &tpl_indent, tpl_props, COMP_SKIP_PROPS, ctx);
                 }
             }
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn fmt_comp_tree(
         buf: &mut String,
         node_name: &str,
         depth: usize,
         scs_nodes: &HashMap<String, (String, String, Vec<String>)>,
-        comp_props: &HashMap<String, &[Property]>,
-        cat_exports: &HashMap<String, (String, &[Property])>,
-        imports: &[ImportEntry],
-        export_names: &[String],
+        ctx: &SummaryCtx,
     ) {
         if let Some((comp_name, comp_class, children)) = scs_nodes.get(node_name) {
-            fmt_comp_props(
-                buf,
-                comp_name,
-                comp_class,
-                depth,
-                comp_props,
-                cat_exports,
-                imports,
-                export_names,
-            );
+            fmt_comp_props(buf, comp_name, comp_class, depth, ctx);
             for child in children {
-                fmt_comp_tree(
-                    buf,
-                    child,
-                    depth + 1,
-                    scs_nodes,
-                    comp_props,
-                    cat_exports,
-                    imports,
-                    export_names,
-                );
+                fmt_comp_tree(buf, child, depth + 1, scs_nodes, ctx);
             }
         }
     }
 
     if !components.is_empty() {
+        let ctx = SummaryCtx {
+            imports: &asset.imports,
+            export_names: &export_names,
+            comp_props: &comp_props,
+            cat_exports: &cat_exports,
+        };
         writeln!(buf, "Components:").unwrap();
         for root in &root_nodes {
-            fmt_comp_tree(
-                &mut buf,
-                root,
-                0,
-                &scs_nodes,
-                &comp_props,
-                &cat_exports,
-                &asset.imports,
-                &export_names,
-            );
+            fmt_comp_tree(&mut buf, root, 0, &scs_nodes, &ctx);
         }
         writeln!(buf).unwrap();
     }
