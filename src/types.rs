@@ -1,3 +1,5 @@
+//! Core data types shared across the parser.
+
 // -- UE4 file_ver gates --
 pub const VER_UE4_TEMPLATE_INDEX: i32 = 459;
 pub const VER_UE4_PROPERTY_GUID: i32 = 503;

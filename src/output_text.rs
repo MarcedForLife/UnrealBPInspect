@@ -1,8 +1,11 @@
+//! Full dump output mode (`--dump`).
+
 use std::fmt::Write;
 
 use crate::resolve::*;
 use crate::types::*;
 
+/// Format a parsed asset as a verbose text dump. Filters restrict to matching export names.
 pub fn format_text(asset: &ParsedAsset, filters: &[String]) -> String {
     let mut buf = String::new();
     let export_names: Vec<String> = asset

@@ -1,3 +1,5 @@
+//! Self-update from GitHub releases (`--update`).
+
 use anyhow::{bail, Context, Result};
 use std::io::Read;
 use std::path::Path;
@@ -97,7 +99,7 @@ pub fn run_update(target_version: Option<&str>) -> Result<()> {
         .context("Failed to read update data")?;
 
     if bytes.len() < 1000 {
-        bail!("Downloaded file too small — possible error");
+        bail!("Downloaded file too small, possible error");
     }
 
     // Replace current binary

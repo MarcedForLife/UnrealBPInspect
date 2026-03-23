@@ -1,18 +1,23 @@
+//! Flow pattern detection and bytecode reordering.
+//!
+//! Detects Sequence nodes, ForLoop, ForEach, and convergence patterns in flat bytecode,
+//! then reorders so downstream structuring sees natural control flow.
+
 use super::decode::BcStatement;
 
-/// Parse "push_flow 0xHEX" → target offset.
+/// Parse "push_flow 0xHEX" -> target offset.
 pub fn parse_push_flow(text: &str) -> Option<usize> {
     text.strip_prefix("push_flow 0x")
         .and_then(|h| usize::from_str_radix(h, 16).ok())
 }
 
-/// Parse "jump 0xHEX" → target offset.
+/// Parse "jump 0xHEX" -> target offset.
 pub fn parse_jump(text: &str) -> Option<usize> {
     text.strip_prefix("jump 0x")
         .and_then(|h| usize::from_str_radix(h, 16).ok())
 }
 
-/// Parse "if !(COND) jump 0xHEX" → (condition, target offset).
+/// Parse "if !(COND) jump 0xHEX" -> (condition, target offset).
 pub fn parse_if_jump(text: &str) -> Option<(&str, usize)> {
     if !text.starts_with("if !(") {
         return None;
@@ -23,23 +28,20 @@ pub fn parse_if_jump(text: &str) -> Option<(&str, usize)> {
     Some((cond, target))
 }
 
-/// Parse "pop_flow_if_not(COND)" → condition string.
+/// Parse "pop_flow_if_not(COND)" -> condition string.
 pub fn parse_pop_flow_if_not(text: &str) -> Option<&str> {
     let inner = text.strip_prefix("pop_flow_if_not(")?;
     let cond = inner.strip_suffix(')')?;
     Some(cond)
 }
 
-/// Parse "jump_computed(EXPR)" → true if it's a computed jump.
+/// Parse "jump_computed(EXPR)" -> true if it's a computed jump.
 pub fn parse_jump_computed(text: &str) -> bool {
     text.starts_with("jump_computed(")
 }
 
-/// Iteratively expand a Sequence pin's body boundary by following `if/jump`
-/// targets beyond the current end. Used during body detection to grow the
-/// boundary until all reachable displaced blocks (e.g. switch case bodies)
-/// are included. Rescans after each expansion since newly included code
-/// may contain further jumps. Returns the expanded body_end index.
+/// Expand a Sequence pin's body boundary by following if/jump targets beyond the
+/// current end. Rescans after each expansion since new code may contain further jumps.
 fn expand_body_end(
     stmts: &[BcStatement],
     body_start: usize,
@@ -82,11 +84,8 @@ fn expand_body_end(
     be
 }
 
-/// Single-pass enumeration of displaced blocks reachable from the inline
-/// body's if/jump targets. Unlike expand_body_end (which iteratively grows
-/// a boundary), this collects specific block ranges for non-contiguous
-/// emission. Returns `(start_idx, pop_flow_idx)` pairs; use `[start..end)`
-/// to exclude the pop_flow itself.
+/// Enumerate displaced blocks reachable from the inline body's if/jump targets.
+/// Returns `(start_idx, pop_flow_idx)` pairs.
 fn find_displaced_blocks(
     stmts: &[BcStatement],
     body_start: usize,
@@ -117,7 +116,7 @@ fn find_displaced_blocks(
     blocks
 }
 
-/// Reorder bytecode stmts to place sequence/loop bodies in logical execution order.
+/// Reorder bytecode statements to place sequence/loop bodies in logical execution order.
 pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
     if stmts.is_empty() {
         return Vec::new();
@@ -412,17 +411,18 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
 
         // For ForEach loops, the body is displaced AFTER the completion path.
         // Detect by checking if the body_jump_target lands past the control block end.
+        //
+        // Offset tolerance: jump targets use in-memory offsets but we index by on-disk
+        // offsets + cumulative mem_adj. The drift accumulates from FFieldPath (variable
+        // length on disk, 8-byte pointer in memory) and obj-ref (+4 each) differences.
+        const OFFSET_TOLERANCE: usize = 64;
+
         let (body_start, loop_ctrl_end, completion_start, completion_end) = if let Some(pop_idx) =
             pop_idx
         {
-            // Check if the actual body is displaced further (ForEach pattern).
-            // 64-byte tolerance: jump targets use in-memory offsets but we index by on-disk
-            // offsets + cumulative mem_adj. The drift accumulates from FFieldPath (variable
-            // length on disk, 8-byte pointer in memory) and obj-ref (+4 each) differences.
-            // 64 bytes is empirically sufficient for real-world functions.
-            let body_at_jump = stmts
-                .iter()
-                .position(|s| s.mem_offset > 0 && s.mem_offset.abs_diff(body_jump_target) < 64);
+            let body_at_jump = stmts.iter().position(|s| {
+                s.mem_offset > 0 && s.mem_offset.abs_diff(body_jump_target) < OFFSET_TOLERANCE
+            });
             if let Some(actual_body) = body_at_jump {
                 if actual_body > pop_idx + 1 {
                     (
@@ -438,13 +438,15 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
                 (pop_idx + 1, pop_idx, None, None)
             }
         } else {
-            // Find the CLOSEST matching statement, not first-match. First-match fails because
-            // completion path statements can land within the 64-byte tolerance window of the
-            // body target, so we need the nearest offset to avoid picking the wrong statement.
+            // Find the CLOSEST matching statement, not first-match. Completion path statements
+            // can land within the tolerance window of the body target, so we need the nearest
+            // offset to avoid picking the wrong statement.
             let body_idx = stmts
                 .iter()
                 .enumerate()
-                .filter(|(_, s)| s.mem_offset > 0 && s.mem_offset.abs_diff(body_jump_target) < 64)
+                .filter(|(_, s)| {
+                    s.mem_offset > 0 && s.mem_offset.abs_diff(body_jump_target) < OFFSET_TOLERANCE
+                })
                 .min_by_key(|(_, s)| s.mem_offset.abs_diff(body_jump_target))
                 .map(|(idx, _)| idx);
             let Some(body_idx) = body_idx else { continue };
@@ -620,15 +622,9 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
 
 /// Reorder displaced if/else branches caused by convergence inlining.
 ///
-/// The UE4 compiler sometimes inlines shared "convergence" code after one branch,
-/// then uses backward jumps from other branches to reach it. This produces:
-///   [inner-true] [convergence] [outer-false → backward jump] [inner-false → backward jump]
-/// We reorder to:
-///   [inner-true] [synthetic jump] [inner-false] [outer-false] [convergence]
-/// so all jumps become forward and structure_bytecode can detect if/else correctly.
-///
-/// Loops until no more convergence groups are found, handling multiple independent
-/// nested-if patterns in the same function.
+/// The compiler sometimes inlines shared convergence code after one branch, then uses
+/// backward jumps from others. We reorder so all jumps become forward and
+/// structure_bytecode can detect if/else correctly. Loops until no groups remain.
 pub fn reorder_convergence(stmts: &mut Vec<BcStatement>) {
     // Loop because each reorder shifts indices; process one convergence group per iteration.
     loop {
@@ -660,7 +656,7 @@ fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
         }
     }
 
-    // Group by target — need 2+ backward jumps to same target
+    // Group by target; need 2+ backward jumps to same target
     let mut target_groups: HashMap<usize, Vec<usize>> = HashMap::new();
     for &(jump_idx, target_idx) in &backward_jumps {
         target_groups.entry(target_idx).or_default().push(jump_idx);
@@ -687,8 +683,8 @@ fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
 
     // Find convergence code extent: from target_idx to the exit jump that leaves the
     // convergence block. Track if-nesting depth so that jumps inside nested if/else
-    // blocks within the convergence code don't prematurely terminate the scan —
-    // each if-jump increments depth, and its exit jump decrements it. Only a jump at
+    // blocks within the convergence code don't prematurely terminate the scan.
+    // Each if-jump increments depth, and its exit jump decrements it. Only a jump at
     // depth 0 marks the true convergence exit.
     let mut conv_end = conv_target_idx;
     let mut if_depth = 0usize;
@@ -701,7 +697,7 @@ fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
         }
         if let Some(jt) = parse_jump(&stmt.text) {
             if if_depth > 0 {
-                // This jump is an if-block's exit jump — reduces nesting
+                // This jump is an if-block's exit jump, reduces nesting
                 if_depth -= 1;
                 continue;
             }
@@ -766,7 +762,7 @@ fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
             }
         }
         if !found {
-            // Can't match this block to an if-statement — bail out
+            // Can't match this block to an if-statement; bail out
             return false;
         }
     }

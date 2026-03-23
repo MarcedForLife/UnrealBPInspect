@@ -1,3 +1,5 @@
+//! Bytecode reference resolution: object indices and field paths to display names.
+
 use super::names::clean_bc_name;
 use super::readers::*;
 use crate::binary::NameTable;
@@ -35,10 +37,15 @@ pub fn read_bc_obj_ref(
     resolve_bc_obj(index, imports, export_names)
 }
 
+/// Maximum FFieldPath depth. UE's field paths are typically 1-3 levels deep
+/// (e.g. Struct.Member). 16 is generous enough for any real asset while catching
+/// corrupt data that would read garbage FNames.
+const MAX_FIELD_PATH_DEPTH: i32 = 16;
+
 /// Read an FField* reference from serialized bytecode (FFieldPath format for UE4.25+).
 /// Format: int32 PathNum + FName[PathNum] + int32 ResolvedOwner.
 /// On disk this is variable-length (8 + N*8 bytes), but in memory it's a single 8-byte
-/// pointer — so mem_adj tracks the cumulative size difference for code-offset mapping.
+/// pointer, so mem_adj tracks the cumulative size difference for code-offset mapping.
 pub fn read_bc_field_path(bc: &[u8], pos: &mut usize, nt: &NameTable, mem_adj: &mut i32) -> String {
     let path_num = read_bc_i32(bc, pos);
     if path_num <= 0 {
@@ -46,7 +53,7 @@ pub fn read_bc_field_path(bc: &[u8], pos: &mut usize, nt: &NameTable, mem_adj: &
         return "null".to_string();
     }
     let needed = path_num as usize * 8 + 4;
-    if path_num > 16 || *pos + needed > bc.len() {
+    if path_num > MAX_FIELD_PATH_DEPTH || *pos + needed > bc.len() {
         let _owner = read_bc_i32(bc, pos);
         return "???".to_string();
     }
