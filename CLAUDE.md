@@ -120,13 +120,10 @@ Key things to know:
 
 ## Release process
 
-Push a version tag to trigger GitHub Actions:
+Run the Release workflow from GitHub Actions with a version bump type (patch/minor/major):
 
-```bash
-git tag v0.1.0
-git push --tags
-```
+**Actions > Release > Run workflow > select bump type**
 
-Builds binaries for linux-x86_64, macos-x86_64, macos-aarch64, windows-x86_64 with SHA-256 checksums and creates a GitHub release.
+The workflow automatically bumps `Cargo.toml`, commits, tags, builds binaries for linux-x86_64, macos-x86_64, macos-aarch64, windows-x86_64 with SHA-256 checksums, and creates a GitHub release. Run `git pull` locally after the release to pick up the version bump commit.
 
 Install scripts (`install.sh` / `install.ps1`) download from GitHub releases. `cargo install unreal-bp-inspect` works once published to crates.io.
