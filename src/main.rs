@@ -143,87 +143,98 @@ fn main() {
     }
 
     if cli.diff {
-        if files.len() != 2 {
-            eprintln!("--diff requires exactly 2 .uasset files");
+        run_diff(&files, &filters, cli.context);
+    } else if matches!(mode, OutputMode::Json) && files.len() > 1 {
+        run_batch_json(&files, &mode, &filters, cli.debug);
+    } else {
+        run_batch_text(&files, &mode, &filters, cli.debug, files.len() == 1);
+    }
+}
+
+fn run_diff(files: &[PathBuf], filters: &[String], context: usize) {
+    if files.len() != 2 {
+        eprintln!("--diff requires exactly 2 .uasset files");
+        std::process::exit(2);
+    }
+    let before = read_file_or_exit(&files[0]);
+    let after = read_file_or_exit(&files[1]);
+    let label_a = files[0].display().to_string();
+    let label_b = files[1].display().to_string();
+    match format_diff(&before, &after, &label_a, &label_b, filters, context) {
+        Ok((output, has_changes)) => {
+            if has_changes {
+                print!("{}", output);
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("{:#}", e);
             std::process::exit(2);
         }
-        let before = read_file_or_exit(&files[0]);
-        let after = read_file_or_exit(&files[1]);
-        let label_a = files[0].display().to_string();
-        let label_b = files[1].display().to_string();
-        match format_diff(&before, &after, &label_a, &label_b, &filters, cli.context) {
-            Ok((output, has_changes)) => {
-                if has_changes {
-                    print!("{}", output);
-                    std::process::exit(1);
-                }
+    }
+}
+
+fn run_batch_json(files: &[PathBuf], mode: &OutputMode, filters: &[String], debug: bool) {
+    let mut results = Vec::new();
+    let mut failures = 0;
+    for path in files {
+        match process_file(path, mode, filters, debug) {
+            Ok(json_str) => {
+                let mut val: serde_json::Value =
+                    serde_json::from_str(&json_str).expect("internal JSON error");
+                val["file"] = serde_json::json!(path.display().to_string());
+                results.push(val);
             }
             Err(e) => {
-                eprintln!("{:#}", e);
-                std::process::exit(2);
+                eprintln!("Warning: {:#}", e);
+                failures += 1;
             }
         }
-        return;
     }
+    if results.is_empty() {
+        std::process::exit(1);
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&results).expect("internal JSON error")
+    );
+    if failures > 0 {
+        eprintln!("{} of {} files failed", failures, failures + results.len());
+    }
+}
 
-    let single = files.len() == 1;
-
-    if matches!(mode, OutputMode::Json) && !single {
-        // Multi-file JSON: collect into array
-        let mut results = Vec::new();
-        let mut failures = 0;
-        for path in &files {
-            match process_file(path, &mode, &filters, cli.debug) {
-                Ok(json_str) => {
-                    let mut val: serde_json::Value =
-                        serde_json::from_str(&json_str).expect("internal JSON error");
-                    val["file"] = serde_json::json!(path.display().to_string());
-                    results.push(val);
+fn run_batch_text(
+    files: &[PathBuf],
+    mode: &OutputMode,
+    filters: &[String],
+    debug: bool,
+    single: bool,
+) {
+    let mut successes = 0;
+    let mut failures = 0;
+    for path in files {
+        match process_file(path, mode, filters, debug) {
+            Ok(output) => {
+                if !single {
+                    println!("=== {} ===\n", path.display());
                 }
-                Err(e) => {
-                    eprintln!("Warning: {:#}", e);
-                    failures += 1;
+                print!("{}", output);
+                successes += 1;
+            }
+            Err(e) => {
+                if single {
+                    eprintln!("{:#}", e);
+                    std::process::exit(1);
                 }
+                eprintln!("Warning: {:#}", e);
+                failures += 1;
             }
         }
-        if results.is_empty() {
-            std::process::exit(1);
-        }
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&results).expect("internal JSON error")
-        );
-        if failures > 0 {
-            eprintln!("{} of {} files failed", failures, failures + results.len());
-        }
-    } else {
-        // Single file or multi-file text modes
-        let mut successes = 0;
-        let mut failures = 0;
-        for path in &files {
-            match process_file(path, &mode, &filters, cli.debug) {
-                Ok(output) => {
-                    if !single {
-                        println!("=== {} ===\n", path.display());
-                    }
-                    print!("{}", output);
-                    successes += 1;
-                }
-                Err(e) => {
-                    if single {
-                        eprintln!("{:#}", e);
-                        std::process::exit(1);
-                    }
-                    eprintln!("Warning: {:#}", e);
-                    failures += 1;
-                }
-            }
-        }
-        if successes == 0 {
-            std::process::exit(1);
-        }
-        if failures > 0 {
-            eprintln!("{} of {} files failed", failures, failures + successes);
-        }
+    }
+    if successes == 0 {
+        std::process::exit(1);
+    }
+    if failures > 0 {
+        eprintln!("{} of {} files failed", failures, failures + successes);
     }
 }

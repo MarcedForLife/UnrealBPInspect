@@ -86,6 +86,19 @@ pub fn read_bc_xyzw(bytecode: &[u8], pos: &mut usize, lwc: bool) -> (f64, f64, f
     }
 }
 
+/// Read an FName and apply the mem_adj correction.
+/// FNames are 8 bytes on disk but 12 in memory (WITH_CASE_PRESERVING_NAME adds DisplayIndex).
+pub fn read_bc_fname_with_adj(
+    bytecode: &[u8],
+    pos: &mut usize,
+    name_table: &NameTable,
+    mem_adj: &mut i32,
+) -> String {
+    let name = read_bc_fname(bytecode, pos, name_table);
+    *mem_adj += 4;
+    name
+}
+
 pub fn read_bc_string(bytecode: &[u8], pos: &mut usize) -> String {
     let mut s = Vec::new();
     while *pos < bytecode.len() {
