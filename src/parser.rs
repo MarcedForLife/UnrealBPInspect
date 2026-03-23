@@ -252,7 +252,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
 
             let is_function = kind == ExportKind::Function;
             let props = read_properties(&mut reader, &name_table, end, ver);
-            let after_props = reader.position();
+            let props_end_pos = reader.position();
 
             let mut extra_props = props;
 
@@ -261,7 +261,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
                 &mut reader,
                 &pctx,
                 &mut extra_props,
-                after_props,
+                props_end_pos,
                 end,
                 &hdr.object_name,
             )?;
@@ -353,12 +353,11 @@ fn parse_ustruct_header(
     reader: &mut Reader,
     pctx: &ParseCtx,
     props: &mut Vec<Property>,
-    after_props: u64,
+    props_end_pos: u64,
     end: u64,
     name: &str,
 ) -> Result<()> {
-    let (imports, export_names, debug) = (pctx.imports, pctx.export_names, pctx.debug);
-    if after_props + 12 > end {
+    if props_end_pos + 12 > end {
         return Ok(());
     }
     let next = read_i32(reader)?;
@@ -367,11 +366,11 @@ fn parse_ustruct_header(
     if children_count > 0 && children_count < MAX_REASONABLE_COUNT {
         reader.seek(SeekFrom::Current(children_count as i64 * 4))?;
     }
-    if debug {
+    if pctx.debug {
         eprintln!(
             "  {} UStruct: after_props={} next={} super={} children={} pos={}",
             name,
-            after_props,
+            props_end_pos,
             next,
             super_ref,
             children_count,
@@ -379,7 +378,7 @@ fn parse_ustruct_header(
         );
     }
     if super_ref != 0 {
-        let super_name = resolve_index(imports, export_names, super_ref);
+        let super_name = resolve_index(pctx.imports, pctx.export_names, super_ref);
         props.push(Property {
             name: "Super".into(),
             value: PropValue::Name(short_class(&super_name)),
@@ -393,22 +392,26 @@ fn read_one_ffield_child(
     pctx: &ParseCtx,
     end: u64,
 ) -> Result<(String, String, u64)> {
-    let (name_table, imports, export_names, debug) =
-        (pctx.name_table, pctx.imports, pctx.export_names, pctx.debug);
-    let field_class = name_table.fname(reader)?;
-    let field_name = name_table.fname(reader)?;
+    let field_class = pctx.name_table.fname(reader)?;
+    let field_name = pctx.name_table.fname(reader)?;
     let _flags = read_u32(reader)?;
-    name_table.skip_metadata(reader)?;
+    pctx.name_table.skip_metadata(reader)?;
     let _array_dim = read_i32(reader)?;
     let _elem_size = read_i32(reader)?;
     let prop_flags = read_i64(reader)? as u64;
     let mut rep_bytes = [0u8; 2];
     reader.read_exact(&mut rep_bytes)?;
-    let _rep_notify_func = name_table.fname(reader)?;
+    let _rep_notify_func = pctx.name_table.fname(reader)?;
     let _bp_rep_condition = read_u8(reader)?;
-    let type_name =
-        resolve_ffield_type(&field_class, reader, name_table, imports, export_names, end)?;
-    if debug {
+    let type_name = resolve_ffield_type(
+        &field_class,
+        reader,
+        pctx.name_table,
+        pctx.imports,
+        pctx.export_names,
+        end,
+    )?;
+    if pctx.debug {
         eprintln!(
             "    param: {} {} flags=0x{:x} @ {}",
             field_class,
@@ -462,26 +465,14 @@ fn parse_and_structure_bytecode(
     end: u64,
     name: &str,
 ) -> Result<()> {
-    let (name_table, imports, export_names, debug) =
-        (pctx.name_table, pctx.imports, pctx.export_names, pctx.debug);
     if reader.position() + 8 > end {
         return Ok(());
     }
-    if debug {
-        let spos = reader.position();
-        let peek_len = std::cmp::min(16, (end - spos) as usize);
-        let mut peek = vec![0u8; peek_len];
-        reader.read_exact(&mut peek)?;
-        reader.seek(SeekFrom::Start(spos))?;
-        let hex: Vec<String> = peek.iter().map(|b| format!("{:02x}", b)).collect();
-        eprintln!(
-            "  {} script @ {} (end={}) raw: {}",
-            name,
-            spos,
-            end,
-            hex.join(" ")
-        );
+    if pctx.debug {
+        debug_peek_script(reader, name, end)?;
     }
+
+    // Read raw bytecode from the export data
     let bytecode_size = read_i32(reader)?;
     let storage_size = read_i32(reader)?;
     if storage_size <= 0 || (reader.position() + storage_size as u64) > end {
@@ -489,27 +480,19 @@ fn parse_and_structure_bytecode(
     }
     let mut bytecode_data = vec![0u8; storage_size as usize];
     reader.read_exact(&mut bytecode_data)?;
-    if debug {
-        eprintln!(
-            "  {} bytecode: {}B mem, {}B disk",
-            name, bytecode_size, storage_size
-        );
-        let show = std::cmp::min(bytecode_data.len(), 64);
-        let hex: Vec<String> = bytecode_data[..show]
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect();
-        eprintln!("    hex: {}", hex.join(" "));
+    if pctx.debug {
+        debug_bytecode_hex(&bytecode_data, name, bytecode_size, storage_size);
     }
 
+    // Decode opcodes into flat statement list
     let (stmts, final_mem_adj) = decode_bytecode(
         &bytecode_data,
-        name_table,
-        imports,
-        export_names,
+        pctx.name_table,
+        pctx.imports,
+        pctx.export_names,
         ver.file_ver_ue5,
     );
-    if debug {
+    if pctx.debug {
         let expected = bytecode_size - storage_size;
         let drift = final_mem_adj - expected;
         eprintln!(
@@ -521,6 +504,7 @@ fn parse_and_structure_bytecode(
         return Ok(());
     }
 
+    // Store raw decoded bytecode
     props.push(Property {
         name: "Bytecode".into(),
         value: PropValue::Array {
@@ -532,15 +516,8 @@ fn parse_and_structure_bytecode(
         },
     });
 
-    let mut reordered = reorder_flow_patterns(&stmts);
-    reorder_convergence(&mut reordered);
-    inline_constant_temps(&mut reordered);
-    inline_single_use_temps(&mut reordered);
-    discard_unused_assignments(&mut reordered);
-    let mut structured = structure_bytecode(&reordered, &HashMap::new());
-    cleanup_structured_output(&mut structured);
-    fold_summary_patterns(&mut structured);
-    strip_orphaned_blocks(&mut structured);
+    // Run the structuring pipeline: reorder, inline, structure, cleanup
+    let structured = structure_statements(&stmts);
     if !structured.is_empty() {
         props.push(Property {
             name: "BytecodeSummary".into(),
@@ -551,4 +528,49 @@ fn parse_and_structure_bytecode(
         });
     }
     Ok(())
+}
+
+/// Run the full statement structuring pipeline: flow reordering, temp inlining,
+/// if/else reconstruction, expression cleanup, and pattern folding.
+fn structure_statements(stmts: &[crate::bytecode::BcStatement]) -> Vec<String> {
+    let mut reordered = reorder_flow_patterns(stmts);
+    reorder_convergence(&mut reordered);
+    inline_constant_temps(&mut reordered);
+    inline_single_use_temps(&mut reordered);
+    discard_unused_assignments(&mut reordered);
+    let mut structured = structure_bytecode(&reordered, &HashMap::new());
+    cleanup_structured_output(&mut structured);
+    fold_summary_patterns(&mut structured);
+    strip_orphaned_blocks(&mut structured);
+    structured
+}
+
+fn debug_peek_script(reader: &mut Reader, name: &str, end: u64) -> Result<()> {
+    let spos = reader.position();
+    let peek_len = std::cmp::min(16, (end - spos) as usize);
+    let mut peek = vec![0u8; peek_len];
+    reader.read_exact(&mut peek)?;
+    reader.seek(SeekFrom::Start(spos))?;
+    let hex: Vec<String> = peek.iter().map(|b| format!("{:02x}", b)).collect();
+    eprintln!(
+        "  {} script @ {} (end={}) raw: {}",
+        name,
+        spos,
+        end,
+        hex.join(" ")
+    );
+    Ok(())
+}
+
+fn debug_bytecode_hex(bytecode_data: &[u8], name: &str, bytecode_size: i32, storage_size: i32) {
+    eprintln!(
+        "  {} bytecode: {}B mem, {}B disk",
+        name, bytecode_size, storage_size
+    );
+    let show = std::cmp::min(bytecode_data.len(), 64);
+    let hex: Vec<String> = bytecode_data[..show]
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    eprintln!("    hex: {}", hex.join(" "));
 }
