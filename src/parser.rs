@@ -43,7 +43,7 @@ enum ExportKind {
 
 /// Shared immutable context for export-data parsing helpers.
 struct ParseCtx<'a> {
-    nt: &'a NameTable,
+    name_table: &'a NameTable,
     imports: &'a [ImportEntry],
     export_names: &'a [String],
     debug: bool,
@@ -67,22 +67,22 @@ fn classify_export(class_name: &str) -> ExportKind {
 /// and produce empty property lists.
 pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
     let file_size = data.len();
-    let mut r = std::io::Cursor::new(data);
+    let mut reader = std::io::Cursor::new(data);
 
     // --- Package file summary ---
-    let magic = read_u32(&mut r).context("truncated file: cannot read magic")?;
+    let magic = read_u32(&mut reader).context("truncated file: cannot read magic")?;
     ensure!(
         magic == PACKAGE_FILE_TAG,
         "not a valid .uasset file (magic: {:#X})",
         magic
     );
-    let legacy_ver = read_i32(&mut r)?;
+    let legacy_ver = read_i32(&mut reader)?;
     if legacy_ver < LEGACY_VER_UE3_COMPAT && legacy_ver != -4 {
-        let _ue3_ver = read_i32(&mut r)?;
+        let _ue3_ver = read_i32(&mut reader)?;
     }
-    let file_ver = read_i32(&mut r)?;
+    let file_ver = read_i32(&mut reader)?;
     let file_ver_ue5: i32 = if legacy_ver <= LEGACY_VER_UE5_START {
-        read_i32(&mut r)?
+        read_i32(&mut reader)?
     } else {
         0
     };
@@ -90,34 +90,34 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
         file_ver,
         file_ver_ue5,
     };
-    let _licensee_ver = read_i32(&mut r)?;
+    let _licensee_ver = read_i32(&mut reader)?;
     // Custom versions: each entry is 16-byte GUID + int32 version = 20 bytes
-    let custom_ver_count = read_i32(&mut r)?;
-    r.seek(SeekFrom::Current(custom_ver_count as i64 * 20))?;
-    let _total_header_size = read_i32(&mut r)?;
-    let _folder_name = read_fstring(&mut r)?;
-    let _pkg_flags = read_u32(&mut r)?;
-    let name_count = read_i32(&mut r)?;
-    let name_offset = read_i32(&mut r)?;
+    let custom_ver_count = read_i32(&mut reader)?;
+    reader.seek(SeekFrom::Current(custom_ver_count as i64 * 20))?;
+    let _total_header_size = read_i32(&mut reader)?;
+    let _folder_name = read_fstring(&mut reader)?;
+    let _pkg_flags = read_u32(&mut reader)?;
+    let name_count = read_i32(&mut reader)?;
+    let name_offset = read_i32(&mut reader)?;
     if file_ver_ue5 >= VER_UE5_SOFT_OBJECT_PATH_LIST {
-        let _soft_count = read_i32(&mut r)?;
-        let _soft_offset = read_i32(&mut r)?;
+        let _soft_count = read_i32(&mut reader)?;
+        let _soft_offset = read_i32(&mut reader)?;
     }
     if file_ver >= VER_UE4_LOCALIZATION_ID {
-        let _loc_id = read_fstring(&mut r)?;
+        let _loc_id = read_fstring(&mut reader)?;
     }
     if file_ver >= VER_UE4_TEMPLATE_INDEX {
-        let _gc = read_i32(&mut r)?;
-        let _go = read_i32(&mut r)?;
+        let _gc = read_i32(&mut reader)?;
+        let _go = read_i32(&mut reader)?;
     }
-    let export_count = read_i32(&mut r)?;
-    let export_offset = read_i32(&mut r)?;
-    let import_count = read_i32(&mut r)?;
-    let import_offset = read_i32(&mut r)?;
+    let export_count = read_i32(&mut reader)?;
+    let export_offset = read_i32(&mut reader)?;
+    let import_count = read_i32(&mut reader)?;
+    let import_offset = read_i32(&mut reader)?;
 
     // --- Name table ---
-    let nt =
-        NameTable::read(&mut r, name_count, name_offset).context("failed to read name table")?;
+    let name_table = NameTable::read(&mut reader, name_count, name_offset)
+        .context("failed to read name table")?;
 
     if debug {
         eprintln!(
@@ -127,18 +127,18 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
     }
 
     // --- Import table ---
-    r.seek(SeekFrom::Start(import_offset as u64))?;
+    reader.seek(SeekFrom::Start(import_offset as u64))?;
     let mut imports = Vec::with_capacity(import_count as usize);
     for _ in 0..import_count {
-        let class_package = nt.fname(&mut r)?;
-        let class_name = nt.fname(&mut r)?;
-        let outer_index = read_i32(&mut r)?;
-        let object_name = nt.fname(&mut r)?;
+        let class_package = name_table.fname(&mut reader)?;
+        let class_name = name_table.fname(&mut reader)?;
+        let outer_index = read_i32(&mut reader)?;
+        let object_name = name_table.fname(&mut reader)?;
         if file_ver >= VER_UE4_PACKAGE_NAME_IN_IMPORT {
-            let _package_name = nt.fname(&mut r)?;
+            let _package_name = name_table.fname(&mut reader)?;
         }
         if file_ver_ue5 >= VER_UE5_OPTIONAL_RESOURCES {
-            let _import_optional = read_i32(&mut r)?;
+            let _import_optional = read_i32(&mut reader)?;
         }
         if debug {
             eprintln!(
@@ -159,48 +159,48 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
     }
 
     // --- Export table ---
-    r.seek(SeekFrom::Start(export_offset as u64))?;
+    reader.seek(SeekFrom::Start(export_offset as u64))?;
     let mut export_headers = Vec::with_capacity(export_count as usize);
     for _ in 0..export_count {
-        let class_index = read_i32(&mut r)?;
-        let super_index = read_i32(&mut r)?;
+        let class_index = read_i32(&mut reader)?;
+        let super_index = read_i32(&mut reader)?;
         if file_ver >= VER_UE4_TEMPLATE_INDEX {
-            let _template = read_i32(&mut r)?;
+            let _template = read_i32(&mut reader)?;
         }
-        let outer_index = read_i32(&mut r)?;
-        let object_name = nt.fname(&mut r)?;
-        let _object_flags = read_u32(&mut r)?;
-        let serial_size = read_i64(&mut r)?;
-        let serial_offset = read_i64(&mut r)?;
-        let _forced = read_i32(&mut r)?;
-        let _not_client = read_i32(&mut r)?;
-        let _not_server = read_i32(&mut r)?;
+        let outer_index = read_i32(&mut reader)?;
+        let object_name = name_table.fname(&mut reader)?;
+        let _object_flags = read_u32(&mut reader)?;
+        let serial_size = read_i64(&mut reader)?;
+        let serial_offset = read_i64(&mut reader)?;
+        let _forced = read_i32(&mut reader)?;
+        let _not_client = read_i32(&mut reader)?;
+        let _not_server = read_i32(&mut reader)?;
         if file_ver_ue5 < VER_UE5_REMOVE_EXPORT_GUID {
-            let _guid = read_guid(&mut r)?;
+            let _guid = read_guid(&mut reader)?;
         }
         if file_ver_ue5 >= VER_UE5_TRACK_INHERITED {
-            let _is_inherited = read_i32(&mut r)?;
+            let _is_inherited = read_i32(&mut reader)?;
         }
-        let _pkg_flags = read_u32(&mut r)?;
+        let _pkg_flags = read_u32(&mut reader)?;
         if file_ver >= VER_UE4_TEMPLATE_INDEX {
-            let _not_always = read_i32(&mut r)?;
+            let _not_always = read_i32(&mut reader)?;
         }
         if file_ver >= VER_UE4_TEMPLATE_INDEX {
-            let _is_asset = read_i32(&mut r)?;
+            let _is_asset = read_i32(&mut reader)?;
         }
         if file_ver_ue5 >= VER_UE5_OPTIONAL_RESOURCES {
-            let _gen_public_hash = read_i32(&mut r)?;
+            let _gen_public_hash = read_i32(&mut reader)?;
         }
         if file_ver >= VER_UE4_PACKAGE_NAME_IN_IMPORT {
-            let _first_dep = read_i32(&mut r)?;
-            let _s_before_s = read_i32(&mut r)?;
-            let _c_before_s = read_i32(&mut r)?;
-            let _s_before_c = read_i32(&mut r)?;
-            let _c_before_c = read_i32(&mut r)?;
+            let _first_dep = read_i32(&mut reader)?;
+            let _s_before_s = read_i32(&mut reader)?;
+            let _c_before_s = read_i32(&mut reader)?;
+            let _s_before_c = read_i32(&mut reader)?;
+            let _c_before_c = read_i32(&mut reader)?;
         }
         if file_ver_ue5 >= VER_UE5_SCRIPT_SERIALIZATION_OFFSET {
-            let _script_start = read_i64(&mut r)?;
-            let _script_end = read_i64(&mut r)?;
+            let _script_start = read_i64(&mut reader)?;
+            let _script_end = read_i64(&mut reader)?;
         }
         export_headers.push(ExportHeader {
             class_index,
@@ -218,7 +218,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
         .map(|h| h.object_name.clone())
         .collect();
     let pctx = ParseCtx {
-        nt: &nt,
+        name_table: &name_table,
         imports: &imports,
         export_names: &export_names_pre,
         debug,
@@ -234,7 +234,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
         }
 
         let export_result: Result<Vec<Property>> = (|| {
-            r.seek(SeekFrom::Start(hdr.serial_offset as u64))?;
+            reader.seek(SeekFrom::Start(hdr.serial_offset as u64))?;
             let end = hdr.serial_offset as u64 + hdr.serial_size as u64;
             let class_name = resolve_index(&imports, &export_names_pre, hdr.class_index);
             let kind = classify_export(&class_name);
@@ -243,22 +243,22 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
             // UE source gates this on bIsUClass in SerializeVersionedTaggedProperties,
             // but uncooked assets emit it for all exports (verified empirically).
             if ver.has_complete_type_name() {
-                skip_serialization_extension(&mut r, &nt)?;
+                skip_serialization_extension(&mut reader, &name_table)?;
             }
 
             if kind == ExportKind::Other {
-                return Ok(read_properties(&mut r, &nt, end, ver));
+                return Ok(read_properties(&mut reader, &name_table, end, ver));
             }
 
             let is_function = kind == ExportKind::Function;
-            let props = read_properties(&mut r, &nt, end, ver);
-            let after_props = r.position();
+            let props = read_properties(&mut reader, &name_table, end, ver);
+            let after_props = reader.position();
 
             let mut extra_props = props;
 
             // UStruct header: Next, Super, Children
             parse_ustruct_header(
-                &mut r,
+                &mut reader,
                 &pctx,
                 &mut extra_props,
                 after_props,
@@ -267,7 +267,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
             )?;
 
             // FField children (parameters / member variables)
-            let ffield_children = parse_ffield_children(&mut r, &pctx, end, &hdr.object_name)?;
+            let ffield_children = parse_ffield_children(&mut reader, &pctx, end, &hdr.object_name)?;
             if is_function && !ffield_children.is_empty() {
                 extra_props.push(Property {
                     name: "Signature".into(),
@@ -289,7 +289,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
 
             // Script bytecode
             parse_and_structure_bytecode(
-                &mut r,
+                &mut reader,
                 &pctx,
                 &mut extra_props,
                 ver,
@@ -298,16 +298,16 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
             )?;
 
             // Function flags (after bytecode, only for Function exports)
-            if is_function && r.position() + 4 <= end {
-                let func_flags = read_u32(&mut r)?;
+            if is_function && reader.position() + 4 <= end {
+                let func_flags = read_u32(&mut reader)?;
                 if func_flags != 0 {
                     extra_props.push(Property {
                         name: "FunctionFlags".into(),
                         value: PropValue::Str(format_func_flags(func_flags)),
                     });
                 }
-                if func_flags & FUNC_NET != 0 && r.position() + 4 <= end {
-                    let _rep_offset = read_i32(&mut r)?;
+                if func_flags & FUNC_NET != 0 && reader.position() + 4 <= end {
+                    let _rep_offset = read_i32(&mut reader)?;
                 }
             }
 
@@ -332,25 +332,25 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
 // Extracted helpers for export data parsing
 // ---------------------------------------------------------------------------
 
-fn skip_serialization_extension(r: &mut Reader, nt: &NameTable) -> Result<()> {
-    let ext = read_u8(r)?;
+fn skip_serialization_extension(reader: &mut Reader, name_table: &NameTable) -> Result<()> {
+    let ext = read_u8(reader)?;
     if ext != 0 {
-        let count = read_i32(r)?;
+        let count = read_i32(reader)?;
         anyhow::ensure!(
             (0..MAX_REASONABLE_COUNT).contains(&count),
             "invalid extension count {count}"
         );
         for _ in 0..count {
-            nt.fname(r)?;
-            nt.fname(r)?;
-            read_guid(r)?;
+            name_table.fname(reader)?;
+            name_table.fname(reader)?;
+            read_guid(reader)?;
         }
     }
     Ok(())
 }
 
 fn parse_ustruct_header(
-    r: &mut Reader,
+    reader: &mut Reader,
     pctx: &ParseCtx,
     props: &mut Vec<Property>,
     after_props: u64,
@@ -361,11 +361,11 @@ fn parse_ustruct_header(
     if after_props + 12 > end {
         return Ok(());
     }
-    let next = read_i32(r)?;
-    let super_ref = read_i32(r)?;
-    let children_count = read_i32(r)?;
+    let next = read_i32(reader)?;
+    let super_ref = read_i32(reader)?;
+    let children_count = read_i32(reader)?;
     if children_count > 0 && children_count < MAX_REASONABLE_COUNT {
-        r.seek(SeekFrom::Current(children_count as i64 * 4))?;
+        reader.seek(SeekFrom::Current(children_count as i64 * 4))?;
     }
     if debug {
         eprintln!(
@@ -375,7 +375,7 @@ fn parse_ustruct_header(
             next,
             super_ref,
             children_count,
-            r.position()
+            reader.position()
         );
     }
     if super_ref != 0 {
@@ -389,45 +389,47 @@ fn parse_ustruct_header(
 }
 
 fn parse_ffield_children(
-    r: &mut Reader,
+    reader: &mut Reader,
     pctx: &ParseCtx,
     end: u64,
     name: &str,
 ) -> Result<Vec<(String, String, u64)>> {
-    let (nt, imports, export_names, debug) = (pctx.nt, pctx.imports, pctx.export_names, pctx.debug);
+    let (name_table, imports, export_names, debug) =
+        (pctx.name_table, pctx.imports, pctx.export_names, pctx.debug);
     let mut children = Vec::new();
-    if r.position() + 4 > end {
+    if reader.position() + 4 > end {
         return Ok(children);
     }
-    let child_prop_count = read_i32(r)?;
+    let child_prop_count = read_i32(reader)?;
     if debug && child_prop_count > 0 {
         eprintln!("  {} child properties: {}", name, child_prop_count);
     }
     let mut ci = 0;
     loop {
-        if r.position() + 16 > end {
+        if reader.position() + 16 > end {
             break;
         }
         if ci >= child_prop_count {
-            if !nt.peek_is_ffield_class(r)? {
+            if !name_table.peek_is_ffield_class(reader)? {
                 break;
             }
             if debug {
-                eprintln!("  {} extra child property at {}", name, r.position());
+                eprintln!("  {} extra child property at {}", name, reader.position());
             }
         }
-        let field_class = nt.fname(r)?;
-        let field_name = nt.fname(r)?;
-        let _flags = read_u32(r)?;
-        nt.skip_metadata(r)?;
-        let _array_dim = read_i32(r)?;
-        let _elem_size = read_i32(r)?;
-        let prop_flags = read_i64(r)? as u64;
+        let field_class = name_table.fname(reader)?;
+        let field_name = name_table.fname(reader)?;
+        let _flags = read_u32(reader)?;
+        name_table.skip_metadata(reader)?;
+        let _array_dim = read_i32(reader)?;
+        let _elem_size = read_i32(reader)?;
+        let prop_flags = read_i64(reader)? as u64;
         let mut rep_bytes = [0u8; 2];
-        r.read_exact(&mut rep_bytes)?;
-        let _rep_notify_func = nt.fname(r)?;
-        let _bp_rep_condition = read_u8(r)?;
-        let type_name = resolve_ffield_type(&field_class, r, nt, imports, export_names, end)?;
+        reader.read_exact(&mut rep_bytes)?;
+        let _rep_notify_func = name_table.fname(reader)?;
+        let _bp_rep_condition = read_u8(reader)?;
+        let type_name =
+            resolve_ffield_type(&field_class, reader, name_table, imports, export_names, end)?;
         children.push((field_name.clone(), type_name, prop_flags));
         if debug {
             eprintln!(
@@ -435,7 +437,7 @@ fn parse_ffield_children(
                 field_class,
                 field_name,
                 prop_flags,
-                r.position()
+                reader.position()
             );
         }
         ci += 1;
@@ -444,23 +446,24 @@ fn parse_ffield_children(
 }
 
 fn parse_and_structure_bytecode(
-    r: &mut Reader,
+    reader: &mut Reader,
     pctx: &ParseCtx,
     props: &mut Vec<Property>,
     ver: AssetVersion,
     end: u64,
     name: &str,
 ) -> Result<()> {
-    let (nt, imports, export_names, debug) = (pctx.nt, pctx.imports, pctx.export_names, pctx.debug);
-    if r.position() + 8 > end {
+    let (name_table, imports, export_names, debug) =
+        (pctx.name_table, pctx.imports, pctx.export_names, pctx.debug);
+    if reader.position() + 8 > end {
         return Ok(());
     }
     if debug {
-        let spos = r.position();
+        let spos = reader.position();
         let peek_len = std::cmp::min(16, (end - spos) as usize);
         let mut peek = vec![0u8; peek_len];
-        r.read_exact(&mut peek)?;
-        r.seek(SeekFrom::Start(spos))?;
+        reader.read_exact(&mut peek)?;
+        reader.seek(SeekFrom::Start(spos))?;
         let hex: Vec<String> = peek.iter().map(|b| format!("{:02x}", b)).collect();
         eprintln!(
             "  {} script @ {} (end={}) raw: {}",
@@ -470,13 +473,13 @@ fn parse_and_structure_bytecode(
             hex.join(" ")
         );
     }
-    let bytecode_size = read_i32(r)?;
-    let storage_size = read_i32(r)?;
-    if storage_size <= 0 || (r.position() + storage_size as u64) > end {
+    let bytecode_size = read_i32(reader)?;
+    let storage_size = read_i32(reader)?;
+    if storage_size <= 0 || (reader.position() + storage_size as u64) > end {
         return Ok(());
     }
     let mut bytecode_data = vec![0u8; storage_size as usize];
-    r.read_exact(&mut bytecode_data)?;
+    reader.read_exact(&mut bytecode_data)?;
     if debug {
         eprintln!(
             "  {} bytecode: {}B mem, {}B disk",
@@ -490,8 +493,13 @@ fn parse_and_structure_bytecode(
         eprintln!("    hex: {}", hex.join(" "));
     }
 
-    let (stmts, final_mem_adj) =
-        decode_bytecode(&bytecode_data, nt, imports, export_names, ver.file_ver_ue5);
+    let (stmts, final_mem_adj) = decode_bytecode(
+        &bytecode_data,
+        name_table,
+        imports,
+        export_names,
+        ver.file_ver_ue5,
+    );
     if debug {
         let expected = bytecode_size - storage_size;
         let drift = final_mem_adj - expected;

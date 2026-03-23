@@ -135,11 +135,11 @@ fn prop_to_json(prop: &Property, imports: &[ImportEntry], export_names: &[String
             "key_type": key_type,
             "value_type": value_type,
             "entries": entries.iter().map(|(k, v)| {
-                let kp = Property { name: String::new(), value: k.clone() };
-                let vp = Property { name: String::new(), value: v.clone() };
+                let key_prop = Property { name: String::new(), value: k.clone() };
+                let val_prop = Property { name: String::new(), value: v.clone() };
                 json!({
-                    "key": prop_to_json(&kp, imports, export_names)["value"],
-                    "value": prop_to_json(&vp, imports, export_names)["value"],
+                    "key": prop_to_json(&key_prop, imports, export_names)["value"],
+                    "value": prop_to_json(&val_prop, imports, export_names)["value"],
                 })
             }).collect::<Vec<_>>(),
         }),

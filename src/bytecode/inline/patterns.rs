@@ -128,11 +128,11 @@ fn rewrite_foreach_loops(lines: &mut Vec<String>) {
             let mut depth = 0i32;
             let mut new_close = for_idx;
             for (j, line) in lines.iter().enumerate().skip(for_idx) {
-                let t = line.trim();
-                if t.ends_with('{') {
+                let trimmed = line.trim();
+                if trimmed.ends_with('{') {
                     depth += 1;
                 }
-                if t == "}" {
+                if trimmed == "}" {
                     depth -= 1;
                     if depth == 0 {
                         new_close = j;
@@ -144,8 +144,8 @@ fn rewrite_foreach_loops(lines: &mut Vec<String>) {
             let redundant_get = format!("{} = {}[{}]", item, array, index_var);
             let mut j = for_idx + 1;
             while j < new_close {
-                let t = lines[j].trim();
-                if t == redundant_get {
+                let trimmed = lines[j].trim();
+                if trimmed == redundant_get {
                     lines.remove(j);
                     new_close -= 1;
                     continue; // don't advance j
@@ -185,19 +185,19 @@ fn find_foreach_init(
     let mut index_var = None;
 
     for j in (start..while_idx).rev() {
-        let t = lines[j].trim();
-        if t.is_empty() {
+        let trimmed = lines[j].trim();
+        if trimmed.is_empty() {
             continue;
         }
-        let li = lines[j].len() - t.len();
-        if li != indent_len {
+        let line_indent = lines[j].len() - trimmed.len();
+        if line_indent != indent_len {
             break;
         }
 
-        if t == format!("{} = 0", counter) {
+        if trimmed == format!("{} = 0", counter) {
             counter_idx = Some(j);
-        } else if t.ends_with(" = 0") && t.starts_with("Temp_int_") {
-            let var = &t[..t.len() - 4]; // strip " = 0"
+        } else if trimmed.ends_with(" = 0") && trimmed.starts_with("Temp_int_") {
+            let var = &trimmed[..trimmed.len() - 4]; // strip " = 0"
             index_var = Some(var.to_string());
             index_idx = Some(j);
         }
@@ -219,16 +219,16 @@ fn validate_body_start(
     let mut body_lines = Vec::new();
     let mut j = start;
     while j < lines.len() && body_lines.len() < 2 {
-        let t = lines[j].trim();
-        if t.is_empty() {
+        let trimmed = lines[j].trim();
+        if trimmed.is_empty() {
             j += 1;
             continue;
         }
-        let li = lines[j].len() - t.len();
-        if li < body_indent {
+        let line_indent = lines[j].len() - trimmed.len();
+        if line_indent < body_indent {
             return None;
         }
-        body_lines.push((j, t.to_string()));
+        body_lines.push((j, trimmed.to_string()));
         j += 1;
     }
     if body_lines.len() < 2 {
@@ -243,10 +243,10 @@ fn validate_body_start(
     let assign_idx = body_lines[0].0;
 
     // Line 2: ITEM = ARRAY[INDEX]
-    let t = &body_lines[1].1;
-    let eq_pos = t.find(" = ")?;
-    let item_part = &t[..eq_pos];
-    let rhs = &t[eq_pos + 3..];
+    let trimmed = &body_lines[1].1;
+    let eq_pos = trimmed.find(" = ")?;
+    let item_part = &trimmed[..eq_pos];
+    let rhs = &trimmed[eq_pos + 3..];
     let bracket_start = rhs.find('[')?;
     let arr_part = &rhs[..bracket_start];
     let idx_part = rhs[bracket_start + 1..].strip_suffix(']')?;
@@ -270,13 +270,13 @@ fn find_close_and_increment(
     let mut depth = 0i32;
     let mut close_idx = None;
     for (j, line) in lines.iter().enumerate().skip(while_idx) {
-        let t = line.trim();
-        if t.ends_with('{') {
+        let trimmed = line.trim();
+        if trimmed.ends_with('{') {
             depth += 1;
         }
-        if t == "}" {
-            let li = line.len() - t.len();
-            if li == indent_len {
+        if trimmed == "}" {
+            let line_indent = line.len() - trimmed.len();
+            if line_indent == indent_len {
                 depth -= 1;
                 if depth == 0 {
                     close_idx = Some(j);
@@ -291,11 +291,11 @@ fn find_close_and_increment(
     let expected_incr = format!("{} = {} + 1", counter, counter);
     let mut incr_idx = None;
     for j in (while_idx + 1..close_idx).rev() {
-        let t = lines[j].trim();
-        if t.is_empty() {
+        let trimmed = lines[j].trim();
+        if trimmed.is_empty() {
             continue;
         }
-        if t == expected_incr {
+        if trimmed == expected_incr {
             incr_idx = Some(j);
         }
         break; // only check the last non-empty line
@@ -486,8 +486,8 @@ pub(super) fn fold_cast_inline(lines: &mut Vec<String>) {
             if j == i {
                 continue;
             }
-            let li = line.len() - line.trim_start().len();
-            let content = &line[li..];
+            let line_indent = line.len() - line.trim_start().len();
+            let content = &line[line_indent..];
             if count_var_refs(content, &var) > 0 {
                 let mut text = content.to_string();
                 loop {
@@ -497,7 +497,7 @@ pub(super) fn fold_cast_inline(lines: &mut Vec<String>) {
                     }
                     text = new_text;
                 }
-                *line = format!("{}{}", &line[..li], text);
+                *line = format!("{}{}", &line[..line_indent], text);
             }
         }
 
@@ -611,8 +611,8 @@ fn fold_struct_construction(lines: &mut Vec<String>) {
         let mut fields: Vec<(String, String)> = Vec::new();
         let mut intermediate_temps: Vec<(String, String)> = Vec::new();
         while i < lines.len() {
-            let t = lines[i].trim();
-            if let Some((sv, field, value)) = parse_make_struct_field(t) {
+            let trimmed = lines[i].trim();
+            if let Some((sv, field, value)) = parse_make_struct_field(trimmed) {
                 if sv == expected_var {
                     fields.push((field.to_string(), value.to_string()));
                     i += 1;
@@ -621,7 +621,7 @@ fn fold_struct_construction(lines: &mut Vec<String>) {
             }
             // Also consume $MakeStruct_* temp assignments (no dot) that feed
             // into subsequent field assignments
-            if let Some((var, expr)) = parse_temp_assignment(t) {
+            if let Some((var, expr)) = parse_temp_assignment(trimmed) {
                 if var.starts_with("$MakeStruct_") {
                     intermediate_temps.push((var.to_string(), expr.to_string()));
                     i += 1;
@@ -647,10 +647,10 @@ fn fold_struct_construction(lines: &mut Vec<String>) {
 
         // Check if next line is TARGET = $MakeStruct_TYPE
         if i < lines.len() {
-            let t = lines[i].trim();
-            if let Some(eq_pos) = t.find(" = ") {
-                let target = &t[..eq_pos];
-                let src = &t[eq_pos + 3..];
+            let trimmed = lines[i].trim();
+            if let Some(eq_pos) = trimmed.find(" = ") {
+                let target = &trimmed[..eq_pos];
+                let src = &trimmed[eq_pos + 3..];
                 if src == expected_var {
                     let type_name = expected_var
                         .strip_prefix("$MakeStruct_")
@@ -728,17 +728,17 @@ pub(super) fn hoist_repeated_ternaries(lines: &mut Vec<String>) {
 }
 
 /// Extract all parenthesized ternary expressions `(COND ? T : F)` from a line.
-pub(super) fn extract_parenthesized_ternaries(s: &str) -> Vec<String> {
+pub(super) fn extract_parenthesized_ternaries(input: &str) -> Vec<String> {
     let mut results = Vec::new();
-    let bytes = s.as_bytes();
+    let bytes = input.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'(' {
-            if let Some(close) = find_matching_paren(&s[i..]) {
-                let inner = &s[i + 1..i + close];
+            if let Some(close) = find_matching_paren(&input[i..]) {
+                let inner = &input[i + 1..i + close];
                 // Check for ` ? ` and ` : ` at paren depth 0 inside
                 if has_ternary_at_depth_zero(inner) {
-                    results.push(s[i..i + close + 1].to_string());
+                    results.push(input[i..i + close + 1].to_string());
                 }
                 // Don't skip past close; there may be nested ternaries inside
                 i += 1;
@@ -753,10 +753,10 @@ pub(super) fn extract_parenthesized_ternaries(s: &str) -> Vec<String> {
 }
 
 /// Check if a string contains ` ? ` and ` : ` at paren/brace depth 0.
-fn has_ternary_at_depth_zero(s: &str) -> bool {
+fn has_ternary_at_depth_zero(input: &str) -> bool {
     let mut depth = 0i32;
     let mut has_question = false;
-    let bytes = s.as_bytes();
+    let bytes = input.as_bytes();
     let len = bytes.len();
     for i in 0..len {
         match bytes[i] {
@@ -832,11 +832,11 @@ fn generate_ternary_var_name(ternary: &str, index: usize) -> String {
 /// extract the common suffix after stripping `Left`/`Right` prefixes.
 pub(super) fn extract_left_right_suffix(true_expr: &str, false_expr: &str) -> Option<String> {
     // Strip `self.` prefix if present on both
-    let t = true_expr.strip_prefix("self.").unwrap_or(true_expr);
-    let f = false_expr.strip_prefix("self.").unwrap_or(false_expr);
+    let true_stripped = true_expr.strip_prefix("self.").unwrap_or(true_expr);
+    let false_stripped = false_expr.strip_prefix("self.").unwrap_or(false_expr);
     // Try stripping Left/Right from true and Right/Left from false
-    let suffix = if let Some(ts) = t.strip_prefix("Left") {
-        if let Some(fs) = f.strip_prefix("Right") {
+    let suffix = if let Some(ts) = true_stripped.strip_prefix("Left") {
+        if let Some(fs) = false_stripped.strip_prefix("Right") {
             if ts == fs {
                 Some(ts)
             } else {
@@ -845,8 +845,8 @@ pub(super) fn extract_left_right_suffix(true_expr: &str, false_expr: &str) -> Op
         } else {
             None
         }
-    } else if let Some(ts) = t.strip_prefix("Right") {
-        if let Some(fs) = f.strip_prefix("Left") {
+    } else if let Some(ts) = true_stripped.strip_prefix("Right") {
+        if let Some(fs) = false_stripped.strip_prefix("Left") {
             if ts == fs {
                 Some(ts)
             } else {
@@ -877,8 +877,8 @@ pub(super) fn simplify_bool_comparisons(lines: &mut [String]) {
 /// Rewrite `!CALL(...) == 1` -> `!CALL(...)`, `!CALL(...) == 0` -> `CALL(...)`, etc.
 /// Only matches function-call patterns (identifier followed by parens) to avoid
 /// false positives on member access like `!self.Flag == 1`.
-fn simplify_negated_bool_comparison(s: &str) -> String {
-    let mut result = s.to_string();
+fn simplify_negated_bool_comparison(input: &str) -> String {
+    let mut result = input.to_string();
     // Process all occurrences in the string
     let mut search_from = 0;
     loop {
@@ -1067,8 +1067,8 @@ pub(super) fn fold_outparam_calls(lines: &mut Vec<String>) {
 
         // The out-param must NOT have a separate assignment line (it's populated by the call)
         let has_assignment = lines.iter().any(|l| {
-            let t = l.trim();
-            parse_temp_assignment(t).is_some_and(|(v, _)| v == out_var)
+            let trimmed = l.trim();
+            parse_temp_assignment(trimmed).is_some_and(|(v, _)| v == out_var)
         });
         if has_assignment {
             i += 1;
@@ -1423,9 +1423,9 @@ fn fold_section_temps(lines: &mut Vec<String>) {
                 if i == *assign_idx || removed.contains(&i) {
                     continue;
                 }
-                let r = count_var_refs(line.trim(), var_name);
-                refs += r;
-                if r == 1 && target.is_none() {
+                let ref_count = count_var_refs(line.trim(), var_name);
+                refs += ref_count;
+                if ref_count == 1 && target.is_none() {
                     target = Some(i);
                 }
             }
@@ -1477,13 +1477,15 @@ fn dedup_completion_paths(lines: &mut Vec<String>) {
         let comp_start = marker_idx + 1;
         let mut comp_end = comp_start;
         while comp_end < lines.len() {
-            let t = lines[comp_end].trim();
-            if t.is_empty() {
+            let trimmed = lines[comp_end].trim();
+            if trimmed.is_empty() {
                 comp_end += 1;
                 continue;
             }
-            let li = lines[comp_end].len() - lines[comp_end].trim_start().len();
-            if li <= marker_indent && (t.starts_with('}') || t.starts_with("---")) {
+            let line_indent = lines[comp_end].len() - lines[comp_end].trim_start().len();
+            if line_indent <= marker_indent
+                && (trimmed.starts_with('}') || trimmed.starts_with("---"))
+            {
                 break;
             }
             comp_end += 1;
@@ -1495,8 +1497,8 @@ fn dedup_completion_paths(lines: &mut Vec<String>) {
 
         // Find the while/for loop above
         let while_idx = (0..marker_idx).rev().find(|&j| {
-            let t = lines[j].trim();
-            t.starts_with("while ") || t.starts_with("for ")
+            let trimmed = lines[j].trim();
+            trimmed.starts_with("while ") || trimmed.starts_with("for ")
         });
         let Some(while_idx) = while_idx else {
             i = comp_end;
@@ -1507,12 +1509,15 @@ fn dedup_completion_paths(lines: &mut Vec<String>) {
         let while_indent = lines[while_idx].len() - lines[while_idx].trim_start().len();
         let mut pre_start = while_idx;
         for j in (0..while_idx).rev() {
-            let t = lines[j].trim();
-            if t.is_empty() {
+            let trimmed = lines[j].trim();
+            if trimmed.is_empty() {
                 continue;
             }
-            let li = lines[j].len() - lines[j].trim_start().len();
-            if li == while_indent && !t.starts_with('}') && !t.starts_with("//") {
+            let line_indent = lines[j].len() - lines[j].trim_start().len();
+            if line_indent == while_indent
+                && !trimmed.starts_with('}')
+                && !trimmed.starts_with("//")
+            {
                 pre_start = j;
             } else {
                 break;
@@ -1531,12 +1536,12 @@ fn dedup_completion_paths(lines: &mut Vec<String>) {
         let mut total_count = 0usize;
         let mut unique_indices: Vec<usize> = Vec::new();
         for (j, line) in lines.iter().enumerate().take(comp_end).skip(comp_start) {
-            let t = line.trim();
-            if t.is_empty() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
                 continue;
             }
             total_count += 1;
-            if pre_set.contains(t) {
+            if pre_set.contains(trimmed) {
                 matched_count += 1;
             } else {
                 unique_indices.push(j);
@@ -1598,22 +1603,22 @@ pub(super) fn detect_common_suffix<'a>(fields: &[&'a str]) -> Option<&'a str> {
 }
 
 /// Split comma-separated arguments respecting nested parentheses.
-pub(super) fn split_args(s: &str) -> Vec<&str> {
+pub(super) fn split_args(input: &str) -> Vec<&str> {
     let mut args = Vec::new();
     let mut depth = 0;
     let mut start = 0;
-    for (i, ch) in s.char_indices() {
+    for (i, ch) in input.char_indices() {
         match ch {
             '(' | '[' => depth += 1,
             ')' | ']' => depth -= 1,
             ',' if depth == 0 => {
-                args.push(s[start..i].trim());
+                args.push(input[start..i].trim());
                 start = i + 1;
             }
             _ => {}
         }
     }
-    let last = s[start..].trim();
+    let last = input[start..].trim();
     if !last.is_empty() {
         args.push(last);
     }

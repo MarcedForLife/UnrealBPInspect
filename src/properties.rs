@@ -28,18 +28,21 @@ impl PropertyTypeInfo {
     }
 }
 
-fn read_property_type_name(r: &mut Reader, nt: &NameTable) -> Result<PropertyTypeInfo> {
-    read_property_type_name_depth(r, nt, 0)
+fn read_property_type_name(
+    reader: &mut Reader,
+    name_table: &NameTable,
+) -> Result<PropertyTypeInfo> {
+    read_property_type_name_depth(reader, name_table, 0)
 }
 
 fn read_property_type_name_depth(
-    r: &mut Reader,
-    nt: &NameTable,
+    reader: &mut Reader,
+    name_table: &NameTable,
     depth: u32,
 ) -> Result<PropertyTypeInfo> {
     anyhow::ensure!(depth < 8, "FPropertyTypeName recursion too deep");
-    let type_name = nt.fname(r)?;
-    let inner_count = read_i32(r)?;
+    let type_name = name_table.fname(reader)?;
+    let inner_count = read_i32(reader)?;
     anyhow::ensure!(
         (0..=4).contains(&inner_count),
         "FPropertyTypeName inner count {} out of range",
@@ -47,7 +50,11 @@ fn read_property_type_name_depth(
     );
     let mut inners = Vec::new();
     for _ in 0..inner_count {
-        inners.push(read_property_type_name_depth(r, nt, depth + 1)?);
+        inners.push(read_property_type_name_depth(
+            reader,
+            name_table,
+            depth + 1,
+        )?);
     }
     Ok(PropertyTypeInfo { type_name, inners })
 }
@@ -76,9 +83,9 @@ struct PropertyMeta {
     value_type: String,
 }
 
-fn format_delegate_binding(r: &mut Reader, nt: &NameTable) -> Result<String> {
-    let obj = read_i32(r)?;
-    let func = nt.fname(r)?;
+fn format_delegate_binding(reader: &mut Reader, name_table: &NameTable) -> Result<String> {
+    let obj = read_i32(reader)?;
+    let func = name_table.fname(reader)?;
     Ok(if obj != 0 {
         format!("{}::{}", obj, func)
     } else {
@@ -97,46 +104,50 @@ const SIZE_VALIDATION_HEADROOM: u64 = 256;
 /// Returns a `Vec<Property>`; on malformed data the stream is terminated early and
 /// already-read properties are returned (best-effort parsing).
 pub fn read_properties(
-    r: &mut Reader,
-    nt: &NameTable,
+    reader: &mut Reader,
+    name_table: &NameTable,
     end_offset: u64,
     ver: AssetVersion,
 ) -> Vec<Property> {
     if ver.has_complete_type_name() {
-        return read_properties_ue5(r, nt, end_offset, ver);
+        return read_properties_ue5(reader, name_table, end_offset, ver);
     }
     let mut props = Vec::new();
     loop {
-        if r.position() + 8 > end_offset {
+        if reader.position() + 8 > end_offset {
             break;
         }
-        let pos_before = r.position();
-        let Ok((prop_name, is_none)) = nt.fname_is_none(r) else {
+        let pos_before = reader.position();
+        let Ok((prop_name, is_none)) = name_table.fname_is_none(reader) else {
             break;
         };
         if is_none {
             break;
         }
-        if r.position() + 16 > end_offset {
-            let _ = r.seek(SeekFrom::Start(pos_before));
+        if reader.position() + 16 > end_offset {
+            let _ = reader.seek(SeekFrom::Start(pos_before));
             break;
         }
-        let Ok(type_name) = nt.fname(r) else { break };
+        let Ok(type_name) = name_table.fname(reader) else {
+            break;
+        };
 
         if !type_name.ends_with("Property") {
-            let _ = r.seek(SeekFrom::Start(pos_before));
+            let _ = reader.seek(SeekFrom::Start(pos_before));
             break;
         }
 
-        let Ok(size) = read_i32(r) else { break };
-        let Ok(_array_index) = read_i32(r) else { break };
+        let Ok(size) = read_i32(reader) else { break };
+        let Ok(_array_index) = read_i32(reader) else {
+            break;
+        };
 
-        if size < 0 || size as u64 > end_offset - r.position() + SIZE_VALIDATION_HEADROOM {
-            let _ = r.seek(SeekFrom::Start(pos_before));
+        if size < 0 || size as u64 > end_offset - reader.position() + SIZE_VALIDATION_HEADROOM {
+            let _ = reader.seek(SeekFrom::Start(pos_before));
             break;
         }
 
-        let Ok(value) = read_property_value_ue4(r, nt, &type_name, size, ver) else {
+        let Ok(value) = read_property_value_ue4(reader, name_table, &type_name, size, ver) else {
             break;
         };
         props.push(Property {
@@ -152,8 +163,8 @@ pub fn read_properties(
 // builds PropertyMeta, skips PropertyGuid, then delegates to shared reader.
 // ---------------------------------------------------------------------------
 fn read_property_value_ue4(
-    r: &mut Reader,
-    nt: &NameTable,
+    reader: &mut Reader,
+    name_table: &NameTable,
     type_name: &str,
     size: i32,
     ver: AssetVersion,
@@ -162,11 +173,11 @@ fn read_property_value_ue4(
 
     // BoolProperty has a unique UE4 layout: value byte before PropertyGuid
     if type_name == "BoolProperty" {
-        let val = read_u8(r)? != 0;
+        let val = read_u8(reader)? != 0;
         if file_ver >= VER_UE4_PROPERTY_GUID {
-            let has_guid = read_u8(r)?;
+            let has_guid = read_u8(reader)?;
             if has_guid != 0 {
-                let _guid = read_guid(r)?;
+                let _guid = read_guid(reader)?;
             }
         }
         return Ok(PropValue::Bool(val));
@@ -176,41 +187,49 @@ fn read_property_value_ue4(
     let mut meta = PropertyMeta::default();
     match type_name {
         "StructProperty" => {
-            meta.struct_type = nt.fname(r)?;
-            let _struct_guid = read_guid(r)?;
+            meta.struct_type = name_table.fname(reader)?;
+            let _struct_guid = read_guid(reader)?;
         }
-        "ArrayProperty" => meta.inner_type = nt.fname(r)?,
-        "SetProperty" => meta.inner_type = nt.fname(r)?,
+        "ArrayProperty" => meta.inner_type = name_table.fname(reader)?,
+        "SetProperty" => meta.inner_type = name_table.fname(reader)?,
         "MapProperty" => {
-            meta.key_type = nt.fname(r)?;
-            meta.value_type = nt.fname(r)?;
+            meta.key_type = name_table.fname(reader)?;
+            meta.value_type = name_table.fname(reader)?;
         }
-        "EnumProperty" => meta.enum_name = nt.fname(r)?,
-        "ByteProperty" => meta.enum_name = nt.fname(r)?,
+        "EnumProperty" => meta.enum_name = name_table.fname(reader)?,
+        "ByteProperty" => meta.enum_name = name_table.fname(reader)?,
         _ => {}
     }
-    skip_property_guid(r, file_ver)?;
+    skip_property_guid(reader, file_ver)?;
 
     // The cursor is now past all tag-specific fields; value data is next.
-    let value_data_end = r.position() + size as u64;
+    let value_data_end = reader.position() + size as u64;
 
-    let value = read_value_with_meta(r, nt, type_name, size, &meta, value_data_end, ver)?;
+    let value = read_value_with_meta(
+        reader,
+        name_table,
+        type_name,
+        size,
+        &meta,
+        value_data_end,
+        ver,
+    )?;
 
     // Ensure cursor is at the correct position after the value
     match type_name {
         "StructProperty" | "ArrayProperty" | "MapProperty" | "SetProperty" => {
-            r.seek(SeekFrom::Start(value_data_end))?;
+            reader.seek(SeekFrom::Start(value_data_end))?;
         }
         _ => {}
     }
     Ok(value)
 }
 
-fn skip_property_guid(r: &mut Reader, file_ver: i32) -> Result<()> {
+fn skip_property_guid(reader: &mut Reader, file_ver: i32) -> Result<()> {
     if file_ver >= VER_UE4_PROPERTY_GUID {
-        let has_guid = read_u8(r)?;
+        let has_guid = read_u8(reader)?;
         if has_guid != 0 {
-            let _guid = read_guid(r)?;
+            let _guid = read_guid(reader)?;
         }
     }
     Ok(())
@@ -220,63 +239,68 @@ fn skip_property_guid(r: &mut Reader, file_ver: i32) -> Result<()> {
 // UE5.2+ tagged property reader
 // ---------------------------------------------------------------------------
 fn read_properties_ue5(
-    r: &mut Reader,
-    nt: &NameTable,
+    reader: &mut Reader,
+    name_table: &NameTable,
     end_offset: u64,
     ver: AssetVersion,
 ) -> Vec<Property> {
     let mut props = Vec::new();
     loop {
-        if r.position() + 8 > end_offset {
+        if reader.position() + 8 > end_offset {
             break;
         }
-        let pos_before = r.position();
-        let Ok((prop_name, is_none)) = nt.fname_is_none(r) else {
+        let pos_before = reader.position();
+        let Ok((prop_name, is_none)) = name_table.fname_is_none(reader) else {
             break;
         };
         if is_none {
             break;
         }
 
-        let Ok(type_info) = read_property_type_name(r, nt) else {
+        let Ok(type_info) = read_property_type_name(reader, name_table) else {
             break;
         };
         if !type_info.type_name.ends_with("Property") {
-            let _ = r.seek(SeekFrom::Start(pos_before));
+            let _ = reader.seek(SeekFrom::Start(pos_before));
             break;
         }
 
-        let Ok(size) = read_i32(r) else { break };
-        let Ok(flags) = read_u8(r) else { break };
+        let Ok(size) = read_i32(reader) else { break };
+        let Ok(flags) = read_u8(reader) else { break };
 
         if flags & TAG_HAS_ARRAY_INDEX != 0 {
-            let Ok(_) = read_i32(r) else { break };
+            let Ok(_) = read_i32(reader) else { break };
         }
         if flags & TAG_HAS_PROPERTY_GUID != 0 {
-            let Ok(_) = read_guid(r) else { break };
+            let Ok(_) = read_guid(reader) else { break };
         }
         if flags & TAG_HAS_PROPERTY_EXTENSIONS != 0 {
-            let Ok(ext) = read_u8(r) else { break };
+            let Ok(ext) = read_u8(reader) else { break };
             // EPropertyTagExtensionType::OverridableSerializationInformation (2 extra bytes)
             if ext & 0x02 != 0 {
-                let Ok(_operation) = read_u8(r) else { break };
-                let Ok(_condition) = read_u8(r) else { break };
+                let Ok(_operation) = read_u8(reader) else {
+                    break;
+                };
+                let Ok(_condition) = read_u8(reader) else {
+                    break;
+                };
             }
         }
 
         if size < 0
-            || size as u64 > end_offset.saturating_sub(r.position()) + SIZE_VALIDATION_HEADROOM
+            || size as u64 > end_offset.saturating_sub(reader.position()) + SIZE_VALIDATION_HEADROOM
         {
-            let _ = r.seek(SeekFrom::Start(pos_before));
+            let _ = reader.seek(SeekFrom::Start(pos_before));
             break;
         }
 
-        let value_start = r.position();
-        let Ok(value) = read_property_value_ue5(r, nt, &type_info, size, flags, ver) else {
+        let value_start = reader.position();
+        let Ok(value) = read_property_value_ue5(reader, name_table, &type_info, size, flags, ver)
+        else {
             break;
         };
         // Ensure we consumed exactly `size` bytes of value data
-        let _ = r.seek(SeekFrom::Start(value_start + size as u64));
+        let _ = reader.seek(SeekFrom::Start(value_start + size as u64));
 
         props.push(Property {
             name: prop_name,
@@ -287,8 +311,8 @@ fn read_properties_ue5(
 }
 
 fn read_property_value_ue5(
-    r: &mut Reader,
-    nt: &NameTable,
+    reader: &mut Reader,
+    name_table: &NameTable,
     ti: &PropertyTypeInfo,
     size: i32,
     flags: u8,
@@ -306,8 +330,16 @@ fn read_property_value_ue5(
         key_type: ti.inner_name(0),
         value_type: ti.inner_name(1),
     };
-    let value_data_end = r.position() + size as u64;
-    read_value_with_meta(r, nt, &ti.type_name, size, &meta, value_data_end, ver)
+    let value_data_end = reader.position() + size as u64;
+    read_value_with_meta(
+        reader,
+        name_table,
+        &ti.type_name,
+        size,
+        &meta,
+        value_data_end,
+        ver,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -316,31 +348,31 @@ fn read_property_value_ue5(
 // Returns None for types that need context-specific handling.
 // ---------------------------------------------------------------------------
 fn read_primitive_value(
-    r: &mut Reader,
-    nt: &NameTable,
+    reader: &mut Reader,
+    name_table: &NameTable,
     type_name: &str,
 ) -> Result<Option<PropValue>> {
     match type_name {
         "IntProperty" | "Int32Property" | "UInt32Property" => {
-            Ok(Some(PropValue::Int(read_i32(r)?)))
+            Ok(Some(PropValue::Int(read_i32(reader)?)))
         }
-        "Int8Property" => Ok(Some(PropValue::Int(read_u8(r)? as i8 as i32))),
+        "Int8Property" => Ok(Some(PropValue::Int(read_u8(reader)? as i8 as i32))),
         "Int16Property" | "UInt16Property" => {
             let mut b = [0u8; 2];
-            r.read_exact(&mut b)?;
+            reader.read_exact(&mut b)?;
             Ok(Some(PropValue::Int(i16::from_le_bytes(b) as i32)))
         }
-        "Int64Property" | "UInt64Property" => Ok(Some(PropValue::Int64(read_i64(r)?))),
-        "FloatProperty" => Ok(Some(PropValue::Float(read_f32(r)?))),
-        "DoubleProperty" => Ok(Some(PropValue::Double(read_f64(r)?))),
-        "NameProperty" => Ok(Some(PropValue::Name(nt.fname(r)?))),
-        "ObjectProperty" => Ok(Some(PropValue::Object(read_i32(r)?))),
+        "Int64Property" | "UInt64Property" => Ok(Some(PropValue::Int64(read_i64(reader)?))),
+        "FloatProperty" => Ok(Some(PropValue::Float(read_f32(reader)?))),
+        "DoubleProperty" => Ok(Some(PropValue::Double(read_f64(reader)?))),
+        "NameProperty" => Ok(Some(PropValue::Name(name_table.fname(reader)?))),
+        "ObjectProperty" => Ok(Some(PropValue::Object(read_i32(reader)?))),
         "SoftObjectProperty" => {
-            let path = read_fstring(r)?;
-            let _sub = read_fstring(r)?;
+            let path = read_fstring(reader)?;
+            let _sub = read_fstring(reader)?;
             Ok(Some(PropValue::SoftObject(path)))
         }
-        "StrProperty" => Ok(Some(PropValue::Str(read_fstring(r)?))),
+        "StrProperty" => Ok(Some(PropValue::Str(read_fstring(reader)?))),
         _ => Ok(None),
     }
 }
@@ -351,22 +383,22 @@ fn read_primitive_value(
 // ---------------------------------------------------------------------------
 #[allow(clippy::too_many_arguments)]
 fn read_value_with_meta(
-    r: &mut Reader,
-    nt: &NameTable,
+    reader: &mut Reader,
+    name_table: &NameTable,
     type_name: &str,
     size: i32,
     meta: &PropertyMeta,
     value_data_end: u64,
     ver: AssetVersion,
 ) -> Result<PropValue> {
-    if let Some(val) = read_primitive_value(r, nt, type_name)? {
+    if let Some(val) = read_primitive_value(reader, name_table, type_name)? {
         return Ok(val);
     }
     match type_name {
-        "TextProperty" => read_text_property(r, size).map(PropValue::Text),
+        "TextProperty" => read_text_property(reader, size).map(PropValue::Text),
 
         "EnumProperty" => {
-            let value = nt.fname(r)?;
+            let value = name_table.fname(reader)?;
             Ok(PropValue::Enum {
                 enum_type: meta.enum_name.clone(),
                 value,
@@ -376,20 +408,21 @@ fn read_value_with_meta(
             if size == 1 {
                 Ok(PropValue::Byte {
                     enum_name: meta.enum_name.clone(),
-                    value: read_u8(r)?.to_string(),
+                    value: read_u8(reader)?.to_string(),
                 })
             } else {
                 Ok(PropValue::Byte {
                     enum_name: meta.enum_name.clone(),
-                    value: nt.fname(r)?,
+                    value: name_table.fname(reader)?,
                 })
             }
         }
 
         "StructProperty" => {
-            let struct_end = r.position() + size as u64;
-            let fields = read_struct_value(r, nt, &meta.struct_type, size, struct_end, ver)?;
-            r.seek(SeekFrom::Start(struct_end))?;
+            let struct_end = reader.position() + size as u64;
+            let fields =
+                read_struct_value(reader, name_table, &meta.struct_type, size, struct_end, ver)?;
+            reader.seek(SeekFrom::Start(struct_end))?;
             Ok(PropValue::Struct {
                 struct_type: meta.struct_type.clone(),
                 fields,
@@ -397,8 +430,15 @@ fn read_value_with_meta(
         }
 
         "ArrayProperty" => {
-            let count = read_i32(r)?;
-            let items = read_array_items(r, nt, &meta.inner_type, count, value_data_end, ver)?;
+            let count = read_i32(reader)?;
+            let items = read_array_items(
+                reader,
+                name_table,
+                &meta.inner_type,
+                count,
+                value_data_end,
+                ver,
+            )?;
             Ok(PropValue::Array {
                 inner_type: meta.inner_type.clone(),
                 items,
@@ -406,16 +446,18 @@ fn read_value_with_meta(
         }
 
         "MapProperty" => {
-            let _num_keys_to_remove = read_i32(r)?;
-            let count = read_i32(r)?;
+            let _num_keys_to_remove = read_i32(reader)?;
+            let count = read_i32(reader)?;
             let mut entries = Vec::new();
             for _ in 0..count {
-                if r.position() >= value_data_end {
+                if reader.position() >= value_data_end {
                     break;
                 }
-                let k = read_typed_value(r, nt, &meta.key_type, value_data_end, ver)?;
-                let v = read_typed_value(r, nt, &meta.value_type, value_data_end, ver)?;
-                entries.push((k, v));
+                let key =
+                    read_typed_value(reader, name_table, &meta.key_type, value_data_end, ver)?;
+                let val =
+                    read_typed_value(reader, name_table, &meta.value_type, value_data_end, ver)?;
+                entries.push((key, val));
             }
             Ok(PropValue::Map {
                 key_type: meta.key_type.clone(),
@@ -425,24 +467,31 @@ fn read_value_with_meta(
         }
 
         "SetProperty" => {
-            let _num_to_remove = read_i32(r)?;
-            let count = read_i32(r)?;
-            let items = read_array_items(r, nt, &meta.inner_type, count, value_data_end, ver)?;
+            let _num_to_remove = read_i32(reader)?;
+            let count = read_i32(reader)?;
+            let items = read_array_items(
+                reader,
+                name_table,
+                &meta.inner_type,
+                count,
+                value_data_end,
+                ver,
+            )?;
             Ok(PropValue::Array {
                 inner_type: meta.inner_type.clone(),
                 items,
             })
         }
 
-        "DelegateProperty" => format_delegate_binding(r, nt).map(PropValue::Str),
+        "DelegateProperty" => format_delegate_binding(reader, name_table).map(PropValue::Str),
 
         "MulticastDelegateProperty"
         | "MulticastInlineDelegateProperty"
         | "MulticastSparseDelegateProperty" => {
-            let count = read_i32(r)?;
+            let count = read_i32(reader)?;
             let mut bindings = Vec::new();
             for _ in 0..count {
-                bindings.push(PropValue::Str(format_delegate_binding(r, nt)?));
+                bindings.push(PropValue::Str(format_delegate_binding(reader, name_table)?));
             }
             Ok(PropValue::Array {
                 inner_type: "DelegateProperty".into(),
@@ -451,7 +500,7 @@ fn read_value_with_meta(
         }
 
         _ => {
-            r.seek(SeekFrom::Current(size as i64))?;
+            reader.seek(SeekFrom::Current(size as i64))?;
             Ok(PropValue::Unknown {
                 type_name: type_name.to_string(),
                 size,
@@ -465,21 +514,21 @@ fn read_value_with_meta(
 // ---------------------------------------------------------------------------
 
 fn read_typed_value(
-    r: &mut Reader,
-    nt: &NameTable,
+    reader: &mut Reader,
+    name_table: &NameTable,
     type_name: &str,
     end_offset: u64,
     ver: AssetVersion,
 ) -> Result<PropValue> {
-    if let Some(val) = read_primitive_value(r, nt, type_name)? {
+    if let Some(val) = read_primitive_value(reader, name_table, type_name)? {
         return Ok(val);
     }
     match type_name {
-        "BoolProperty" => Ok(PropValue::Bool(read_u8(r)? != 0)),
-        "ByteProperty" => Ok(PropValue::Int(read_u8(r)? as i32)),
-        "EnumProperty" => Ok(PropValue::Name(nt.fname(r)?)),
+        "BoolProperty" => Ok(PropValue::Bool(read_u8(reader)? != 0)),
+        "ByteProperty" => Ok(PropValue::Int(read_u8(reader)? as i32)),
+        "EnumProperty" => Ok(PropValue::Name(name_table.fname(reader)?)),
         "StructProperty" => {
-            let fields = read_properties(r, nt, end_offset, ver);
+            let fields = read_properties(reader, name_table, end_offset, ver);
             Ok(PropValue::Struct {
                 struct_type: String::new(),
                 fields,
@@ -492,12 +541,12 @@ fn read_typed_value(
     }
 }
 
-fn read_text_property(r: &mut Reader, size: i32) -> Result<String> {
+fn read_text_property(reader: &mut Reader, size: i32) -> Result<String> {
     if size <= 0 {
         return Ok(String::new());
     }
     let mut buf = vec![0u8; size as usize];
-    r.read_exact(&mut buf)?;
+    reader.read_exact(&mut buf)?;
     let text = String::from_utf8_lossy(&buf);
     let readable: String = text
         .chars()
@@ -510,13 +559,13 @@ fn read_text_property(r: &mut Reader, size: i32) -> Result<String> {
     })
 }
 
-fn read_lwc_components(r: &mut Reader, lwc: bool, names: &[&str]) -> Result<Vec<Property>> {
+fn read_lwc_components(reader: &mut Reader, lwc: bool, names: &[&str]) -> Result<Vec<Property>> {
     let mut props = Vec::new();
     for name in names {
         let value = if lwc {
-            PropValue::Double(read_f64(r)?)
+            PropValue::Double(read_f64(reader)?)
         } else {
-            PropValue::Float(read_f32(r)?)
+            PropValue::Float(read_f32(reader)?)
         };
         props.push(Property {
             name: name.to_string(),
@@ -527,8 +576,8 @@ fn read_lwc_components(r: &mut Reader, lwc: bool, names: &[&str]) -> Result<Vec<
 }
 
 fn read_struct_value(
-    r: &mut Reader,
-    nt: &NameTable,
+    reader: &mut Reader,
+    name_table: &NameTable,
     struct_type: &str,
     _size: i32,
     end_offset: u64,
@@ -536,14 +585,14 @@ fn read_struct_value(
 ) -> Result<Vec<Property>> {
     let lwc = ver.is_lwc();
     match struct_type {
-        "Vector" => read_lwc_components(r, lwc, &["X", "Y", "Z"]),
-        "Rotator" => read_lwc_components(r, lwc, &["Pitch", "Yaw", "Roll"]),
-        "Vector2D" => read_lwc_components(r, lwc, &["X", "Y"]),
+        "Vector" => read_lwc_components(reader, lwc, &["X", "Y", "Z"]),
+        "Rotator" => read_lwc_components(reader, lwc, &["Pitch", "Yaw", "Roll"]),
+        "Vector2D" => read_lwc_components(reader, lwc, &["X", "Y"]),
         "LinearColor" => {
-            let red = read_f32(r)?;
-            let g = read_f32(r)?;
-            let b = read_f32(r)?;
-            let a = read_f32(r)?;
+            let red = read_f32(reader)?;
+            let green = read_f32(reader)?;
+            let blue = read_f32(reader)?;
+            let alpha = read_f32(reader)?;
             Ok(vec![
                 Property {
                     name: "R".into(),
@@ -551,32 +600,32 @@ fn read_struct_value(
                 },
                 Property {
                     name: "G".into(),
-                    value: PropValue::Float(g),
+                    value: PropValue::Float(green),
                 },
                 Property {
                     name: "B".into(),
-                    value: PropValue::Float(b),
+                    value: PropValue::Float(blue),
                 },
                 Property {
                     name: "A".into(),
-                    value: PropValue::Float(a),
+                    value: PropValue::Float(alpha),
                 },
             ])
         }
         "Guid" => {
-            let g = read_guid(r)?;
+            let guid = read_guid(reader)?;
             Ok(vec![Property {
                 name: "Guid".into(),
-                value: PropValue::Str(format!("{:02x?}", g)),
+                value: PropValue::Str(format!("{:02x?}", guid)),
             }])
         }
-        _ => Ok(read_properties(r, nt, end_offset, ver)),
+        _ => Ok(read_properties(reader, name_table, end_offset, ver)),
     }
 }
 
 fn read_array_items(
-    r: &mut Reader,
-    nt: &NameTable,
+    reader: &mut Reader,
+    name_table: &NameTable,
     inner_type: &str,
     count: i32,
     end_offset: u64,
@@ -584,12 +633,12 @@ fn read_array_items(
 ) -> Result<Vec<PropValue>> {
     let mut items = Vec::new();
     for _ in 0..count {
-        if r.position() >= end_offset {
+        if reader.position() >= end_offset {
             break;
         }
-        let item = read_typed_value(r, nt, inner_type, end_offset, ver)?;
+        let item = read_typed_value(reader, name_table, inner_type, end_offset, ver)?;
         if matches!(&item, PropValue::Unknown { .. }) {
-            r.seek(SeekFrom::Start(end_offset))?;
+            reader.seek(SeekFrom::Start(end_offset))?;
             items.push(item);
             break;
         }

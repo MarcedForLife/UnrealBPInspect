@@ -341,8 +341,8 @@ fn emit_stmts_range(
                 && !output.iter().any(|l| l.starts_with("---"))
             {
                 let has_content = output.iter().any(|l| {
-                    let t = l.trim();
-                    !t.is_empty() && t != "return"
+                    let trimmed = l.trim();
+                    !trimmed.is_empty() && trimmed != "return"
                 });
                 if has_content {
                     output.insert(0, "--- (latent resume) ---".to_string());
@@ -603,8 +603,8 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
                     .find(|l| !l.trim().is_empty())
                     .is_some_and(|l| l.trim() == "}");
                 let is_near_end = output[i + 1..].iter().all(|l| {
-                    let t = l.trim();
-                    t.is_empty() || t == "return" || t == "}"
+                    let trimmed = l.trim();
+                    trimmed.is_empty() || trimmed == "return" || trimmed == "}"
                 });
                 if prev_is_brace || is_near_end {
                     set.insert(label.to_string());
@@ -621,9 +621,11 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
                     let indent_str = " ".repeat(output[i].len() - trimmed.len());
                     let line_indent = indent_str.len() / INDENT.len();
                     let in_loop = output[..i].iter().rev().any(|l| {
-                        let lt = l.trim();
-                        let li = (l.len() - l.trim_start().len()) / INDENT.len();
-                        li < line_indent && (lt.starts_with("while ") || lt.starts_with("for "))
+                        let line_trimmed = l.trim();
+                        let inner_indent = (l.len() - l.trim_start().len()) / INDENT.len();
+                        inner_indent < line_indent
+                            && (line_trimmed.starts_with("while ")
+                                || line_trimmed.starts_with("for "))
                     });
                     if in_loop {
                         output[i] = format!("{}break", indent_str);
@@ -747,12 +749,16 @@ fn extract_convergence(output: &mut Vec<String>) {
                 }
                 if gotos.len() == 1 {
                     let label_text = format!("{}:", label_name);
-                    if let Some(li) = output.iter().position(|l| l.trim() == label_text) {
-                        let gi = gotos[0];
-                        let (lo, hi) = if li < gi { (li, gi) } else { (gi, li) };
+                    if let Some(label_idx) = output.iter().position(|l| l.trim() == label_text) {
+                        let goto_idx = gotos[0];
+                        let (lo, hi) = if label_idx < goto_idx {
+                            (label_idx, goto_idx)
+                        } else {
+                            (goto_idx, label_idx)
+                        };
                         let has_boundary = output[lo + 1..hi].iter().any(|l| {
-                            let t = l.trim();
-                            t == "}" || t.starts_with("} else")
+                            let trimmed = l.trim();
+                            trimmed == "}" || trimmed.starts_with("} else")
                         });
                         return has_boundary;
                     }
