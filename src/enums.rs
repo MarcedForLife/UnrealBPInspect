@@ -4,9 +4,9 @@
 /// (or since introduction, e.g. EAttachmentRule in 4.12). Epic can't change these without
 /// breaking every serialized asset, so version-specific tables aren't needed. If a future
 /// engine version adds new values at the end of an enum, we'll simply leave those as raw
-/// integers — same as any unknown value. To extend coverage, add a const slice + match arm.
+/// integers, same as any unknown value. To extend coverage, add a const slice + match arm.
 ///
-/// Only touches plain integer literal args — variables, expressions, bools are left alone.
+/// Only touches plain integer literal args; variables, expressions, bools are left alone.
 /// Indices are relative to the displayed argument list (after WorldContextObject/LatentActionInfo
 /// filtering in `format_call_or_operator`).
 pub fn resolve_enum_args(func_name: &str, args: &mut [String]) {

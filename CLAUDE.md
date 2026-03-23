@@ -6,29 +6,37 @@ Standalone Rust CLI that parses Unreal Engine Blueprint `.uasset` files into rea
 
 ```
 src/
-  main.rs              CLI entry point (~60 lines)
+  main.rs              CLI entry point
   lib.rs               Module declarations
   types.rs             Core data types (ImportEntry, ExportHeader, PropValue, Property, ParsedAsset)
-  binary.rs            Binary reading helpers (R<'a>, read_*, NameTable)
+  binary.rs            Binary reading helpers (Reader<'a>, read_*, NameTable)
   resolve.rs           Index resolution, property lookup helpers, format_func_flags
   enums.rs             Common UE4 enum argument resolution (ECollisionEnabled, EAttachmentRule, etc.)
   properties.rs        Tagged property deserialiser
   ffield.rs            FField type resolution, function signatures
-  parser.rs            Asset parser orchestrator (parse_asset)
+  parser.rs            Asset parser orchestrator (parse_asset, ParseCtx)
   output_text.rs       Dump output mode (--dump)
   output_json.rs       JSON output mode (--json)
-  output_summary.rs    Summary output mode (default: component tree, variables, functions, inline comments)
+  output_summary/
+    mod.rs             Shared types (CommentBox, NodeInfo, UbergraphSection), re-exports
+    comments.rs        EdGraph comment/bubble parsing, spatial matching, classification
+    ubergraph.rs       Ubergraph event splitting, resume block matching, cross-segment jumps
+    format.rs          Summary formatting: component tree, variables, functions, inline comments
   output_diff.rs       Diff output mode (--diff: unified diff of two summaries)
   bytecode/
-    mod.rs             Sub-module re-exports
+    mod.rs             OffsetMap, sub-module re-exports
     opcodes.rs         EExprToken opcode constants (EX_*)
     readers.rs         Bytecode binary stream readers (read_bc_*)
     names.rs           GUID stripping, name cleanup
     resolve.rs         Bytecode reference resolution (obj refs, field paths)
-    decode.rs          Expression decoder (~85 opcodes), BcStatement, decode_bytecode
+    decode.rs          Expression decoder (~85 opcodes), BcStatement, DecodeCtx, decode_bytecode
     flow.rs            Flow pattern detection (sequences, for-loops, ForEach, convergence reorder)
     structure.rs       If/else block structuring, false-block truncation
-    inline.rs          Temp inlining, ForEach rewriting, delegate folding, cast guard folding, Break/Make folding, summary pattern folding
+    inline/
+      mod.rs           Shared helpers (parse_temp_assignment, substitute_var, etc.), re-exports
+      temps.rs         Temp variable inlining, constant folding, dead assignment removal
+      cleanup.rs       Line cleanup, bool switch rewriting, brace/goto cleanup
+      patterns.rs      Summary pattern folding: ForEach, delegates, casts, Break/Make, ternaries
   update.rs            Self-update from GitHub releases (--update)
 install.sh             macOS/Linux install script (curl | sh)
 install.ps1            Windows install script (irm | iex)

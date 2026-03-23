@@ -1,3 +1,7 @@
+//! FField child property parsing, type resolution, and function signatures.
+//!
+//! Resolves FField children into function signatures, e.g. `MyFunc(X: float, Y: Vector) -> bool`.
+
 use anyhow::Result;
 use std::io::Read;
 
@@ -5,53 +9,53 @@ use crate::binary::*;
 use crate::resolve::*;
 use crate::types::*;
 
-pub fn skip_ffield_child(c: &mut R, nt: &NameTable, end: u64) -> Result<()> {
-    if c.position() + 8 > end {
+pub fn skip_ffield_child(r: &mut Reader, nt: &NameTable, end: u64) -> Result<()> {
+    if r.position() + 8 > end {
         return Ok(());
     }
-    let field_class = nt.fname(c)?;
+    let field_class = nt.fname(r)?;
     if field_class == "None" {
         return Ok(());
     }
-    let _field_name = nt.fname(c)?;
-    let _flags = read_u32(c)?;
-    nt.skip_metadata(c)?;
-    let _array_dim = read_i32(c)?;
-    let _elem_size = read_i32(c)?;
-    let _prop_flags = read_i64(c)?;
+    let _field_name = nt.fname(r)?;
+    let _flags = read_u32(r)?;
+    nt.skip_metadata(r)?;
+    let _array_dim = read_i32(r)?;
+    let _elem_size = read_i32(r)?;
+    let _prop_flags = read_i64(r)?;
     let mut rep_bytes = [0u8; 2];
-    c.read_exact(&mut rep_bytes)?;
-    let _rep_func = nt.fname(c)?;
-    let _bp_rep = read_u8(c)?;
+    r.read_exact(&mut rep_bytes)?;
+    let _rep_func = nt.fname(r)?;
+    let _bp_rep = read_u8(r)?;
     match field_class.as_str() {
         "ObjectProperty" | "WeakObjectProperty" | "SoftObjectProperty" | "InterfaceProperty" => {
-            let _ref = read_i32(c)?;
+            let _ref = read_i32(r)?;
         }
         "ClassProperty" | "SoftClassProperty" => {
-            let _prop_class = read_i32(c)?;
-            let _meta_class = read_i32(c)?;
+            let _prop_class = read_i32(r)?;
+            let _meta_class = read_i32(r)?;
         }
         "StructProperty" => {
-            let _ref = read_i32(c)?;
+            let _ref = read_i32(r)?;
         }
         "ByteProperty" | "EnumProperty" => {
-            let _ref = read_i32(c)?;
+            let _ref = read_i32(r)?;
         }
         "BoolProperty" => {
             // 6 bytes: FieldSize(1) + ByteOffset(1) + ByteMask(1) + FieldMask(1) + NativeBool(1) + Value(1)
             for _ in 0..6 {
-                read_u8(c)?;
+                read_u8(r)?;
             }
         }
         "ArrayProperty" | "SetProperty" => {
-            skip_ffield_child(c, nt, end)?;
+            skip_ffield_child(r, nt, end)?;
         }
         "MapProperty" => {
-            skip_ffield_child(c, nt, end)?;
-            skip_ffield_child(c, nt, end)?;
+            skip_ffield_child(r, nt, end)?;
+            skip_ffield_child(r, nt, end)?;
         }
         "DelegateProperty" | "MulticastDelegateProperty" | "MulticastInlineDelegateProperty" => {
-            let _ref = read_i32(c)?;
+            let _ref = read_i32(r)?;
         }
         _ => {}
     }
@@ -60,14 +64,14 @@ pub fn skip_ffield_child(c: &mut R, nt: &NameTable, end: u64) -> Result<()> {
 
 pub fn resolve_ffield_type(
     field_class: &str,
-    c: &mut R,
+    r: &mut Reader,
     nt: &NameTable,
     imports: &[ImportEntry],
     export_names: &[String],
     end: u64,
 ) -> Result<String> {
     match field_class {
-        // UE5 LWC promotes float → double internally, but we display as "float"
+        // UE5 LWC promotes float -> double internally, but we display as "float"
         // for consistency with UE4 and the Blueprint editor. Actual values are
         // parsed at full f64 precision regardless.
         "FloatProperty" | "DoubleProperty" => Ok("float".into()),
@@ -78,7 +82,7 @@ pub fn resolve_ffield_type(
         "BoolProperty" => {
             // 6 bytes: FieldSize, ByteOffset, ByteMask, FieldMask, NativeBool, Value
             for _ in 0..6 {
-                read_u8(c)?;
+                read_u8(r)?;
             }
             Ok("bool".into())
         }
@@ -87,7 +91,7 @@ pub fn resolve_ffield_type(
         "TextProperty" => Ok("FText".into()),
         "ObjectProperty" | "WeakObjectProperty" | "LazyObjectProperty" | "SoftObjectProperty"
         | "InterfaceProperty" => {
-            let class_ref = read_i32(c)?;
+            let class_ref = read_i32(r)?;
             if class_ref != 0 {
                 Ok(format!(
                     "{}*",
@@ -98,12 +102,12 @@ pub fn resolve_ffield_type(
             }
         }
         "ClassProperty" | "SoftClassProperty" => {
-            let _prop_class = read_i32(c)?;
-            let _meta_class = read_i32(c)?;
+            let _prop_class = read_i32(r)?;
+            let _meta_class = read_i32(r)?;
             Ok("UClass*".into())
         }
         "StructProperty" => {
-            let struct_ref = read_i32(c)?;
+            let struct_ref = read_i32(r)?;
             Ok(short_class(&resolve_index(
                 imports,
                 export_names,
@@ -111,7 +115,7 @@ pub fn resolve_ffield_type(
             )))
         }
         "ByteProperty" | "EnumProperty" => {
-            let enum_ref = read_i32(c)?;
+            let enum_ref = read_i32(r)?;
             if enum_ref != 0 {
                 Ok(short_class(&resolve_index(imports, export_names, enum_ref)))
             } else {
@@ -119,7 +123,7 @@ pub fn resolve_ffield_type(
             }
         }
         "ArrayProperty" | "SetProperty" => {
-            skip_ffield_child(c, nt, end)?;
+            skip_ffield_child(r, nt, end)?;
             Ok(if field_class == "SetProperty" {
                 "TSet<>".into()
             } else {
@@ -127,15 +131,15 @@ pub fn resolve_ffield_type(
             })
         }
         "MapProperty" => {
-            skip_ffield_child(c, nt, end)?;
-            skip_ffield_child(c, nt, end)?;
+            skip_ffield_child(r, nt, end)?;
+            skip_ffield_child(r, nt, end)?;
             Ok("TMap<>".into())
         }
         "DelegateProperty"
         | "MulticastDelegateProperty"
         | "MulticastInlineDelegateProperty"
         | "MulticastSparseDelegateProperty" => {
-            let _sig = read_i32(c)?;
+            let _sig = read_i32(r)?;
             Ok("Delegate".into())
         }
         _ => Ok(field_class

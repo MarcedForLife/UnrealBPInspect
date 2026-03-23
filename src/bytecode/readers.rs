@@ -1,3 +1,8 @@
+//! Bytecode-level binary readers.
+//!
+//! Works on `&[u8]` + `&mut usize` (not `Cursor`). Returns defaults on
+//! truncation rather than erroring; bytecode parsing is best-effort.
+
 use crate::binary::NameTable;
 
 macro_rules! read_bc_num {

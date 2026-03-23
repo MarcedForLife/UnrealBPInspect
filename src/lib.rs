@@ -1,3 +1,7 @@
+//! Unreal Engine Blueprint `.uasset` parser library.
+//!
+//! Entry point: [`parser::parse_asset`].
+
 pub mod binary;
 pub mod bytecode;
 pub mod enums;

@@ -1,8 +1,11 @@
+//! JSON output mode (`--json`). Must always produce valid JSON.
+
 use serde_json::{json, Value};
 
 use crate::resolve::*;
 use crate::types::*;
 
+/// Convert a parsed asset to a JSON value. Filters restrict to matching export names.
 pub fn to_json(asset: &ParsedAsset, filters: &[String]) -> Value {
     let export_names: Vec<String> = asset
         .exports

@@ -1,3 +1,7 @@
+//! Index resolution and property lookup helpers.
+//!
+//! Package index convention: negative = import (1-based), positive = export (1-based), zero = null.
+
 use crate::types::*;
 
 /// UE "package index" convention: negative = import table (1-based), positive = export table (1-based), zero = null.

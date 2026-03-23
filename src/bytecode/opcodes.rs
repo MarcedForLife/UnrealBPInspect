@@ -1,5 +1,6 @@
-// Kismet bytecode opcodes (EExprToken)
-// https://github.com/EpicGames/UnrealEngine/blob/release/Engine/Source/Runtime/CoreUObject/Public/UObject/Script.h
+//! Kismet opcode constants (`EExprToken`), 1:1 with UE source.
+//!
+//! <https://github.com/EpicGames/UnrealEngine/blob/release/Engine/Source/Runtime/CoreUObject/Public/UObject/Script.h>
 
 pub const EX_LOCAL_VARIABLE: u8 = 0x00;
 pub const EX_INSTANCE_VARIABLE: u8 = 0x01;
