@@ -42,10 +42,8 @@ pub fn read_bc_obj_ref(
 /// corrupt data that would read garbage FNames.
 const MAX_FIELD_PATH_DEPTH: i32 = 16;
 
-/// Read an FField* reference from serialized bytecode (FFieldPath format for UE4.25+).
-/// Format: int32 PathNum + FName[PathNum] + int32 ResolvedOwner.
-/// On disk this is variable-length (8 + N*8 bytes), but in memory it's a single 8-byte
-/// pointer, so mem_adj tracks the cumulative size difference for code-offset mapping.
+/// Read an FFieldPath from bytecode: PathNum + FName[N] + ResolvedOwner.
+/// Variable-length on disk (8+N*8 bytes) but 8-byte pointer in memory, tracked via mem_adj.
 pub fn read_bc_field_path(
     bytecode: &[u8],
     pos: &mut usize,

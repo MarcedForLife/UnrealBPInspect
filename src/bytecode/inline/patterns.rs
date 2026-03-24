@@ -3,8 +3,9 @@
 
 use super::{
     count_var_refs, find_matching_paren, is_ident_char, is_trivial_expr, parse_temp_assignment,
-    strip_outer_parens, substitute_var,
+    split_args, strip_outer_parens, substitute_var,
 };
+use crate::helpers::indent_of;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Max output args for a Break* call to be fully inlined (replaced with dot access).
@@ -492,7 +493,7 @@ pub(super) fn fold_cast_inline(lines: &mut Vec<String>) {
             if j == i {
                 continue;
             }
-            let line_indent = line.len() - line.trim_start().len();
+            let line_indent = indent_of(line);
             let content = &line[line_indent..];
             if count_var_refs(content, &var) > 0 {
                 let mut text = content.to_string();
@@ -579,7 +580,7 @@ fn fold_break_patterns(lines: &mut Vec<String>) {
             let replacement = format!("{}.{}", source, fields[idx]);
 
             for line in lines.iter_mut().skip(i + 1) {
-                let indent_len = line.len() - line.trim_start().len();
+                let indent_len = indent_of(line);
                 let content = &line[indent_len..];
                 if count_var_refs(content, out_var) > 0 {
                     let new_content = replace_all_var_refs(content, out_var, &replacement);
@@ -697,7 +698,7 @@ fn fold_struct_construction(lines: &mut Vec<String>) {
 /// When the same `(COND ? T : F)` appears 3+ times in a section, insert
 /// `$VarName = COND ? T : F` before the first use and replace all occurrences.
 pub(super) fn hoist_repeated_ternaries(lines: &mut Vec<String>) {
-    // Phase 1: Extract and count all parenthesized ternary expressions
+    // Extract and count all parenthesized ternary expressions
     let mut ternary_counts: BTreeMap<String, usize> = BTreeMap::new();
     for line in lines.iter() {
         for ternary in extract_parenthesized_ternaries(line.trim()) {
@@ -705,7 +706,7 @@ pub(super) fn hoist_repeated_ternaries(lines: &mut Vec<String>) {
         }
     }
 
-    // Phase 2: Collect ternaries appearing 3+ times, longest first
+    // Collect ternaries appearing 3+ times, longest first
     let mut to_hoist: Vec<(String, String)> = Vec::new();
     for (ternary, count) in &ternary_counts {
         if *count >= 3 {
@@ -715,11 +716,11 @@ pub(super) fn hoist_repeated_ternaries(lines: &mut Vec<String>) {
     }
     to_hoist.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
-    // Phase 3: For each hoisted ternary, insert assignment and replace
+    // Insert assignment before first use and replace all occurrences
     for (ternary, var_name) in &to_hoist {
         let first_use = lines.iter().position(|l| l.contains(ternary.as_str()));
         let Some(idx) = first_use else { continue };
-        let indent = lines[idx].len() - lines[idx].trim_start().len();
+        let indent = indent_of(&lines[idx]);
         let indent_str = " ".repeat(indent);
         // Strip outer parens for the assignment RHS
         let rhs = strip_outer_parens(ternary);
@@ -764,8 +765,8 @@ fn has_ternary_at_depth_zero(input: &str) -> bool {
     let mut has_question = false;
     let bytes = input.as_bytes();
     let len = bytes.len();
-    for i in 0..len {
-        match bytes[i] {
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth -= 1,
             b'?' if depth == 0 => {
@@ -795,8 +796,8 @@ fn generate_ternary_var_name(ternary: &str, index: usize) -> String {
     let mut c_pos = None;
     let bytes = inner.as_bytes();
     let len = bytes.len();
-    for i in 0..len {
-        match bytes[i] {
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth -= 1,
             b'?' if depth == 0 && q_pos.is_none() => {
@@ -871,7 +872,7 @@ pub(super) fn extract_left_right_suffix(true_expr: &str, false_expr: &str) -> Op
 /// Fixes precedence ambiguity where `!Func() == 1` reads as `!(Func() == 1)`.
 pub(super) fn simplify_bool_comparisons(lines: &mut [String]) {
     for line in lines.iter_mut() {
-        let indent_len = line.len() - line.trim_start().len();
+        let indent_len = indent_of(line);
         let content = &line[indent_len..];
         let simplified = simplify_negated_bool_comparison(content);
         if simplified != content {
@@ -1003,7 +1004,7 @@ fn suppress_unused_outparams(lines: &mut [String]) {
 
     for var in &to_suppress {
         for line in lines.iter_mut() {
-            let indent_len = line.len() - line.trim_start().len();
+            let indent_len = indent_of(line);
             let content = &line[indent_len..];
             if count_var_refs(content, var) > 0 {
                 let new_content = replace_all_var_refs(content, var, "_");
@@ -1040,7 +1041,7 @@ pub(super) fn fold_outparam_calls(lines: &mut Vec<String>) {
         };
 
         // Substitute $outParam with the rewritten call expression
-        let ref_indent = lines[ref_line].len() - lines[ref_line].trim_start().len();
+        let ref_indent = indent_of(&lines[ref_line]);
         let ref_content = &lines[ref_line][ref_indent..];
         let replacement =
             replace_all_var_refs(ref_content, &candidate.out_var, &candidate.call_expr);
@@ -1323,14 +1324,14 @@ fn parse_switch_enum_assign(
     let neq_pos = rhs.find(" != ")?;
     let compared_var = rhs[..neq_pos].to_string();
     let value = rhs[neq_pos + 4..].to_string();
-    let indent_len = full_line.len() - full_line.trim_start().len();
+    let indent_len = indent_of(full_line);
     Some((switch_var.to_string(), compared_var, value, indent_len))
 }
 
 /// Rename Make* functions by stripping the `Make` prefix: MakeVector -> Vector, etc.
 fn rename_make_functions(lines: &mut [String]) {
     for line in lines.iter_mut() {
-        let indent_len = line.len() - line.trim_start().len();
+        let indent_len = indent_of(line);
         let content = &line[indent_len..];
         let changed = strip_make_prefix(content);
         if changed != content {
@@ -1453,7 +1454,7 @@ fn fold_section_temps(lines: &mut Vec<String>) {
             }
             let Some(target_idx) = target else { continue };
 
-            let indent_len = lines[target_idx].len() - lines[target_idx].trim_start().len();
+            let indent_len = indent_of(&lines[target_idx]);
             let content = &lines[target_idx][indent_len..];
             let replacement = substitute_var(content, var_name, &current_expr);
 
@@ -1493,7 +1494,7 @@ fn find_completion_block(
             comp_end += 1;
             continue;
         }
-        let line_indent = lines[comp_end].len() - lines[comp_end].trim_start().len();
+        let line_indent = indent_of(&lines[comp_end]);
         if line_indent <= marker_indent && (trimmed.starts_with('}') || trimmed.starts_with("---"))
         {
             break;
@@ -1515,14 +1516,14 @@ fn find_pre_loop_setup(lines: &[String], marker_idx: usize) -> Option<(usize, us
         trimmed.starts_with("while ") || trimmed.starts_with("for ")
     })?;
 
-    let while_indent = lines[while_idx].len() - lines[while_idx].trim_start().len();
+    let while_indent = indent_of(&lines[while_idx]);
     let mut pre_start = while_idx;
     for j in (0..while_idx).rev() {
         let trimmed = lines[j].trim();
         if trimmed.is_empty() {
             continue;
         }
-        let line_indent = lines[j].len() - lines[j].trim_start().len();
+        let line_indent = indent_of(&lines[j]);
         if line_indent == while_indent && !trimmed.starts_with('}') && !trimmed.starts_with("//") {
             pre_start = j;
         } else {
@@ -1545,7 +1546,7 @@ fn dedup_completion_paths(lines: &mut Vec<String>) {
         }
 
         let marker_idx = i;
-        let marker_indent = lines[i].len() - lines[i].trim_start().len();
+        let marker_indent = indent_of(&lines[i]);
 
         let Some((comp_start, comp_end)) = find_completion_block(lines, marker_idx, marker_indent)
         else {
@@ -1607,10 +1608,6 @@ fn dedup_completion_paths(lines: &mut Vec<String>) {
     }
 }
 
-// ============================================================
-// Helpers for summary pattern folding
-// ============================================================
-
 /// Detect a shared `_N` disambiguation suffix across all field names.
 /// Returns Some("_1") if all fields end with "_1", etc.
 pub(super) fn detect_common_suffix<'a>(fields: &[&'a str]) -> Option<&'a str> {
@@ -1634,29 +1631,6 @@ pub(super) fn detect_common_suffix<'a>(fields: &[&'a str]) -> Option<&'a str> {
     } else {
         None
     }
-}
-
-/// Split comma-separated arguments respecting nested parentheses.
-pub(super) fn split_args(input: &str) -> Vec<&str> {
-    let mut args = Vec::new();
-    let mut depth = 0;
-    let mut start = 0;
-    for (i, ch) in input.char_indices() {
-        match ch {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth -= 1,
-            ',' if depth == 0 => {
-                args.push(input[start..i].trim());
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    let last = input[start..].trim();
-    if !last.is_empty() {
-        args.push(last);
-    }
-    args
 }
 
 /// Parse `$MakeStruct_TYPE.FIELD = VALUE`.

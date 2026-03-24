@@ -8,9 +8,7 @@ pub use cleanup::{cleanup_structured_output, strip_orphaned_blocks, strip_unmatc
 pub use patterns::fold_summary_patterns;
 pub use temps::{discard_unused_assignments, inline_constant_temps, inline_single_use_temps};
 
-// ============================================================
-// Shared helpers used by multiple sub-modules (pub(super))
-// ============================================================
+// Shared helpers
 
 /// Parse `$VarName = expression` or `Temp_* = expression` assignments.
 pub(super) fn parse_temp_assignment(text: &str) -> Option<(&str, &str)> {
@@ -45,9 +43,10 @@ pub(super) fn count_var_refs(text: &str, var: &str) -> usize {
     count
 }
 
-pub(super) fn is_ident_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
-}
+pub(super) use crate::helpers::{
+    expr_is_compound, find_at_depth_zero, find_matching_paren, is_ident_char, split_args,
+    strip_outer_parens,
+};
 
 /// Check if `var` appears at a word boundary at position `pos` in `text`.
 pub(super) fn is_var_boundary(text: &str, pos: usize, var: &str) -> bool {
@@ -96,23 +95,15 @@ pub(super) fn expr_has_call(expr: &str) -> bool {
     false
 }
 
-const OPERATORS: &[&str] = &[
-    "&&", "||", "+", "-", "*", "/", "%", ">=", "<=", "==", "!=", ">>", "<<", ">", "<", "?",
-];
-
-pub(super) fn expr_is_compound(expr: &str) -> bool {
-    OPERATORS
-        .iter()
-        .any(|op| expr.contains(&format!(" {} ", op)))
-        || expr.starts_with('!')
-}
-
 /// True if `expr` is trivial enough to inline regardless of line length (no calls, operators, or brackets).
 pub(super) fn is_trivial_expr(expr: &str) -> bool {
     !expr.is_empty() && !expr.contains(['(', ')', '[', ']']) && !expr_is_compound(expr)
 }
 
 fn used_in_operator_context(text: &str, pos: usize, after: usize) -> bool {
+    const OPERATORS: &[&str] = &[
+        "&&", "||", "+", "-", "*", "/", "%", ">=", "<=", "==", "!=", ">>", "<<", ">", "<", "?",
+    ];
     let before = text[..pos].trim_end();
     let after_text = text[after..].trim_start();
 
@@ -121,53 +112,6 @@ fn used_in_operator_context(text: &str, pos: usize, after: usize) -> bool {
         || OPERATORS.iter().any(|op| before.ends_with(op));
     let after_op = OPERATORS.iter().any(|op| after_text.starts_with(op));
     before_op || after_op
-}
-
-pub(super) fn find_matching_paren(input: &str) -> Option<usize> {
-    if !input.starts_with('(') {
-        return None;
-    }
-    let mut depth = 0i32;
-    for (i, ch) in input.chars().enumerate() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-pub(super) fn find_at_depth_zero(input: &str, needle: &str) -> Option<usize> {
-    let mut depth = 0i32;
-    let bytes = input.as_bytes();
-    let needle_bytes = needle.as_bytes();
-    let nlen = needle_bytes.len();
-    for i in 0..bytes.len() {
-        match bytes[i] {
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' => depth -= 1,
-            _ => {}
-        }
-        if depth == 0 && i + nlen <= bytes.len() && &bytes[i..i + nlen] == needle_bytes {
-            return Some(i);
-        }
-    }
-    None
-}
-
-pub(super) fn strip_outer_parens(input: &str) -> &str {
-    if let Some(close) = find_matching_paren(input) {
-        if close == input.len() - 1 {
-            return &input[1..close];
-        }
-    }
-    input
 }
 
 // Inline tests: these test private functions (clean_line, parse_temp_assignment,

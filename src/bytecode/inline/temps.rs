@@ -6,6 +6,85 @@ use super::{
 use crate::bytecode::decode::BcStatement;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+/// Collect all `(statement_index, var_name, expression)` tuples from temp assignments.
+fn collect_temp_assignments(stmts: &[BcStatement]) -> Vec<(usize, String, String)> {
+    stmts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| {
+            let (var, expr) = parse_temp_assignment(&s.text)?;
+            Some((i, var.to_string(), expr.to_string()))
+        })
+        .collect()
+}
+
+/// Re-verify each substitution candidate against current statement text, then apply.
+/// Each entry is `(assign_idx, var_name, expr)`. The expr is re-read from the statement
+/// in case earlier substitutions modified it.
+fn apply_temp_substitutions(
+    stmts: &mut Vec<BcStatement>,
+    to_inline: &[(usize, String, String)],
+    max_line: Option<usize>,
+) -> bool {
+    let mut removed: Vec<usize> = Vec::new();
+    let mut inlined_any = false;
+
+    for (assign_idx, var_name, _) in to_inline {
+        if removed.contains(assign_idx) {
+            continue;
+        }
+
+        // Re-read the current expr (may have been modified by earlier inlines)
+        let current_expr = match parse_temp_assignment(&stmts[*assign_idx].text) {
+            Some((v, e)) if v == var_name => e.to_string(),
+            _ => continue,
+        };
+
+        // Re-verify: count refs in current (possibly modified) statements
+        let mut current_refs = 0usize;
+        let mut target_idx = None;
+        for (i, s) in stmts.iter().enumerate() {
+            if i == *assign_idx || removed.contains(&i) {
+                continue;
+            }
+            let refs = count_var_refs(&s.text, var_name);
+            current_refs += refs;
+            if refs == 1 && target_idx.is_none() {
+                target_idx = Some(i);
+            }
+        }
+        if current_refs != 1 {
+            continue;
+        }
+        let Some(target_idx) = target_idx else {
+            continue;
+        };
+
+        let replacement = substitute_var(&stmts[target_idx].text, var_name, &current_expr);
+
+        // Bypass max_line for trivial expressions (property chains, $temp refs, literals)
+        if let Some(limit) = max_line {
+            let shortens = current_expr.len() + 2 <= var_name.len(); // +2 for possible (...)
+            let trivial = is_trivial_expr(&current_expr);
+            if !shortens && !trivial && replacement.len() > limit {
+                continue;
+            }
+        }
+
+        stmts[target_idx].text = replacement;
+        removed.push(*assign_idx);
+        inlined_any = true;
+    }
+
+    // Remove inlined assignment lines (reverse order to preserve indices)
+    removed.sort_unstable();
+    for idx in removed.into_iter().rev() {
+        stmts.remove(idx);
+    }
+
+    inlined_any
+}
+
 /// Inline single-use `$temp` variables to reduce noise.
 /// Only inlines vars that:
 /// - Start with `$` (compiler temporaries)
@@ -17,29 +96,17 @@ pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
     const MAX_PASSES: usize = 6; // Iterative: inlining one temp may expose further inlines
 
     for _ in 0..MAX_PASSES {
-        let mut inlined_any = false;
-
-        // Collect assignments: (index, var_name, expr)
-        let assignments: Vec<(usize, String, String)> = stmts
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| {
-                let (var, expr) = parse_temp_assignment(&s.text)?;
-                Some((i, var.to_string(), expr.to_string()))
-            })
-            .collect();
+        let assignments = collect_temp_assignments(stmts);
 
         // Count how many times each var name is assigned
-        let mut assign_counts: std::collections::HashMap<&str, usize> =
-            std::collections::HashMap::new();
+        let mut assign_counts: HashMap<&str, usize> = HashMap::new();
         for (_, var_name, _) in &assignments {
             *assign_counts.entry(var_name.as_str()).or_default() += 1;
         }
 
-        // For each assignment, count references in all other statements
+        // Filter to single-assignment, single-reference candidates
         let mut to_inline: Vec<(usize, String, String)> = Vec::new();
         for (assign_idx, var_name, expr) in &assignments {
-            // Skip if this var name is assigned more than once (reused across event handlers)
             if assign_counts.get(var_name.as_str()).copied().unwrap_or(0) != 1 {
                 continue;
             }
@@ -55,60 +122,7 @@ pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
             }
         }
 
-        // Apply substitutions; re-verify and re-read expr after each change
-        let mut removed: Vec<usize> = Vec::new();
-        for (assign_idx, var_name, _) in &to_inline {
-            if removed.contains(assign_idx) {
-                continue;
-            }
-
-            // Re-read the current expr (may have been modified by earlier inlines)
-            let current_expr = match parse_temp_assignment(&stmts[*assign_idx].text) {
-                Some((v, e)) if v == var_name => e.to_string(),
-                _ => continue,
-            };
-
-            // Re-verify: count refs in current (possibly modified) statements
-            let mut current_refs = 0usize;
-            let mut target_idx = None;
-            for (i, s) in stmts.iter().enumerate() {
-                if i == *assign_idx || removed.contains(&i) {
-                    continue;
-                }
-                let refs = count_var_refs(&s.text, var_name);
-                current_refs += refs;
-                if refs == 1 && target_idx.is_none() {
-                    target_idx = Some(i);
-                }
-            }
-            if current_refs != 1 {
-                continue;
-            }
-            let Some(target_idx) = target_idx else {
-                continue;
-            };
-
-            let replacement = substitute_var(&stmts[target_idx].text, var_name, &current_expr);
-
-            // Bypass MAX_LINE for trivial expressions (property chains, $temp refs, literals)
-            let shortens = current_expr.len() + 2 <= var_name.len(); // +2 for possible (...)
-            let trivial = is_trivial_expr(&current_expr);
-            if !shortens && !trivial && replacement.len() > MAX_LINE {
-                continue;
-            }
-
-            stmts[target_idx].text = replacement;
-            removed.push(*assign_idx);
-            inlined_any = true;
-        }
-
-        // Remove inlined assignment lines (reverse order to preserve indices)
-        removed.sort_unstable();
-        for idx in removed.into_iter().rev() {
-            stmts.remove(idx);
-        }
-
-        if !inlined_any {
+        if !apply_temp_substitutions(stmts, &to_inline, Some(MAX_LINE)) {
             break;
         }
     }

@@ -42,11 +42,8 @@ pub fn clean_bc_name(name: &str) -> String {
     name.to_string()
 }
 
-/// Normalize UE5 LWC (Large World Coordinates) name differences so that
-/// UE4 and UE5 produce identical temp variable and function names.
-/// UE5 renamed float math functions to double variants; this maps them back
-/// so diffs between engine versions show only real code changes.
-/// Display only; actual values are still parsed at full f64 precision.
+/// Normalize UE5 LWC (Large World Coordinates) name variants back to UE4 equivalents
+/// for clean cross-version diffs.
 fn normalize_lwc_name(name: &str) -> String {
     let mut s = name.to_string();
     // Binary math ops: _DoubleDouble -> _FloatFloat
@@ -131,7 +128,7 @@ mod tests {
         );
     }
 
-    // --- LWC normalization ---
+    // LWC normalization
 
     #[test]
     fn lwc_double_double_to_float_float() {
