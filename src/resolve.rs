@@ -4,13 +4,15 @@
 
 use crate::types::*;
 
-/// UE "package index" convention: negative = import table (1-based), positive = export table (1-based), zero = null.
+/// Guard against circular outer_index references in the import table.
+const MAX_IMPORT_DEPTH: usize = 32;
+
 pub fn resolve_import_path(imports: &[ImportEntry], index: i32) -> String {
     resolve_import_path_inner(imports, index, 0)
 }
 
 fn resolve_import_path_inner(imports: &[ImportEntry], index: i32, depth: usize) -> String {
-    if depth > 32 || index >= 0 {
+    if depth > MAX_IMPORT_DEPTH || index >= 0 {
         return "?".to_string();
     }
     let idx = (-index - 1) as usize;
@@ -58,8 +60,15 @@ pub fn find_prop<'a>(props: &'a [Property], name: &str) -> Option<&'a Property> 
 
 pub fn find_prop_str(props: &[Property], name: &str) -> Option<String> {
     find_prop(props, name).and_then(|p| match &p.value {
-        PropValue::Str(s) => Some(s.clone()),
-        PropValue::Name(s) => Some(s.clone()),
+        PropValue::Str(s) | PropValue::Name(s) | PropValue::Text(s) => Some(s.clone()),
+        _ => None,
+    })
+}
+
+/// Extract a string field from a nested Struct property.
+pub fn find_struct_field_str(props: &[Property], struct_name: &str, field: &str) -> Option<String> {
+    find_prop(props, struct_name).and_then(|p| match &p.value {
+        PropValue::Struct { fields, .. } => find_prop_str(fields, field),
         _ => None,
     })
 }
@@ -105,6 +114,37 @@ pub fn find_prop_object_array(
             _ => None,
         })
         .unwrap_or_default()
+}
+
+/// Get the string items from an Array property (Str, Name, and Text variants).
+pub fn find_prop_str_items<'a>(props: &'a [Property], name: &str) -> Vec<&'a str> {
+    find_prop(props, name)
+        .and_then(|p| match &p.value {
+            PropValue::Array { items, .. } => Some(
+                items
+                    .iter()
+                    .filter_map(|item| match item {
+                        PropValue::Str(s) | PropValue::Name(s) | PropValue::Text(s) => {
+                            Some(s.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Get string items from the first matching property name (tries each in order).
+pub fn find_prop_str_items_any<'a>(props: &'a [Property], names: &[&str]) -> Vec<&'a str> {
+    for name in names {
+        let items = find_prop_str_items(props, name);
+        if !items.is_empty() {
+            return items;
+        }
+    }
+    Vec::new()
 }
 
 pub fn prop_value_short(

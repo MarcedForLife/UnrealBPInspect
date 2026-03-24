@@ -4,12 +4,16 @@
 //! then reorders so downstream structuring sees natural control flow.
 
 use super::decode::BcStatement;
-use super::OffsetMap;
+use super::{OffsetMap, JUMP_OFFSET_TOLERANCE};
 
 /// Offset tolerance for ForEach loop body detection. Jump targets use in-memory offsets
 /// but we index by on-disk offsets + cumulative mem_adj. The drift accumulates from
 /// FFieldPath (variable length on disk, 8-byte pointer in memory) and obj-ref (+4 each).
 const FORLOOP_OFFSET_TOLERANCE: usize = 64;
+
+/// Max gap (in statements) between an if_jump and its push_flow/jump pair.
+/// Filtered opcodes (wire_trace, tracepoint) can appear between them.
+const FORLOOP_PUSHFLOW_WINDOW: usize = 4;
 
 /// Parse "push_flow 0xHEX" -> target offset.
 pub fn parse_push_flow(text: &str) -> Option<usize> {
@@ -89,7 +93,8 @@ fn expand_body_end(
         let mut idx = scan_from;
         while idx <= be {
             if let Some((_, jump_target)) = parse_if_jump(&stmts[idx].text) {
-                if let Some(target_idx) = offset_map.find_fuzzy(jump_target, 4) {
+                if let Some(target_idx) = offset_map.find_fuzzy(jump_target, JUMP_OFFSET_TOLERANCE)
+                {
                     let in_other_pin = existing_pins
                         .iter()
                         .any(|&(ps, pe)| target_idx >= ps && target_idx <= pe);
@@ -130,7 +135,7 @@ fn find_displaced_blocks(
         let Some((_, jump_target)) = parse_if_jump(&stmts[idx].text) else {
             continue;
         };
-        let Some(target_idx) = offset_map.find_fuzzy(jump_target, 4) else {
+        let Some(target_idx) = offset_map.find_fuzzy(jump_target, JUMP_OFFSET_TOLERANCE) else {
             continue;
         };
         if target_idx <= body_end {
@@ -164,16 +169,16 @@ fn detect_grouped_sequences(stmts: &[BcStatement], offset_map: &OffsetMap) -> Ve
         };
 
         let mut pairs: Vec<(usize, usize)> = Vec::new();
-        let mut j = i + 1;
-        while j + 1 < stmts.len() {
-            let Some(_cont) = parse_push_flow(&stmts[j].text) else {
+        let mut scan_idx = i + 1;
+        while scan_idx + 1 < stmts.len() {
+            let Some(_cont) = parse_push_flow(&stmts[scan_idx].text) else {
                 break;
             };
-            let Some(body) = parse_jump(&stmts[j + 1].text) else {
+            let Some(body) = parse_jump(&stmts[scan_idx + 1].text) else {
                 break;
             };
             pairs.push((_cont, body));
-            j += 2;
+            scan_idx += 2;
         }
 
         if pairs.len() < 2 {
@@ -181,7 +186,7 @@ fn detect_grouped_sequences(stmts: &[BcStatement], offset_map: &OffsetMap) -> Ve
             continue;
         }
 
-        let inline_start = j;
+        let inline_start = scan_idx;
         let inline_end = stmts[inline_start..]
             .iter()
             .position(|s| s.text == "pop_flow")
@@ -263,16 +268,16 @@ fn detect_interleaved_sequences(
         // Collect alternating push_flow/jump pairs
         let chain_start = i;
         let mut jump_targets: Vec<usize> = Vec::new(); // body offsets
-        let mut j = i;
-        while j + 1 < stmts.len() && !used[j] {
-            let Some(_resume) = parse_push_flow(&stmts[j].text) else {
+        let mut scan_idx = i;
+        while scan_idx + 1 < stmts.len() && !used[scan_idx] {
+            let Some(_resume) = parse_push_flow(&stmts[scan_idx].text) else {
                 break;
             };
-            let Some(body_off) = parse_jump(&stmts[j + 1].text) else {
+            let Some(body_off) = parse_jump(&stmts[scan_idx + 1].text) else {
                 break;
             };
             jump_targets.push(body_off);
-            j += 2;
+            scan_idx += 2;
         }
         if jump_targets.is_empty() {
             i += 1;
@@ -281,7 +286,7 @@ fn detect_interleaved_sequences(
 
         // After the chain: inline body until pop_flow (exact).
         // pop_flow_if_not is a conditional branch WITHIN the body, not the terminator.
-        let inline_start = j;
+        let inline_start = scan_idx;
         let inline_end = stmts[inline_start..]
             .iter()
             .position(|s| s.text == "pop_flow")
@@ -295,7 +300,7 @@ fn detect_interleaved_sequences(
         let mut pins: Vec<SequencePin> = Vec::new();
         let mut all_found = true;
         for &target in &jump_targets {
-            let Some(body_start) = offset_map.find_fuzzy(target, 4) else {
+            let Some(body_start) = offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) else {
                 all_found = false;
                 break;
             };
@@ -352,6 +357,50 @@ fn detect_interleaved_sequences(
     }
 }
 
+/// Resolve ForEach body layout: body may be displaced after the completion path.
+///
+/// Returns `(body_start, loop_ctrl_end, completion_start, completion_end)`.
+/// `None` for the completion range means no displaced body was detected.
+fn resolve_foreach_body(
+    stmts: &[BcStatement],
+    body_jump_target: usize,
+    back_jump_idx: usize,
+    pop_idx: Option<usize>,
+) -> Option<(usize, usize, Option<usize>, Option<usize>)> {
+    if let Some(pop_idx) = pop_idx {
+        let body_at_jump = stmts.iter().position(|s| {
+            s.mem_offset > 0 && s.mem_offset.abs_diff(body_jump_target) < FORLOOP_OFFSET_TOLERANCE
+        });
+        let (body_start, completion) = match body_at_jump {
+            Some(actual_body) if actual_body > pop_idx + 1 => {
+                (actual_body, (Some(pop_idx + 1), Some(actual_body - 1)))
+            }
+            _ => (pop_idx + 1, (None, None)),
+        };
+        Some((body_start, pop_idx, completion.0, completion.1))
+    } else {
+        // Find the CLOSEST matching statement, not first-match. Completion path statements
+        // can land within the tolerance window of the body target, so we need the nearest
+        // offset to avoid picking the wrong statement.
+        let body_idx = stmts
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| {
+                s.mem_offset > 0
+                    && s.mem_offset.abs_diff(body_jump_target) < FORLOOP_OFFSET_TOLERANCE
+            })
+            .min_by_key(|(_, s)| s.mem_offset.abs_diff(body_jump_target))
+            .map(|(idx, _)| idx)?;
+        // If body is displaced past the back_jump, the gap is the completion path
+        let (cs, ce) = if body_idx > back_jump_idx + 1 {
+            (Some(back_jump_idx + 1), Some(body_idx - 1))
+        } else {
+            (None, None)
+        };
+        Some((body_idx, back_jump_idx, cs, ce))
+    }
+}
+
 /// Detect for-loops (including ForEach with displaced body and completion path).
 fn detect_for_loops(
     stmts: &[BcStatement],
@@ -366,14 +415,14 @@ fn detect_for_loops(
         };
 
         let mut pf_idx = None;
-        for k in 1..=4usize.min(stmts.len().saturating_sub(i + 1)) {
-            if i + k + 1 >= stmts.len() {
+        for window_offset in 1..=FORLOOP_PUSHFLOW_WINDOW.min(stmts.len().saturating_sub(i + 1)) {
+            if i + window_offset + 1 >= stmts.len() {
                 break;
             }
-            if parse_push_flow(&stmts[i + k].text).is_some()
-                && parse_jump(&stmts[i + k + 1].text).is_some()
+            if parse_push_flow(&stmts[i + window_offset].text).is_some()
+                && parse_jump(&stmts[i + window_offset + 1].text).is_some()
             {
-                pf_idx = Some(i + k);
+                pf_idx = Some(i + window_offset);
                 break;
             }
         }
@@ -389,10 +438,10 @@ fn detect_for_loops(
         let incr_start = pf_idx + 2;
 
         let mut back_jump_idx = None;
-        for j in incr_start..stmts.len() {
-            if let Some(back_target) = parse_jump(&stmts[j].text) {
+        for scan_idx in incr_start..stmts.len() {
+            if let Some(back_target) = parse_jump(&stmts[scan_idx].text) {
                 if back_target <= stmts[i].mem_offset {
-                    back_jump_idx = Some(j);
+                    back_jump_idx = Some(scan_idx);
                     break;
                 }
             }
@@ -408,48 +457,11 @@ fn detect_for_loops(
 
         // For ForEach loops, the body is displaced AFTER the completion path.
         // Detect by checking if the body_jump_target lands past the control block end.
-        let (body_start, loop_ctrl_end, completion_start, completion_end) =
-            if let Some(pop_idx) = pop_idx {
-                let body_at_jump = stmts.iter().position(|s| {
-                    s.mem_offset > 0
-                        && s.mem_offset.abs_diff(body_jump_target) < FORLOOP_OFFSET_TOLERANCE
-                });
-                if let Some(actual_body) = body_at_jump {
-                    if actual_body > pop_idx + 1 {
-                        (
-                            actual_body,
-                            pop_idx,
-                            Some(pop_idx + 1),
-                            Some(actual_body - 1),
-                        )
-                    } else {
-                        (pop_idx + 1, pop_idx, None, None)
-                    }
-                } else {
-                    (pop_idx + 1, pop_idx, None, None)
-                }
-            } else {
-                // Find the CLOSEST matching statement, not first-match. Completion path statements
-                // can land within the tolerance window of the body target, so we need the nearest
-                // offset to avoid picking the wrong statement.
-                let body_idx = stmts
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, s)| {
-                        s.mem_offset > 0
-                            && s.mem_offset.abs_diff(body_jump_target) < FORLOOP_OFFSET_TOLERANCE
-                    })
-                    .min_by_key(|(_, s)| s.mem_offset.abs_diff(body_jump_target))
-                    .map(|(idx, _)| idx);
-                let Some(body_idx) = body_idx else { continue };
-                // If body is displaced past the back_jump, the gap is the completion path
-                let (cs, ce) = if body_idx > back_jump_idx + 1 {
-                    (Some(back_jump_idx + 1), Some(body_idx - 1))
-                } else {
-                    (None, None)
-                };
-                (body_idx, back_jump_idx, cs, ce)
-            };
+        let Some((body_start, loop_ctrl_end, completion_start, completion_end)) =
+            resolve_foreach_body(stmts, body_jump_target, back_jump_idx, pop_idx)
+        else {
+            continue;
+        };
 
         if body_start >= stmts.len() {
             continue;
@@ -653,12 +665,22 @@ pub fn reorder_convergence(stmts: &mut Vec<BcStatement>) {
     }
 }
 
-/// Process a single convergence group. Returns true if a reorder was performed.
-fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
-    use std::collections::{HashMap, HashSet};
+struct ConvergenceGroup {
+    target_idx: usize,
+    jump_indices: Vec<usize>,
+    conv_end: usize,
+}
 
-    let offset_map = OffsetMap::build(stmts);
-    let find_idx = |target: usize| -> Option<usize> { offset_map.find_fuzzy(target, 4) };
+/// Find the earliest convergence group: 2+ backward unconditional jumps sharing a target.
+/// Scans for the convergence extent with if-nesting depth tracking.
+fn find_convergence_group(
+    stmts: &[BcStatement],
+    offset_map: &OffsetMap,
+) -> Option<ConvergenceGroup> {
+    use std::collections::HashMap;
+
+    let find_idx =
+        |target: usize| -> Option<usize> { offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) };
 
     // Find backward unconditional jumps (target resolves to earlier index)
     let mut backward_jumps: Vec<(usize, usize)> = Vec::new(); // (jump_idx, target_idx)
@@ -692,9 +714,7 @@ fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
             conv = Some((target_idx, jump_indices.clone()));
         }
     }
-    let Some((conv_target_idx, mut jump_indices)) = conv else {
-        return false;
-    };
+    let (conv_target_idx, mut jump_indices) = conv?;
     jump_indices.sort();
 
     // Find convergence code extent: from target_idx to the exit jump that leaves the
@@ -706,18 +726,15 @@ fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
     let mut if_depth = 0usize;
     for (j, stmt) in stmts.iter().enumerate().skip(conv_target_idx) {
         conv_end = j;
-        // Track if-nesting within convergence code
         if parse_if_jump(&stmt.text).is_some() {
             if_depth += 1;
             continue;
         }
         if let Some(jt) = parse_jump(&stmt.text) {
             if if_depth > 0 {
-                // This jump is an if-block's exit jump, reduces nesting
                 if_depth -= 1;
                 continue;
             }
-            // Top-level forward jump or jump past end = convergence exit
             if let Some(jt_idx) = find_idx(jt) {
                 if jt_idx > j {
                     break;
@@ -729,16 +746,31 @@ fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
         }
     }
 
+    Some(ConvergenceGroup {
+        target_idx: conv_target_idx,
+        jump_indices,
+        conv_end,
+    })
+}
+
+/// Match each backward jump to its if-statement and build the reordered output
+/// with displaced blocks placed before convergence code.
+fn build_convergence_reorder(
+    stmts: &[BcStatement],
+    group: &ConvergenceGroup,
+    offset_map: &OffsetMap,
+) -> Option<Vec<BcStatement>> {
+    use std::collections::HashSet;
+
+    let find_idx =
+        |target: usize| -> Option<usize> { offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) };
+
     // Build a set of all displaced block ranges (between conv_end and the backward jumps).
-    // Each backward jump terminates a block; blocks are contiguous between conv_end+1
-    // and the last backward jump.
-    let all_displaced_start = conv_end + 1;
-    let Some(&all_displaced_end) = jump_indices.last() else {
-        return false;
-    };
+    let all_displaced_start = group.conv_end + 1;
+    let &all_displaced_end = group.jump_indices.last()?;
 
     if all_displaced_start > all_displaced_end || all_displaced_end >= stmts.len() {
-        return false;
+        return None;
     }
 
     // Each backward jump terminates a displaced block. Find which if-statement's false
@@ -752,17 +784,15 @@ fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
 
     // Determine block boundaries: blocks are separated by the backward jumps.
     // First block starts at all_displaced_start, subsequent blocks start after prev jump.
-    let mut block_starts: Vec<usize> = Vec::new();
-    block_starts.push(all_displaced_start);
-    for &ji in &jump_indices[..jump_indices.len() - 1] {
+    let mut block_starts: Vec<usize> = vec![all_displaced_start];
+    for &ji in &group.jump_indices[..group.jump_indices.len() - 1] {
         block_starts.push(ji + 1);
     }
 
-    for (bi, &jump_idx) in jump_indices.iter().enumerate() {
+    for (bi, &jump_idx) in group.jump_indices.iter().enumerate() {
         let block_start = block_starts[bi];
-        // Find the if-statement whose false target points to this block's start
         let mut found = false;
-        for (i, stmt) in stmts.iter().enumerate().take(conv_target_idx) {
+        for (i, stmt) in stmts.iter().enumerate().take(group.target_idx) {
             if let Some((_, target)) = parse_if_jump(&stmt.text) {
                 if let Some(target_idx) = find_idx(target) {
                     if target_idx == block_start {
@@ -778,8 +808,7 @@ fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
             }
         }
         if !found {
-            // Can't match this block to an if-statement; bail out
-            return false;
+            return None;
         }
     }
 
@@ -790,11 +819,10 @@ fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
     // [before convergence] [synthetic jump] [displaced blocks deepest-first] [convergence] [after]
     let mut output: Vec<BcStatement> = Vec::new();
 
-    // Emit everything before convergence
-    output.extend_from_slice(&stmts[..conv_target_idx]);
+    output.extend_from_slice(&stmts[..group.target_idx]);
 
     // Insert synthetic jump to convergence (so structure.rs sees a forward jump)
-    let conv_offset = stmts[conv_target_idx].mem_offset;
+    let conv_offset = stmts[group.target_idx].mem_offset;
     output.push(BcStatement {
         mem_offset: 0,
         text: format!("jump 0x{:x}", conv_offset),
@@ -813,20 +841,32 @@ fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
     }
 
     // Emit convergence code
-    output.extend_from_slice(&stmts[conv_target_idx..=conv_end]);
+    output.extend_from_slice(&stmts[group.target_idx..=group.conv_end]);
 
     // Emit anything after convergence that isn't a displaced block
     let displaced_range: HashSet<usize> = displaced
         .iter()
         .flat_map(|db| db.block_start..=db.block_end)
         .collect();
-    for (j, stmt) in stmts.iter().enumerate().skip(conv_end + 1) {
+    for (j, stmt) in stmts.iter().enumerate().skip(group.conv_end + 1) {
         if !displaced_range.contains(&j) {
             output.push(stmt.clone());
         }
     }
 
-    *stmts = output;
+    Some(output)
+}
+
+/// Process a single convergence group. Returns true if a reorder was performed.
+fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
+    let offset_map = OffsetMap::build(stmts);
+    let Some(group) = find_convergence_group(stmts, &offset_map) else {
+        return false;
+    };
+    let Some(reordered) = build_convergence_reorder(stmts, &group, &offset_map) else {
+        return false;
+    };
+    *stmts = reordered;
     true
 }
 

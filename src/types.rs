@@ -63,7 +63,7 @@ pub enum PropValue {
     Name(String),
     Object(i32),
     Enum {
-        enum_type: String,
+        enum_name: String,
         value: String,
     },
     Struct {

@@ -1,9 +1,13 @@
 //! EdGraph comment box/bubble parsing, spatial matching to bytecode nodes, classification.
 
 use super::{CommentBox, NodeInfo, MAX_BUBBLE_DISTANCE_SQ};
+use crate::helpers::indent_of;
+
+/// A box comment covering more than this percentage of a function's nodes is treated
+/// as a top-level description rather than an inline annotation.
+const COVERAGE_THRESHOLD_PERCENT: usize = 80;
 
 /// Find the closest identifiable nodes to a bubble comment.
-/// When `right_only` is true, only considers nodes to the right (downstream in UE4 flow).
 fn nearest_nodes<'a>(
     comment: &CommentBox,
     nodes: &'a [NodeInfo],
@@ -88,12 +92,11 @@ fn node_rank(node: &NodeInfo, all_nodes: &[NodeInfo]) -> Option<usize> {
 
 /// Walk backward from `anchor_line` to find the nearest `if` at a shallower indent.
 fn find_enclosing_if(bytecode_lines: &[String], anchor_line: usize) -> Option<usize> {
-    let anchor_indent =
-        bytecode_lines[anchor_line].len() - bytecode_lines[anchor_line].trim_start().len();
+    let anchor_indent = indent_of(&bytecode_lines[anchor_line]);
     for i in (0..anchor_line).rev() {
         let line = &bytecode_lines[i];
         let trimmed = line.trim_start();
-        let indent = line.len() - trimmed.len();
+        let indent = indent_of(line);
         if indent < anchor_indent
             && (trimmed.starts_with("if (") || trimmed.starts_with("} else if ("))
         {
@@ -202,7 +205,10 @@ pub(super) fn classify_comments<'a>(
             .filter(|n| comment.contains_point(n.x, n.y))
             .count();
 
-        if total_nodes > 0 && contained > 0 && contained * 100 / total_nodes > 80 {
+        if total_nodes > 0
+            && contained > 0
+            && contained * 100 / total_nodes > COVERAGE_THRESHOLD_PERCENT
+        {
             top_level.push(comment);
         } else if let Some(line_idx) = find_comment_line(comment, nodes, bytecode_lines) {
             inline.push((line_idx, comment));

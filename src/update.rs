@@ -7,8 +7,7 @@ use std::path::Path;
 const REPO: &str = "MarcedForLife/UnrealBPInspect";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Update bp-inspect to the latest (or a specific) version from GitHub releases.
-/// Pass `None` for latest, or `Some("v0.2.0")` for a pinned version.
+/// Update bp-inspect from GitHub releases.
 pub fn run_update(target_version: Option<&str>) -> Result<()> {
     eprintln!("Checking for updates...");
 
