@@ -55,44 +55,47 @@ pub fn format_text(asset: &ParsedAsset, filters: &[String]) -> String {
             .unwrap();
         }
         for prop in props {
-            format_property(&mut buf, prop, &asset.imports, &export_names, 4);
+            format_value(
+                &mut buf,
+                &prop.name,
+                &prop.value,
+                &asset.imports,
+                &export_names,
+                4,
+            );
         }
     }
     buf
 }
-
-pub fn print_text(asset: &ParsedAsset, filters: &[String]) {
-    print!("{}", format_text(asset, filters));
-}
-
-fn format_property(
+fn format_value(
     buf: &mut String,
-    prop: &Property,
+    name: &str,
+    value: &PropValue,
     imports: &[ImportEntry],
     export_names: &[String],
     indent: usize,
 ) {
     let pad = " ".repeat(indent);
-    match &prop.value {
-        PropValue::Bool(v) => writeln!(buf, "{}{}: {}", pad, prop.name, v).unwrap(),
-        PropValue::Int(v) => writeln!(buf, "{}{}: {}", pad, prop.name, v).unwrap(),
-        PropValue::Int64(v) => writeln!(buf, "{}{}: {}", pad, prop.name, v).unwrap(),
-        PropValue::Float(v) => writeln!(buf, "{}{}: {:.4}", pad, prop.name, v).unwrap(),
-        PropValue::Double(v) => writeln!(buf, "{}{}: {:.4}", pad, prop.name, v).unwrap(),
-        PropValue::Str(v) => writeln!(buf, "{}{}: \"{}\"", pad, prop.name, v).unwrap(),
-        PropValue::Name(v) => writeln!(buf, "{}{}: {}", pad, prop.name, v).unwrap(),
+    match value {
+        PropValue::Bool(v) => writeln!(buf, "{}{}: {}", pad, name, v).unwrap(),
+        PropValue::Int(v) => writeln!(buf, "{}{}: {}", pad, name, v).unwrap(),
+        PropValue::Int64(v) => writeln!(buf, "{}{}: {}", pad, name, v).unwrap(),
+        PropValue::Float(v) => writeln!(buf, "{}{}: {:.4}", pad, name, v).unwrap(),
+        PropValue::Double(v) => writeln!(buf, "{}{}: {:.4}", pad, name, v).unwrap(),
+        PropValue::Str(v) => writeln!(buf, "{}{}: \"{}\"", pad, name, v).unwrap(),
+        PropValue::Name(v) => writeln!(buf, "{}{}: {}", pad, name, v).unwrap(),
         PropValue::Object(idx) => {
             let target = resolve_index(imports, export_names, *idx);
-            writeln!(buf, "{}{}: -> {}", pad, prop.name, target).unwrap();
+            writeln!(buf, "{}{}: -> {}", pad, name, target).unwrap();
         }
-        PropValue::Enum { enum_type, value } => {
-            writeln!(buf, "{}{}: {} ({})", pad, prop.name, value, enum_type).unwrap();
+        PropValue::Enum { enum_name, value } => {
+            writeln!(buf, "{}{}: {} ({})", pad, name, value, enum_name).unwrap();
         }
         PropValue::Byte { enum_name, value } => {
             if enum_name == "None" {
-                writeln!(buf, "{}{}: {}", pad, prop.name, value).unwrap();
+                writeln!(buf, "{}{}: {}", pad, name, value).unwrap();
             } else {
-                writeln!(buf, "{}{}: {} ({})", pad, prop.name, value, enum_name).unwrap();
+                writeln!(buf, "{}{}: {} ({})", pad, name, value, enum_name).unwrap();
             }
         }
         PropValue::Struct {
@@ -100,11 +103,11 @@ fn format_property(
             fields,
         } => {
             if fields.is_empty() {
-                writeln!(buf, "{}{}: ({}) {{}}", pad, prop.name, struct_type).unwrap();
+                writeln!(buf, "{}{}: ({}) {{}}", pad, name, struct_type).unwrap();
             } else {
-                writeln!(buf, "{}{}: ({}) {{", pad, prop.name, struct_type).unwrap();
+                writeln!(buf, "{}{}: ({}) {{", pad, name, struct_type).unwrap();
                 for f in fields {
-                    format_property(buf, f, imports, export_names, indent + 2);
+                    format_value(buf, &f.name, &f.value, imports, export_names, indent + 2);
                 }
                 writeln!(buf, "{}}}", pad).unwrap();
             }
@@ -114,17 +117,20 @@ fn format_property(
                 buf,
                 "{}{}: [{}; {} items]",
                 pad,
-                prop.name,
+                name,
                 inner_type,
                 items.len()
             )
             .unwrap();
             for (j, item) in items.iter().enumerate() {
-                let child = Property {
-                    name: format!("[{}]", j),
-                    value: item.clone(),
-                };
-                format_property(buf, &child, imports, export_names, indent + 2);
+                format_value(
+                    buf,
+                    &format!("[{}]", j),
+                    item,
+                    imports,
+                    export_names,
+                    indent + 2,
+                );
             }
         }
         PropValue::Map {
@@ -136,29 +142,35 @@ fn format_property(
                 buf,
                 "{}{}: {{{}->{}; {} entries}}",
                 pad,
-                prop.name,
+                name,
                 key_type,
                 value_type,
                 entries.len()
             )
             .unwrap();
             for (j, (k, v)) in entries.iter().enumerate() {
-                let key_prop = Property {
-                    name: format!("[{}].key", j),
-                    value: k.clone(),
-                };
-                let val_prop = Property {
-                    name: format!("[{}].val", j),
-                    value: v.clone(),
-                };
-                format_property(buf, &key_prop, imports, export_names, indent + 2);
-                format_property(buf, &val_prop, imports, export_names, indent + 2);
+                format_value(
+                    buf,
+                    &format!("[{}].key", j),
+                    k,
+                    imports,
+                    export_names,
+                    indent + 2,
+                );
+                format_value(
+                    buf,
+                    &format!("[{}].val", j),
+                    v,
+                    imports,
+                    export_names,
+                    indent + 2,
+                );
             }
         }
-        PropValue::Text(v) => writeln!(buf, "{}{}: \"{}\"", pad, prop.name, v).unwrap(),
-        PropValue::SoftObject(v) => writeln!(buf, "{}{}: ~{}", pad, prop.name, v).unwrap(),
+        PropValue::Text(v) => writeln!(buf, "{}{}: \"{}\"", pad, name, v).unwrap(),
+        PropValue::SoftObject(v) => writeln!(buf, "{}{}: ~{}", pad, name, v).unwrap(),
         PropValue::Unknown { type_name, size } => {
-            writeln!(buf, "{}{}: <{}, {} bytes>", pad, prop.name, type_name, size).unwrap();
+            writeln!(buf, "{}{}: <{}, {} bytes>", pad, name, type_name, size).unwrap();
         }
     }
 }

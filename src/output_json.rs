@@ -34,27 +34,7 @@ pub fn to_json(asset: &ParsedAsset, filters: &[String]) -> Value {
         .iter()
         .enumerate()
         .filter(|(_, (hdr, _))| matches_filter(&hdr.object_name, filters))
-        .map(|(i, (hdr, props))| {
-            let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
-            let parent = resolve_index(&asset.imports, &export_names, hdr.super_index);
-            let mut exp = json!({
-                "index": i + 1,
-                "name": hdr.object_name,
-                "class": class,
-            });
-            if parent != "None" {
-                exp["parent"] = json!(parent);
-            }
-            if !props.is_empty() {
-                exp["properties"] = Value::Array(
-                    props
-                        .iter()
-                        .map(|p| prop_to_json(p, &asset.imports, &export_names))
-                        .collect(),
-                );
-            }
-            exp
-        })
+        .map(|(i, (hdr, props))| export_to_json(i, hdr, props, &asset.imports, &export_names))
         .collect();
 
     let functions_json: Vec<Value> = asset
@@ -65,39 +45,70 @@ pub fn to_json(asset: &ParsedAsset, filters: &[String]) -> Value {
             let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
             class.ends_with(".Function") && matches_filter(&hdr.object_name, filters)
         })
-        .map(|(i, (hdr, props))| {
-            let sig = find_prop_str(props, "Signature")
-                .unwrap_or_else(|| format!("{}()", hdr.object_name));
-            let flags = find_prop_str(props, "FunctionFlags").unwrap_or_default();
-            let bytecode = find_prop(props, "BytecodeSummary")
-                .or_else(|| find_prop(props, "Bytecode"))
-                .and_then(|p| match &p.value {
-                    PropValue::Array { items, .. } => Some(
-                        items
-                            .iter()
-                            .filter_map(|item| match item {
-                                PropValue::Str(s) => Some(json!(s)),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>(),
-                    ),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            json!({
-                "name": hdr.object_name,
-                "signature": sig,
-                "flags": flags,
-                "bytecode": bytecode,
-                "export_index": i + 1,
-            })
-        })
+        .map(|(i, (hdr, props))| function_to_json(i, hdr, props))
         .collect();
 
     json!({
         "imports": imports_json,
         "exports": exports_json,
         "functions": functions_json,
+    })
+}
+
+/// Build JSON for a single export entry.
+fn export_to_json(
+    index: usize,
+    hdr: &ExportHeader,
+    props: &[Property],
+    imports: &[ImportEntry],
+    export_names: &[String],
+) -> Value {
+    let class = resolve_index(imports, export_names, hdr.class_index);
+    let parent = resolve_index(imports, export_names, hdr.super_index);
+    let mut exp = json!({
+        "index": index + 1,
+        "name": hdr.object_name,
+        "class": class,
+    });
+    if parent != "None" {
+        exp["parent"] = json!(parent);
+    }
+    if !props.is_empty() {
+        exp["properties"] = Value::Array(
+            props
+                .iter()
+                .map(|p| prop_to_json(p, imports, export_names))
+                .collect(),
+        );
+    }
+    exp
+}
+
+/// Build JSON for a single function export.
+fn function_to_json(index: usize, hdr: &ExportHeader, props: &[Property]) -> Value {
+    let sig = find_prop_str(props, "Signature").unwrap_or_else(|| format!("{}()", hdr.object_name));
+    let flags = find_prop_str(props, "FunctionFlags").unwrap_or_default();
+    let bytecode = find_prop(props, "BytecodeSummary")
+        .or_else(|| find_prop(props, "Bytecode"))
+        .and_then(|p| match &p.value {
+            PropValue::Array { items, .. } => Some(
+                items
+                    .iter()
+                    .filter_map(|item| match item {
+                        PropValue::Str(s) => Some(json!(s)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default();
+    json!({
+        "name": hdr.object_name,
+        "signature": sig,
+        "flags": flags,
+        "bytecode": bytecode,
+        "export_index": index + 1,
     })
 }
 

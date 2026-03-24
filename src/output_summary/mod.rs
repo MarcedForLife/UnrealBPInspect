@@ -7,7 +7,7 @@ mod comments;
 mod format;
 mod ubergraph;
 
-pub use format::{format_summary, print_summary};
+pub use format::format_summary;
 
 use std::collections::HashSet;
 use std::fmt::Write;
@@ -44,13 +44,16 @@ struct ResumeBlock {
 }
 
 const COMMENT_WRAP_WIDTH: usize = 100;
-const MAX_BUBBLE_DISTANCE_SQ: i64 = 640_000; // 800²
+const MAX_BUBBLE_DISTANCE_SQ: i64 = 640_000; // 800px squared
 const FUZZY_LABEL_WINDOW: usize = 8;
 
-/// Strip the `XXXX: ` offset prefix from a bytecode line (e.g. `0012: expr` -> `expr`).
+// Bytecode lines are stored as "XXXX: text" where XXXX is a 4-char hex offset
+const OFFSET_PREFIX_LEN: usize = "0000: ".len(); // 6
+
+/// Strip the hex offset prefix from a bytecode line (e.g. `0012: expr` -> `expr`).
 fn strip_offset_prefix(line: &str) -> &str {
-    if line.len() > 6 && line.as_bytes()[4] == b':' {
-        &line[6..]
+    if line.len() > OFFSET_PREFIX_LEN && line.as_bytes()[4] == b':' {
+        &line[OFFSET_PREFIX_LEN..]
     } else {
         line
     }

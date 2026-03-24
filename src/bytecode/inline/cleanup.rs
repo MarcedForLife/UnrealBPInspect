@@ -3,13 +3,43 @@
 use super::{
     expr_is_compound, find_at_depth_zero, find_matching_paren, is_ident_char, strip_outer_parens,
 };
+use crate::helpers::indent_of;
 use std::collections::{HashMap, HashSet};
+
+/// Try to simplify `!(!X)` to `X`. Returns `Some(simplified)` on success.
+///
+/// Only safe when the inner `!` covers the entire expression (no bare `&&`/`||` at
+/// paren depth 0). For example, `!(!A && B)` is NOT a double negation because the
+/// inner `!` only negates `A`.
+fn try_strip_double_negation(s: &str) -> Option<String> {
+    let pos = s.find("!(")?;
+    // Check the char before `!` is a prefix context (start, space, `(`, `!`)
+    if pos > 0 {
+        let prev = s.as_bytes()[pos - 1];
+        if prev != b'(' && prev != b' ' && prev != b'!' {
+            return None;
+        }
+    }
+    let inner_start = pos + 2;
+    let inner = find_matching_paren(&s[pos + 1..])?;
+    let inner_text = &s[inner_start..pos + 1 + inner];
+    let after_neg = inner_text.strip_prefix('!')?;
+    if has_toplevel_logical_op(after_neg) {
+        return None;
+    }
+    Some(format!(
+        "{}{}{}",
+        &s[..pos],
+        after_neg,
+        &s[pos + 2 + inner..]
+    ))
+}
 
 /// Clean up structured output: double negation, extra parens, trailing returns.
 pub fn cleanup_structured_output(lines: &mut Vec<String>) {
     // Pass 1: clean each line in place
     for line in lines.iter_mut() {
-        let indent_len = line.len() - line.trim_start().len();
+        let indent_len = indent_of(line);
         let indent = &line[..indent_len];
         let trimmed = line[indent_len..].to_string();
         let cleaned = clean_line(&trimmed);
@@ -54,8 +84,7 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
                 // Closing braces are structural, keep them
                 trimmed == "}" || trimmed.is_empty()
             } else {
-                let indent_len = line.len() - line.trim_start().len();
-                if indent_len == 0 && trimmed == "return" {
+                if indent_of(line) == 0 && trimmed == "return" {
                     dead = true;
                 }
                 true
@@ -87,56 +116,29 @@ pub(super) fn clean_line(text: &str) -> String {
     let mut s = text.to_string();
 
     // Strip bool(expr) -> expr (Kismet cast-to-bool is redundant in pseudocode)
-    let mut bstart = 0;
-    while bstart < s.len() {
-        let Some(rel_pos) = s[bstart..].find("bool(") else {
+    let mut bool_scan_pos = 0;
+    while bool_scan_pos < s.len() {
+        let Some(rel_pos) = s[bool_scan_pos..].find("bool(") else {
             break;
         };
-        let pos = bstart + rel_pos;
+        let pos = bool_scan_pos + rel_pos;
         if pos > 0 && is_ident_char(s.as_bytes()[pos - 1]) {
-            bstart = pos + 5;
+            bool_scan_pos = pos + 5;
             continue;
         }
         let paren_start = pos + 4;
         if let Some(close) = find_matching_paren(&s[paren_start..]) {
             let inner = s[paren_start + 1..paren_start + close].to_string();
             s = format!("{}{}{}", &s[..pos], inner, &s[paren_start + close + 1..]);
-            bstart = 0; // restart, string changed
+            bool_scan_pos = 0; // restart, string changed
         } else {
             break;
         }
     }
 
     // Double negation elimination: !(!X) -> X
-    // Only safe when the inner ! covers the entire expression:
-    //   !(!A)         -> A           (single identifier, safe)
-    //   !(!(A && B))  -> (A && B)    (inner ! wraps full parens, safe)
-    //   !(!A && B)    -> UNSAFE      (inner ! only negates A, not the compound)
-    // We use has_toplevel_logical_op() to verify no bare && or || at paren depth 0.
-    loop {
-        if let Some(pos) = s.find("!(") {
-            // Check if the char before ! is ( or space or start; i.e. it's a prefix not
-            if pos > 0 {
-                let prev = s.as_bytes()[pos - 1];
-                if prev != b'(' && prev != b' ' && prev != b'!' {
-                    break;
-                }
-            }
-            // Find matching close paren
-            let inner_start = pos + 2;
-            if let Some(inner) = find_matching_paren(&s[pos + 1..]) {
-                let inner_text = &s[inner_start..pos + 1 + inner];
-                // Only simplify if inner_text starts with ! (double negation)
-                // AND the ! covers the entire inner expression (no top-level && or ||)
-                if let Some(after_neg) = inner_text.strip_prefix('!') {
-                    if !has_toplevel_logical_op(after_neg) {
-                        s = format!("{}{}{}", &s[..pos], after_neg, &s[pos + 2 + inner..]);
-                        continue;
-                    }
-                }
-            }
-        }
-        break;
+    while let Some(simplified) = try_strip_double_negation(&s) {
+        s = simplified;
     }
 
     // Outer extra parens in if-conditions: "if ((EXPR)) {" -> "if (EXPR) {"
@@ -318,7 +320,7 @@ fn rewrite_negated_guards(lines: &mut Vec<String>) {
     while i > 0 {
         i -= 1;
         let line = &lines[i];
-        let indent_len = line.len() - line.trim_start().len();
+        let indent_len = indent_of(line);
         let trimmed = &line[indent_len..];
 
         if !trimmed.starts_with("if (") {
@@ -367,7 +369,7 @@ fn rewrite_negated_guards(lines: &mut Vec<String>) {
                 body_end += 1;
                 continue;
             }
-            let line_indent = lines[body_end].len() - lines[body_end].trim_start().len();
+            let line_indent = indent_of(&lines[body_end]);
             if line_indent < guard_indent {
                 break;
             }

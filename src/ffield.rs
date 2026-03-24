@@ -9,9 +9,7 @@ use crate::binary::*;
 use crate::resolve::*;
 use crate::types::*;
 
-/// Extra data layout that follows the common FProperty header for each field class.
-/// Used by both `skip_ffield_child` and `resolve_ffield_type` so the field class
-/// groupings are defined once.
+/// Extra data layout after the common FProperty header, shared across skip and resolve functions.
 enum FieldExtra {
     /// No extra bytes (simple scalar types like Float, Int, Str, Name, Text).
     None,

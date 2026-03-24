@@ -4,10 +4,12 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use crate::bytecode::{
-    cleanup_structured_output, discard_unused_assignments, fold_summary_patterns,
-    inline_constant_temps, inline_single_use_temps, reorder_convergence, reorder_flow_patterns,
-    strip_orphaned_blocks, strip_unmatched_braces, structure_bytecode, BcStatement,
+    discard_unused_assignments, inline_constant_temps, inline_single_use_temps,
+    reorder_convergence, reorder_flow_patterns, strip_orphaned_blocks, strip_unmatched_braces,
+    BcStatement, OffsetMap, JUMP_OFFSET_TOLERANCE,
 };
+use crate::helpers::indent_of;
+use crate::parser::structure_and_cleanup;
 use crate::resolve::*;
 use crate::types::*;
 
@@ -17,57 +19,17 @@ use super::{
     ResumeBlock, UbergraphSection, FUZZY_LABEL_WINDOW,
 };
 
-/// Rewrite unresolvable jumps to point past the end of the segment.
-///
-/// In UberGraph bytecode, each event is processed as an independent segment.
-/// Jumps targeting offsets outside the current segment are always "return from
-/// this event"; control goes back to the dispatcher.  But even intra-segment
-/// jumps can fail to resolve when filtered trace opcodes shift the visible
-/// statement offsets away from the raw bytecode targets.
-///
-/// This function uses the **same +/-4-byte sorted-offset lookup** that
-/// `structure_bytecode`'s `find_target_idx` uses.  Any jump target that would
-/// return `None` there (and isn't past the end) is rewritten to a sentinel
-/// offset, which `find_target_idx_or_end` resolves as jump-to-end (implicit
-/// return or break).
+/// Rewrite jumps targeting offsets outside or unresolvable within the current segment.
+/// Uses the same +/-4 byte fuzzy lookup as structure_bytecode. Unresolvable targets
+/// become past-end sentinels (implicit return/break).
 fn resolve_cross_segment_jumps(stmts: &mut Vec<BcStatement>) {
     if stmts.is_empty() {
         return;
     }
 
-    // Build exact map and sorted offsets, mirrors structure_bytecode logic
-    let exact_map: HashSet<usize> = stmts.iter().map(|s| s.mem_offset).collect();
-    let mut sorted_offsets: Vec<usize> = exact_map.iter().copied().collect();
-    sorted_offsets.sort();
-
-    let max_offset = *sorted_offsets.last().unwrap();
+    let offset_map = OffsetMap::build(stmts);
+    let max_offset = stmts.iter().map(|s| s.mem_offset).max().unwrap();
     let sentinel_offset = max_offset + 1;
-
-    // Replicate structure_bytecode's find_target_idx: exact match, then +/-4
-    // binary-search fallback.  Returns true if the target would resolve.
-    let is_resolvable = |target: usize| -> bool {
-        // Past end -> find_target_idx_or_end returns stmts.len() (end sentinel)
-        if target > max_offset {
-            return true;
-        }
-        // Exact match
-        if exact_map.contains(&target) {
-            return true;
-        }
-        // +/-4 fuzzy match via sorted offsets (same as structure.rs)
-        let pos = sorted_offsets.partition_point(|&off| off <= target);
-        let below_dist = if pos > 0 {
-            target.saturating_sub(sorted_offsets[pos - 1])
-        } else {
-            usize::MAX
-        };
-        let above_dist = if pos < sorted_offsets.len() {
-            sorted_offsets[pos].saturating_sub(target)
-        } else {
-            usize::MAX
-        };
-        below_dist.min(above_dist) <= 4
-    };
 
     for stmt in stmts.iter_mut() {
         // Pattern: "if !(COND) jump 0xHEX"
@@ -78,7 +40,7 @@ fn resolve_cross_segment_jumps(stmts: &mut Vec<BcStatement>) {
                 .find(|c: char| !c.is_ascii_hexdigit())
                 .unwrap_or(hex_str.len());
             if let Ok(t) = usize::from_str_radix(&hex_str[..hex_end], 16) {
-                if !is_resolvable(t) {
+                if t <= max_offset && offset_map.find_fuzzy(t, JUMP_OFFSET_TOLERANCE).is_none() {
                     stmt.text =
                         format!("{}jump 0x{:x}", &stmt.text[..jump_pos + 2], sentinel_offset);
                 }
@@ -87,7 +49,7 @@ fn resolve_cross_segment_jumps(stmts: &mut Vec<BcStatement>) {
         // Pattern: standalone "jump 0xHEX"
         else if let Some(hex_str) = stmt.text.strip_prefix("jump 0x") {
             if let Ok(t) = usize::from_str_radix(hex_str, 16) {
-                if !is_resolvable(t) {
+                if t <= max_offset && offset_map.find_fuzzy(t, JUMP_OFFSET_TOLERANCE).is_none() {
                     stmt.text = format!("jump 0x{:x}", sentinel_offset);
                 }
             }
@@ -160,11 +122,7 @@ fn structure_segment(stmts: &[BcStatement]) -> Vec<String> {
     inline_constant_temps(&mut seg);
     inline_single_use_temps(&mut seg);
     discard_unused_assignments(&mut seg);
-    let mut structured = structure_bytecode(&seg, &HashMap::new());
-    cleanup_structured_output(&mut structured);
-    fold_summary_patterns(&mut structured);
-    strip_orphaned_blocks(&mut structured);
-    structured
+    structure_and_cleanup(&seg)
 }
 
 /// Split a segment's BcStatements at `// sequence [N]:` markers.
@@ -324,6 +282,84 @@ pub(super) fn build_ubergraph_structured(
     }
 }
 
+/// Classify comments for a single ubergraph event section.
+///
+/// Returns event-wrapping comments (top-level) and inline-positioned comments.
+fn classify_event_comments<'a>(
+    section_name: &str,
+    section_lines: &[String],
+    comments: &'a [CommentBox],
+    nodes: &[NodeInfo],
+    event_positions: &HashMap<String, (i32, i32)>,
+    multi_event_idxs: &HashSet<usize>,
+) -> (Vec<&'a CommentBox>, Vec<(usize, &'a CommentBox)>) {
+    let Some(&(ex, ey)) = event_positions.get(section_name) else {
+        return (Vec::new(), Vec::new());
+    };
+
+    // Event-wrapping comment boxes (contain the event node) -> top-level
+    // Exclude multi-event comments (handled as group headers)
+    let mut event_wrapping: Vec<&CommentBox> = comments
+        .iter()
+        .enumerate()
+        .filter(|(i, c)| !c.is_bubble && c.contains_point(ex, ey) && !multi_event_idxs.contains(i))
+        .map(|(_, c)| c)
+        .collect();
+    event_wrapping.sort_by_key(|c| ((c.width as i64) * (c.height as i64), c.x, c.y));
+    event_wrapping.truncate(2);
+
+    // Remaining comments: try to inline using node-to-bytecode matching.
+    // Scope to the Y range of the event's wrapping comment box to prevent
+    // leaking between nearby events.
+    let mut inline: Vec<(usize, &CommentBox)> = Vec::new();
+    if !nodes.is_empty() {
+        let (scope_y_min, scope_y_max) = event_wrapping
+            .iter()
+            .fold(None, |acc: Option<(i32, i32)>, c| {
+                let (y1, y2) = (c.y, c.y + c.height);
+                match acc {
+                    Some((min_y, max_y)) => Some((min_y.min(y1), max_y.max(y2))),
+                    None => Some((y1, y2)),
+                }
+            })
+            .unwrap_or((ey - 400, ey + 400));
+
+        // Scope nodes to the event's Y range for correct rank computation.
+        // Without this, node_rank counts duplicates across all events
+        // (e.g. two Delay nodes), inflating the rank beyond what the
+        // scoped bytecode lines contain.
+        let scoped_nodes: Vec<NodeInfo> = nodes
+            .iter()
+            .filter(|n| n.y >= scope_y_min && n.y <= scope_y_max)
+            .cloned()
+            .collect();
+
+        let remaining: Vec<&CommentBox> = comments
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| {
+                if event_wrapping.iter().any(|ew| std::ptr::eq(*ew, *c)) {
+                    return false;
+                }
+                if multi_event_idxs.contains(i) {
+                    return false;
+                }
+                let center_y = if c.is_bubble { c.y } else { c.y + c.height / 2 };
+                center_y >= scope_y_min && center_y <= scope_y_max
+            })
+            .map(|(_, c)| c)
+            .collect();
+        for cb in remaining {
+            if let Some(line_idx) = find_comment_line(cb, &scoped_nodes, section_lines) {
+                inline.push((line_idx, cb));
+            }
+        }
+        inline.sort_by_key(|(idx, _)| *idx);
+    }
+
+    (event_wrapping, inline)
+}
+
 /// Split ubergraph structured output into per-event sections and inline latent resumes.
 pub(super) fn emit_ubergraph_events(
     buf: &mut String,
@@ -415,72 +451,15 @@ pub(super) fn emit_ubergraph_events(
 
         // Classify comments for this event section
         let (top_level_comments, inline_comments) = if !section.name.is_empty() {
-            if let (Some(cbs), Some(&(ex, ey))) = (comments, event_positions.get(&section.name)) {
-                // Event-wrapping comment boxes (contain the event node) -> top-level
-                // Exclude multi-event comments (handled as group headers)
-                let mut event_wrapping: Vec<&CommentBox> = cbs
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, c)| {
-                        !c.is_bubble && c.contains_point(ex, ey) && !multi_event_idxs.contains(i)
-                    })
-                    .map(|(_, c)| c)
-                    .collect();
-                event_wrapping.sort_by_key(|c| ((c.width as i64) * (c.height as i64), c.x, c.y));
-                event_wrapping.truncate(2);
-
-                // Remaining comments: try to inline using node-to-bytecode matching.
-                // Scope to the Y range of the event's wrapping comment box to prevent
-                // leaking between nearby events.
-                let node_slice = nodes.unwrap_or(&[]);
-                let mut inline: Vec<(usize, &CommentBox)> = Vec::new();
-                if !node_slice.is_empty() {
-                    let (scope_y_min, scope_y_max) = event_wrapping
-                        .iter()
-                        .fold(None, |acc: Option<(i32, i32)>, c| {
-                            let (y1, y2) = (c.y, c.y + c.height);
-                            match acc {
-                                Some((min_y, max_y)) => Some((min_y.min(y1), max_y.max(y2))),
-                                None => Some((y1, y2)),
-                            }
-                        })
-                        .unwrap_or((ey - 400, ey + 400));
-
-                    // Scope nodes to the event's Y range for correct rank computation.
-                    // Without this, node_rank counts duplicates across all events
-                    // (e.g. two Delay nodes), inflating the rank beyond what the
-                    // scoped bytecode lines contain.
-                    let scoped_nodes: Vec<NodeInfo> = node_slice
-                        .iter()
-                        .filter(|n| n.y >= scope_y_min && n.y <= scope_y_max)
-                        .cloned()
-                        .collect();
-
-                    let remaining: Vec<&CommentBox> = cbs
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, c)| {
-                            if event_wrapping.iter().any(|ew| std::ptr::eq(*ew, *c)) {
-                                return false;
-                            }
-                            if multi_event_idxs.contains(i) {
-                                return false;
-                            }
-                            let center_y = if c.is_bubble { c.y } else { c.y + c.height / 2 };
-                            center_y >= scope_y_min && center_y <= scope_y_max
-                        })
-                        .map(|(_, c)| c)
-                        .collect();
-                    for cb in remaining {
-                        if let Some(line_idx) = find_comment_line(cb, &scoped_nodes, &section.lines)
-                        {
-                            inline.push((line_idx, cb));
-                        }
-                    }
-                    inline.sort_by_key(|(idx, _)| *idx);
-                }
-
-                (event_wrapping, inline)
+            if let Some(cbs) = comments {
+                classify_event_comments(
+                    &section.name,
+                    &section.lines,
+                    cbs,
+                    nodes.unwrap_or(&[]),
+                    event_positions,
+                    &multi_event_idxs,
+                )
             } else {
                 (Vec::new(), Vec::new())
             }
@@ -537,7 +516,7 @@ pub(super) fn emit_ubergraph_events(
         for (i, line) in section.lines.iter().enumerate() {
             // Emit any inline comments targeting this line
             while inline_idx < inline_comments.len() && inline_comments[inline_idx].0 == i {
-                let ws_len = line.len() - line.trim_start().len();
+                let ws_len = indent_of(line);
                 let indent = format!("{}{}", body_indent, &line[..ws_len]);
                 emit_comment(buf, &inline_comments[inline_idx].1.text, &indent);
                 inline_idx += 1;
@@ -639,37 +618,20 @@ pub(super) fn scan_structured_calls(
 /// Check if a function is a stub that just dispatches to the ubergraph.
 /// Stubs contain only an ExecuteUbergraph_X(N) call, plus optional return/persistent-frame lines.
 pub(super) fn is_ubergraph_stub(props: &[Property], ug_name: &str) -> bool {
-    let bc_prop = find_prop(props, "BytecodeSummary").or_else(|| find_prop(props, "Bytecode"));
-    let items = match bc_prop {
-        Some(Property {
-            value: PropValue::Array { items, .. },
-            ..
-        }) => items,
-        _ => return false,
-    };
-    let meaningful: Vec<&str> = items
+    let lines = find_prop_str_items_any(props, &["BytecodeSummary", "Bytecode"]);
+    let meaningful: Vec<&str> = lines
         .iter()
-        .filter_map(|item| {
-            if let PropValue::Str(line) = item {
-                let code = super::strip_offset_prefix(line).trim();
-                match code {
-                    "" | "return" | "return nop" => None,
-                    _ => Some(code),
-                }
-            } else {
-                None
-            }
-        })
+        .map(|line| super::strip_offset_prefix(line).trim())
+        .filter(|code| !matches!(*code, "" | "return" | "return nop"))
         .collect();
     if meaningful.is_empty() {
         return false;
     }
-    meaningful
-        .iter()
-        .any(|line| line.starts_with(&format!("{}(", ug_name)))
+    let prefix = format!("{}(", ug_name);
+    meaningful.iter().any(|line| line.starts_with(&prefix))
         && meaningful
             .iter()
-            .all(|line| line.starts_with(&format!("{}(", ug_name)) || line.contains("[persistent]"))
+            .all(|line| line.starts_with(&prefix) || line.contains("[persistent]"))
 }
 
 #[cfg(test)]
