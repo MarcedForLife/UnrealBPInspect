@@ -5,41 +5,22 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 
 pub type Reader<'a> = Cursor<&'a [u8]>;
 
-pub fn read_i32(reader: &mut Reader) -> Result<i32> {
-    let mut b = [0u8; 4];
-    reader.read_exact(&mut b)?;
-    Ok(i32::from_le_bytes(b))
+macro_rules! read_le {
+    ($name:ident, $ty:ty) => {
+        pub fn $name(reader: &mut Reader) -> Result<$ty> {
+            let mut b = [0u8; std::mem::size_of::<$ty>()];
+            reader.read_exact(&mut b)?;
+            Ok(<$ty>::from_le_bytes(b))
+        }
+    };
 }
 
-pub fn read_u32(reader: &mut Reader) -> Result<u32> {
-    let mut b = [0u8; 4];
-    reader.read_exact(&mut b)?;
-    Ok(u32::from_le_bytes(b))
-}
-
-pub fn read_i64(reader: &mut Reader) -> Result<i64> {
-    let mut b = [0u8; 8];
-    reader.read_exact(&mut b)?;
-    Ok(i64::from_le_bytes(b))
-}
-
-pub fn read_u8(reader: &mut Reader) -> Result<u8> {
-    let mut b = [0u8; 1];
-    reader.read_exact(&mut b)?;
-    Ok(b[0])
-}
-
-pub fn read_f32(reader: &mut Reader) -> Result<f32> {
-    let mut b = [0u8; 4];
-    reader.read_exact(&mut b)?;
-    Ok(f32::from_le_bytes(b))
-}
-
-pub fn read_f64(reader: &mut Reader) -> Result<f64> {
-    let mut b = [0u8; 8];
-    reader.read_exact(&mut b)?;
-    Ok(f64::from_le_bytes(b))
-}
+read_le!(read_i32, i32);
+read_le!(read_u32, u32);
+read_le!(read_i64, i64);
+read_le!(read_u8, u8);
+read_le!(read_f32, f32);
+read_le!(read_f64, f64);
 
 pub fn read_guid(reader: &mut Reader) -> Result<[u8; 16]> {
     let mut g = [0u8; 16];

@@ -7,6 +7,7 @@
 
 pub mod decode;
 pub mod flow;
+mod format;
 pub mod inline;
 pub mod names;
 pub mod opcodes;
@@ -15,6 +16,11 @@ pub mod resolve;
 pub mod structure;
 
 use std::collections::HashMap;
+
+/// Fuzzy offset tolerance for jump target resolution. FName operands are 8 bytes
+/// on disk but 12 in memory, so each FName read shifts targets by +4 bytes. This
+/// single-step granularity covers the common case of one missed adjustment.
+pub const JUMP_OFFSET_TOLERANCE: usize = 4;
 
 pub use decode::{decode_bytecode, BcStatement};
 pub use flow::{
