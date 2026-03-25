@@ -3,6 +3,8 @@
 //! Detects Sequence nodes, ForLoop, ForEach, and convergence patterns in flat bytecode,
 //! then reorders so downstream structuring sees natural control flow.
 
+use std::collections::HashSet;
+
 use super::decode::BcStatement;
 use super::{OffsetMap, JUMP_OFFSET_TOLERANCE};
 
@@ -265,6 +267,31 @@ fn detect_interleaved_sequences(
             continue;
         };
 
+        // Skip push_flow/jump pairs that are part of a for-loop body dispatch.
+        // A for-loop has if !(cond) jump BEFORE the push_flow AND a backward jump
+        // (back-edge) AFTER it. if-guards before Sequences also have preceding
+        // if-jumps but no back-edge, so checking both directions avoids false skips.
+        const BACK_JUMP_SEARCH_WINDOW: usize = 10;
+        let is_forloop_dispatch = (1..=FORLOOP_PUSHFLOW_WINDOW).any(|offset| {
+            if i < offset {
+                return false;
+            }
+            let cond_idx = i - offset;
+            if parse_if_jump(&stmts[cond_idx].text).is_none() {
+                return false;
+            }
+            let incr_start = i + 2;
+            let search_end = stmts.len().min(incr_start + BACK_JUMP_SEARCH_WINDOW);
+            (incr_start..search_end).any(|scan_idx| {
+                parse_jump(&stmts[scan_idx].text)
+                    .is_some_and(|back_target| back_target <= stmts[cond_idx].mem_offset)
+            })
+        });
+        if is_forloop_dispatch {
+            i += 2;
+            continue;
+        }
+
         // Collect alternating push_flow/jump pairs
         let chain_start = i;
         let mut jump_targets: Vec<usize> = Vec::new(); // body offsets
@@ -508,6 +535,136 @@ fn detect_for_loops(
     loops
 }
 
+/// Collect chain_starts of Sequences that are children of another Sequence's
+/// pin body. A child Sequence is one whose push_flow entry point is the target
+/// of an unconditional jump from a parent's pin body or inline body.
+///
+/// The push_flow target check distinguishes real sub-Sequence dispatch from
+/// coincidental control-flow jumps that land within another Sequence's range.
+fn find_child_sequence_starts(
+    stmts: &[BcStatement],
+    sequences: &[SequenceNode],
+    offset_map: &OffsetMap,
+) -> HashSet<usize> {
+    let mut child_starts: HashSet<usize> = HashSet::new();
+
+    for seq in sequences {
+        let ranges = seq
+            .pins
+            .iter()
+            .map(|pin| (pin.body_start_idx, pin.body_end_idx))
+            .chain(std::iter::once((seq.chain_end, seq.inline_end)));
+
+        for (scan_start, scan_end) in ranges {
+            for idx in scan_start..scan_end.min(stmts.len()) {
+                let Some(target) = parse_jump(&stmts[idx].text) else {
+                    continue;
+                };
+                let Some(target_idx) = offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) else {
+                    continue;
+                };
+                if target_idx >= stmts.len() || parse_push_flow(&stmts[target_idx].text).is_none() {
+                    continue;
+                }
+                for other in sequences {
+                    if other.chain_start != seq.chain_start
+                        && target_idx >= other.chain_start
+                        && target_idx <= other.inline_end
+                    {
+                        child_starts.insert(other.chain_start);
+                    }
+                }
+            }
+        }
+    }
+
+    child_starts
+}
+
+/// Bundles shared state for Sequence emission so individual methods don't
+/// need 5+ parameters. Tracks which Sequences have been emitted to support
+/// child inlining (a child is emitted once within its parent, then skipped
+/// when the main loop reaches its standalone position).
+struct SequenceEmitter<'a> {
+    stmts: &'a [BcStatement],
+    sequences: &'a [SequenceNode],
+    child_starts: &'a HashSet<usize>,
+    offset_map: &'a OffsetMap,
+    emitted: HashSet<usize>,
+}
+
+impl<'a> SequenceEmitter<'a> {
+    fn emit(&mut self, seq: &SequenceNode, output: &mut Vec<BcStatement>) {
+        let seq_offset = self.stmts[seq.chain_start].mem_offset;
+        let marker = |text: &str| BcStatement {
+            mem_offset: seq_offset,
+            text: text.to_string(),
+        };
+        let sentinel = |idx: usize| BcStatement {
+            mem_offset: self.stmts[idx].mem_offset,
+            text: "return nop".to_string(),
+        };
+
+        // Emit each pin body, following unconditional jumps to child Sequences
+        for (pi, pin) in seq.pins.iter().enumerate() {
+            output.push(marker(&format!("// sequence [{}]:", pi)));
+            output.extend_from_slice(&self.stmts[pin.body_start_idx..pin.body_end_idx]);
+            self.emit_child_sequences(pin.body_start_idx, pin.body_end_idx, output);
+            // Sentinel so if-else exit jumps within the body can resolve
+            output.push(sentinel(pin.body_end_idx));
+        }
+
+        // Inline body (after all pin dispatch pairs)
+        output.push(marker(&format!("// sequence [{}]:", seq.pins.len())));
+        output.extend_from_slice(&self.stmts[seq.chain_end..seq.inline_end]);
+        self.emit_child_sequences(seq.chain_end, seq.inline_end, output);
+        output.push(sentinel(seq.inline_end));
+
+        // Displaced blocks reachable from the inline body's conditional jumps
+        for &(ds, de) in
+            &find_displaced_blocks(self.stmts, seq.chain_end, seq.inline_end, self.offset_map)
+        {
+            output.extend_from_slice(&self.stmts[ds..de]);
+            output.push(sentinel(de));
+        }
+    }
+
+    /// Scan for unconditional jumps targeting child Sequences and emit them inline.
+    fn emit_child_sequences(
+        &mut self,
+        scan_start: usize,
+        scan_end: usize,
+        output: &mut Vec<BcStatement>,
+    ) {
+        for idx in scan_start..scan_end.min(self.stmts.len()) {
+            let Some(target) = parse_jump(&self.stmts[idx].text) else {
+                continue;
+            };
+            let Some(target_idx) = self.offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) else {
+                continue;
+            };
+            // Find the child Sequence this jump dispatches to
+            let child_chain = self.sequences.iter().find_map(|seq| {
+                if self.child_starts.contains(&seq.chain_start)
+                    && target_idx >= seq.chain_start
+                    && target_idx <= seq.inline_end
+                    && !self.emitted.contains(&seq.chain_start)
+                {
+                    Some(seq.chain_start)
+                } else {
+                    None
+                }
+            });
+            if let Some(chain_start) = child_chain {
+                self.emitted.insert(chain_start);
+                if let Some(child) = self.sequences.iter().find(|s| s.chain_start == chain_start) {
+                    self.emit(child, output);
+                }
+            }
+        }
+    }
+}
+
 /// Emit reordered statements with sequence pins and loop bodies inlined.
 fn emit_reordered(
     stmts: &[BcStatement],
@@ -516,6 +673,8 @@ fn emit_reordered(
     used: &mut [bool],
     offset_map: &OffsetMap,
 ) -> Vec<BcStatement> {
+    let child_starts = find_child_sequence_starts(stmts, sequences, offset_map);
+
     for seq in sequences {
         used[seq.chain_start..=seq.inline_end].fill(true);
         for pin in &seq.pins {
@@ -531,62 +690,41 @@ fn emit_reordered(
     for lp in loops {
         used[lp.if_idx..=lp.loop_ctrl_end].fill(true);
         used[lp.body_start_idx..=lp.body_end_idx].fill(true);
-        // Mark ForEach completion range as used (we'll emit it after the loop)
         if let (Some(cs), Some(ce)) = (lp.completion_start, lp.completion_end) {
             used[cs..=ce].fill(true);
         }
     }
 
     let mut output: Vec<BcStatement> = Vec::new();
-    let marker = |offset: usize, text: &str| BcStatement {
-        mem_offset: offset,
-        text: text.to_string(),
+    let mut emitter = SequenceEmitter {
+        stmts,
+        sequences,
+        child_starts: &child_starts,
+        offset_map,
+        emitted: HashSet::new(),
     };
 
     let mut i = 0;
     while i < stmts.len() {
         if let Some(seq) = sequences.iter().find(|s| s.chain_start == i) {
-            let seq_offset = stmts[seq.chain_start].mem_offset;
-            for (pi, pin) in seq.pins.iter().enumerate() {
-                output.push(marker(seq_offset, &format!("// sequence [{}]:", pi)));
-                output.extend_from_slice(&stmts[pin.body_start_idx..pin.body_end_idx]);
-                // Sentinel at pop_flow offset so if-else exit jumps within
-                // the body can resolve (the pop_flow itself is excluded).
-                output.push(BcStatement {
-                    mem_offset: stmts[pin.body_end_idx].mem_offset,
-                    text: "return nop".to_string(),
-                });
+            // Child Sequences are skipped here; they'll be inlined within
+            // the parent pin that dispatches to them via emit_child_sequences.
+            let is_child = child_starts.contains(&seq.chain_start);
+            if !is_child && !emitter.emitted.contains(&seq.chain_start) {
+                emitter.emitted.insert(seq.chain_start);
+                emitter.emit(seq, &mut output);
             }
-            output.push(marker(
-                seq_offset,
-                &format!("// sequence [{}]:", seq.pins.len()),
-            ));
-            output.extend_from_slice(&stmts[seq.chain_end..seq.inline_end]);
-            // Sentinel for inline body's pop_flow. This must appear before
-            // displaced blocks so the structurer can detect if/else patterns
-            // where the true branch returns via pop_flow.
-            output.push(BcStatement {
-                mem_offset: stmts[seq.inline_end].mem_offset,
-                text: "return nop".to_string(),
-            });
-            // Append displaced blocks reachable from the inline body's
-            // if/jump targets (e.g. else branches at distant offsets).
-            let displaced = find_displaced_blocks(stmts, seq.chain_end, seq.inline_end, offset_map);
-            for &(ds, de) in &displaced {
-                output.extend_from_slice(&stmts[ds..de]);
-                output.push(BcStatement {
-                    mem_offset: stmts[de].mem_offset,
-                    text: "return nop".to_string(),
-                });
-            }
-
             i = seq.inline_end + 1;
             continue;
         }
 
         if let Some(lp) = loops.iter().find(|l| l.if_idx == i) {
             let lp_offset = stmts[lp.if_idx].mem_offset;
-            output.push(marker(lp_offset, &format!("while ({}) {{", lp.cond_text)));
+            let marker = |text: &str| BcStatement {
+                mem_offset: lp_offset,
+                text: text.to_string(),
+            };
+            output.push(marker(&format!("while ({}) {{", lp.cond_text)));
             if lp.extra_start < lp.extra_end {
                 output.extend_from_slice(&stmts[lp.extra_start..lp.extra_end]);
             }
@@ -597,12 +735,11 @@ fn emit_reordered(
             };
             output.extend_from_slice(&stmts[lp.body_start_idx..body_end]);
             output.extend_from_slice(&stmts[lp.incr_start..lp.back_jump_idx]);
-            output.push(marker(lp_offset, "}"));
+            output.push(marker("}"));
             // Emit ForEach completion path after the loop
             if let (Some(cs), Some(ce)) = (lp.completion_start, lp.completion_end) {
-                output.push(marker(lp_offset, "// on loop complete:"));
+                output.push(marker("// on loop complete:"));
                 for stmt in &stmts[cs..=ce] {
-                    // Skip push_flow/pop_flow/jump that are loop control artifacts
                     if parse_push_flow(&stmt.text).is_some()
                         || stmt.text == "pop_flow"
                         || parse_jump(&stmt.text).is_some()
