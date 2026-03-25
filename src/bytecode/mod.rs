@@ -79,7 +79,7 @@ impl OffsetMap {
             (Some((below_off, below_idx)), Some((above_off, above_idx))) => {
                 let below_dist = target.saturating_sub(below_off);
                 let above_dist = above_off.saturating_sub(target);
-                if below_dist <= above_dist {
+                if below_dist < above_dist {
                     Some((below_dist, below_idx))
                 } else {
                     Some((above_dist, above_idx))
