@@ -267,6 +267,31 @@ fn detect_interleaved_sequences(
             continue;
         };
 
+        // Skip push_flow/jump pairs that are part of a for-loop body dispatch.
+        // A for-loop has if !(cond) jump BEFORE the push_flow AND a backward jump
+        // (back-edge) AFTER it. if-guards before Sequences also have preceding
+        // if-jumps but no back-edge, so checking both directions avoids false skips.
+        const BACK_JUMP_SEARCH_WINDOW: usize = 10;
+        let is_forloop_dispatch = (1..=FORLOOP_PUSHFLOW_WINDOW).any(|offset| {
+            if i < offset {
+                return false;
+            }
+            let cond_idx = i - offset;
+            if parse_if_jump(&stmts[cond_idx].text).is_none() {
+                return false;
+            }
+            let incr_start = i + 2;
+            let search_end = stmts.len().min(incr_start + BACK_JUMP_SEARCH_WINDOW);
+            (incr_start..search_end).any(|scan_idx| {
+                parse_jump(&stmts[scan_idx].text)
+                    .is_some_and(|back_target| back_target <= stmts[cond_idx].mem_offset)
+            })
+        });
+        if is_forloop_dispatch {
+            i += 2;
+            continue;
+        }
+
         // Collect alternating push_flow/jump pairs
         let chain_start = i;
         let mut jump_targets: Vec<usize> = Vec::new(); // body offsets
@@ -510,53 +535,57 @@ fn detect_for_loops(
     loops
 }
 
-/// Identify Sequences that are children of another Sequence's pin body.
-/// A child is any Sequence whose chain range is the target of an unconditional
-/// jump from a parent pin body. Returns a map: child chain_start -> parent info.
-fn build_child_sequence_map(
+/// Collect chain_starts of Sequences that are children of another Sequence's
+/// pin body. A child Sequence is one whose push_flow entry point is the target
+/// of an unconditional jump from a parent's pin body or inline body.
+///
+/// The push_flow target check distinguishes real sub-Sequence dispatch from
+/// coincidental control-flow jumps that land within another Sequence's range.
+fn find_child_sequence_starts(
     stmts: &[BcStatement],
     sequences: &[SequenceNode],
     offset_map: &OffsetMap,
 ) -> HashSet<usize> {
-    let mut children: HashSet<usize> = HashSet::new();
+    let mut child_starts: HashSet<usize> = HashSet::new();
 
     for seq in sequences {
-        // Scan pin bodies and inline body for jumps to other Sequences
-        let ranges_to_scan: Vec<(usize, usize)> = seq
+        let ranges = seq
             .pins
             .iter()
             .map(|pin| (pin.body_start_idx, pin.body_end_idx))
-            .chain(std::iter::once((seq.chain_end, seq.inline_end)))
-            .collect();
+            .chain(std::iter::once((seq.chain_end, seq.inline_end)));
 
-        for (scan_start, scan_end) in ranges_to_scan {
-            for idx in scan_start..scan_end {
-                if idx >= stmts.len() {
-                    break;
-                }
+        for (scan_start, scan_end) in ranges {
+            for idx in scan_start..scan_end.min(stmts.len()) {
                 let Some(target) = parse_jump(&stmts[idx].text) else {
                     continue;
                 };
                 let Some(target_idx) = offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) else {
                     continue;
                 };
+                if target_idx >= stmts.len() || parse_push_flow(&stmts[target_idx].text).is_none() {
+                    continue;
+                }
                 for other in sequences {
-                    if std::ptr::eq(other, seq) {
-                        continue;
-                    }
-                    if target_idx >= other.chain_start && target_idx <= other.inline_end {
-                        children.insert(other.chain_start);
+                    if other.chain_start != seq.chain_start
+                        && target_idx >= other.chain_start
+                        && target_idx <= other.inline_end
+                    {
+                        child_starts.insert(other.chain_start);
                     }
                 }
             }
         }
     }
 
-    children
+    child_starts
 }
 
-/// Shared context for Sequence emission, avoiding repeated parameter passing.
-struct EmitSequenceCtx<'a> {
+/// Bundles shared state for Sequence emission so individual methods don't
+/// need 5+ parameters. Tracks which Sequences have been emitted to support
+/// child inlining (a child is emitted once within its parent, then skipped
+/// when the main loop reaches its standalone position).
+struct SequenceEmitter<'a> {
     stmts: &'a [BcStatement],
     sequences: &'a [SequenceNode],
     child_starts: &'a HashSet<usize>,
@@ -564,10 +593,8 @@ struct EmitSequenceCtx<'a> {
     emitted: HashSet<usize>,
 }
 
-impl<'a> EmitSequenceCtx<'a> {
-    /// Emit a single Sequence: markers, pin bodies, inline body, displaced blocks.
-    /// Child Sequences referenced by unconditional jumps are inlined recursively.
-    fn emit_sequence(&mut self, seq: &SequenceNode, output: &mut Vec<BcStatement>) {
+impl<'a> SequenceEmitter<'a> {
+    fn emit(&mut self, seq: &SequenceNode, output: &mut Vec<BcStatement>) {
         let seq_offset = self.stmts[seq.chain_start].mem_offset;
         let marker = |text: &str| BcStatement {
             mem_offset: seq_offset,
@@ -578,58 +605,61 @@ impl<'a> EmitSequenceCtx<'a> {
             text: "return nop".to_string(),
         };
 
+        // Emit each pin body, following unconditional jumps to child Sequences
         for (pi, pin) in seq.pins.iter().enumerate() {
             output.push(marker(&format!("// sequence [{}]:", pi)));
             output.extend_from_slice(&self.stmts[pin.body_start_idx..pin.body_end_idx]);
-            self.inline_child_sequences(pin.body_start_idx, pin.body_end_idx, output);
+            self.emit_child_sequences(pin.body_start_idx, pin.body_end_idx, output);
+            // Sentinel so if-else exit jumps within the body can resolve
             output.push(sentinel(pin.body_end_idx));
         }
 
+        // Inline body (after all pin dispatch pairs)
         output.push(marker(&format!("// sequence [{}]:", seq.pins.len())));
         output.extend_from_slice(&self.stmts[seq.chain_end..seq.inline_end]);
-        self.inline_child_sequences(seq.chain_end, seq.inline_end, output);
+        self.emit_child_sequences(seq.chain_end, seq.inline_end, output);
         output.push(sentinel(seq.inline_end));
 
-        let displaced =
-            find_displaced_blocks(self.stmts, seq.chain_end, seq.inline_end, self.offset_map);
-        for &(ds, de) in &displaced {
+        // Displaced blocks reachable from the inline body's conditional jumps
+        for &(ds, de) in
+            &find_displaced_blocks(self.stmts, seq.chain_end, seq.inline_end, self.offset_map)
+        {
             output.extend_from_slice(&self.stmts[ds..de]);
             output.push(sentinel(de));
         }
     }
 
-    /// Scan a statement range for unconditional jumps to child Sequences and
-    /// emit them inline.
-    fn inline_child_sequences(
+    /// Scan for unconditional jumps targeting child Sequences and emit them inline.
+    fn emit_child_sequences(
         &mut self,
         scan_start: usize,
         scan_end: usize,
         output: &mut Vec<BcStatement>,
     ) {
-        for idx in scan_start..scan_end {
-            if idx >= self.stmts.len() {
-                break;
-            }
+        for idx in scan_start..scan_end.min(self.stmts.len()) {
             let Some(target) = parse_jump(&self.stmts[idx].text) else {
                 continue;
             };
             let Some(target_idx) = self.offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) else {
                 continue;
             };
-            let Some(child) = self.sequences.iter().find(|s| {
-                self.child_starts.contains(&s.chain_start)
-                    && target_idx >= s.chain_start
-                    && target_idx <= s.inline_end
-                    && !self.emitted.contains(&s.chain_start)
-            }) else {
-                continue;
-            };
-            // Take ownership workaround: collect child info before mutable borrow
-            let child_chain = child.chain_start;
-            self.emitted.insert(child_chain);
-            // Re-find the child (borrow was released by the let binding above)
-            if let Some(child) = self.sequences.iter().find(|s| s.chain_start == child_chain) {
-                self.emit_sequence(child, output);
+            // Find the child Sequence this jump dispatches to
+            let child_chain = self.sequences.iter().find_map(|seq| {
+                if self.child_starts.contains(&seq.chain_start)
+                    && target_idx >= seq.chain_start
+                    && target_idx <= seq.inline_end
+                    && !self.emitted.contains(&seq.chain_start)
+                {
+                    Some(seq.chain_start)
+                } else {
+                    None
+                }
+            });
+            if let Some(chain_start) = child_chain {
+                self.emitted.insert(chain_start);
+                if let Some(child) = self.sequences.iter().find(|s| s.chain_start == chain_start) {
+                    self.emit(child, output);
+                }
             }
         }
     }
@@ -643,7 +673,7 @@ fn emit_reordered(
     used: &mut [bool],
     offset_map: &OffsetMap,
 ) -> Vec<BcStatement> {
-    let child_starts = build_child_sequence_map(stmts, sequences, offset_map);
+    let child_starts = find_child_sequence_starts(stmts, sequences, offset_map);
 
     for seq in sequences {
         used[seq.chain_start..=seq.inline_end].fill(true);
@@ -666,7 +696,7 @@ fn emit_reordered(
     }
 
     let mut output: Vec<BcStatement> = Vec::new();
-    let mut ctx = EmitSequenceCtx {
+    let mut emitter = SequenceEmitter {
         stmts,
         sequences,
         child_starts: &child_starts,
@@ -677,11 +707,12 @@ fn emit_reordered(
     let mut i = 0;
     while i < stmts.len() {
         if let Some(seq) = sequences.iter().find(|s| s.chain_start == i) {
-            if child_starts.contains(&seq.chain_start) {
-                // Child Sequence: skip standalone emission, will be inlined by parent
-            } else if !ctx.emitted.contains(&seq.chain_start) {
-                ctx.emitted.insert(seq.chain_start);
-                ctx.emit_sequence(seq, &mut output);
+            // Child Sequences are skipped here; they'll be inlined within
+            // the parent pin that dispatches to them via emit_child_sequences.
+            let is_child = child_starts.contains(&seq.chain_start);
+            if !is_child && !emitter.emitted.contains(&seq.chain_start) {
+                emitter.emitted.insert(seq.chain_start);
+                emitter.emit(seq, &mut output);
             }
             i = seq.inline_end + 1;
             continue;
