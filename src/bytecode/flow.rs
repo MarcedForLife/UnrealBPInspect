@@ -3,6 +3,8 @@
 //! Detects Sequence nodes, ForLoop, ForEach, and convergence patterns in flat bytecode,
 //! then reorders so downstream structuring sees natural control flow.
 
+use std::collections::HashSet;
+
 use super::decode::BcStatement;
 use super::{OffsetMap, JUMP_OFFSET_TOLERANCE};
 
@@ -508,6 +510,131 @@ fn detect_for_loops(
     loops
 }
 
+/// Identify Sequences that are children of another Sequence's pin body.
+/// A child is any Sequence whose chain range is the target of an unconditional
+/// jump from a parent pin body. Returns a map: child chain_start -> parent info.
+fn build_child_sequence_map(
+    stmts: &[BcStatement],
+    sequences: &[SequenceNode],
+    offset_map: &OffsetMap,
+) -> HashSet<usize> {
+    let mut children: HashSet<usize> = HashSet::new();
+
+    for seq in sequences {
+        // Scan pin bodies and inline body for jumps to other Sequences
+        let ranges_to_scan: Vec<(usize, usize)> = seq
+            .pins
+            .iter()
+            .map(|pin| (pin.body_start_idx, pin.body_end_idx))
+            .chain(std::iter::once((seq.chain_end, seq.inline_end)))
+            .collect();
+
+        for (scan_start, scan_end) in ranges_to_scan {
+            for idx in scan_start..scan_end {
+                if idx >= stmts.len() {
+                    break;
+                }
+                let Some(target) = parse_jump(&stmts[idx].text) else {
+                    continue;
+                };
+                let Some(target_idx) = offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) else {
+                    continue;
+                };
+                for other in sequences {
+                    if std::ptr::eq(other, seq) {
+                        continue;
+                    }
+                    if target_idx >= other.chain_start && target_idx <= other.inline_end {
+                        children.insert(other.chain_start);
+                    }
+                }
+            }
+        }
+    }
+
+    children
+}
+
+/// Shared context for Sequence emission, avoiding repeated parameter passing.
+struct EmitSequenceCtx<'a> {
+    stmts: &'a [BcStatement],
+    sequences: &'a [SequenceNode],
+    child_starts: &'a HashSet<usize>,
+    offset_map: &'a OffsetMap,
+    emitted: HashSet<usize>,
+}
+
+impl<'a> EmitSequenceCtx<'a> {
+    /// Emit a single Sequence: markers, pin bodies, inline body, displaced blocks.
+    /// Child Sequences referenced by unconditional jumps are inlined recursively.
+    fn emit_sequence(&mut self, seq: &SequenceNode, output: &mut Vec<BcStatement>) {
+        let seq_offset = self.stmts[seq.chain_start].mem_offset;
+        let marker = |text: &str| BcStatement {
+            mem_offset: seq_offset,
+            text: text.to_string(),
+        };
+        let sentinel = |idx: usize| BcStatement {
+            mem_offset: self.stmts[idx].mem_offset,
+            text: "return nop".to_string(),
+        };
+
+        for (pi, pin) in seq.pins.iter().enumerate() {
+            output.push(marker(&format!("// sequence [{}]:", pi)));
+            output.extend_from_slice(&self.stmts[pin.body_start_idx..pin.body_end_idx]);
+            self.inline_child_sequences(pin.body_start_idx, pin.body_end_idx, output);
+            output.push(sentinel(pin.body_end_idx));
+        }
+
+        output.push(marker(&format!("// sequence [{}]:", seq.pins.len())));
+        output.extend_from_slice(&self.stmts[seq.chain_end..seq.inline_end]);
+        self.inline_child_sequences(seq.chain_end, seq.inline_end, output);
+        output.push(sentinel(seq.inline_end));
+
+        let displaced =
+            find_displaced_blocks(self.stmts, seq.chain_end, seq.inline_end, self.offset_map);
+        for &(ds, de) in &displaced {
+            output.extend_from_slice(&self.stmts[ds..de]);
+            output.push(sentinel(de));
+        }
+    }
+
+    /// Scan a statement range for unconditional jumps to child Sequences and
+    /// emit them inline.
+    fn inline_child_sequences(
+        &mut self,
+        scan_start: usize,
+        scan_end: usize,
+        output: &mut Vec<BcStatement>,
+    ) {
+        for idx in scan_start..scan_end {
+            if idx >= self.stmts.len() {
+                break;
+            }
+            let Some(target) = parse_jump(&self.stmts[idx].text) else {
+                continue;
+            };
+            let Some(target_idx) = self.offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) else {
+                continue;
+            };
+            let Some(child) = self.sequences.iter().find(|s| {
+                self.child_starts.contains(&s.chain_start)
+                    && target_idx >= s.chain_start
+                    && target_idx <= s.inline_end
+                    && !self.emitted.contains(&s.chain_start)
+            }) else {
+                continue;
+            };
+            // Take ownership workaround: collect child info before mutable borrow
+            let child_chain = child.chain_start;
+            self.emitted.insert(child_chain);
+            // Re-find the child (borrow was released by the let binding above)
+            if let Some(child) = self.sequences.iter().find(|s| s.chain_start == child_chain) {
+                self.emit_sequence(child, output);
+            }
+        }
+    }
+}
+
 /// Emit reordered statements with sequence pins and loop bodies inlined.
 fn emit_reordered(
     stmts: &[BcStatement],
@@ -516,6 +643,8 @@ fn emit_reordered(
     used: &mut [bool],
     offset_map: &OffsetMap,
 ) -> Vec<BcStatement> {
+    let child_starts = build_child_sequence_map(stmts, sequences, offset_map);
+
     for seq in sequences {
         used[seq.chain_start..=seq.inline_end].fill(true);
         for pin in &seq.pins {
@@ -531,62 +660,40 @@ fn emit_reordered(
     for lp in loops {
         used[lp.if_idx..=lp.loop_ctrl_end].fill(true);
         used[lp.body_start_idx..=lp.body_end_idx].fill(true);
-        // Mark ForEach completion range as used (we'll emit it after the loop)
         if let (Some(cs), Some(ce)) = (lp.completion_start, lp.completion_end) {
             used[cs..=ce].fill(true);
         }
     }
 
     let mut output: Vec<BcStatement> = Vec::new();
-    let marker = |offset: usize, text: &str| BcStatement {
-        mem_offset: offset,
-        text: text.to_string(),
+    let mut ctx = EmitSequenceCtx {
+        stmts,
+        sequences,
+        child_starts: &child_starts,
+        offset_map,
+        emitted: HashSet::new(),
     };
 
     let mut i = 0;
     while i < stmts.len() {
         if let Some(seq) = sequences.iter().find(|s| s.chain_start == i) {
-            let seq_offset = stmts[seq.chain_start].mem_offset;
-            for (pi, pin) in seq.pins.iter().enumerate() {
-                output.push(marker(seq_offset, &format!("// sequence [{}]:", pi)));
-                output.extend_from_slice(&stmts[pin.body_start_idx..pin.body_end_idx]);
-                // Sentinel at pop_flow offset so if-else exit jumps within
-                // the body can resolve (the pop_flow itself is excluded).
-                output.push(BcStatement {
-                    mem_offset: stmts[pin.body_end_idx].mem_offset,
-                    text: "return nop".to_string(),
-                });
+            if child_starts.contains(&seq.chain_start) {
+                // Child Sequence: skip standalone emission, will be inlined by parent
+            } else if !ctx.emitted.contains(&seq.chain_start) {
+                ctx.emitted.insert(seq.chain_start);
+                ctx.emit_sequence(seq, &mut output);
             }
-            output.push(marker(
-                seq_offset,
-                &format!("// sequence [{}]:", seq.pins.len()),
-            ));
-            output.extend_from_slice(&stmts[seq.chain_end..seq.inline_end]);
-            // Sentinel for inline body's pop_flow. This must appear before
-            // displaced blocks so the structurer can detect if/else patterns
-            // where the true branch returns via pop_flow.
-            output.push(BcStatement {
-                mem_offset: stmts[seq.inline_end].mem_offset,
-                text: "return nop".to_string(),
-            });
-            // Append displaced blocks reachable from the inline body's
-            // if/jump targets (e.g. else branches at distant offsets).
-            let displaced = find_displaced_blocks(stmts, seq.chain_end, seq.inline_end, offset_map);
-            for &(ds, de) in &displaced {
-                output.extend_from_slice(&stmts[ds..de]);
-                output.push(BcStatement {
-                    mem_offset: stmts[de].mem_offset,
-                    text: "return nop".to_string(),
-                });
-            }
-
             i = seq.inline_end + 1;
             continue;
         }
 
         if let Some(lp) = loops.iter().find(|l| l.if_idx == i) {
             let lp_offset = stmts[lp.if_idx].mem_offset;
-            output.push(marker(lp_offset, &format!("while ({}) {{", lp.cond_text)));
+            let marker = |text: &str| BcStatement {
+                mem_offset: lp_offset,
+                text: text.to_string(),
+            };
+            output.push(marker(&format!("while ({}) {{", lp.cond_text)));
             if lp.extra_start < lp.extra_end {
                 output.extend_from_slice(&stmts[lp.extra_start..lp.extra_end]);
             }
@@ -597,12 +704,11 @@ fn emit_reordered(
             };
             output.extend_from_slice(&stmts[lp.body_start_idx..body_end]);
             output.extend_from_slice(&stmts[lp.incr_start..lp.back_jump_idx]);
-            output.push(marker(lp_offset, "}"));
+            output.push(marker("}"));
             // Emit ForEach completion path after the loop
             if let (Some(cs), Some(ce)) = (lp.completion_start, lp.completion_end) {
-                output.push(marker(lp_offset, "// on loop complete:"));
+                output.push(marker("// on loop complete:"));
                 for stmt in &stmts[cs..=ce] {
-                    // Skip push_flow/pop_flow/jump that are loop control artifacts
                     if parse_push_flow(&stmt.text).is_some()
                         || stmt.text == "pop_flow"
                         || parse_jump(&stmt.text).is_some()
