@@ -722,11 +722,15 @@ fn emit_single_loop(
     // Emit ForEach completion path after the loop.
     // Convert pop_flow to unconditional jumps targeting the function return
     // so the structurer can detect if/else boundaries (skip-else pattern).
+    // After each converted jump, emit a no-op anchor at the next statement's
+    // offset so inline passes can't remove the OffsetMap entry the structurer
+    // needs for else-branch resolution.
     // Strip push_flow and plain jumps which are loop control artifacts.
     if let (Some(cs), Some(ce)) = (lp.completion_start, lp.completion_end) {
         output.push(marker("// on loop complete:"));
         let end_offset = stmts[lp.body_end_idx].mem_offset;
-        for stmt in &stmts[cs..=ce] {
+        let completion = &stmts[cs..=ce];
+        for (rel, stmt) in completion.iter().enumerate() {
             if parse_push_flow(&stmt.text).is_some() || parse_jump(&stmt.text).is_some() {
                 continue;
             }
@@ -735,6 +739,16 @@ fn emit_single_loop(
                     mem_offset: stmt.mem_offset,
                     text: format!("jump 0x{:x}", end_offset),
                 });
+                // Anchor: the next statement's offset must survive in the
+                // OffsetMap even if inline passes remove its original statement.
+                if let Some(next) = completion.get(rel + 1) {
+                    if next.mem_offset > 0 {
+                        output.push(BcStatement {
+                            mem_offset: next.mem_offset,
+                            text: String::new(),
+                        });
+                    }
+                }
                 continue;
             }
             output.push(stmt.clone());
