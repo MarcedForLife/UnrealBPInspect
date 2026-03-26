@@ -719,14 +719,22 @@ fn emit_single_loop(
     emit_body_range(stmts, lp.body_start_idx, body_end, loops, emitted, output);
     output.extend_from_slice(&stmts[lp.incr_start..lp.back_jump_idx]);
     output.push(marker("}"));
-    // Emit ForEach completion path after the loop
+    // Emit ForEach completion path after the loop.
+    // Convert pop_flow to unconditional jumps targeting the function return
+    // so the structurer can detect if/else boundaries (skip-else pattern).
+    // Strip push_flow and plain jumps which are loop control artifacts.
     if let (Some(cs), Some(ce)) = (lp.completion_start, lp.completion_end) {
         output.push(marker("// on loop complete:"));
+        let end_offset = stmts[lp.body_end_idx].mem_offset;
         for stmt in &stmts[cs..=ce] {
-            if parse_push_flow(&stmt.text).is_some()
-                || stmt.text == "pop_flow"
-                || parse_jump(&stmt.text).is_some()
-            {
+            if parse_push_flow(&stmt.text).is_some() || parse_jump(&stmt.text).is_some() {
+                continue;
+            }
+            if stmt.text == "pop_flow" {
+                output.push(BcStatement {
+                    mem_offset: stmt.mem_offset,
+                    text: format!("jump 0x{:x}", end_offset),
+                });
                 continue;
             }
             output.push(stmt.clone());
