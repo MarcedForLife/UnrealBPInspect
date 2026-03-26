@@ -1212,9 +1212,9 @@ fn compact_large_break_calls(lines: &mut [String]) {
 ///
 /// UE4's "Switch on Enum" node compiles to cascading comparisons:
 ///   `$SwitchEnum_CmpSuccess = VAR != N` / `if (!...) return` or `if (...) { ... }`
-/// After structuring, this produces deeply nested if-blocks. This pass detects the
-/// cascade fingerprint and replaces it with a readable switch comment, labeling the
-/// first case body that follows.
+/// After structuring, this produces deeply nested if-blocks with case bodies at
+/// decreasing indent levels. This pass detects the cascade, collects all case
+/// bodies, and re-emits them with uniform indentation.
 pub(super) fn fold_switch_enum_cascade(lines: &mut Vec<String>) {
     let mut i = 0;
     while i < lines.len() {
@@ -1229,11 +1229,10 @@ pub(super) fn fold_switch_enum_cascade(lines: &mut Vec<String>) {
         let cascade_start = i;
         let mut case_values = vec![first_value];
 
-        // Scan forward to find the full cascade extent.
-        // Track brace depth to find the matching closing braces.
+        // Scan forward through the cascade scaffold:
+        // assignments, if-checks, and closing braces.
         let mut j = i + 1;
         let mut brace_depth = 0i32;
-        let mut cascade_end = i; // inclusive last cascade line
 
         while j < lines.len() {
             let trimmed = lines[j].trim();
@@ -1242,7 +1241,6 @@ pub(super) fn fold_switch_enum_cascade(lines: &mut Vec<String>) {
             if let Some((sv, cv, val, _)) = parse_switch_enum_assign(trimmed, &lines[j]) {
                 if sv == switch_var && cv == compared_var {
                     case_values.push(val);
-                    cascade_end = j;
                     j += 1;
                     continue;
                 }
@@ -1253,7 +1251,6 @@ pub(super) fn fold_switch_enum_cascade(lines: &mut Vec<String>) {
                 if trimmed.ends_with('{') {
                     brace_depth += 1;
                 }
-                cascade_end = j;
                 j += 1;
                 continue;
             }
@@ -1261,7 +1258,6 @@ pub(super) fn fold_switch_enum_cascade(lines: &mut Vec<String>) {
             // Closing brace belonging to the cascade
             if trimmed == "}" && brace_depth > 0 {
                 brace_depth -= 1;
-                cascade_end = j;
                 j += 1;
                 continue;
             }
@@ -1275,7 +1271,49 @@ pub(super) fn fold_switch_enum_cascade(lines: &mut Vec<String>) {
             continue;
         }
 
-        // Build replacement lines
+        // Continue past the cascade to collect case body groups.
+        // Bodies appear between closing braces (innermost first) and
+        // after all braces close (outermost body).
+        let mut body_groups: Vec<Vec<String>> = Vec::new();
+        let mut current_body: Vec<String> = Vec::new();
+
+        while j < lines.len() && brace_depth > 0 {
+            let trimmed = lines[j].trim();
+            if trimmed == "}" {
+                if !current_body.is_empty() {
+                    body_groups.push(std::mem::take(&mut current_body));
+                }
+                brace_depth -= 1;
+                j += 1;
+            } else if !trimmed.is_empty() {
+                current_body.push(trimmed.to_string());
+                j += 1;
+            } else {
+                j += 1;
+            }
+        }
+
+        // Collect the outermost body (after all cascade braces close)
+        while j < lines.len() {
+            let trimmed = lines[j].trim();
+            if trimmed.is_empty() || trimmed == "return" || trimmed == "}" || trimmed == "break" {
+                break;
+            }
+            current_body.push(trimmed.to_string());
+            j += 1;
+        }
+        if !current_body.is_empty() {
+            body_groups.push(current_body);
+        }
+
+        let construct_end = j; // exclusive end of the entire switch construct
+
+        // Recursively fold inner switch cascades within each body group
+        for body in &mut body_groups {
+            fold_switch_enum_cascade(body);
+        }
+
+        // Build replacement
         let indent_str = " ".repeat(base_indent);
         let cases_str = case_values
             .iter()
@@ -1287,23 +1325,16 @@ pub(super) fn fold_switch_enum_cascade(lines: &mut Vec<String>) {
             indent_str, compared_var, cases_str
         );
 
-        // Check if there's a meaningful body after the cascade (not just return/break/})
-        let has_body_after = j < lines.len()
-            && !lines[j].trim().is_empty()
-            && lines[j].trim() != "return"
-            && lines[j].trim() != "break"
-            && lines[j].trim() != "}";
-
         let mut replacement = vec![switch_line];
-        if has_body_after {
-            replacement.push(format!(
-                "{}// case {} == {}:",
-                indent_str, compared_var, case_values[0]
-            ));
+        for body in &body_groups {
+            for line in body {
+                replacement.push(format!("{}    {}", indent_str, line));
+            }
         }
 
-        lines.splice(cascade_start..=cascade_end, replacement);
-        i = cascade_start + 1;
+        let replacement_len = replacement.len();
+        lines.splice(cascade_start..construct_end, replacement);
+        i = cascade_start + replacement_len;
     }
 }
 

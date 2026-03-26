@@ -1004,8 +1004,7 @@ mod tests {
         ];
         fold_switch_enum_cascade(&mut lines);
         assert!(lines[0].contains("// switch (Status)"));
-        assert!(lines[1].contains("// case Status == 0:"));
-        assert_eq!(lines[2], "body_after_cascade()");
+        assert_eq!(lines[1].trim(), "body_after_cascade()");
     }
 
     #[test]
@@ -1020,7 +1019,7 @@ mod tests {
         ];
         fold_switch_enum_cascade(&mut lines);
         assert!(lines[0].contains("// switch (X)"));
-        // No case label before return
+        // No case body before return
         assert_eq!(lines[1], "return");
     }
 }
