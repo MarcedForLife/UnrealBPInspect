@@ -569,9 +569,9 @@ fn detect_if_blocks(
             continue;
         };
 
-        // Check for an else branch: the statement before the false-branch start
-        // should be an unconditional jump (skip-else) or a return (diverging branches)
-        let (jump_idx, end_idx) = detect_else_branch(stmts, target_idx, find_target);
+        // Check for an else branch: search backward from the false-branch start
+        // for the true-branch's terminating jump or return
+        let (jump_idx, end_idx) = detect_else_branch(stmts, i, target_idx, find_target);
 
         if_blocks.push(IfBlock {
             if_idx: i,
@@ -590,25 +590,50 @@ fn detect_if_blocks(
 }
 
 /// Check if the true-branch ends with an unconditional jump (else) or return (diverging).
+///
+/// Searches backward from `target_idx`, skipping only comment/marker lines, to find
+/// the true-branch terminator (a jump past the false-branch, or a return).
+/// The search is bounded by `if_idx` to avoid crossing into unrelated code.
 fn detect_else_branch(
     stmts: &[BcStatement],
+    if_idx: usize,
     target_idx: usize,
     find_target: &dyn Fn(usize) -> Option<usize>,
 ) -> (Option<usize>, Option<usize>) {
-    if target_idx == 0 || target_idx > stmts.len() {
+    if target_idx == 0 || target_idx > stmts.len() || if_idx >= target_idx {
         return (None, None);
     }
-    let check_idx = target_idx - 1;
-    let prev = &stmts[check_idx];
-    if let Some(end_target) = parse_jump(&prev.text) {
-        if let Some(end_idx) = find_target(end_target) {
-            if end_idx >= target_idx {
-                return (Some(check_idx), Some(end_idx));
+
+    // Search backward from the false-branch start, skipping only
+    // non-executable lines (comments, markers). Stop at the first
+    // executable statement.
+    let search_start = if_idx + 1;
+    for check_idx in (search_start..target_idx).rev() {
+        let stmt = &stmts[check_idx];
+        let trimmed = stmt.text.trim();
+
+        // Skip comments and markers
+        if trimmed.starts_with("//") || trimmed.is_empty() {
+            continue;
+        }
+
+        // Unconditional jump past the false-branch: classic if/else skip
+        if let Some(end_target) = parse_jump(&stmt.text) {
+            if let Some(end_idx) = find_target(end_target) {
+                if end_idx >= target_idx {
+                    return (Some(check_idx), Some(end_idx));
+                }
             }
         }
-    } else if (prev.text == "return nop" || prev.text == "return") && target_idx < stmts.len() {
-        return (Some(check_idx), Some(stmts.len()));
+        // Diverging return: both branches return independently
+        else if (stmt.text == "return nop" || stmt.text == "return") && target_idx < stmts.len() {
+            return (Some(check_idx), Some(stmts.len()));
+        }
+
+        // Any other executable statement means no else detected
+        break;
     }
+
     (None, None)
 }
 
