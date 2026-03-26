@@ -691,11 +691,14 @@ impl<'a> SequenceEmitter<'a> {
 }
 
 /// Emit a single loop: while header, extra, body (recursive), increment, close, completion.
+/// `nested` is true when called from within another loop's body, suppressing the
+/// trailing return nop (which belongs to the function, not the inner loop).
 fn emit_single_loop(
     stmts: &[BcStatement],
     lp: &ForLoop,
     loops: &[ForLoop],
     emitted: &mut HashSet<usize>,
+    nested: bool,
     output: &mut Vec<BcStatement>,
 ) {
     emitted.insert(lp.if_idx);
@@ -729,7 +732,11 @@ fn emit_single_loop(
             output.push(stmt.clone());
         }
     }
-    if stmts[lp.body_end_idx].text == "return nop" {
+    // Only emit the trailing return nop for top-level loops. Nested loops
+    // share the same body_end_idx (inflated to stmts.len()-1), and emitting
+    // it inside the parent body would cause dead code elimination to strip
+    // the parent's completion path.
+    if !nested && stmts[lp.body_end_idx].text == "return nop" {
         output.push(stmts[lp.body_end_idx].clone());
     }
 }
@@ -737,6 +744,7 @@ fn emit_single_loop(
 /// Emit statements from a range, recursively formatting any nested loops.
 /// Uses an `emitted` set to prevent the same loop from being formatted twice
 /// (sibling loops in the same function share inflated body_end ranges).
+/// Tracks indices consumed by nested loop bodies to avoid duplication.
 fn emit_body_range(
     stmts: &[BcStatement],
     start: usize,
@@ -745,14 +753,29 @@ fn emit_body_range(
     emitted: &mut HashSet<usize>,
     output: &mut Vec<BcStatement>,
 ) {
+    // Collect index ranges consumed by nested loops within this range,
+    // so we can skip them after the nested loop is emitted.
+    let mut consumed = HashSet::new();
     let mut i = start;
     while i < end {
         if let Some(inner) = loops
             .iter()
             .find(|l| l.if_idx == i && !emitted.contains(&l.if_idx))
         {
-            emit_single_loop(stmts, inner, loops, emitted, output);
+            // Mark the inner loop's body range as consumed so statements
+            // aren't emitted twice (once inside the while, once flat).
+            let inner_body_end = if inner.body_end_idx < end {
+                inner.body_end_idx + 1
+            } else {
+                end
+            };
+            for idx in inner.body_start_idx..inner_body_end {
+                consumed.insert(idx);
+            }
+            emit_single_loop(stmts, inner, loops, emitted, true, output);
             i = inner.loop_ctrl_end + 1;
+        } else if consumed.contains(&i) {
+            i += 1;
         } else {
             output.push(stmts[i].clone());
             i += 1;
@@ -816,7 +839,7 @@ fn emit_reordered(
             .iter()
             .find(|l| l.if_idx == i && !emitted_loops.contains(&l.if_idx))
         {
-            emit_single_loop(stmts, lp, loops, &mut emitted_loops, &mut output);
+            emit_single_loop(stmts, lp, loops, &mut emitted_loops, false, &mut output);
             i = lp.loop_ctrl_end + 1;
             continue;
         }
