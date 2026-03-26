@@ -66,7 +66,13 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
     // These are sentinel leaks from Sequence body boundaries (return nop).
     let mut i = 0;
     while i + 1 < lines.len() {
-        if lines[i].trim() == "return" && lines[i + 1].trim().starts_with("// sequence [") {
+        let next = lines[i + 1].trim();
+        if lines[i].trim() == "return"
+            && (next.starts_with("// sequence [")
+                || next.starts_with("// sub-sequence [")
+                || next.starts_with("// case ")
+                || next.starts_with("// switch "))
+        {
             lines.remove(i);
             continue;
         }
@@ -81,6 +87,11 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
         lines.retain(|line| {
             let trimmed = line.trim();
             if dead {
+                // Switch/case markers restart live code (case fall-through)
+                if trimmed.starts_with("// case ") || trimmed.starts_with("// switch ") {
+                    dead = false;
+                    return true;
+                }
                 // Closing braces are structural, keep them
                 trimmed == "}" || trimmed.is_empty()
             } else {
