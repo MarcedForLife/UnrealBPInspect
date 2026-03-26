@@ -6,7 +6,10 @@ mod temps;
 
 pub use cleanup::{cleanup_structured_output, strip_orphaned_blocks, strip_unmatched_braces};
 pub use patterns::fold_summary_patterns;
-pub use temps::{discard_unused_assignments, inline_constant_temps, inline_single_use_temps};
+pub use temps::{
+    collect_jump_targets, discard_unused_assignments, inline_constant_temps,
+    inline_single_use_temps,
+};
 
 // Shared helpers
 
@@ -118,6 +121,8 @@ fn used_in_operator_context(text: &str, pos: usize, after: usize) -> bool {
 // substitute_var, split_args, etc.) that aren't accessible from tests/.
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::cleanup::*;
     use super::patterns::*;
     use super::temps::*;
@@ -441,7 +446,7 @@ mod tests {
                 text: "y = switch(Temp_bool_Variable) { false: C, true: D }".into(),
             },
         ];
-        inline_constant_temps(&mut stmts);
+        inline_constant_temps(&mut stmts, &HashSet::new());
         assert_eq!(stmts.len(), 2);
         assert_eq!(stmts[0].text, "x = switch(LeftHand) { false: A, true: B }");
         assert_eq!(stmts[1].text, "y = switch(LeftHand) { false: C, true: D }");
@@ -468,7 +473,7 @@ mod tests {
                 text: "y = Temp_bool_Variable".into(),
             },
         ];
-        inline_constant_temps(&mut stmts);
+        inline_constant_temps(&mut stmts, &HashSet::new());
         // Different exprs -> not inlined, all 4 remain
         assert_eq!(stmts.len(), 4);
     }
@@ -491,7 +496,7 @@ mod tests {
                 text: "baz(Temp_0)".into(),
             },
         ];
-        inline_constant_temps(&mut stmts);
+        inline_constant_temps(&mut stmts, &HashSet::new());
         assert_eq!(stmts.len(), 2);
         assert_eq!(stmts[0].text, "bar(foo)");
         assert_eq!(stmts[1].text, "baz(foo)");
@@ -515,7 +520,7 @@ mod tests {
                 text: "x = $Param + 1".into(),
             },
         ];
-        inline_constant_temps(&mut stmts);
+        inline_constant_temps(&mut stmts, &HashSet::new());
         assert_eq!(stmts.len(), 3); // unchanged
     }
 
