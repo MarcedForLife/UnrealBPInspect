@@ -27,8 +27,9 @@ pub use flow::{
     parse_if_jump, parse_jump, parse_push_flow, reorder_convergence, reorder_flow_patterns,
 };
 pub use inline::{
-    cleanup_structured_output, discard_unused_assignments, fold_summary_patterns,
-    inline_constant_temps, inline_single_use_temps, strip_orphaned_blocks, strip_unmatched_braces,
+    cleanup_structured_output, collect_jump_targets, discard_unused_assignments,
+    fold_summary_patterns, inline_constant_temps, inline_single_use_temps, strip_orphaned_blocks,
+    strip_unmatched_braces,
 };
 pub use structure::structure_bytecode;
 
