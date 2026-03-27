@@ -10,8 +10,9 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::binary::*;
 use crate::bytecode::{
     cleanup_structured_output, collect_jump_targets, decode_bytecode, discard_unused_assignments,
-    fold_summary_patterns, inline_constant_temps, inline_single_use_temps, reorder_convergence,
-    reorder_flow_patterns, strip_orphaned_blocks, structure_bytecode,
+    eliminate_constant_condition_branches, fold_summary_patterns, inline_constant_temps,
+    inline_single_use_temps, reorder_convergence, reorder_flow_patterns, strip_orphaned_blocks,
+    structure_bytecode,
 };
 use crate::ffield::*;
 use crate::properties::read_properties;
@@ -590,6 +591,9 @@ pub fn structure_and_cleanup(stmts: &[crate::bytecode::BcStatement]) -> Vec<Stri
     let mut structured = structure_bytecode(stmts, &HashMap::new());
     cleanup_structured_output(&mut structured);
     fold_summary_patterns(&mut structured);
+    // Re-run after pattern folding: temp inlining can create new constant-condition
+    // branches (e.g., inlining `Temp_bool = true` into `if (!Temp_bool) return`).
+    eliminate_constant_condition_branches(&mut structured);
     strip_orphaned_blocks(&mut structured);
     structured
 }

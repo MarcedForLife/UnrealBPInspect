@@ -1326,7 +1326,28 @@ pub(super) fn fold_switch_enum_cascade(lines: &mut Vec<String>) {
         );
 
         let mut replacement = vec![switch_line];
-        for body in &body_groups {
+        let num_bodies = body_groups.len();
+        let num_cases = case_values.len();
+        for (idx, body) in body_groups.iter().enumerate() {
+            // Bodies are collected innermost-first from cascade nesting,
+            // then the outermost tail. The outermost body (last entry) maps
+            // to case_values[0], and earlier entries map in reverse order.
+            // When num_bodies == num_cases + 1, body[0] is the default.
+            let case_idx = num_bodies.saturating_sub(1 + idx);
+            let is_default = num_bodies == num_cases + 1 && idx == 0;
+            let label = if is_default {
+                format!("{}// default:", indent_str)
+            } else if case_idx < num_cases {
+                format!(
+                    "{}// case {} == {}:",
+                    indent_str, compared_var, case_values[case_idx]
+                )
+            } else {
+                format!("{}// case {}:", indent_str, idx)
+            };
+            if !body.is_empty() {
+                replacement.push(label);
+            }
             for line in body {
                 replacement.push(format!("{}    {}", indent_str, line));
             }

@@ -28,8 +28,8 @@ pub use flow::{
 };
 pub use inline::{
     cleanup_structured_output, collect_jump_targets, discard_unused_assignments,
-    fold_summary_patterns, inline_constant_temps, inline_single_use_temps, strip_orphaned_blocks,
-    strip_unmatched_braces,
+    eliminate_constant_condition_branches, fold_summary_patterns, inline_constant_temps,
+    inline_single_use_temps, strip_orphaned_blocks, strip_unmatched_braces,
 };
 pub use structure::structure_bytecode;
 
