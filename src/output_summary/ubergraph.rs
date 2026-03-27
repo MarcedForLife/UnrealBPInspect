@@ -126,6 +126,32 @@ fn structure_segment(stmts: &[BcStatement]) -> Vec<String> {
     structure_and_cleanup(&seg)
 }
 
+/// Split a latent resume segment at `return nop` or `pop_flow` boundaries.
+///
+/// Each sub-block is an independent resume continuation that should be
+/// structured separately so dead-code elimination doesn't discard blocks
+/// after the first return.
+fn split_at_return_nop(stmts: &[BcStatement]) -> Vec<Vec<BcStatement>> {
+    let mut blocks: Vec<Vec<BcStatement>> = Vec::new();
+    let mut current: Vec<BcStatement> = Vec::new();
+    for stmt in stmts {
+        if stmt.text == "return nop" || stmt.text == "pop_flow" {
+            if !current.is_empty() {
+                blocks.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(stmt.clone());
+        }
+    }
+    if !current.is_empty() {
+        blocks.push(current);
+    }
+    if blocks.is_empty() {
+        blocks.push(Vec::new());
+    }
+    blocks
+}
+
 /// Split a segment's BcStatements at `// sequence [N]:` markers.
 /// Returns a list of (optional marker text, body statements).
 /// When the segment has no sequence markers, returns a single entry.
@@ -252,21 +278,39 @@ pub(super) fn build_ubergraph_structured(
         } else if !segment_stmts.is_empty() {
             all_lines.push("--- (latent resume) ---".to_string());
         }
-        if !segment_stmts.is_empty() {
-            let sub_segments = split_by_sequence_markers(segment_stmts);
-            if sub_segments.len() <= 1 {
-                all_lines.extend(structure_segment(segment_stmts));
-            } else {
-                // Process each sequence body independently so that
-                // cross-body jumps don't cause if-blocks to span
-                // across sequence boundaries.
-                for (marker, body) in &sub_segments {
-                    if let Some(m) = marker {
-                        all_lines.push(m.clone());
-                    }
-                    if !body.is_empty() {
-                        all_lines.extend(structure_segment(body));
-                    }
+        if segment_stmts.is_empty() {
+            continue;
+        }
+
+        // Latent resume segments contain multiple independent blocks separated
+        // by `return nop`. Split and structure each block independently so that
+        // dead-code elimination doesn't kill all blocks after the first return.
+        if name.is_empty() {
+            let resume_blocks = split_at_return_nop(segment_stmts);
+            for (bi, block) in resume_blocks.iter().enumerate() {
+                if bi > 0 {
+                    all_lines.push("return".to_string());
+                }
+                if !block.is_empty() {
+                    all_lines.extend(structure_segment(block));
+                }
+            }
+            continue;
+        }
+
+        let sub_segments = split_by_sequence_markers(segment_stmts);
+        if sub_segments.len() <= 1 {
+            all_lines.extend(structure_segment(segment_stmts));
+        } else {
+            // Process each sequence body independently so that
+            // cross-body jumps don't cause if-blocks to span
+            // across sequence boundaries.
+            for (marker, body) in &sub_segments {
+                if let Some(m) = marker {
+                    all_lines.push(m.clone());
+                }
+                if !body.is_empty() {
+                    all_lines.extend(structure_segment(body));
                 }
             }
         }
