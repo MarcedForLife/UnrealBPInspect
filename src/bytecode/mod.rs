@@ -33,6 +33,47 @@ pub use inline::{
 };
 pub use structure::structure_bytecode;
 
+/// Split BcStatements at `// sequence [N]:` markers.
+/// Returns a list of (optional marker text, body statements).
+/// When there are no sequence markers, returns a single entry.
+pub fn split_by_sequence_markers(stmts: &[BcStatement]) -> Vec<(Option<String>, Vec<BcStatement>)> {
+    let marker_indices: Vec<usize> = stmts
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.text.starts_with("// sequence ["))
+        .map(|(i, _)| i)
+        .collect();
+
+    if marker_indices.is_empty() {
+        return vec![(None, stmts.to_vec())];
+    }
+
+    let mut result = Vec::new();
+
+    // Statements before the first marker (prefix)
+    if marker_indices[0] > 0 {
+        result.push((None, stmts[..marker_indices[0]].to_vec()));
+    }
+
+    for (i, &start) in marker_indices.iter().enumerate() {
+        let marker_text = stmts[start].text.clone();
+        let body_start = start + 1;
+        let body_end = if i + 1 < marker_indices.len() {
+            marker_indices[i + 1]
+        } else {
+            stmts.len()
+        };
+        let body: Vec<BcStatement> = if body_start < body_end {
+            stmts[body_start..body_end].to_vec()
+        } else {
+            Vec::new()
+        };
+        result.push((Some(marker_text), body));
+    }
+
+    result
+}
+
 /// Maps bytecode memory offsets to statement indices with fuzzy matching.
 /// Jump targets can land on filtered opcodes (wire_trace, tracepoint), so the
 /// nearest statement may be a few bytes away from the target address.
