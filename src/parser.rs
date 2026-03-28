@@ -9,9 +9,9 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::binary::*;
 use crate::bytecode::{
-    cleanup_structured_output, decode_bytecode, discard_unused_assignments, fold_summary_patterns,
-    inline_constant_temps, inline_single_use_temps, reorder_convergence, reorder_flow_patterns,
-    strip_orphaned_blocks, structure_bytecode,
+    cleanup_structured_output, collect_jump_targets, decode_bytecode, discard_unused_assignments,
+    fold_summary_patterns, inline_constant_temps, inline_single_use_temps, reorder_convergence,
+    reorder_flow_patterns, strip_orphaned_blocks, structure_bytecode,
 };
 use crate::ffield::*;
 use crate::properties::read_properties;
@@ -599,7 +599,8 @@ pub fn structure_and_cleanup(stmts: &[crate::bytecode::BcStatement]) -> Vec<Stri
 fn structure_statements(stmts: &[crate::bytecode::BcStatement]) -> Vec<String> {
     let mut reordered = reorder_flow_patterns(stmts);
     reorder_convergence(&mut reordered);
-    inline_constant_temps(&mut reordered);
+    let jump_targets = collect_jump_targets(&reordered);
+    inline_constant_temps(&mut reordered, &jump_targets);
     inline_single_use_temps(&mut reordered);
     discard_unused_assignments(&mut reordered);
     structure_and_cleanup(&reordered)
