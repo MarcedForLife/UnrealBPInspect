@@ -130,14 +130,21 @@ pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
 
 /// Substitute ALL occurrences of `var` in `text`, repeating until stable.
 fn substitute_var_all(text: &str, var: &str, expr: &str) -> String {
+    // Bail immediately if expr contains var (would loop forever).
+    if count_var_refs(expr, var) > 0 {
+        return text.to_string();
+    }
     let mut result = text.to_string();
-    loop {
+    // Limit iterations to the number of references (each call replaces one).
+    let limit = count_var_refs(text, var) + 1;
+    for _ in 0..limit {
         let next = substitute_var(&result, var, expr);
         if next == result {
             return result;
         }
         result = next;
     }
+    result
 }
 
 /// Inline `Temp_*` / `$temp` variables that are always assigned the same value.
@@ -200,6 +207,14 @@ pub fn inline_constant_temps(stmts: &mut Vec<BcStatement>) {
         if !changed {
             break;
         }
+    }
+
+    // Drop vars whose resolved expression still references themselves
+    // (circular dependencies like FlipFlop: A = !B, B = A).
+    constant_vars.retain(|var, expr| count_var_refs(expr, var) == 0);
+
+    if constant_vars.is_empty() {
+        return;
     }
 
     // Collect assignment indices to remove
