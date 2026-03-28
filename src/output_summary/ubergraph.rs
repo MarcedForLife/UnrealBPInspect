@@ -5,8 +5,8 @@ use std::fmt::Write;
 
 use crate::bytecode::{
     collect_jump_targets, discard_unused_assignments, inline_constant_temps,
-    inline_single_use_temps, reorder_convergence, reorder_flow_patterns, strip_orphaned_blocks,
-    strip_unmatched_braces, BcStatement, OffsetMap, JUMP_OFFSET_TOLERANCE,
+    inline_single_use_temps, reorder_convergence, reorder_flow_patterns, split_by_sequence_markers,
+    strip_orphaned_blocks, strip_unmatched_braces, BcStatement, OffsetMap, JUMP_OFFSET_TOLERANCE,
 };
 use crate::helpers::indent_of;
 use crate::parser::structure_and_cleanup;
@@ -126,45 +126,30 @@ fn structure_segment(stmts: &[BcStatement]) -> Vec<String> {
     structure_and_cleanup(&seg)
 }
 
-/// Split a segment's BcStatements at `// sequence [N]:` markers.
-/// Returns a list of (optional marker text, body statements).
-/// When the segment has no sequence markers, returns a single entry.
-fn split_by_sequence_markers(stmts: &[BcStatement]) -> Vec<(Option<String>, Vec<BcStatement>)> {
-    let marker_indices: Vec<usize> = stmts
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.text.starts_with("// sequence ["))
-        .map(|(i, _)| i)
-        .collect();
-
-    if marker_indices.is_empty() {
-        return vec![(None, stmts.to_vec())];
-    }
-
-    let mut result = Vec::new();
-
-    // Statements before the first marker (prefix)
-    if marker_indices[0] > 0 {
-        result.push((None, stmts[..marker_indices[0]].to_vec()));
-    }
-
-    for (i, &start) in marker_indices.iter().enumerate() {
-        let marker_text = stmts[start].text.clone();
-        let body_start = start + 1;
-        let body_end = if i + 1 < marker_indices.len() {
-            marker_indices[i + 1]
+/// Split a latent resume segment at `return nop` or `pop_flow` boundaries.
+///
+/// Each sub-block is an independent resume continuation that should be
+/// structured separately so dead-code elimination doesn't discard blocks
+/// after the first return.
+fn split_at_return_nop(stmts: &[BcStatement]) -> Vec<Vec<BcStatement>> {
+    let mut blocks: Vec<Vec<BcStatement>> = Vec::new();
+    let mut current: Vec<BcStatement> = Vec::new();
+    for stmt in stmts {
+        if stmt.text == "return nop" || stmt.text == "pop_flow" {
+            if !current.is_empty() {
+                blocks.push(std::mem::take(&mut current));
+            }
         } else {
-            stmts.len()
-        };
-        let body: Vec<BcStatement> = if body_start < body_end {
-            stmts[body_start..body_end].to_vec()
-        } else {
-            Vec::new()
-        };
-        result.push((Some(marker_text), body));
+            current.push(stmt.clone());
+        }
     }
-
-    result
+    if !current.is_empty() {
+        blocks.push(current);
+    }
+    if blocks.is_empty() {
+        blocks.push(Vec::new());
+    }
+    blocks
 }
 
 /// Split structured ubergraph output into per-event sections and resume blocks.
@@ -252,21 +237,39 @@ pub(super) fn build_ubergraph_structured(
         } else if !segment_stmts.is_empty() {
             all_lines.push("--- (latent resume) ---".to_string());
         }
-        if !segment_stmts.is_empty() {
-            let sub_segments = split_by_sequence_markers(segment_stmts);
-            if sub_segments.len() <= 1 {
-                all_lines.extend(structure_segment(segment_stmts));
-            } else {
-                // Process each sequence body independently so that
-                // cross-body jumps don't cause if-blocks to span
-                // across sequence boundaries.
-                for (marker, body) in &sub_segments {
-                    if let Some(m) = marker {
-                        all_lines.push(m.clone());
-                    }
-                    if !body.is_empty() {
-                        all_lines.extend(structure_segment(body));
-                    }
+        if segment_stmts.is_empty() {
+            continue;
+        }
+
+        // Latent resume segments contain multiple independent blocks separated
+        // by `return nop`. Split and structure each block independently so that
+        // dead-code elimination doesn't kill all blocks after the first return.
+        if name.is_empty() {
+            let resume_blocks = split_at_return_nop(segment_stmts);
+            for (bi, block) in resume_blocks.iter().enumerate() {
+                if bi > 0 {
+                    all_lines.push("return".to_string());
+                }
+                if !block.is_empty() {
+                    all_lines.extend(structure_segment(block));
+                }
+            }
+            continue;
+        }
+
+        let sub_segments = split_by_sequence_markers(segment_stmts);
+        if sub_segments.len() <= 1 {
+            all_lines.extend(structure_segment(segment_stmts));
+        } else {
+            // Process each sequence body independently so that
+            // cross-body jumps don't cause if-blocks to span
+            // across sequence boundaries.
+            for (marker, body) in &sub_segments {
+                if let Some(m) = marker {
+                    all_lines.push(m.clone());
+                }
+                if !body.is_empty() {
+                    all_lines.extend(structure_segment(body));
                 }
             }
         }

@@ -37,6 +37,11 @@ fn try_strip_double_negation(s: &str) -> Option<String> {
 
 /// Clean up structured output: double negation, extra parens, trailing returns.
 pub fn cleanup_structured_output(lines: &mut Vec<String>) {
+    // Pass 0: eliminate constant-condition gates (DoOnce/FlipFlop artifacts).
+    // `if (!true) ...` / `if (false) ...` = dead branch, remove entirely.
+    // `if (!false) ...` / `if (true) ...` = always-taken, inline body.
+    eliminate_constant_condition_branches(lines);
+
     // Pass 1: clean each line in place
     for line in lines.iter_mut() {
         let indent_len = indent_of(line);
@@ -119,6 +124,175 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
             lines.pop();
         } else {
             break;
+        }
+    }
+}
+
+/// Classify a constant condition: returns `Some(true)` for always-taken branches
+/// (`true`, `!false`), `Some(false)` for dead branches (`false`, `!true`),
+/// or `None` if the condition isn't a constant.
+fn classify_constant_condition(if_line: &str) -> Option<bool> {
+    let trimmed = if_line.trim();
+    // Match "if (COND) STMT" or "if (COND) {"
+    let after_if = trimmed.strip_prefix("if ")?;
+    if !after_if.starts_with('(') {
+        return None;
+    }
+    let close = find_matching_paren(after_if)?;
+    let mut cond = after_if[1..close].trim();
+    // Strip redundant outer parens: !(true) -> !true, (true) -> true
+    if let Some(inner) = cond.strip_prefix("!(") {
+        if let Some(val) = inner.strip_suffix(')') {
+            let negated = format!("!{}", val);
+            return match negated.as_str() {
+                "!true" => Some(false),
+                "!false" => Some(true),
+                _ => None,
+            };
+        }
+    }
+    if cond.starts_with('(') {
+        if let Some(close_inner) = find_matching_paren(cond) {
+            if close_inner == cond.len() - 1 {
+                cond = cond[1..close_inner].trim();
+            }
+        }
+    }
+    match cond {
+        "true" | "!false" => Some(true),
+        "false" | "!true" => Some(false),
+        _ => None,
+    }
+}
+
+/// Remove constant-condition branches from structured output.
+///
+/// Handles both single-line (`if (!true) return`) and block forms (`if (!true) {`).
+/// Dead branches are removed entirely; always-taken branches have the if wrapper
+/// stripped and body inlined.
+pub fn eliminate_constant_condition_branches(lines: &mut Vec<String>) {
+    let mut idx = 0;
+    while idx < lines.len() {
+        let Some(always_taken) = classify_constant_condition(&lines[idx]) else {
+            idx += 1;
+            continue;
+        };
+
+        let trimmed = lines[idx].trim().to_string();
+        let indent_len = indent_of(&lines[idx]);
+        let indent = lines[idx][..indent_len].to_string();
+
+        let is_block = trimmed.ends_with('{');
+
+        if is_block {
+            // Find the matching closing brace at the same indent level
+            let mut depth = 1i32;
+            let mut close_idx = idx + 1;
+            while close_idx < lines.len() && depth > 0 {
+                let inner = lines[close_idx].trim();
+                if inner.ends_with('{') {
+                    depth += 1;
+                } else if inner == "}" || inner.starts_with("} ") {
+                    depth -= 1;
+                }
+                if depth > 0 {
+                    close_idx += 1;
+                }
+            }
+
+            if always_taken {
+                // Inline the body: remove if-line and closing brace, dedent body
+                // Also remove any else block after the closing brace
+                if close_idx < lines.len() && lines[close_idx].trim().starts_with("} else {") {
+                    // Find the end of the else block
+                    let mut else_depth = 1i32;
+                    let mut else_end = close_idx + 1;
+                    while else_end < lines.len() && else_depth > 0 {
+                        let inner = lines[else_end].trim();
+                        if inner.ends_with('{') {
+                            else_depth += 1;
+                        } else if inner == "}" || inner.starts_with("} ") {
+                            else_depth -= 1;
+                        }
+                        if else_depth > 0 {
+                            else_end += 1;
+                        }
+                    }
+                    // Remove else block (close_idx..=else_end)
+                    if else_end < lines.len() {
+                        lines.drain(close_idx..=else_end);
+                    }
+                } else if close_idx < lines.len() {
+                    // Just remove the closing brace
+                    lines.remove(close_idx);
+                }
+                // Dedent body lines by one level (4 spaces)
+                for line in &mut lines[idx + 1..close_idx] {
+                    let line_trimmed = line.trim().to_string();
+                    let line_indent = indent_of(line);
+                    if line_indent >= 4 {
+                        *line = format!("{}{}", &" ".repeat(line_indent - 4), line_trimmed);
+                    }
+                }
+                // Remove the if-line
+                lines.remove(idx);
+                // Don't advance idx -- re-examine what's now at this position
+            } else {
+                // Dead branch: remove the entire block
+                // Check if closing brace is "} else {" -- keep the else body
+                if close_idx < lines.len() && lines[close_idx].trim().starts_with("} else {") {
+                    // Remove if-line through "} else {", keep else body, find else close
+                    lines.drain(idx..=close_idx);
+                    // Dedent the else body and find its closing brace
+                    let mut else_depth = 1i32;
+                    let mut dedent_idx = idx;
+                    while dedent_idx < lines.len() && else_depth > 0 {
+                        let inner = lines[dedent_idx].trim().to_string();
+                        if inner.ends_with('{') {
+                            else_depth += 1;
+                        } else if inner == "}" || inner.starts_with("} ") {
+                            else_depth -= 1;
+                            if else_depth == 0 {
+                                lines.remove(dedent_idx);
+                                break;
+                            }
+                        }
+                        // Dedent by one level
+                        let line_indent = indent_of(&lines[dedent_idx]);
+                        if line_indent >= 4 {
+                            lines[dedent_idx] =
+                                format!("{}{}", &" ".repeat(line_indent - 4), inner);
+                        }
+                        dedent_idx += 1;
+                    }
+                } else {
+                    // Remove if-line through closing brace (inclusive)
+                    let end = if close_idx < lines.len() {
+                        close_idx + 1
+                    } else {
+                        close_idx
+                    };
+                    lines.drain(idx..end);
+                }
+                // Don't advance idx
+            }
+        } else {
+            // Single-line form: "if (COND) STMT"
+            if always_taken {
+                // Extract the statement after the condition
+                let after_if = trimmed.strip_prefix("if ").unwrap();
+                let close = find_matching_paren(after_if).unwrap();
+                let stmt = after_if[close + 1..].trim();
+                if stmt.is_empty() {
+                    lines.remove(idx);
+                } else {
+                    lines[idx] = format!("{}{}", indent, stmt);
+                    idx += 1;
+                }
+            } else {
+                // Dead code, remove the line
+                lines.remove(idx);
+            }
         }
     }
 }
@@ -448,6 +622,48 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
         true
     });
 
+    // Remove ForEach compiler artifacts: break-hit flag assignments are always
+    // internal bookkeeping and never meaningful in pseudocode.
+    lines.retain(|l| {
+        let trimmed = l.trim();
+        !trimmed.starts_with("Temp_bool_True_if_break_was_hit_Variable") || !trimmed.contains(" = ")
+    });
+
+    // Remove residual counter/index init lines that appear just before a while/for
+    // loop (already absorbed by the loop syntax or semantically redundant).
+    let mut remove_indices: HashSet<usize> = HashSet::new();
+    for idx in 0..lines.len() {
+        let trimmed = lines[idx].trim();
+        if !(trimmed.starts_with("Temp_int_Loop_Counter_Variable")
+            || trimmed.starts_with("Temp_int_Array_Index_Variable"))
+        {
+            continue;
+        }
+        if !trimmed.ends_with(" = 0") {
+            continue;
+        }
+        // Check if a while/for loop follows within the next 3 lines at same indent
+        let this_indent = indent_of(&lines[idx]);
+        let has_loop_nearby = lines[idx + 1..std::cmp::min(idx + 4, lines.len())]
+            .iter()
+            .any(|l| {
+                let li = indent_of(l);
+                let lt = l.trim();
+                li == this_indent && (lt.starts_with("while (") || lt.starts_with("for ("))
+            });
+        if has_loop_nearby {
+            remove_indices.insert(idx);
+        }
+    }
+    if !remove_indices.is_empty() {
+        let mut kept_idx = 0;
+        lines.retain(|_| {
+            let keep = !remove_indices.contains(&kept_idx);
+            kept_idx += 1;
+            keep
+        });
+    }
+
     // Collect all goto targets so we know which labels are still referenced
     let goto_targets: HashSet<String> = lines
         .iter()
@@ -523,6 +739,28 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
                 lines.remove(i);
                 changed = true;
                 continue;
+            }
+
+            // Pattern: "if (...) {" / "    return" / "}" where the next line after
+            // the close is also "return" -- both paths return, so the guard is
+            // redundant. Remove the if-block, keep the return.
+            if i + 2 < lines.len()
+                && trimmed.starts_with("if ")
+                && trimmed.ends_with(" {")
+                && lines[i + 1].trim() == "return"
+                && lines[i + 2].trim() == "}"
+            {
+                if i + 3 < lines.len() && lines[i + 3].trim() == "return" {
+                    lines.drain(i..i + 3);
+                    changed = true;
+                    continue;
+                }
+                // If the if-return is at the end, just remove it (return is implicit)
+                if i + 3 >= lines.len() {
+                    lines.drain(i..i + 3);
+                    changed = true;
+                    continue;
+                }
             }
 
             i += 1;

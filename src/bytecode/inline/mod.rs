@@ -4,7 +4,10 @@ mod cleanup;
 mod patterns;
 mod temps;
 
-pub use cleanup::{cleanup_structured_output, strip_orphaned_blocks, strip_unmatched_braces};
+pub use cleanup::{
+    cleanup_structured_output, eliminate_constant_condition_branches, strip_orphaned_blocks,
+    strip_unmatched_braces,
+};
 pub use patterns::fold_summary_patterns;
 pub use temps::{
     collect_jump_targets, discard_unused_assignments, inline_constant_temps,
@@ -646,6 +649,66 @@ mod tests {
         assert_eq!(lines.len(), 5); // all lines preserved
     }
 
+    // ========== constant-condition elimination tests ==========
+
+    #[test]
+    fn cleanup_removes_if_not_true_return() {
+        let mut lines = vec![
+            "    if (!true) return".to_string(),
+            "    DoThing()".to_string(),
+        ];
+        cleanup_structured_output(&mut lines);
+        assert_eq!(lines, vec!["    DoThing()"]);
+    }
+
+    #[test]
+    fn cleanup_simplifies_if_not_false_return() {
+        let mut lines = vec![
+            "    if (!false) return".to_string(),
+            "    DoThing()".to_string(),
+        ];
+        cleanup_structured_output(&mut lines);
+        assert_eq!(lines, vec!["    return", "    DoThing()"]);
+    }
+
+    #[test]
+    fn cleanup_removes_if_false_block() {
+        let mut lines = vec![
+            "if (false) {".to_string(),
+            "    DeadCode()".to_string(),
+            "}".to_string(),
+            "LiveCode()".to_string(),
+        ];
+        cleanup_structured_output(&mut lines);
+        assert_eq!(lines, vec!["LiveCode()"]);
+    }
+
+    #[test]
+    fn cleanup_inlines_if_true_block() {
+        let mut lines = vec![
+            "    if (true) {".to_string(),
+            "        Body()".to_string(),
+            "    }".to_string(),
+            "    After()".to_string(),
+        ];
+        cleanup_structured_output(&mut lines);
+        assert_eq!(lines, vec!["    Body()", "    After()"]);
+    }
+
+    #[test]
+    fn cleanup_gate_pattern_all_removed() {
+        let mut lines = vec![
+            "    goto L_0b0c".to_string(),
+            "    if (!true) return".to_string(),
+            "L_0b0c:".to_string(),
+            "    if (!true) return".to_string(),
+            "    if (!false) return".to_string(),
+        ];
+        cleanup_structured_output(&mut lines);
+        // Dead gates removed, !false becomes return, trailing return stripped
+        assert_eq!(lines, vec!["    goto L_0b0c", "L_0b0c:"]);
+    }
+
     // ========== rewrite_bool_switches tests ==========
 
     #[test]
@@ -1004,8 +1067,9 @@ mod tests {
         ];
         fold_switch_enum_cascade(&mut lines);
         assert!(lines[0].contains("// switch (Status)"));
+        // Body group has a case label before it
         assert!(lines[1].contains("// case Status == 0:"));
-        assert_eq!(lines[2], "body_after_cascade()");
+        assert_eq!(lines[2].trim(), "body_after_cascade()");
     }
 
     #[test]
@@ -1020,7 +1084,7 @@ mod tests {
         ];
         fold_switch_enum_cascade(&mut lines);
         assert!(lines[0].contains("// switch (X)"));
-        // No case label before return
+        // No case body, so no case label emitted; return follows directly
         assert_eq!(lines[1], "return");
     }
 }
