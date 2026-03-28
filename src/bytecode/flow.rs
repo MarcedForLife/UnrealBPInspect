@@ -594,8 +594,16 @@ struct SequenceEmitter<'a> {
 }
 
 impl<'a> SequenceEmitter<'a> {
-    fn emit(&mut self, seq: &SequenceNode, output: &mut Vec<BcStatement>) {
+    fn emit(&mut self, seq: &SequenceNode, depth: usize, output: &mut Vec<BcStatement>) {
         let seq_offset = self.stmts[seq.chain_start].mem_offset;
+        // Child sequences use "sub-sequence" markers so that
+        // split_by_sequence_markers (which splits on "// sequence [")
+        // doesn't tear the parent pin body apart.
+        let prefix = if depth > 0 {
+            "sub-sequence"
+        } else {
+            "sequence"
+        };
         let marker = |text: &str| BcStatement {
             mem_offset: seq_offset,
             text: text.to_string(),
@@ -607,17 +615,17 @@ impl<'a> SequenceEmitter<'a> {
 
         // Emit each pin body, following unconditional jumps to child Sequences
         for (pi, pin) in seq.pins.iter().enumerate() {
-            output.push(marker(&format!("// sequence [{}]:", pi)));
+            output.push(marker(&format!("// {} [{}]:", prefix, pi)));
             output.extend_from_slice(&self.stmts[pin.body_start_idx..pin.body_end_idx]);
-            self.emit_child_sequences(pin.body_start_idx, pin.body_end_idx, output);
+            self.emit_child_sequences(pin.body_start_idx, pin.body_end_idx, depth, output);
             // Sentinel so if-else exit jumps within the body can resolve
             output.push(sentinel(pin.body_end_idx));
         }
 
         // Inline body (after all pin dispatch pairs)
-        output.push(marker(&format!("// sequence [{}]:", seq.pins.len())));
+        output.push(marker(&format!("// {} [{}]:", prefix, seq.pins.len())));
         output.extend_from_slice(&self.stmts[seq.chain_end..seq.inline_end]);
-        self.emit_child_sequences(seq.chain_end, seq.inline_end, output);
+        self.emit_child_sequences(seq.chain_end, seq.inline_end, depth, output);
         output.push(sentinel(seq.inline_end));
 
         // Displaced blocks reachable from the inline body's conditional jumps
@@ -630,10 +638,12 @@ impl<'a> SequenceEmitter<'a> {
     }
 
     /// Scan for unconditional jumps targeting child Sequences and emit them inline.
+    /// Removes the triggering jump from output since the child content follows inline.
     fn emit_child_sequences(
         &mut self,
         scan_start: usize,
         scan_end: usize,
+        depth: usize,
         output: &mut Vec<BcStatement>,
     ) {
         for idx in scan_start..scan_end.min(self.stmts.len()) {
@@ -656,9 +666,18 @@ impl<'a> SequenceEmitter<'a> {
                 }
             });
             if let Some(chain_start) = child_chain {
+                // Remove the triggering jump from output. The child content
+                // is emitted inline so the jump is now a no-op skip.
+                let jump_stmt = &self.stmts[idx];
+                if let Some(pos) = output
+                    .iter()
+                    .rposition(|s| s.mem_offset == jump_stmt.mem_offset && s.text == jump_stmt.text)
+                {
+                    output.remove(pos);
+                }
                 self.emitted.insert(chain_start);
                 if let Some(child) = self.sequences.iter().find(|s| s.chain_start == chain_start) {
-                    self.emit(child, output);
+                    self.emit(child, depth + 1, output);
                 }
             }
         }
@@ -712,7 +731,7 @@ fn emit_reordered(
             let is_child = child_starts.contains(&seq.chain_start);
             if !is_child && !emitter.emitted.contains(&seq.chain_start) {
                 emitter.emitted.insert(seq.chain_start);
-                emitter.emit(seq, &mut output);
+                emitter.emit(seq, 0, &mut output);
             }
             i = seq.inline_end + 1;
             continue;
