@@ -1198,8 +1198,10 @@ fn reorder_inline_convergence(
         };
 
         // Convergence code is [conv_start .. exit_jump_idx) (excludes the exit jump).
-        // Require at least 4 convergence statements -- shorter sequences are typically
-        // internal control flow rather than shared post-branch code.
+        // Require at least 4 convergence statements to avoid matching trivial
+        // backward jumps (loop back-edges, internal control flow). This threshold
+        // correctly catches patterns like EvaluateClimbing (4 shared assignments)
+        // while filtering false matches in loop bodies and small branches.
         let conv_len = exit_jump_idx.saturating_sub(conv_start);
         if conv_len < 4 {
             continue;
