@@ -6,6 +6,20 @@ use super::{
 use crate::bytecode::decode::BcStatement;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+/// Collect all bytecode offsets that are targets of if-jumps.
+/// Used to protect these offsets from being lost when inline passes remove statements.
+pub fn collect_jump_targets(stmts: &[BcStatement]) -> HashSet<usize> {
+    let mut targets = HashSet::new();
+    for stmt in stmts {
+        if let Some(pos) = stmt.text.rfind(") jump 0x") {
+            if let Ok(target) = usize::from_str_radix(&stmt.text[pos + 9..], 16) {
+                targets.insert(target);
+            }
+        }
+    }
+    targets
+}
+
 /// Collect all `(statement_index, var_name, expression)` tuples from temp assignments.
 fn collect_temp_assignments(stmts: &[BcStatement]) -> Vec<(usize, String, String)> {
     stmts
@@ -151,7 +165,7 @@ fn substitute_var_all(text: &str, var: &str, expr: &str) -> String {
 /// UE4 Select nodes re-assign the index input before every use; this pass
 /// collapses `Temp_bool_Variable = LeftHand` + `switch(Temp_bool_Variable)`
 /// into `switch(LeftHand)`.
-pub fn inline_constant_temps(stmts: &mut Vec<BcStatement>) {
+pub fn inline_constant_temps(stmts: &mut Vec<BcStatement>, jump_targets: &HashSet<usize>) {
     // Collect all assignments for each temp variable: (stmt_index, expr)
     let mut assignments: HashMap<String, Vec<(usize, String)>> = HashMap::new();
     for (i, s) in stmts.iter().enumerate() {
@@ -232,6 +246,26 @@ pub fn inline_constant_temps(stmts: &mut Vec<BcStatement>) {
         for (var, expr) in &constant_vars {
             if count_var_refs(&s.text, var) > 0 {
                 s.text = substitute_var_all(&s.text, var, expr);
+            }
+        }
+    }
+
+    // Transfer mem_offsets from removed statements to the next surviving
+    // statement when the removed offset is a known jump target. This keeps
+    // the OffsetMap entry alive so the structurer can resolve else branches.
+    let mut pending_offset: Option<usize> = None;
+    for (i, stmt) in stmts.iter_mut().enumerate() {
+        if remove_indices.contains(&i) {
+            let off = stmt.mem_offset;
+            if off > 0
+                && jump_targets.contains(&off)
+                && (pending_offset.is_none() || off < pending_offset.unwrap())
+            {
+                pending_offset = Some(off);
+            }
+        } else if let Some(off) = pending_offset.take() {
+            if off < stmt.mem_offset {
+                stmt.mem_offset = off;
             }
         }
     }

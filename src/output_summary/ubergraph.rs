@@ -4,9 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use crate::bytecode::{
-    discard_unused_assignments, inline_constant_temps, inline_single_use_temps,
-    reorder_convergence, reorder_flow_patterns, strip_orphaned_blocks, strip_unmatched_braces,
-    BcStatement, OffsetMap, JUMP_OFFSET_TOLERANCE,
+    collect_jump_targets, discard_unused_assignments, inline_constant_temps,
+    inline_single_use_temps, reorder_convergence, reorder_flow_patterns, strip_orphaned_blocks,
+    strip_unmatched_braces, BcStatement, OffsetMap, JUMP_OFFSET_TOLERANCE,
 };
 use crate::helpers::indent_of;
 use crate::parser::structure_and_cleanup;
@@ -119,7 +119,8 @@ fn split_stmts_by_labels(
 fn structure_segment(stmts: &[BcStatement]) -> Vec<String> {
     let mut seg = stmts.to_vec();
     resolve_cross_segment_jumps(&mut seg);
-    inline_constant_temps(&mut seg);
+    let jump_targets = collect_jump_targets(&seg);
+    inline_constant_temps(&mut seg, &jump_targets);
     inline_single_use_temps(&mut seg);
     discard_unused_assignments(&mut seg);
     structure_and_cleanup(&seg)
