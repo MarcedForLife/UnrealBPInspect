@@ -1104,23 +1104,24 @@ fn build_convergence_reorder(
     Some(output)
 }
 
-/// Detect and reorder inline convergence: a single backward jump whose target is
-/// convergence code inlined in a preceding branch. The compiler places shared
-/// post-branch code inside the first if-branch and uses a backward jump from the
-/// second branch to reach it. We extract the convergence code and place it after
-/// all branches so the structurer produces a clean if/else chain.
+/// Duplicate inline convergence code into sibling branches.
 ///
-/// Pattern:
+/// The compiler sometimes places shared post-branch code inside the first
+/// if-branch and uses a backward jump from a sibling branch to reach it.
+/// Instead of extracting and reordering, we duplicate the convergence code
+/// at the backward jump site so each branch is self-contained.
+///
+/// Pattern detected:
 /// ```text
-/// if !(COND) jump ELSE       // [if_idx]
-///   specific_code             // path-1 specific
-///   convergence_code          // [conv_start .. conv_end]  (shared)
-///   jump END                  // [exit_jump] forward exit
+/// if !(COND) jump ELSE
+///   specific_code
+///   convergence_code          // [conv_start..exit_jump)
+///   jump END                  // exit_jump
 /// ELSE:
 ///   ...
-///   jump conv_start           // [bj_idx] backward to convergence
+///   jump conv_start           // backward jump, replaced with duplicated code
 /// ```
-fn reorder_inline_convergence(
+fn duplicate_inline_convergence(
     stmts: &[BcStatement],
     offset_map: &OffsetMap,
 ) -> Option<Vec<BcStatement>> {
@@ -1128,7 +1129,6 @@ fn reorder_inline_convergence(
         |target: usize| -> Option<usize> { offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) };
     let last_offset = stmts.last()?.mem_offset;
 
-    // Find backward unconditional jumps (single-reference candidates)
     for (bj_idx, stmt) in stmts.iter().enumerate() {
         let Some(target) = parse_jump(&stmt.text) else {
             continue;
@@ -1140,8 +1140,7 @@ fn reorder_inline_convergence(
             continue; // not backward
         }
 
-        // Skip dead-code backward jumps: if the preceding statement is a forward
-        // jump past this point, this backward jump is unreachable.
+        // Skip dead-code backward jumps (preceded by a forward exit)
         if bj_idx > 0 {
             if let Some(prev_target) = parse_jump(&stmts[bj_idx - 1].text) {
                 if let Some(prev_idx) = find_idx(prev_target) {
@@ -1155,15 +1154,11 @@ fn reorder_inline_convergence(
             }
         }
 
-        // The target must be inside a branch: find the if-jump whose true-body
-        // contains conv_start. The if-jump is before conv_start and its false
-        // target is after conv_start.
+        // Target must be inside a branch (an if-jump's true body)
         let mut if_idx_found = false;
-        for (_, if_stmt) in stmts.iter().enumerate().take(conv_start) {
+        for if_stmt in stmts.iter().take(conv_start) {
             if let Some((_, false_target)) = parse_if_jump(&if_stmt.text) {
                 if let Some(false_idx) = find_idx(false_target) {
-                    // The if-jump's false target must be between conv_start and
-                    // bj_idx (the backward jump comes from the false/else path)
                     if false_idx > conv_start && false_idx <= bj_idx {
                         if_idx_found = true;
                     }
@@ -1174,9 +1169,7 @@ fn reorder_inline_convergence(
             continue;
         }
 
-        // Find the exit jump: a forward unconditional jump within the branch
-        // that leaves the convergence code. It's between conv_start and the
-        // backward jump.
+        // Find the exit jump (forward jump to end) after conv_start
         let mut exit_jump_idx = None;
         for (j, exit_stmt) in stmts.iter().enumerate().take(bj_idx).skip(conv_start) {
             if let Some(exit_target) = parse_jump(&exit_stmt.text) {
@@ -1186,7 +1179,6 @@ fn reorder_inline_convergence(
                         break;
                     }
                 }
-                // Also check past-end targets (jump to return nop)
                 if exit_target > last_offset {
                     exit_jump_idx = Some(j);
                     break;
@@ -1197,28 +1189,22 @@ fn reorder_inline_convergence(
             continue;
         };
 
-        // Convergence code is [conv_start .. exit_jump_idx) (excludes the exit jump).
-        // Require at least 4 convergence statements to avoid matching trivial
-        // backward jumps (loop back-edges, internal control flow). This threshold
-        // correctly catches patterns like EvaluateClimbing (4 shared assignments)
-        // while filtering false matches in loop bodies and small branches.
-        let conv_len = exit_jump_idx.saturating_sub(conv_start);
-        if conv_len < 4 {
+        // Convergence must be 4+ pure assignments/calls. Shorter sequences tend
+        // to be loop back-edges or internal control flow rather than shared
+        // post-branch code.
+        let conv_range = &stmts[conv_start..exit_jump_idx];
+        if conv_range.len() < 4 {
             continue;
         }
-
-        // Convergence code must be pure assignments/calls -- no if-jumps or other
-        // control flow. Shared post-branch code is typically linear.
-        let has_control_flow = stmts[conv_start..exit_jump_idx]
+        let has_control_flow = conv_range
             .iter()
             .any(|s| parse_if_jump(&s.text).is_some() || parse_jump(&s.text).is_some());
         if has_control_flow {
             continue;
         }
 
-        // The backward jump must be the only reference to the convergence target
-        // from outside the branch.
-        let other_backward_refs = stmts
+        // Must be the only backward reference to this target
+        let other_refs = stmts
             .iter()
             .enumerate()
             .filter(|(i, s)| {
@@ -1228,35 +1214,25 @@ fn reorder_inline_convergence(
                         .is_some_and(|ti| ti == conv_start)
             })
             .count();
-        if other_backward_refs > 0 {
+        if other_refs > 0 {
             continue;
         }
 
-        // Build reordered output: move convergence code after the backward jump
-        let conv_offset = stmts[conv_start].mem_offset;
+        // Duplicate: replace the backward jump with a copy of convergence + exit
         let mut output: Vec<BcStatement> = Vec::new();
-
-        // Everything before convergence code (the branch-specific part)
-        output.extend_from_slice(&stmts[..conv_start]);
-
-        // Replace convergence code with a forward jump to where it will be placed
-        output.push(BcStatement {
-            mem_offset: 0,
-            text: format!("jump 0x{:x}", conv_offset),
-        });
-
-        // Everything between exit_jump and the backward jump (else body, other branches)
-        output.extend_from_slice(&stmts[exit_jump_idx + 1..bj_idx]);
-
-        // Replace backward jump with forward jump to convergence
+        output.extend_from_slice(&stmts[..bj_idx]);
+        // Convergence code (duplicated)
+        for orig in conv_range {
+            output.push(BcStatement {
+                mem_offset: 0,
+                text: orig.text.clone(),
+            });
+        }
+        // Exit jump (duplicated, keeps the same forward target)
         output.push(BcStatement {
             mem_offset: stmts[bj_idx].mem_offset,
-            text: format!("jump 0x{:x}", conv_offset),
+            text: stmts[exit_jump_idx].text.clone(),
         });
-
-        // Emit convergence code + exit jump
-        output.extend_from_slice(&stmts[conv_start..=exit_jump_idx]);
-
         // Everything after the backward jump
         output.extend_from_slice(&stmts[bj_idx + 1..]);
 
@@ -1275,8 +1251,8 @@ fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
             return true;
         }
     }
-    // Fallback: try inline convergence (single backward jump into a branch body)
-    if let Some(reordered) = reorder_inline_convergence(stmts, &offset_map) {
+    // Fallback: duplicate inline convergence (single backward jump into a branch body)
+    if let Some(reordered) = duplicate_inline_convergence(stmts, &offset_map) {
         *stmts = reordered;
         return true;
     }
