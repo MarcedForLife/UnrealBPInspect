@@ -11,8 +11,8 @@ use crate::binary::*;
 use crate::bytecode::{
     cleanup_structured_output, collect_jump_targets, decode_bytecode, discard_unused_assignments,
     eliminate_constant_condition_branches, fold_summary_patterns, inline_constant_temps,
-    inline_single_use_temps, reorder_convergence, reorder_flow_patterns, strip_orphaned_blocks,
-    structure_bytecode,
+    inline_single_use_temps, reorder_convergence, reorder_flow_patterns, split_by_sequence_markers,
+    strip_orphaned_blocks, strip_unmatched_braces, structure_bytecode,
 };
 use crate::ffield::*;
 use crate::properties::read_properties;
@@ -600,6 +600,10 @@ pub fn structure_and_cleanup(stmts: &[crate::bytecode::BcStatement]) -> Vec<Stri
 
 /// Run the full statement structuring pipeline: flow reordering, temp inlining,
 /// if/else reconstruction, expression cleanup, and pattern folding.
+///
+/// When the function has Sequence pins, splits by `// sequence [N]:` markers
+/// and structures each body independently. This prevents switch cascades and
+/// other control flow from spanning across sequence boundaries.
 fn structure_statements(stmts: &[crate::bytecode::BcStatement]) -> Vec<String> {
     let mut reordered = reorder_flow_patterns(stmts);
     reorder_convergence(&mut reordered);
@@ -607,7 +611,31 @@ fn structure_statements(stmts: &[crate::bytecode::BcStatement]) -> Vec<String> {
     inline_constant_temps(&mut reordered, &jump_targets);
     inline_single_use_temps(&mut reordered);
     discard_unused_assignments(&mut reordered);
-    structure_and_cleanup(&reordered)
+
+    let sub_segments = split_by_sequence_markers(&reordered);
+    if sub_segments.len() <= 1 {
+        return structure_and_cleanup(&reordered);
+    }
+
+    // Structure each pin independently (proper if/else blocks per pin),
+    // but defer pattern folding to the combined output so cross-pin
+    // variable references are preserved.
+    let mut all_lines = Vec::new();
+    for (marker, body) in &sub_segments {
+        if let Some(marker_text) = marker {
+            all_lines.push(marker_text.clone());
+        }
+        if !body.is_empty() {
+            let mut structured = structure_bytecode(body, &HashMap::new());
+            cleanup_structured_output(&mut structured);
+            all_lines.extend(structured);
+        }
+    }
+    fold_summary_patterns(&mut all_lines);
+    eliminate_constant_condition_branches(&mut all_lines);
+    strip_unmatched_braces(&mut all_lines);
+    strip_orphaned_blocks(&mut all_lines);
+    all_lines
 }
 
 fn debug_peek_script(reader: &mut Reader, name: &str, end: u64) -> Result<()> {
