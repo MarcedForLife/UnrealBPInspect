@@ -741,6 +741,28 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
                 continue;
             }
 
+            // Pattern: "if (...) {" / "    return" / "}" where the next line after
+            // the close is also "return" -- both paths return, so the guard is
+            // redundant. Remove the if-block, keep the return.
+            if i + 2 < lines.len()
+                && trimmed.starts_with("if ")
+                && trimmed.ends_with(" {")
+                && lines[i + 1].trim() == "return"
+                && lines[i + 2].trim() == "}"
+            {
+                if i + 3 < lines.len() && lines[i + 3].trim() == "return" {
+                    lines.drain(i..i + 3);
+                    changed = true;
+                    continue;
+                }
+                // If the if-return is at the end, just remove it (return is implicit)
+                if i + 3 >= lines.len() {
+                    lines.drain(i..i + 3);
+                    changed = true;
+                    continue;
+                }
+            }
+
             i += 1;
         }
         if !changed {
