@@ -409,7 +409,7 @@ fn resolve_foreach_body(
         // Find the CLOSEST matching statement, not first-match. Completion path statements
         // can land within the tolerance window of the body target, so we need the nearest
         // offset to avoid picking the wrong statement.
-        let body_idx = stmts
+        let mut body_idx = stmts
             .iter()
             .enumerate()
             .filter(|(_, s)| {
@@ -418,6 +418,12 @@ fn resolve_foreach_body(
             })
             .min_by_key(|(_, s)| s.mem_offset.abs_diff(body_jump_target))
             .map(|(idx, _)| idx)?;
+        // Fuzzy matching can land on a preceding terminator; skip to real content
+        while body_idx < stmts.len()
+            && (stmts[body_idx].text == "pop_flow" || stmts[body_idx].text == "return nop")
+        {
+            body_idx += 1;
+        }
         // If body is displaced past the back_jump, the gap is the completion path
         let (cs, ce) = if body_idx > back_jump_idx + 1 {
             (Some(back_jump_idx + 1), Some(body_idx - 1))
@@ -684,6 +690,99 @@ impl<'a> SequenceEmitter<'a> {
     }
 }
 
+/// Emit a single loop: while header, extra, body (recursive), increment, close, completion.
+/// `nested` is true when called from within another loop's body, suppressing the
+/// trailing return nop (which belongs to the function, not the inner loop).
+fn emit_single_loop(
+    stmts: &[BcStatement],
+    lp: &ForLoop,
+    loops: &[ForLoop],
+    emitted: &mut HashSet<usize>,
+    nested: bool,
+    output: &mut Vec<BcStatement>,
+) {
+    emitted.insert(lp.if_idx);
+    let lp_offset = stmts[lp.if_idx].mem_offset;
+    let marker = |text: &str| BcStatement {
+        mem_offset: lp_offset,
+        text: text.to_string(),
+    };
+    output.push(marker(&format!("while ({}) {{", lp.cond_text)));
+    if lp.extra_start < lp.extra_end {
+        output.extend_from_slice(&stmts[lp.extra_start..lp.extra_end]);
+    }
+    let body_end = if stmts[lp.body_end_idx].text == "return nop" {
+        lp.body_end_idx
+    } else {
+        lp.body_end_idx + 1
+    };
+    emit_body_range(stmts, lp.body_start_idx, body_end, loops, emitted, output);
+    output.extend_from_slice(&stmts[lp.incr_start..lp.back_jump_idx]);
+    output.push(marker("}"));
+    // Emit ForEach completion path after the loop
+    if let (Some(cs), Some(ce)) = (lp.completion_start, lp.completion_end) {
+        output.push(marker("// on loop complete:"));
+        for stmt in &stmts[cs..=ce] {
+            if parse_push_flow(&stmt.text).is_some()
+                || stmt.text == "pop_flow"
+                || parse_jump(&stmt.text).is_some()
+            {
+                continue;
+            }
+            output.push(stmt.clone());
+        }
+    }
+    // Only emit the trailing return nop for top-level loops. Nested loops
+    // share the same body_end_idx (inflated to stmts.len()-1), and emitting
+    // it inside the parent body would cause dead code elimination to strip
+    // the parent's completion path.
+    if !nested && stmts[lp.body_end_idx].text == "return nop" {
+        output.push(stmts[lp.body_end_idx].clone());
+    }
+}
+
+/// Emit statements from a range, recursively formatting any nested loops.
+/// Uses an `emitted` set to prevent the same loop from being formatted twice
+/// (sibling loops in the same function share inflated body_end ranges).
+/// Tracks indices consumed by nested loop bodies to avoid duplication.
+fn emit_body_range(
+    stmts: &[BcStatement],
+    start: usize,
+    end: usize,
+    loops: &[ForLoop],
+    emitted: &mut HashSet<usize>,
+    output: &mut Vec<BcStatement>,
+) {
+    // Collect index ranges consumed by nested loops within this range,
+    // so we can skip them after the nested loop is emitted.
+    let mut consumed = HashSet::new();
+    let mut i = start;
+    while i < end {
+        if let Some(inner) = loops
+            .iter()
+            .find(|l| l.if_idx == i && !emitted.contains(&l.if_idx))
+        {
+            // Mark the inner loop's body range as consumed so statements
+            // aren't emitted twice (once inside the while, once flat).
+            let inner_body_end = if inner.body_end_idx < end {
+                inner.body_end_idx + 1
+            } else {
+                end
+            };
+            for idx in inner.body_start_idx..inner_body_end {
+                consumed.insert(idx);
+            }
+            emit_single_loop(stmts, inner, loops, emitted, true, output);
+            i = inner.loop_ctrl_end + 1;
+        } else if consumed.contains(&i) {
+            i += 1;
+        } else {
+            output.push(stmts[i].clone());
+            i += 1;
+        }
+    }
+}
+
 /// Emit reordered statements with sequence pins and loop bodies inlined.
 fn emit_reordered(
     stmts: &[BcStatement],
@@ -722,12 +821,11 @@ fn emit_reordered(
         offset_map,
         emitted: HashSet::new(),
     };
+    let mut emitted_loops: HashSet<usize> = HashSet::new();
 
     let mut i = 0;
     while i < stmts.len() {
         if let Some(seq) = sequences.iter().find(|s| s.chain_start == i) {
-            // Child Sequences are skipped here; they'll be inlined within
-            // the parent pin that dispatches to them via emit_child_sequences.
             let is_child = child_starts.contains(&seq.chain_start);
             if !is_child && !emitter.emitted.contains(&seq.chain_start) {
                 emitter.emitted.insert(seq.chain_start);
@@ -737,40 +835,11 @@ fn emit_reordered(
             continue;
         }
 
-        if let Some(lp) = loops.iter().find(|l| l.if_idx == i) {
-            let lp_offset = stmts[lp.if_idx].mem_offset;
-            let marker = |text: &str| BcStatement {
-                mem_offset: lp_offset,
-                text: text.to_string(),
-            };
-            output.push(marker(&format!("while ({}) {{", lp.cond_text)));
-            if lp.extra_start < lp.extra_end {
-                output.extend_from_slice(&stmts[lp.extra_start..lp.extra_end]);
-            }
-            let body_end = if stmts[lp.body_end_idx].text == "return nop" {
-                lp.body_end_idx
-            } else {
-                lp.body_end_idx + 1
-            };
-            output.extend_from_slice(&stmts[lp.body_start_idx..body_end]);
-            output.extend_from_slice(&stmts[lp.incr_start..lp.back_jump_idx]);
-            output.push(marker("}"));
-            // Emit ForEach completion path after the loop
-            if let (Some(cs), Some(ce)) = (lp.completion_start, lp.completion_end) {
-                output.push(marker("// on loop complete:"));
-                for stmt in &stmts[cs..=ce] {
-                    if parse_push_flow(&stmt.text).is_some()
-                        || stmt.text == "pop_flow"
-                        || parse_jump(&stmt.text).is_some()
-                    {
-                        continue;
-                    }
-                    output.push(stmt.clone());
-                }
-            }
-            if stmts[lp.body_end_idx].text == "return nop" {
-                output.push(stmts[lp.body_end_idx].clone());
-            }
+        if let Some(lp) = loops
+            .iter()
+            .find(|l| l.if_idx == i && !emitted_loops.contains(&l.if_idx))
+        {
+            emit_single_loop(stmts, lp, loops, &mut emitted_loops, false, &mut output);
             i = lp.loop_ctrl_end + 1;
             continue;
         }
