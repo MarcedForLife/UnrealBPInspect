@@ -36,8 +36,9 @@ src/
     inline/
       mod.rs           Shared helpers (parse_temp_assignment, substitute_var, etc.), re-exports
       temps.rs         Temp variable inlining, constant folding, dead assignment removal
-      cleanup.rs       Line cleanup, bool switch rewriting, brace/goto cleanup
+      cleanup.rs       Line cleanup, bool switch rewriting, brace/goto cleanup, loop var renaming
       patterns.rs      Summary pattern folding: ForEach, delegates, casts, Break/Make, ternaries, switch/case
+      fold.rs          Line folding for long pseudocode lines (120-char target)
   update.rs            Self-update from GitHub releases (--update)
 install.sh             macOS/Linux install script (curl | sh)
 install.ps1            Windows install script (irm | iex)

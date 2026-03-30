@@ -577,6 +577,24 @@ fn rewrite_negated_guards(lines: &mut Vec<String>) {
     }
 }
 
+/// Shorten UE4 ForEach compiler-generated loop variable names that survived
+/// the ForEach rewriter (typically search-and-break loops with no increment).
+pub fn rename_loop_temp_vars(lines: &mut [String]) {
+    // Pairs: (long prefix, short prefix). Suffixed variants like _1 are handled
+    // by replacing the prefix, which preserves the suffix.
+    const RENAMES: &[(&str, &str)] = &[
+        ("Temp_int_Loop_Counter_Variable", "loop_idx"),
+        ("Temp_int_Array_Index_Variable", "arr_idx"),
+    ];
+    for line in lines.iter_mut() {
+        for &(long, short) in RENAMES {
+            if line.contains(long) {
+                *line = line.replace(long, short);
+            }
+        }
+    }
+}
+
 /// Remove empty if/else blocks, unreferenced labels, and bare temp assignments.
 pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
     // Strip bare standalone expressions at brace depth 0 (top level).
