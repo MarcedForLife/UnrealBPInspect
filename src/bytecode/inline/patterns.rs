@@ -44,6 +44,9 @@ pub fn fold_summary_patterns(lines: &mut Vec<String>) {
 
 fn process_section(lines: &mut Vec<String>) {
     // Pipeline ordering: each pass may create patterns consumed by later passes.
+    // 0. Strip ForEach break-hit flags that survived temp inlining (when the flag
+    //    was behind a temp variable, flow.rs couldn't strip it at detection time)
+    strip_break_hit_from_while(lines);
     // 1. Structural rewrites (change control flow shape)
     rewrite_foreach_loops(lines); // foreach before temp inlining (creates new temps)
     fold_delegate_bindings(lines); // bind() + AddDelegate -> +=
@@ -66,9 +69,41 @@ fn process_section(lines: &mut Vec<String>) {
     // adds new brace blocks that should not be touched by brace cleanup.
 }
 
+/// Strip UE4 ForEach break-hit flags from while conditions.
+///
+/// Catches flags that survived temp inlining (when the flag was behind a temp
+/// variable, `strip_break_hit_flag` in flow.rs couldn't strip it at detection time).
+fn strip_break_hit_from_while(lines: &mut [String]) {
+    let marker = "!Temp_bool_True_if_break_was_hit_Variable";
+    for line in lines.iter_mut() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("while ((!") else {
+            continue;
+        };
+        if !rest.starts_with(&marker[1..]) {
+            continue;
+        }
+        let Some(sep_pos) = rest.find(") && (") else {
+            continue;
+        };
+        let cond_start = sep_pos + ") && (".len();
+        let cond_and_suffix = &rest[cond_start..];
+        let Some(real_cond) = cond_and_suffix.strip_suffix(")) {") else {
+            continue;
+        };
+        *line = format!("while ({}) {{", real_cond);
+    }
+}
+
 /// Rewrite ForEach loop boilerplate into `for (ITEM in ARRAY)`.
-/// Detects the pattern: counter/index init, while(COUNTER < Array_Length(ARRAY)),
-/// index assignment, Array_Get, body, increment.
+///
+/// Two patterns are supported:
+/// 1. **Explicit get**: counter/index init, while, `INDEX = COUNTER`,
+///    `ITEM = ARRAY[INDEX]`, body, increment. The ITEM variable replaces
+///    the array access.
+/// 2. **Inline access**: same structure but no explicit get line. The body
+///    uses `ARRAY[INDEX]` directly. A synthetic item name is generated and
+///    all `ARRAY[INDEX]` references in the body are substituted.
 fn rewrite_foreach_loops(lines: &mut Vec<String>) {
     let mut i = 0;
     while i < lines.len() {
@@ -85,14 +120,24 @@ fn rewrite_foreach_loops(lines: &mut Vec<String>) {
             continue;
         };
 
-        let Some((assign_idx, get_idx, item)) =
-            validate_body_start(lines, i + 1, &index_var, &counter, &array)
-        else {
+        let Some((close_idx, incr_idx)) = find_close_and_increment(lines, i, &counter) else {
             i += 1;
             continue;
         };
 
-        let Some((close_idx, incr_idx)) = find_close_and_increment(lines, i, &counter) else {
+        // Try the explicit-get pattern first
+        let (item, mut to_remove) = if let Some((assign_idx, get_idx, item)) =
+            validate_body_start(lines, i + 1, &index_var, &counter, &array)
+        {
+            (
+                item,
+                vec![incr_idx, get_idx, assign_idx, index_idx, counter_idx],
+            )
+        } else if let Some((assign_idx, item)) =
+            try_inline_access_rewrite(lines, i, close_idx, &index_var, &array)
+        {
+            (item, vec![incr_idx, assign_idx, index_idx, counter_idx])
+        } else {
             i += 1;
             continue;
         };
@@ -100,18 +145,15 @@ fn rewrite_foreach_loops(lines: &mut Vec<String>) {
         lines[i] = format!("for ({} in {}) {{", item, array);
 
         // Remove lines in reverse order to preserve indices
-        let mut to_remove = vec![incr_idx, get_idx, assign_idx, index_idx, counter_idx];
         to_remove.sort_unstable();
         to_remove.dedup();
         let removed_before_i = to_remove.iter().filter(|&&idx| idx < i).count();
         for idx in to_remove.into_iter().rev() {
-            // Don't remove lines past close_idx (shouldn't happen, but safety)
             if idx < close_idx {
                 lines.remove(idx);
             }
         }
 
-        // Adjust for_idx since lines before `i` were removed
         let for_idx = i - removed_before_i;
         remove_redundant_gets(lines, for_idx, &item, &array, &index_var);
 
@@ -216,7 +258,102 @@ fn validate_body_start(
     Some((assign_idx, get_idx, item))
 }
 
-/// Find closing `}` and validate COUNTER = COUNTER + 1 as the last body line before it.
+/// Fallback for loops without an explicit `ITEM = ARRAY[INDEX]` line.
+///
+/// Validates that:
+/// 1. The first body line is `INDEX = COUNTER`
+/// 2. `ARRAY[INDEX]` appears at least once in the body
+///
+/// Generates a synthetic item name, substitutes all `ARRAY[INDEX]` occurrences
+/// in the loop body, and returns (assign_idx, item_name).
+fn try_inline_access_rewrite(
+    lines: &mut [String],
+    while_idx: usize,
+    close_idx: usize,
+    index_var: &str,
+    array: &str,
+) -> Option<(usize, String)> {
+    // Find the INDEX = COUNTER assignment (first non-empty body line)
+    let assign_prefix = format!("{} = ", index_var);
+    let mut assign_idx = None;
+    for (j, line) in lines.iter().enumerate().take(close_idx).skip(while_idx + 1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if trimmed.starts_with(&assign_prefix) {
+            assign_idx = Some(j);
+        }
+        break;
+    }
+    let assign_idx = assign_idx?;
+
+    // Check that ARRAY[INDEX] appears in the body
+    let access_pattern = format!("{}[{}]", array, index_var);
+    let body_has_access = lines[while_idx + 1..close_idx]
+        .iter()
+        .any(|l| l.contains(&access_pattern));
+    if !body_has_access {
+        return None;
+    }
+
+    // Generate a synthetic item name from the array name
+    let item = derive_item_name(array, lines, while_idx, close_idx);
+
+    // Substitute all ARRAY[INDEX] with the item name in the body
+    for line in &mut lines[while_idx + 1..close_idx] {
+        if line.contains(&access_pattern) {
+            *line = line.replace(&access_pattern, &item);
+        }
+    }
+
+    Some((assign_idx, item))
+}
+
+/// Derive a readable item name from an array variable name.
+///
+/// Strips prefixes/suffixes and de-pluralizes where obvious. Falls back to
+/// `item` if nothing better can be derived. Avoids word-boundary collisions
+/// with existing names in the loop body.
+fn derive_item_name(array: &str, lines: &[String], while_idx: usize, close_idx: usize) -> String {
+    let base = array
+        .strip_prefix('$')
+        .or_else(|| array.strip_prefix("out "))
+        .unwrap_or(array);
+
+    let candidate = if base.ends_with("_OutHits") || base.ends_with("_Hits") {
+        "hit".to_string()
+    } else if base.ends_with('s') && base.len() > 3 {
+        // De-pluralize simple trailing 's': "NestedActors" -> "NestedActor"
+        let penultimate = base.as_bytes()[base.len() - 2];
+        if penultimate.is_ascii_lowercase() {
+            base[..base.len() - 1].to_string()
+        } else {
+            "item".to_string()
+        }
+    } else {
+        "item".to_string()
+    };
+
+    // Check for word-boundary collision with existing names in the body
+    let body_text: String = lines[while_idx..close_idx].join("\n");
+    let mut name = candidate;
+    if super::count_var_refs(&body_text, &name) > 0 {
+        name = format!("_{}", name);
+        if super::count_var_refs(&body_text, &name) > 0 {
+            name = "item".to_string();
+            if super::count_var_refs(&body_text, &name) > 0 {
+                name = "_item".to_string();
+            }
+        }
+    }
+    name
+}
+
+/// Find the closing `}` of the while loop and locate the `COUNTER = COUNTER + 1`
+/// increment anywhere in the body. The increment may be the last body line
+/// (standard ForEach), inside an else branch (conditional iteration), or absent
+/// entirely (search-and-break pattern, which we reject).
 fn find_close_and_increment(
     lines: &[String],
     while_idx: usize,
@@ -239,21 +376,31 @@ fn find_close_and_increment(
     }
     let close_idx = close_idx?;
 
-    // Last non-empty body line before close should be the increment
+    // Search the body for the increment line at any position
     let expected_incr = format!("{} = {} + 1", counter, counter);
-    let mut incr_idx = None;
-    for j in (while_idx + 1..close_idx).rev() {
-        let trimmed = lines[j].trim();
-        if trimmed.is_empty() {
-            continue;
+    let incr_idx = lines[while_idx + 1..close_idx]
+        .iter()
+        .rposition(|l| l.trim() == expected_incr)
+        .map(|rel| rel + while_idx + 1)?;
+
+    // Reject if the increment is unreachable (preceded by unconditional break
+    // at the same brace depth). This catches search-and-break loops where the
+    // increment is dead code emitted by the loop control structure.
+    let mut depth = 0i32;
+    for line in &lines[while_idx + 1..incr_idx] {
+        let trimmed = line.trim();
+        if trimmed.ends_with(" {") || trimmed == "{" {
+            depth += 1;
         }
-        if trimmed == expected_incr {
-            incr_idx = Some(j);
+        if trimmed.starts_with('}') {
+            depth -= 1;
         }
-        break; // only check the last non-empty line
+        if depth == 0 && trimmed == "break" {
+            return None;
+        }
     }
 
-    Some((close_idx, incr_idx?))
+    Some((close_idx, incr_idx))
 }
 
 /// After rewriting a while-loop to a for-each, remove redundant Array_Get
