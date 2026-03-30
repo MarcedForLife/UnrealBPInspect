@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
-use crate::bytecode::BcStatement;
+use crate::bytecode::{fold_long_lines, BcStatement};
 use crate::helpers::indent_of;
 use crate::resolve::*;
 use crate::types::*;
@@ -762,6 +762,15 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
     if emitted_function_count > 0 {
         writeln!(buf).unwrap();
     }
+
+    // Fold long lines in the final output. This runs on the complete summary
+    // text so it accounts for the indentation added by the formatter (4-space
+    // function body prefix, ubergraph event indentation, etc.).
+    // Preserve the original trailing whitespace by splitting with newlines and
+    // rejoining, rather than using str::lines() which drops trailing newlines.
+    let mut final_lines: Vec<String> = buf.split('\n').map(|l| l.to_string()).collect();
+    fold_long_lines(&mut final_lines);
+    buf = final_lines.join("\n");
 
     buf
 }
