@@ -8,7 +8,7 @@ pub use cleanup::{
     cleanup_structured_output, eliminate_constant_condition_branches, strip_orphaned_blocks,
     strip_unmatched_braces,
 };
-pub use patterns::fold_summary_patterns;
+pub use patterns::{fold_summary_patterns, fold_switch_enum_cascade};
 pub use temps::{
     collect_jump_targets, discard_unused_assignments, inline_constant_temps,
     inline_single_use_temps,
@@ -663,19 +663,18 @@ mod tests {
 
     #[test]
     fn cleanup_simplifies_if_not_false_return() {
-        let mut lines = vec![
-            "    if (!false) return".to_string(),
-            "    DoThing()".to_string(),
-        ];
+        // if (!false) = always taken, becomes bare return.
+        // Code after unconditional return at top level is dead and removed.
+        let mut lines = vec!["if (!false) return".to_string(), "DoThing()".to_string()];
         cleanup_structured_output(&mut lines);
-        assert_eq!(lines, vec!["    return", "    DoThing()"]);
+        assert_eq!(lines, vec!["return"]);
     }
 
     #[test]
     fn cleanup_removes_if_false_block() {
         let mut lines = vec![
             "if (false) {".to_string(),
-            "    DeadCode()".to_string(),
+            "DeadCode()".to_string(),
             "}".to_string(),
             "LiveCode()".to_string(),
         ];
@@ -686,13 +685,13 @@ mod tests {
     #[test]
     fn cleanup_inlines_if_true_block() {
         let mut lines = vec![
-            "    if (true) {".to_string(),
-            "        Body()".to_string(),
-            "    }".to_string(),
-            "    After()".to_string(),
+            "if (true) {".to_string(),
+            "Body()".to_string(),
+            "}".to_string(),
+            "After()".to_string(),
         ];
         cleanup_structured_output(&mut lines);
-        assert_eq!(lines, vec!["    Body()", "    After()"]);
+        assert_eq!(lines, vec!["Body()", "After()"]);
     }
 
     #[test]
@@ -828,12 +827,12 @@ mod tests {
         let mut lines = vec![
             "$Cast = cast<MyType>(GetObj())".to_string(),
             "if ($Cast) {".to_string(),
-            "    self.Foo = $Cast".to_string(),
+            "self.Foo = $Cast".to_string(),
             "}".to_string(),
         ];
         fold_cast_inline(&mut lines);
         assert_eq!(lines[0], "if (cast<MyType>(GetObj())) {");
-        assert_eq!(lines[1], "    self.Foo = cast<MyType>(GetObj())");
+        assert_eq!(lines[1], "self.Foo = cast<MyType>(GetObj())");
         assert_eq!(lines[2], "}");
         assert_eq!(lines.len(), 3);
     }
@@ -909,13 +908,14 @@ mod tests {
 
     #[test]
     fn hoist_preserves_indent() {
+        // Flat text: hoist inserts a new assignment line before the usages
         let mut lines = vec![
-            "        A((X ? L : R).F())".to_string(),
-            "        B((X ? L : R).G())".to_string(),
-            "        C((X ? L : R).H())".to_string(),
+            "A((X ? L : R).F())".to_string(),
+            "B((X ? L : R).G())".to_string(),
+            "C((X ? L : R).H())".to_string(),
         ];
         hoist_repeated_ternaries(&mut lines);
-        assert!(lines[0].starts_with("        $"));
+        assert!(lines[0].starts_with("$"));
     }
 
     #[test]
@@ -1060,16 +1060,15 @@ mod tests {
         let mut lines = vec![
             "$SwitchEnum_CmpSuccess = Status != 0".to_string(),
             "if ($SwitchEnum_CmpSuccess) {".to_string(),
-            "    $SwitchEnum_CmpSuccess = Status != 1".to_string(),
-            "    if (!$SwitchEnum_CmpSuccess) return".to_string(),
+            "$SwitchEnum_CmpSuccess = Status != 1".to_string(),
+            "if (!$SwitchEnum_CmpSuccess) return".to_string(),
             "}".to_string(),
             "body_after_cascade()".to_string(),
         ];
         fold_switch_enum_cascade(&mut lines);
-        assert!(lines[0].contains("// switch (Status)"));
-        // Body group has a case label before it
-        assert!(lines[1].contains("// case Status == 0:"));
-        assert_eq!(lines[2].trim(), "body_after_cascade()");
+        assert!(lines[0].contains("switch (Status) {"));
+        assert!(lines[1].contains("case 0:"));
+        assert!(lines.iter().any(|l| l.trim() == "body_after_cascade()"));
     }
 
     #[test]
@@ -1077,14 +1076,119 @@ mod tests {
         let mut lines = vec![
             "$SwitchEnum_CmpSuccess = X != 0".to_string(),
             "if ($SwitchEnum_CmpSuccess) {".to_string(),
-            "    $SwitchEnum_CmpSuccess = X != 1".to_string(),
-            "    if (!$SwitchEnum_CmpSuccess) return".to_string(),
+            "$SwitchEnum_CmpSuccess = X != 1".to_string(),
+            "if (!$SwitchEnum_CmpSuccess) return".to_string(),
             "}".to_string(),
             "return".to_string(),
         ];
         fold_switch_enum_cascade(&mut lines);
-        assert!(lines[0].contains("// switch (X)"));
-        // No case body, so no case label emitted; return follows directly
-        assert_eq!(lines[1], "return");
+        assert!(!lines.iter().any(|l| l.contains("switch")));
+    }
+
+    #[test]
+    fn switch_enum_cascade_else_bodies() {
+        // The cascade compiles to nested if/else; body collection must split
+        // at } else { boundaries and not leak else into case bodies
+        let mut lines = vec![
+            "$SwitchEnum_CmpSuccess = X != 0".to_string(),
+            "if ($SwitchEnum_CmpSuccess) {".to_string(),
+            "$SwitchEnum_CmpSuccess = X != 1".to_string(),
+            "if ($SwitchEnum_CmpSuccess) {".to_string(),
+            "DefaultBody()".to_string(),
+            "} else {".to_string(),
+            "Case1Body()".to_string(),
+            "}".to_string(),
+            "} else {".to_string(),
+            "Case0Body()".to_string(),
+            "}".to_string(),
+        ];
+        fold_switch_enum_cascade(&mut lines);
+        let text = lines.join("\n");
+        assert!(text.contains("switch (X) {"), "missing switch:\n{}", text);
+        // Each case body should be isolated (no } else { leaking)
+        assert!(
+            !text.contains("} else {"),
+            "else leaked into output:\n{}",
+            text
+        );
+        assert!(text.contains("Case0Body()"), "missing case 0:\n{}", text);
+        assert!(text.contains("Case1Body()"), "missing case 1:\n{}", text);
+    }
+
+    // rewrite_negated_guards
+
+    #[test]
+    fn negated_guard_rewrite_wraps_body() {
+        let mut lines = vec![
+            "if (!(A && B)) return".to_string(),
+            "DoThing()".to_string(),
+            "DoOther()".to_string(),
+        ];
+        cleanup_structured_output(&mut lines);
+        let text = lines.join("\n");
+        assert!(
+            text.contains("if (A && B) {"),
+            "guard not rewritten:\n{}",
+            text
+        );
+        assert!(text.contains("}"), "missing closing brace:\n{}", text);
+    }
+
+    #[test]
+    fn negated_guard_simple_condition_not_rewritten() {
+        // Simple conditions (no && / ||) stay as guards
+        let mut lines = vec!["if (!X) return".to_string(), "DoThing()".to_string()];
+        cleanup_structured_output(&mut lines);
+        assert!(
+            lines.iter().any(|l| l.trim() == "if (!X) return"),
+            "simple guard was rewritten:\n{}",
+            lines.join("\n")
+        );
+    }
+
+    #[test]
+    fn eliminate_if_true_with_else() {
+        // if (true) { A } else { B } -> keeps A, removes B
+        let mut lines = vec![
+            "if (true) {".to_string(),
+            "Keep()".to_string(),
+            "} else {".to_string(),
+            "Remove()".to_string(),
+            "}".to_string(),
+        ];
+        eliminate_constant_condition_branches(&mut lines);
+        assert!(
+            lines.iter().any(|l| l.trim() == "Keep()"),
+            "missing Keep:\n{}",
+            lines.join("\n")
+        );
+        assert!(
+            !lines.iter().any(|l| l.trim() == "Remove()"),
+            "Remove still present:\n{}",
+            lines.join("\n")
+        );
+    }
+
+    #[test]
+    fn eliminate_if_false_with_else() {
+        // if (false) { A } else { B } -> keeps B, removes A
+        let mut lines = vec![
+            "if (false) {".to_string(),
+            "Remove()".to_string(),
+            "} else {".to_string(),
+            "Keep()".to_string(),
+            "}".to_string(),
+        ];
+        eliminate_constant_condition_branches(&mut lines);
+        assert!(
+            !lines.iter().any(|l| l.trim() == "Remove()"),
+            "Remove still present:\n{}",
+            lines.join("\n")
+        );
+        assert!(
+            lines.iter().any(|l| l.trim() == "Keep()"),
+            "missing Keep:\n{}",
+            lines.join("\n")
+        );
     }
 }
