@@ -5,7 +5,6 @@ use super::{
     count_var_refs, find_matching_paren, is_ident_char, is_trivial_expr, parse_temp_assignment,
     split_args, strip_outer_parens, substitute_var,
 };
-use crate::helpers::indent_of;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Max output args for a Break* call to be fully inlined (replaced with dot access).
@@ -62,7 +61,9 @@ fn process_section(lines: &mut Vec<String>) {
     suppress_unused_outparams(lines);
     fold_outparam_calls(lines);
     compact_large_break_calls(lines);
-    fold_switch_enum_cascade(lines);
+    // fold_switch_enum_cascade runs at the pipeline endpoint (after
+    // strip_unmatched_braces, before apply_indentation) because it
+    // adds new brace blocks that should not be touched by brace cleanup.
 }
 
 /// Rewrite ForEach loop boilerplate into `for (ITEM in ARRAY)`.
@@ -72,41 +73,31 @@ fn rewrite_foreach_loops(lines: &mut Vec<String>) {
     let mut i = 0;
     while i < lines.len() {
         let trimmed = lines[i].trim();
-        let indent_len = lines[i].len() - trimmed.len();
 
-        // Step 1: Match "while (COUNTER < Array_Length(ARRAY)) {"
         let Some((counter, array)) = parse_foreach_while(trimmed) else {
             i += 1;
             continue;
         };
 
-        // Step 2: Find two init lines before the while at same indent
-        let Some((counter_idx, index_idx, index_var)) =
-            find_foreach_init(lines, i, indent_len, &counter)
+        let Some((counter_idx, index_idx, index_var)) = find_foreach_init(lines, i, &counter)
         else {
             i += 1;
             continue;
         };
 
-        // Step 3: Validate body start: INDEX = COUNTER, then Array_Get(ARRAY, INDEX, ITEM)
-        let body_indent = indent_len + 4;
         let Some((assign_idx, get_idx, item)) =
-            validate_body_start(lines, i + 1, body_indent, &index_var, &counter, &array)
+            validate_body_start(lines, i + 1, &index_var, &counter, &array)
         else {
             i += 1;
             continue;
         };
 
-        // Step 4: Find closing } and validate increment as last body line
-        let Some((close_idx, incr_idx)) = find_close_and_increment(lines, i, indent_len, &counter)
-        else {
+        let Some((close_idx, incr_idx)) = find_close_and_increment(lines, i, &counter) else {
             i += 1;
             continue;
         };
 
-        // All checks passed, rewrite
-        let indent_str = &lines[i][..indent_len];
-        lines[i] = format!("{}for ({} in {}) {{", indent_str, item, array);
+        lines[i] = format!("for ({} in {}) {{", item, array);
 
         // Remove lines in reverse order to preserve indices
         let mut to_remove = vec![incr_idx, get_idx, assign_idx, index_idx, counter_idx];
@@ -145,10 +136,8 @@ fn parse_foreach_while(trimmed: &str) -> Option<(String, String)> {
 fn find_foreach_init(
     lines: &[String],
     while_idx: usize,
-    indent_len: usize,
     counter: &str,
 ) -> Option<(usize, usize, String)> {
-    // Look at up to 4 lines before while for counter=0 and index=0 (compiler may insert gaps)
     let start = while_idx.saturating_sub(4);
     let mut counter_idx = None;
     let mut index_idx = None;
@@ -159,15 +148,15 @@ fn find_foreach_init(
         if trimmed.is_empty() {
             continue;
         }
-        let line_indent = lines[j].len() - trimmed.len();
-        if line_indent != indent_len {
+        // Stop at structural boundaries
+        if trimmed.starts_with('}') || trimmed.ends_with(" {") {
             break;
         }
 
         if trimmed == format!("{} = 0", counter) {
             counter_idx = Some(j);
         } else if trimmed.ends_with(" = 0") && trimmed.starts_with("Temp_int_") {
-            let var = &trimmed[..trimmed.len() - 4]; // strip " = 0"
+            let var = &trimmed[..trimmed.len() - 4];
             index_var = Some(var.to_string());
             index_idx = Some(j);
         }
@@ -180,12 +169,10 @@ fn find_foreach_init(
 fn validate_body_start(
     lines: &[String],
     start: usize,
-    body_indent: usize,
     index: &str,
     counter: &str,
     array: &str,
 ) -> Option<(usize, usize, String)> {
-    // Find the first two non-empty body lines
     let mut body_lines = Vec::new();
     let mut j = start;
     while j < lines.len() && body_lines.len() < 2 {
@@ -194,8 +181,8 @@ fn validate_body_start(
             j += 1;
             continue;
         }
-        let line_indent = lines[j].len() - trimmed.len();
-        if line_indent < body_indent {
+        // Stop at scope exit
+        if trimmed == "}" {
             return None;
         }
         body_lines.push((j, trimmed.to_string()));
@@ -233,25 +220,20 @@ fn validate_body_start(
 fn find_close_and_increment(
     lines: &[String],
     while_idx: usize,
-    indent_len: usize,
     counter: &str,
 ) -> Option<(usize, usize)> {
-    // Find the closing } at the same indent as while
     let mut depth = 0i32;
     let mut close_idx = None;
     for (j, line) in lines.iter().enumerate().skip(while_idx) {
         let trimmed = line.trim();
-        if trimmed.ends_with('{') {
+        if trimmed.ends_with(" {") || trimmed == "{" {
             depth += 1;
         }
-        if trimmed == "}" {
-            let line_indent = line.len() - trimmed.len();
-            if line_indent == indent_len {
-                depth -= 1;
-                if depth == 0 {
-                    close_idx = Some(j);
-                    break;
-                }
+        if trimmed == "}" || trimmed.starts_with("} ") {
+            depth -= 1;
+            if depth == 0 {
+                close_idx = Some(j);
+                break;
             }
         }
     }
@@ -287,10 +269,10 @@ fn remove_redundant_gets(
     let mut close = for_idx;
     for (j, line) in lines.iter().enumerate().skip(for_idx) {
         let trimmed = line.trim();
-        if trimmed.ends_with('{') {
+        if trimmed.ends_with(" {") || trimmed == "{" {
             depth += 1;
         }
-        if trimmed == "}" {
+        if trimmed == "}" || trimmed.starts_with("} ") {
             depth -= 1;
             if depth == 0 {
                 close = j;
@@ -343,9 +325,7 @@ fn fold_delegate_bindings(lines: &mut Vec<String>) {
             continue;
         }
 
-        // Rewrite
-        let indent = &lines[i][..lines[i].len() - trimmed.len()];
-        lines[i] = format!("{}{} {} {}.{}", indent, target, op, obj, func);
+        lines[i] = format!("{} {} {}.{}", target, op, obj, func);
         lines.remove(i + 1);
         // Don't advance; recheck current position
     }
@@ -388,35 +368,19 @@ fn fold_cast_guards(lines: &mut Vec<String>) {
     let mut i = 0;
     while i + 1 < lines.len() {
         let trimmed_a = lines[i].trim();
-        let indent_a = lines[i].len() - trimmed_a.len();
-
-        // Line A: $VAR = cast<...>(...) or icast<...>(...) or obj_cast<...>(...)
         let Some((var, _rhs)) = parse_cast_assignment(trimmed_a) else {
             i += 1;
             continue;
         };
 
-        let trimmed_b = lines[i + 1].trim();
-        let indent_b = lines[i + 1].len() - trimmed_b.len();
-
-        // Same indent
-        if indent_a != indent_b {
-            i += 1;
-            continue;
-        }
-
-        // Line B: exactly "if (!$VAR) return"
         let expected = format!("if (!{}) return", var);
-        if trimmed_b != expected {
+        if lines[i + 1].trim() != expected {
             i += 1;
             continue;
         }
 
-        // Rewrite: append " else return" to line A, remove line B
-        let indent_str = &lines[i][..indent_a];
-        lines[i] = format!("{}{} else return", indent_str, trimmed_a);
+        lines[i] = format!("{} else return", trimmed_a);
         lines.remove(i + 1);
-        // Don't advance; recheck
     }
 }
 
@@ -442,21 +406,14 @@ fn parse_cast_assignment(text: &str) -> Option<(&str, &str)> {
 /// Returns (var_name, cast_rhs) if the pattern matches.
 fn parse_cast_guard_pair(lines: &[String], i: usize) -> Option<(String, String)> {
     let trimmed = lines[i].trim();
-    let indent_len = lines[i].len() - trimmed.len();
-
     let (var, rhs) = parse_cast_assignment(trimmed)?;
 
-    // Skip if already folded to "else return"
     if trimmed.ends_with("else return") {
         return None;
     }
 
-    // Next line must be `if ($VAR) {` at same indent
-    let next = lines.get(i + 1)?;
-    let next_trimmed = next.trim();
-    let next_indent = next.len() - next_trimmed.len();
     let expected_if = format!("if ({}) {{", var);
-    if next_indent != indent_len || next_trimmed != expected_if {
+    if lines.get(i + 1)?.trim() != expected_if {
         return None;
     }
 
@@ -493,10 +450,8 @@ pub(super) fn fold_cast_inline(lines: &mut Vec<String>) {
             if j == i {
                 continue;
             }
-            let line_indent = indent_of(line);
-            let content = &line[line_indent..];
-            if count_var_refs(content, &var) > 0 {
-                let mut text = content.to_string();
+            if count_var_refs(line.trim(), &var) > 0 {
+                let mut text = line.trim().to_string();
                 loop {
                     let new_text = replace_all_var_refs(&text, &var, &rhs);
                     if new_text == text {
@@ -504,7 +459,7 @@ pub(super) fn fold_cast_inline(lines: &mut Vec<String>) {
                     }
                     text = new_text;
                 }
-                *line = format!("{}{}", &line[..line_indent], text);
+                *line = text;
             }
         }
 
@@ -580,11 +535,8 @@ fn fold_break_patterns(lines: &mut Vec<String>) {
             let replacement = format!("{}.{}", source, fields[idx]);
 
             for line in lines.iter_mut().skip(i + 1) {
-                let indent_len = indent_of(line);
-                let content = &line[indent_len..];
-                if count_var_refs(content, out_var) > 0 {
-                    let new_content = replace_all_var_refs(content, out_var, &replacement);
-                    *line = format!("{}{}", &line[..indent_len], new_content);
+                if count_var_refs(line.trim(), out_var) > 0 {
+                    *line = replace_all_var_refs(line.trim(), out_var, &replacement);
                 }
             }
         }
@@ -609,7 +561,6 @@ fn fold_struct_construction(lines: &mut Vec<String>) {
         };
 
         let run_start = i;
-        let indent_str = lines[i][..lines[i].len() - trimmed.len()].to_string();
         let expected_var = struct_var.to_string();
 
         // Collect consecutive field assignments, tolerating interleaved
@@ -674,13 +625,7 @@ fn fold_struct_construction(lines: &mut Vec<String>) {
                         })
                         .collect();
 
-                    let new_line = format!(
-                        "{}{} = {}({})",
-                        indent_str,
-                        target,
-                        type_name,
-                        args.join(", ")
-                    );
+                    let new_line = format!("{} = {}({})", target, type_name, args.join(", "));
 
                     let run_end = i + 1;
                     lines.splice(run_start..run_end, std::iter::once(new_line));
@@ -720,11 +665,8 @@ pub(super) fn hoist_repeated_ternaries(lines: &mut Vec<String>) {
     for (ternary, var_name) in &to_hoist {
         let first_use = lines.iter().position(|l| l.contains(ternary.as_str()));
         let Some(idx) = first_use else { continue };
-        let indent = indent_of(&lines[idx]);
-        let indent_str = " ".repeat(indent);
-        // Strip outer parens for the assignment RHS
         let rhs = strip_outer_parens(ternary);
-        lines.insert(idx, format!("{}{} = {}", indent_str, var_name, rhs));
+        lines.insert(idx, format!("{} = {}", var_name, rhs));
         // Replace all occurrences in all lines
         for line in lines.iter_mut() {
             while line.contains(ternary.as_str()) {
@@ -872,11 +814,9 @@ pub(super) fn extract_left_right_suffix(true_expr: &str, false_expr: &str) -> Op
 /// Fixes precedence ambiguity where `!Func() == 1` reads as `!(Func() == 1)`.
 pub(super) fn simplify_bool_comparisons(lines: &mut [String]) {
     for line in lines.iter_mut() {
-        let indent_len = indent_of(line);
-        let content = &line[indent_len..];
-        let simplified = simplify_negated_bool_comparison(content);
-        if simplified != content {
-            *line = format!("{}{}", &line[..indent_len], simplified);
+        let simplified = simplify_negated_bool_comparison(line);
+        if simplified != *line {
+            *line = simplified;
         }
     }
 }
@@ -1004,11 +944,8 @@ fn suppress_unused_outparams(lines: &mut [String]) {
 
     for var in &to_suppress {
         for line in lines.iter_mut() {
-            let indent_len = indent_of(line);
-            let content = &line[indent_len..];
-            if count_var_refs(content, var) > 0 {
-                let new_content = replace_all_var_refs(content, var, "_");
-                *line = format!("{}{}", &line[..indent_len], new_content);
+            if count_var_refs(line, var) > 0 {
+                *line = replace_all_var_refs(line, var, "_");
             }
         }
     }
@@ -1041,17 +978,18 @@ pub(super) fn fold_outparam_calls(lines: &mut Vec<String>) {
         };
 
         // Substitute $outParam with the rewritten call expression
-        let ref_indent = indent_of(&lines[ref_line]);
-        let ref_content = &lines[ref_line][ref_indent..];
-        let replacement =
-            replace_all_var_refs(ref_content, &candidate.out_var, &candidate.call_expr);
+        let replacement = replace_all_var_refs(
+            lines[ref_line].trim(),
+            &candidate.out_var,
+            &candidate.call_expr,
+        );
 
-        if ref_indent + replacement.len() > MAX_LINE {
+        if replacement.len() > MAX_LINE {
             i += 1;
             continue;
         }
 
-        lines[ref_line] = format!("{}{}", &lines[ref_line][..ref_indent], replacement);
+        lines[ref_line] = replacement;
         lines.remove(i);
     }
 }
@@ -1152,9 +1090,7 @@ fn compact_large_break_calls(lines: &mut [String]) {
     let mut i = 0;
     while i < lines.len() {
         let trimmed = lines[i].trim();
-        let indent_len = lines[i].len() - trimmed.len();
 
-        // Match Break* calls above the inline threshold (small ones handled by fold_break_patterns)
         let Some(paren_start) = trimmed.find('(') else {
             i += 1;
             continue;
@@ -1185,7 +1121,6 @@ fn compact_large_break_calls(lines: &mut [String]) {
         }
 
         let source = args[0];
-        let indent_str = lines[i][..indent_len].to_string();
         let prefix = format!("${}_", func_name);
 
         // Build compacted params: source first, then named used params
@@ -1202,7 +1137,7 @@ fn compact_large_break_calls(lines: &mut [String]) {
             }
         }
 
-        let new_call = format!("{}{}({})", indent_str, func_name, parts.join(", "));
+        let new_call = format!("{}({})", func_name, parts.join(", "));
         lines[i] = new_call;
         i += 1;
     }
@@ -1213,14 +1148,14 @@ fn compact_large_break_calls(lines: &mut [String]) {
 /// UE4's "Switch on Enum" node compiles to cascading comparisons:
 ///   `$SwitchEnum_CmpSuccess = VAR != N` / `if (!...) return` or `if (...) { ... }`
 /// After structuring, this produces deeply nested if-blocks with case bodies at
-/// decreasing indent levels. This pass detects the cascade, collects all case
-/// bodies, and re-emits them with uniform indentation.
-pub(super) fn fold_switch_enum_cascade(lines: &mut Vec<String>) {
+/// decreasing indent levels. This pass detects the cascade, collects case
+/// bodies (correctly handling `} else {` boundaries), and emits proper
+/// `switch/case` pseudocode with braces for `apply_indentation`.
+pub fn fold_switch_enum_cascade(lines: &mut Vec<String>) {
     let mut i = 0;
     while i < lines.len() {
-        // Look for: INDENT $SwitchEnum_CmpSuccess... = VAR != VALUE
-        let Some((switch_var, compared_var, first_value, base_indent)) =
-            parse_switch_enum_assign(lines[i].trim(), &lines[i])
+        let Some((switch_var, compared_var, first_value)) =
+            parse_switch_enum_assign(lines[i].trim())
         else {
             i += 1;
             continue;
@@ -1229,129 +1164,129 @@ pub(super) fn fold_switch_enum_cascade(lines: &mut Vec<String>) {
         let cascade_start = i;
         let mut case_values = vec![first_value];
 
-        // Scan forward through the cascade scaffold:
-        // assignments, if-checks, and closing braces.
+        // Phase 1: scan the cascade scaffold (assignments + if-checks + braces)
         let mut j = i + 1;
         let mut brace_depth = 0i32;
 
         while j < lines.len() {
             let trimmed = lines[j].trim();
-
-            // Another assignment to the same SwitchEnum variable
-            if let Some((sv, cv, val, _)) = parse_switch_enum_assign(trimmed, &lines[j]) {
+            if let Some((sv, cv, val)) = parse_switch_enum_assign(trimmed) {
                 if sv == switch_var && cv == compared_var {
                     case_values.push(val);
                     j += 1;
                     continue;
                 }
             }
-
-            // if ($SwitchEnum...) { or if (!$SwitchEnum...) return/break
             if trimmed.contains(&switch_var) {
-                if trimmed.ends_with('{') {
+                if trimmed.ends_with(" {") || trimmed == "{" {
                     brace_depth += 1;
                 }
                 j += 1;
                 continue;
             }
-
-            // Closing brace belonging to the cascade
             if trimmed == "}" && brace_depth > 0 {
                 brace_depth -= 1;
                 j += 1;
                 continue;
             }
-
             break;
         }
 
-        // Need at least 2 case values to be a valid switch
         if case_values.len() < 2 {
             i += 1;
             continue;
         }
 
-        // Continue past the cascade to collect case body groups.
-        // Bodies appear between closing braces (innermost first) and
-        // after all braces close (outermost body).
+        // Phase 2: collect case bodies from the nested if/else structure.
+        // The cascade compiles to nested `if (cmpN) { if (cmpN+1) { ... } else { bodyN } }`.
+        // Bodies are separated by `} else {` at the cascade level; nested braces within
+        // bodies are tracked with body_depth to avoid splitting on inner if/else blocks.
         let mut body_groups: Vec<Vec<String>> = Vec::new();
         let mut current_body: Vec<String> = Vec::new();
+        let mut body_depth = 0i32;
 
         while j < lines.len() && brace_depth > 0 {
             let trimmed = lines[j].trim();
-            if trimmed == "}" {
+            let opens_block = trimmed.ends_with(" {") || trimmed == "{";
+            let is_close = trimmed == "}";
+            let is_else_chain = trimmed.starts_with("} ") && trimmed.ends_with('{');
+
+            if body_depth > 0 && (is_close || is_else_chain) {
+                // Closing or chaining a nested block within the body
+                body_depth -= 1;
+                current_body.push(lines[j].clone());
+                if is_else_chain {
+                    body_depth += 1;
+                }
+                j += 1;
+            } else if body_depth == 0 && (is_close || is_else_chain) {
+                // Cascade-level boundary: end current body, start next
                 if !current_body.is_empty() {
                     body_groups.push(std::mem::take(&mut current_body));
                 }
-                brace_depth -= 1;
+                if is_close {
+                    brace_depth -= 1;
+                }
+                j += 1;
+            } else if opens_block {
+                current_body.push(lines[j].clone());
+                body_depth += 1;
                 j += 1;
             } else if !trimmed.is_empty() {
-                current_body.push(trimmed.to_string());
+                current_body.push(lines[j].clone());
                 j += 1;
             } else {
                 j += 1;
             }
         }
 
-        // Collect the outermost body (after all cascade braces close)
+        // Outermost body (after cascade braces close)
         while j < lines.len() {
             let trimmed = lines[j].trim();
             if trimmed.is_empty() || trimmed == "return" || trimmed == "}" || trimmed == "break" {
                 break;
             }
-            current_body.push(trimmed.to_string());
+            current_body.push(lines[j].clone());
             j += 1;
         }
         if !current_body.is_empty() {
             body_groups.push(current_body);
         }
 
-        let construct_end = j; // exclusive end of the entire switch construct
+        let construct_end = j;
 
-        // Recursively fold inner switch cascades within each body group
+        // Skip if no actual case bodies
+        if body_groups.iter().all(Vec::is_empty) {
+            i = construct_end;
+            continue;
+        }
+
+        // Recursively fold inner switch cascades
         for body in &mut body_groups {
             fold_switch_enum_cascade(body);
         }
 
-        // Build replacement
-        let indent_str = " ".repeat(base_indent);
-        let cases_str = case_values
-            .iter()
-            .map(|v| v.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let switch_line = format!(
-            "{}// switch ({}) [cases: {}]:",
-            indent_str, compared_var, cases_str
-        );
-
-        let mut replacement = vec![switch_line];
+        // Build replacement as proper pseudocode with braces
+        let mut replacement = vec![format!("switch ({}) {{", compared_var)];
         let num_bodies = body_groups.len();
         let num_cases = case_values.len();
         for (idx, body) in body_groups.iter().enumerate() {
-            // Bodies are collected innermost-first from cascade nesting,
-            // then the outermost tail. The outermost body (last entry) maps
-            // to case_values[0], and earlier entries map in reverse order.
-            // When num_bodies == num_cases + 1, body[0] is the default.
             let case_idx = num_bodies.saturating_sub(1 + idx);
             let is_default = num_bodies == num_cases + 1 && idx == 0;
             let label = if is_default {
-                format!("{}// default:", indent_str)
+                "default: {".to_string()
             } else if case_idx < num_cases {
-                format!(
-                    "{}// case {} == {}:",
-                    indent_str, compared_var, case_values[case_idx]
-                )
+                format!("case {}: {{", case_values[case_idx])
             } else {
-                format!("{}// case {}:", indent_str, idx)
+                format!("case {}: {{", idx)
             };
-            if !body.is_empty() {
-                replacement.push(label);
-            }
+            replacement.push(label);
             for line in body {
-                replacement.push(format!("{}    {}", indent_str, line));
+                replacement.push(line.trim().to_string());
             }
+            replacement.push("}".to_string());
         }
+        replacement.push("}".to_string());
 
         let replacement_len = replacement.len();
         lines.splice(cascade_start..construct_end, replacement);
@@ -1360,34 +1295,25 @@ pub(super) fn fold_switch_enum_cascade(lines: &mut Vec<String>) {
 }
 
 /// Parse `$SwitchEnum_CmpSuccess... = VAR != VALUE` from a trimmed line.
-/// Returns (switch_var_name, compared_var, value, indent_len).
-fn parse_switch_enum_assign(
-    trimmed: &str,
-    full_line: &str,
-) -> Option<(String, String, String, usize)> {
-    // Must start with $SwitchEnum_CmpSuccess
+fn parse_switch_enum_assign(trimmed: &str) -> Option<(String, String, String)> {
     if !trimmed.starts_with("$SwitchEnum_CmpSuccess") {
         return None;
     }
     let eq_pos = trimmed.find(" = ")?;
     let switch_var = &trimmed[..eq_pos];
     let rhs = &trimmed[eq_pos + 3..];
-    // RHS must be `VAR != VALUE`
     let neq_pos = rhs.find(" != ")?;
     let compared_var = rhs[..neq_pos].to_string();
     let value = rhs[neq_pos + 4..].to_string();
-    let indent_len = indent_of(full_line);
-    Some((switch_var.to_string(), compared_var, value, indent_len))
+    Some((switch_var.to_string(), compared_var, value))
 }
 
 /// Rename Make* functions by stripping the `Make` prefix: MakeVector -> Vector, etc.
 fn rename_make_functions(lines: &mut [String]) {
     for line in lines.iter_mut() {
-        let indent_len = indent_of(line);
-        let content = &line[indent_len..];
-        let changed = strip_make_prefix(content);
-        if changed != content {
-            *line = format!("{}{}", &line[..indent_len], changed);
+        let changed = strip_make_prefix(line);
+        if changed != *line {
+            *line = changed;
         }
     }
 }
@@ -1506,17 +1432,15 @@ fn fold_section_temps(lines: &mut Vec<String>) {
             }
             let Some(target_idx) = target else { continue };
 
-            let indent_len = indent_of(&lines[target_idx]);
-            let content = &lines[target_idx][indent_len..];
-            let replacement = substitute_var(content, var_name, &current_expr);
+            let replacement = substitute_var(lines[target_idx].trim(), var_name, &current_expr);
 
             let shortens = current_expr.len() + 2 <= var_name.len();
             let trivial = is_trivial_expr(&current_expr);
-            if !shortens && !trivial && (indent_len + replacement.len()) > MAX_LINE {
+            if !shortens && !trivial && replacement.len() > MAX_LINE {
                 continue;
             }
 
-            lines[target_idx] = format!("{}{}", &lines[target_idx][..indent_len], replacement);
+            lines[target_idx] = replacement;
             removed.push(*assign_idx);
             inlined_any = true;
         }
@@ -1531,25 +1455,29 @@ fn fold_section_temps(lines: &mut Vec<String>) {
     }
 }
 
-/// Find the completion block extent (lines after "// on loop complete:" until the next boundary).
-/// Returns (comp_start, comp_end) indices.
-fn find_completion_block(
-    lines: &[String],
-    marker_idx: usize,
-    marker_indent: usize,
-) -> Option<(usize, usize)> {
+/// Find the completion block extent (lines after "// on loop complete:" until the next
+/// scope exit or section boundary). Uses brace counting.
+fn find_completion_block(lines: &[String], marker_idx: usize) -> Option<(usize, usize)> {
     let comp_start = marker_idx + 1;
     let mut comp_end = comp_start;
+    let mut depth = 0i32;
     while comp_end < lines.len() {
         let trimmed = lines[comp_end].trim();
         if trimmed.is_empty() {
             comp_end += 1;
             continue;
         }
-        let line_indent = indent_of(&lines[comp_end]);
-        if line_indent <= marker_indent && (trimmed.starts_with('}') || trimmed.starts_with("---"))
-        {
+        if trimmed.starts_with("---") {
             break;
+        }
+        if trimmed.starts_with('}') {
+            depth -= 1;
+            if depth < 0 {
+                break;
+            }
+        }
+        if trimmed.ends_with(" {") || trimmed == "{" {
+            depth += 1;
         }
         comp_end += 1;
     }
@@ -1560,30 +1488,28 @@ fn find_completion_block(
     }
 }
 
-/// Find the pre-loop setup lines: lines at the same indent as the while/for loop
-/// immediately before it. Returns (pre_start, while_idx, while_indent).
-fn find_pre_loop_setup(lines: &[String], marker_idx: usize) -> Option<(usize, usize, usize)> {
+/// Find the pre-loop setup lines: flat statements immediately before the while/for
+/// loop (no braces between them). Returns (pre_start, while_idx).
+fn find_pre_loop_setup(lines: &[String], marker_idx: usize) -> Option<(usize, usize)> {
     let while_idx = (0..marker_idx).rev().find(|&j| {
         let trimmed = lines[j].trim();
         trimmed.starts_with("while ") || trimmed.starts_with("for ")
     })?;
 
-    let while_indent = indent_of(&lines[while_idx]);
     let mut pre_start = while_idx;
     for j in (0..while_idx).rev() {
         let trimmed = lines[j].trim();
         if trimmed.is_empty() {
             continue;
         }
-        let line_indent = indent_of(&lines[j]);
-        if line_indent == while_indent && !trimmed.starts_with('}') && !trimmed.starts_with("//") {
-            pre_start = j;
-        } else {
+        // Stop at braces or comments (structural boundaries)
+        if trimmed.starts_with('}') || trimmed.starts_with("//") || trimmed.ends_with(" {") {
             break;
         }
+        pre_start = j;
     }
 
-    Some((pre_start, while_idx, while_indent))
+    Some((pre_start, while_idx))
 }
 
 /// Deduplicate ForEach completion paths that repeat pre-loop setup code.
@@ -1598,15 +1524,13 @@ fn dedup_completion_paths(lines: &mut Vec<String>) {
         }
 
         let marker_idx = i;
-        let marker_indent = indent_of(&lines[i]);
 
-        let Some((comp_start, comp_end)) = find_completion_block(lines, marker_idx, marker_indent)
-        else {
+        let Some((comp_start, comp_end)) = find_completion_block(lines, marker_idx) else {
             i += 1;
             continue;
         };
 
-        let Some((pre_start, while_idx, _)) = find_pre_loop_setup(lines, marker_idx) else {
+        let Some((pre_start, while_idx)) = find_pre_loop_setup(lines, marker_idx) else {
             i = comp_end;
             continue;
         };
@@ -1637,18 +1561,11 @@ fn dedup_completion_paths(lines: &mut Vec<String>) {
 
         // Need at least 3 duplicated lines covering majority of completion
         if matched_count >= 3 && matched_count * 2 >= total_count {
-            let indent = &lines[marker_idx][..marker_indent];
             let mut replacement: Vec<String> = Vec::new();
             if unique_indices.is_empty() {
-                replacement.push(format!(
-                    "{}// on loop complete: (same as pre-loop setup)",
-                    indent
-                ));
+                replacement.push("// on loop complete: (same as pre-loop setup)".to_string());
             } else {
-                replacement.push(format!(
-                    "{}// on loop complete: (repeats pre-loop setup)",
-                    indent
-                ));
+                replacement.push("// on loop complete: (repeats pre-loop setup)".to_string());
                 for &j in &unique_indices {
                     replacement.push(lines[j].clone());
                 }
