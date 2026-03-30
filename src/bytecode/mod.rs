@@ -28,10 +28,10 @@ pub use flow::{
 };
 pub use inline::{
     cleanup_structured_output, collect_jump_targets, discard_unused_assignments,
-    eliminate_constant_condition_branches, fold_summary_patterns, inline_constant_temps,
-    inline_single_use_temps, strip_orphaned_blocks, strip_unmatched_braces,
+    eliminate_constant_condition_branches, fold_summary_patterns, fold_switch_enum_cascade,
+    inline_constant_temps, inline_single_use_temps, strip_orphaned_blocks, strip_unmatched_braces,
 };
-pub use structure::structure_bytecode;
+pub use structure::{apply_indentation, structure_bytecode};
 
 /// Split BcStatements at `// sequence [N]:` markers.
 /// Returns a list of (optional marker text, body statements).
