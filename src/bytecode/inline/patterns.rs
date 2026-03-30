@@ -61,7 +61,6 @@ fn process_section(lines: &mut Vec<String>) {
                                // 4. Cosmetic cleanup (simplify what remains)
     simplify_bool_comparisons(lines);
     hoist_repeated_ternaries(lines);
-    suppress_unused_outparams(lines);
     fold_outparam_calls(lines);
     compact_large_break_calls(lines);
     // fold_switch_enum_cascade runs at the pipeline endpoint (after
@@ -1072,32 +1071,6 @@ fn parse_negated_bool_at(text: &str, bang_pos: usize) -> Option<NegatedBoolRewri
     })
 }
 
-/// A var is "unused" if it only ever appears as a simple argument in calls
-/// to exactly one function name (i.e., it's never read by any other code).
-fn suppress_unused_outparams(lines: &mut [String]) {
-    let mut all_vars: Vec<String> = Vec::new();
-    for line in lines.iter() {
-        for var in extract_dollar_vars(line.trim()) {
-            if !all_vars.contains(&var) {
-                all_vars.push(var);
-            }
-        }
-    }
-
-    let to_suppress: Vec<String> = all_vars
-        .into_iter()
-        .filter(|var| is_unused_outparam(lines, var))
-        .collect();
-
-    for var in &to_suppress {
-        for line in lines.iter_mut() {
-            if count_var_refs(line, var) > 0 {
-                *line = replace_all_var_refs(line, var, "_");
-            }
-        }
-    }
-}
-
 /// Fold single-out-param function calls into their usage site.
 /// `obj.Func($outParam)` where `$outParam` is referenced exactly once later
 /// -> substitute `obj.Func()` for `$outParam` and remove the standalone call.
@@ -1228,11 +1201,12 @@ fn find_single_ref(lines: &[String], skip_idx: usize, var: &str) -> Option<usize
     }
 }
 
-/// Compact Break struct calls that have many `_` args by keeping only used params.
-/// Field names are inferred from the `$BreakName_FieldName` variable naming convention.
-/// `BreakHitResult(src, _, _, _, $BreakHitResult_Location, ...)` ->
-///   `BreakHitResult(src, Location: $BreakHitResult_Location, ...)`
-/// Triggers when a Break call has ≥6 output args and ≥50% are `_`.
+/// Compact large Break* calls (5+ output args) by showing only fields that are
+/// referenced elsewhere as named arguments. Field names are inferred from the
+/// `$BreakName_FieldName` variable naming convention.
+///
+/// `BreakHitResult(src, $BHR_A, ..., $BHR_R)` (18 positional args) becomes
+/// `BreakHitResult(src, Location: $BHR_Location, HitActor: $BHR_HitActor)`.
 fn compact_large_break_calls(lines: &mut [String]) {
     let mut i = 0;
     while i < lines.len() {
@@ -1251,41 +1225,43 @@ fn compact_large_break_calls(lines: &mut [String]) {
         let args_str = &trimmed[paren_start + 1..trimmed.len() - 1];
         let args = split_args(args_str);
 
-        // Skip small Break calls (handled by fold_break_patterns) and need ≥50% underscores
-        if args.len() < 2 {
-            i += 1;
-            continue;
-        }
-        let output_count = args.len() - 1;
+        // Only compact large Break calls (small ones are handled by fold_break_patterns)
+        let output_count = args.len().saturating_sub(1);
         if output_count <= BREAK_INLINE_MAX_ARGS {
             i += 1;
             continue;
         }
-        let underscore_count = args[1..].iter().filter(|a| **a == "_").count();
-        if underscore_count * 2 < args.len() - 1 {
-            i += 1;
-            continue;
-        }
 
+        // Check which out-param args are actually used elsewhere in the section
         let source = args[0];
         let prefix = format!("${}_", func_name);
-
-        // Build compacted params: source first, then named used params
+        let call_prefix = format!("{}(", func_name);
         let mut parts = vec![source.to_string()];
+        let mut any_unused = false;
+
         for &arg in &args[1..] {
-            if arg == "_" {
-                continue;
-            }
-            // Infer field name from $BreakName_FieldName pattern
-            if let Some(field) = arg.strip_prefix(&prefix) {
-                parts.push(format!("{}: {}", field, arg));
+            // An arg is "used" if it appears on a line that isn't another
+            // call to the same Break function (those just re-extract the same fields)
+            let used = lines.iter().enumerate().any(|(j, line)| {
+                j != i
+                    && count_var_refs(line.trim(), arg) > 0
+                    && !line.trim().starts_with(&call_prefix)
+            });
+            if used {
+                if let Some(field) = arg.strip_prefix(&prefix) {
+                    parts.push(format!("{}: {}", field, arg));
+                } else {
+                    parts.push(arg.to_string());
+                }
             } else {
-                parts.push(arg.to_string());
+                any_unused = true;
             }
         }
 
-        let new_call = format!("{}({})", func_name, parts.join(", "));
-        lines[i] = new_call;
+        // Only rewrite if at least some params are unused (otherwise keep original)
+        if any_unused {
+            lines[i] = format!("{}({})", func_name, parts.join(", "));
+        }
         i += 1;
     }
 }
@@ -1781,116 +1757,4 @@ fn replace_all_var_refs(text: &str, var: &str, replacement: &str) -> String {
     }
     result.push_str(&text[start..]);
     result
-}
-
-/// Extract all `$VarName` tokens from text.
-fn extract_dollar_vars(text: &str) -> Vec<String> {
-    let mut vars = Vec::new();
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'$' {
-            let start = i;
-            i += 1;
-            while i < bytes.len() && is_ident_char(bytes[i]) {
-                i += 1;
-            }
-            if i > start + 1 {
-                let var = text[start..i].to_string();
-                if !vars.contains(&var) {
-                    vars.push(var);
-                }
-            }
-        } else {
-            i += 1;
-        }
-    }
-    vars
-}
-
-/// Check if a `$temp` var is an unused output parameter.
-/// True when every occurrence is a simple comma-separated argument in calls
-/// to exactly one function name, AND the variable name contains the function name
-/// (UE4 names out-params as `$FuncName_ParamName`). This prevents false positives
-/// where a computed value like `$Add_FloatFloat` is used as an in-param to `FClamp`.
-pub(super) fn is_unused_outparam(lines: &[String], var: &str) -> bool {
-    let mut func_names: HashSet<String> = HashSet::new();
-
-    for line in lines {
-        let trimmed = line.trim();
-        let mut start = 0;
-        while let Some(pos) = trimmed[start..].find(var) {
-            let abs_pos = start + pos;
-            let after = abs_pos + var.len();
-            // Check word boundary
-            if after < trimmed.len() && is_ident_char(trimmed.as_bytes()[after]) {
-                start = after;
-                continue;
-            }
-            // Check simple arg position: preceded by ( or , and followed by , or )
-            let before = trimmed[..abs_pos].trim_end();
-            let after_text = trimmed[after..].trim_start();
-            let ok_before = before.ends_with('(') || before.ends_with(',');
-            let ok_after = after_text.starts_with(',') || after_text.starts_with(')');
-            if !ok_before || !ok_after {
-                return false;
-            }
-            // Extract containing function name
-            if let Some(func_name) = extract_containing_func_name(before) {
-                func_names.insert(func_name);
-            }
-            start = after;
-        }
-    }
-
-    // Must appear in exactly one function
-    if func_names.len() != 1 {
-        return false;
-    }
-
-    // Variable name must contain the function name (UE4 out-param naming: $FuncName_ParamName).
-    // Strip leading `$` from the var for matching.
-    let var_body = var.strip_prefix('$').unwrap_or(var);
-    let func_name = func_names.iter().next().unwrap();
-    var_body.starts_with(func_name)
-}
-
-/// From the text before a function argument, find the name of the containing function.
-/// Scans backward for the opening `(` at the right paren depth, then extracts
-/// the identifier immediately before it.
-fn extract_containing_func_name(before_text: &str) -> Option<String> {
-    let trimmed = before_text.trim_end();
-    let bytes = trimmed.as_bytes();
-    let mut depth = 0i32;
-    let mut paren_pos = None;
-
-    for i in (0..bytes.len()).rev() {
-        match bytes[i] {
-            b')' | b']' => depth += 1,
-            b'(' | b'[' => {
-                if depth == 0 {
-                    paren_pos = Some(i);
-                    break;
-                }
-                depth -= 1;
-            }
-            _ => {}
-        }
-    }
-
-    let paren = paren_pos?;
-    if paren == 0 {
-        return None;
-    }
-    let before_paren = &trimmed[..paren];
-    let name_start = before_paren
-        .rfind(|c: char| !c.is_alphanumeric() && c != '_')
-        .map(|p| p + 1)
-        .unwrap_or(0);
-    let name = &trimmed[name_start..paren];
-    if name.is_empty() {
-        None
-    } else {
-        Some(name.to_string())
-    }
 }
