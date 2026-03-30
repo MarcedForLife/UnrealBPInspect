@@ -410,7 +410,12 @@ fn emit_stmts_range(
             } else {
                 "return"
             };
-            output.push(keyword.to_string());
+            // UE4 ForEach-with-break emits multiple pop_flow to unwind the
+            // flow stack. Only the first one is semantically meaningful.
+            let already_breaking = output.last().is_some_and(|l| l.trim() == keyword);
+            if !already_breaking {
+                output.push(keyword.to_string());
+            }
         } else if let Some(cond) = parse_pop_flow_if_not(&stmt.text) {
             let keyword = if in_loop(block_stack) {
                 "break"

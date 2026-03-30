@@ -60,7 +60,8 @@ Components:
       VRGripInterfaceSettings: bAllowMultipleGrips: true
       StaticMesh: helm_elemnt_01
       bGenerateOverlapEvents: false
-      BodyInstance: ObjectType: ECC_PhysicsBody, CollisionProfileName: PhysicsActor, AngularDamping: 8.0000, PhysMaterialOverride: 11_Wood_Physic_Mat, bSimulatePhysics: true, bOverrideMass: true, bEnableGravity: false
+      BodyInstance: ObjectType: ECC_PhysicsBody, CollisionProfileName: PhysicsActor, AngularDamping: 8.0000,
+          PhysMaterialOverride: 11_Wood_Physic_Mat, bSimulatePhysics: true, bOverrideMass: true, bEnableGravity: false
       RelativeLocation: (-0.0000, 0.0000, 146.6086)
     WheelConstraint (ChildActorComponent)
       ChildActorClass: WinchConstraint_BP_C

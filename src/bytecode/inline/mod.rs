@@ -1,6 +1,7 @@
 //! Temp variable inlining, expression cleanup, and summary pattern folding.
 
 mod cleanup;
+mod fold;
 mod patterns;
 mod temps;
 
@@ -8,6 +9,7 @@ pub use cleanup::{
     cleanup_structured_output, eliminate_constant_condition_branches, strip_orphaned_blocks,
     strip_unmatched_braces,
 };
+pub use fold::fold_long_lines;
 pub use patterns::{fold_summary_patterns, fold_switch_enum_cascade};
 pub use temps::{
     collect_jump_targets, discard_unused_assignments, inline_constant_temps,
