@@ -4,9 +4,10 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use crate::bytecode::{
-    collect_jump_targets, discard_unused_assignments, inline_constant_temps,
-    inline_single_use_temps, reorder_convergence, reorder_flow_patterns, split_by_sequence_markers,
-    strip_orphaned_blocks, strip_unmatched_braces, BcStatement, OffsetMap, JUMP_OFFSET_TOLERANCE,
+    apply_indentation, collect_jump_targets, discard_unused_assignments, fold_switch_enum_cascade,
+    inline_constant_temps, inline_single_use_temps, reorder_convergence, reorder_flow_patterns,
+    split_by_sequence_markers, strip_orphaned_blocks, strip_unmatched_braces, BcStatement,
+    OffsetMap, JUMP_OFFSET_TOLERANCE,
 };
 use crate::helpers::indent_of;
 use crate::parser::structure_and_cleanup;
@@ -279,6 +280,8 @@ pub(super) fn build_ubergraph_structured(
     // if-blocks or else-blocks that the brace removal exposed.
     strip_unmatched_braces(&mut all_lines);
     strip_orphaned_blocks(&mut all_lines);
+    fold_switch_enum_cascade(&mut all_lines);
+    apply_indentation(&mut all_lines);
     if all_lines.is_empty() {
         None
     } else {

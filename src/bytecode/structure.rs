@@ -10,7 +10,6 @@ use super::decode::BcStatement;
 use super::flow::{
     parse_if_jump, parse_jump, parse_jump_computed, parse_pop_flow_if_not, parse_push_flow,
 };
-use crate::helpers::indent_of;
 use std::collections::{HashMap, HashSet};
 
 /// Indentation string per nesting level (4 spaces).
@@ -85,6 +84,7 @@ enum RegionKind {
     IfThen(String),
     Else,
     ElseIf(String),
+    Loop(String),
 }
 
 #[derive(Debug, Clone)]
@@ -363,17 +363,15 @@ fn resolve_jump_line(
     }
 }
 
-/// Emit statements in range [from, to) with given indent.
+/// Emit flat (unindented) statements in range [from, to).
+/// Indentation is applied later by `apply_indentation`.
 fn emit_stmts_range(
     ctx: &EmitCtx,
     from: usize,
     to: usize,
-    indent: usize,
-    block_stack: &mut Vec<BlockType>,
+    block_stack: &[BlockType],
     output: &mut Vec<String>,
 ) {
-    let emit = |text: &str| -> String { format!("{}{}", INDENT.repeat(indent), text) };
-
     for i in from..to {
         if i >= ctx.stmts.len() {
             break;
@@ -406,26 +404,13 @@ fn emit_stmts_range(
 
         let stmt = &ctx.stmts[i];
 
-        if stmt.text == "}" {
-            // Closing brace from flow.rs (loop end)
-            block_stack.pop();
-            let close_indent = indent.saturating_sub(1);
-            output.push(format!("{}}}", INDENT.repeat(close_indent)));
-        } else if stmt.text.ends_with(" {") {
-            let is_loop = stmt.text.starts_with("while ") || stmt.text.starts_with("for ");
-            output.push(emit(&stmt.text));
-            block_stack.push(if is_loop {
-                BlockType::Loop
-            } else {
-                BlockType::If
-            });
-        } else if stmt.text == "pop_flow" {
+        if stmt.text == "pop_flow" {
             let keyword = if in_loop(block_stack) {
                 "break"
             } else {
                 "return"
             };
-            output.push(emit(keyword));
+            output.push(keyword.to_string());
         } else if let Some(cond) = parse_pop_flow_if_not(&stmt.text) {
             let keyword = if in_loop(block_stack) {
                 "break"
@@ -433,7 +418,7 @@ fn emit_stmts_range(
                 "return"
             };
             let negated = negate_cond(cond);
-            output.push(emit(&format!("if ({}) {}", negated, keyword)));
+            output.push(format!("if ({}) {}", negated, keyword));
         } else if let Some((cond, _target)) = parse_if_jump(&stmt.text) {
             // Unresolvable conditional jump, treat as guard
             let negated = negate_cond(cond);
@@ -442,10 +427,10 @@ fn emit_stmts_range(
             } else {
                 "return"
             };
-            output.push(emit(&format!("if ({}) {}", negated, keyword)));
+            output.push(format!("if ({}) {}", negated, keyword));
         } else if let Some(target) = parse_jump(&stmt.text) {
             if let Some(text) = resolve_jump_line(ctx, i, target, in_loop(block_stack)) {
-                output.push(emit(&text));
+                output.push(text);
             }
         } else {
             let text = if stmt.text == "return nop" {
@@ -453,7 +438,7 @@ fn emit_stmts_range(
             } else {
                 &stmt.text
             };
-            output.push(emit(text));
+            output.push(text.to_string());
         }
     }
 }
@@ -495,7 +480,7 @@ fn collect_label_targets(
     (label_targets, pending_labels)
 }
 
-/// Convert flat bytecode statements into indented pseudo-code lines.
+/// Convert flat bytecode statements into structured pseudo-code lines (unindented).
 ///
 /// `labels` maps memory offsets to display names (e.g. `--- EventName ---` markers).
 ///
@@ -527,7 +512,8 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
     let mut skip: HashSet<usize> = HashSet::new();
     let if_blocks = detect_if_blocks(stmts, &find_target);
     suppress_flow_opcodes(stmts, &mut skip);
-    let region_tree = build_region_tree(stmts.len(), &if_blocks, &mut skip);
+    let mut region_tree = build_region_tree(stmts.len(), &if_blocks, &mut skip);
+    insert_brace_blocks(&mut region_tree, stmts, &mut skip);
     let (label_targets, pending_labels) =
         collect_label_targets(stmts, &skip, &label_at, &find_target);
 
@@ -544,13 +530,43 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
 
     let mut output = Vec::new();
     let mut block_stack: Vec<BlockType> = Vec::new();
-    emit_region_tree(&region_tree, &ctx, 0, &mut block_stack, &mut output);
+    emit_region_tree(&region_tree, &ctx, &mut block_stack, &mut output);
 
     convert_gotos_to_breaks(&mut output);
     extract_convergence(&mut output);
     collapse_double_else(&mut output);
 
     output
+}
+
+/// Apply indentation based on brace nesting depth.
+/// Lines starting with `}` decrement before indenting; lines ending with ` {` increment after.
+/// Called once at the end of the pipeline so all intermediate passes work with flat text.
+pub fn apply_indentation(lines: &mut [String]) {
+    let mut depth = 0usize;
+    for line in lines.iter_mut() {
+        let trimmed = line.trim().to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let closes = trimmed.starts_with('}');
+        let opens = trimmed.ends_with(" {") || trimmed == "{";
+
+        if closes {
+            depth = depth.saturating_sub(1);
+        }
+
+        *line = if depth > 0 {
+            format!("{}{}", INDENT.repeat(depth), trimmed)
+        } else {
+            trimmed
+        };
+
+        if opens {
+            depth += 1;
+        }
+    }
 }
 
 /// Detect if/else blocks from `if !(cond) jump` patterns, then truncate false-blocks
@@ -672,31 +688,104 @@ fn suppress_flow_opcodes(stmts: &[BcStatement], skip: &mut HashSet<usize>) {
     }
 }
 
-/// Emit the region tree, managing `}` placement for if/else/else-if groups.
+/// Detect brace-delimited blocks (while/for loops from flow.rs) by matching
+/// `ends_with(" {")` / `== "}"` pairs with a simple stack.
+fn detect_brace_blocks(stmts: &[BcStatement]) -> Vec<(usize, usize)> {
+    let mut stack: Vec<usize> = Vec::new();
+    let mut blocks: Vec<(usize, usize)> = Vec::new();
+    for (idx, stmt) in stmts.iter().enumerate() {
+        if stmt.text.ends_with(" {") {
+            stack.push(idx);
+        } else if stmt.text == "}" {
+            if let Some(open_idx) = stack.pop() {
+                blocks.push((open_idx, idx));
+            }
+        }
+    }
+    blocks
+}
+
+/// Insert detected brace blocks as Loop regions into the region tree.
+/// Uses recursive descent (like `insert_if_block`) so loops nested inside
+/// if-blocks or other loops are placed at the correct depth.
+fn insert_brace_blocks(root: &mut Region, stmts: &[BcStatement], skip: &mut HashSet<usize>) {
+    let brace_blocks = detect_brace_blocks(stmts);
+    for (open_idx, close_idx) in brace_blocks {
+        insert_loop_region(root, stmts, open_idx, close_idx, skip);
+    }
+}
+
+/// Try to insert a single loop region into the deepest containing region.
+fn insert_loop_region(
+    region: &mut Region,
+    stmts: &[BcStatement],
+    open_idx: usize,
+    close_idx: usize,
+    skip: &mut HashSet<usize>,
+) -> bool {
+    let body_start = open_idx + 1;
+    let body_end = close_idx;
+
+    if body_start >= body_end {
+        return false;
+    }
+
+    // Must fit within this region
+    if open_idx < region.start || close_idx >= region.end {
+        return false;
+    }
+
+    // Try to insert into a child that fully contains the range
+    for child in &mut region.children {
+        if open_idx >= child.start && close_idx < child.end {
+            return insert_loop_region(child, stmts, open_idx, close_idx, skip);
+        }
+    }
+
+    // Check for partial overlap with existing children
+    let overlaps = region.children.iter().any(|child| {
+        let ov = body_start < child.end && body_end > child.start;
+        let contains = body_start <= child.start && body_end >= child.end;
+        ov && !contains
+    });
+    if overlaps {
+        return false;
+    }
+
+    let header = stmts[open_idx].text.clone();
+    let loop_region = Region::new(RegionKind::Loop(header), body_start, body_end);
+    let loop_region = adopt_children(region, loop_region);
+    insert_child_sorted(region, loop_region);
+    skip.insert(open_idx);
+    skip.insert(close_idx);
+    true
+}
+
+/// Emit the region tree as flat (unindented) text. Braces are emitted for
+/// if/else/loop blocks; `apply_indentation` assigns depth afterward.
+#[allow(clippy::ptr_arg)] // push/pop needed on block_stack
 fn emit_region_tree(
     region: &Region,
     ctx: &EmitCtx,
-    indent: usize,
     block_stack: &mut Vec<BlockType>,
     output: &mut Vec<String>,
 ) {
-    let body_indent = match region.kind {
-        RegionKind::Root => indent,
-        _ => indent + 1,
-    };
-
     // Emit opening
     match &region.kind {
         RegionKind::Root => {}
         RegionKind::IfThen(cond) => {
-            output.push(format!("{}if ({}) {{", INDENT.repeat(indent), cond));
+            output.push(format!("if ({}) {{", cond));
             block_stack.push(BlockType::If);
         }
         RegionKind::Else => {
-            output.push(format!("{}}} else {{", INDENT.repeat(indent)));
+            output.push("} else {".to_string());
         }
         RegionKind::ElseIf(cond) => {
-            output.push(format!("{}}} else if ({}) {{", INDENT.repeat(indent), cond));
+            output.push(format!("}} else if ({}) {{", cond));
+        }
+        RegionKind::Loop(header) => {
+            output.push(header.clone());
+            block_stack.push(BlockType::Loop);
         }
     }
 
@@ -708,42 +797,36 @@ fn emit_region_tree(
     while child_idx < children.len() {
         let child = &children[child_idx];
 
-        // Emit statements [pos, child.start) at body_indent
-        emit_stmts_range(ctx, pos, child.start, body_indent, block_stack, output);
+        // Emit statements [pos, child.start)
+        emit_stmts_range(ctx, pos, child.start, block_stack, output);
 
-        // Detect if/else groups: IfThen possibly followed by Else/ElseIf
+        emit_region_tree(child, ctx, block_stack, output);
+        pos = child.end;
+        child_idx += 1;
+
         if matches!(child.kind, RegionKind::IfThen(_)) {
-            // Emit the IfThen
-            emit_region_tree(child, ctx, body_indent, block_stack, output);
-            pos = child.end;
-            child_idx += 1;
-
-            // Continue emitting Else/ElseIf siblings that form a chain
+            // Collect Else/ElseIf siblings that form an if/else chain
             while child_idx < children.len() {
                 let next = &children[child_idx];
                 if !matches!(next.kind, RegionKind::Else | RegionKind::ElseIf(_)) {
                     break;
                 }
-                // Emit any gap statements between previous and this else
-                emit_stmts_range(ctx, pos, next.start, body_indent, block_stack, output);
-                emit_region_tree(next, ctx, body_indent, block_stack, output);
+                emit_stmts_range(ctx, pos, next.start, block_stack, output);
+                emit_region_tree(next, ctx, block_stack, output);
                 pos = next.end;
                 child_idx += 1;
             }
+        }
 
-            // Close the if/else group
-            output.push(format!("{}}}", INDENT.repeat(body_indent)));
+        // IfThen and Loop both open a block that needs closing
+        if matches!(child.kind, RegionKind::IfThen(_) | RegionKind::Loop(_)) {
+            output.push("}".to_string());
             block_stack.pop();
-        } else {
-            // Non-if child (shouldn't happen with current data, but handle gracefully)
-            emit_region_tree(child, ctx, body_indent, block_stack, output);
-            pos = child.end;
-            child_idx += 1;
         }
     }
 
     // Emit remaining statements [pos, end)
-    emit_stmts_range(ctx, pos, region.end, body_indent, block_stack, output);
+    emit_stmts_range(ctx, pos, region.end, block_stack, output);
 }
 
 /// Convert `goto LABEL` to `break` (in loop context) or remove (outside loop) when
@@ -785,6 +868,7 @@ fn find_break_labels(output: &[String]) -> HashSet<String> {
 }
 
 /// Replace `goto LABEL` with `break` (in loop context) or remove (outside loop).
+/// Uses backward brace scanning to detect enclosing loops.
 fn rewrite_gotos(output: &mut [String], break_labels: &HashSet<String>) {
     for i in 0..output.len() {
         let trimmed = output[i].trim().to_string();
@@ -794,16 +878,26 @@ fn rewrite_gotos(output: &mut [String], break_labels: &HashSet<String>) {
         if !break_labels.contains(label) {
             continue;
         }
-        let indent_len = output[i].len() - trimmed.len();
-        let indent_str = &output[i][..indent_len];
-        let line_depth = indent_len / INDENT.len();
-        let in_loop = output[..i].iter().rev().any(|l| {
-            let depth = indent_of(l) / INDENT.len();
-            let trimmed = l.trim();
-            depth < line_depth && (trimmed.starts_with("while ") || trimmed.starts_with("for "))
-        });
+        // Scan backward through braces to find the enclosing block opener
+        let in_loop = {
+            let mut depth = 0i32;
+            output[..i].iter().rev().any(|line| {
+                let ltrim = line.trim();
+                if ltrim == "}" || ltrim.starts_with("} ") {
+                    depth += 1; // going backward, closing brace increases depth
+                }
+                if ltrim.ends_with(" {") || ltrim == "{" {
+                    if depth == 0 {
+                        // Found the enclosing block opener
+                        return ltrim.starts_with("while ") || ltrim.starts_with("for ");
+                    }
+                    depth -= 1;
+                }
+                false
+            })
+        };
         if in_loop {
-            output[i] = format!("{}break", indent_str);
+            output[i] = "break".to_string();
         } else {
             output[i] = String::new();
         }
@@ -830,9 +924,9 @@ fn remove_orphaned_labels(output: &mut Vec<String>, break_labels: &HashSet<Strin
 }
 
 /// Find the extent of convergence code starting at `code_start`.
-/// Returns the end index (exclusive) of the convergence block.
+/// Uses brace depth tracking -- stops when a closing brace exits the current scope.
 fn find_convergence_extent(output: &[String], code_start: usize) -> usize {
-    let first_indent = indent_of(&output[code_start]);
+    let mut depth = 0i32;
     let mut code_end = code_start;
     for (j, line) in output[code_start..].iter().enumerate() {
         let j = j + code_start;
@@ -841,10 +935,12 @@ fn find_convergence_extent(output: &[String], code_start: usize) -> usize {
             code_end = j + 1;
             continue;
         }
-        let line_indent = indent_of(line);
-        if line_indent < first_indent && (trimmed.starts_with('}') || trimmed.starts_with("} else"))
-        {
-            break;
+        // Check for scope exit before processing this line
+        if trimmed.starts_with('}') {
+            depth -= 1;
+            if depth < 0 {
+                break;
+            }
         }
         if j > code_start
             && trimmed.ends_with(':')
@@ -853,32 +949,42 @@ fn find_convergence_extent(output: &[String], code_start: usize) -> usize {
         {
             break;
         }
+        if trimmed.ends_with(" {") || trimmed == "{" {
+            depth += 1;
+        }
         code_end = j + 1;
     }
     code_end
 }
 
-/// Find the `}` line after all gotos where convergence code should be inserted.
-fn find_insertion_point(output: &[String], max_goto: usize, min_goto_indent: usize) -> usize {
+/// Find the closing `}` that exits the scope containing all gotos.
+/// Scans forward from after the last goto, tracking brace depth.
+fn find_insertion_point(output: &[String], max_goto: usize) -> usize {
+    let mut depth = 0i32;
     for (j, line) in output[(max_goto + 1)..].iter().enumerate() {
         let j = j + max_goto + 1;
         let trimmed = line.trim();
-        let line_indent = indent_of(line);
-        if trimmed == "}" && line_indent < min_goto_indent {
-            return j;
+        if trimmed.ends_with(" {") || trimmed == "{" {
+            depth += 1;
+        }
+        if trimmed == "}" || trimmed.starts_with("} ") {
+            if depth == 0 {
+                return j;
+            }
+            depth -= 1;
         }
     }
     output.len()
 }
 
-/// Remove old convergence lines and insert at the new position with adjusted indentation.
+/// Remove old convergence lines and insert at the new position.
+/// All text is flat (unindented); `apply_indentation` handles formatting later.
 fn splice_convergence(
     output: &mut Vec<String>,
     label_idx: usize,
     code_range: std::ops::Range<usize>,
     goto_indices: &[usize],
     insert_pos: usize,
-    target_indent: usize,
     conv_content: Vec<String>,
 ) {
     let mut to_remove: Vec<usize> = Vec::new();
@@ -897,15 +1003,9 @@ fn splice_convergence(
     let removed_before = to_remove.iter().filter(|&&idx| idx < insert_pos).count();
     let adjusted_pos = insert_pos.saturating_sub(removed_before);
 
-    let indent_str = INDENT.repeat(target_indent / INDENT.len());
     for (i, content) in conv_content.iter().enumerate() {
-        let line = if content.is_empty() {
-            String::new()
-        } else {
-            format!("{}{}", indent_str, content)
-        };
         let pos = (adjusted_pos + 1 + i).min(output.len());
-        output.insert(pos, line);
+        output.insert(pos, content.clone());
     }
 }
 
@@ -933,21 +1033,12 @@ fn extract_convergence(output: &mut Vec<String>) {
             break;
         }
 
-        // Strip indentation from the convergence code (will be re-indented at the insertion point)
-        let conv_content: Vec<String> = output[code_start..code_end]
-            .iter()
-            .map(|l| l.trim().to_string())
-            .collect();
+        // Collect convergence code lines (already flat)
+        let conv_content: Vec<String> = output[code_start..code_end].to_vec();
 
-        // Find where to insert: after the outermost `}` that encloses all the gotos
-        let min_goto_indent = goto_indices
-            .iter()
-            .map(|&i| indent_of(&output[i]))
-            .min()
-            .unwrap_or(0);
+        // Find where to insert: after the `}` that encloses all the gotos
         let max_goto = goto_indices.iter().copied().max().unwrap_or(0);
-        let insert_pos = find_insertion_point(output, max_goto, min_goto_indent);
-        let target_indent = output.get(insert_pos).map_or(0, |l| indent_of(l));
+        let insert_pos = find_insertion_point(output, max_goto);
 
         splice_convergence(
             output,
@@ -955,7 +1046,6 @@ fn extract_convergence(output: &mut Vec<String>) {
             code_start..code_end,
             &goto_indices,
             insert_pos,
-            target_indent,
             conv_content,
         );
     }
@@ -1267,5 +1357,187 @@ mod tests {
         let tree = build_region_tree(6, &blocks, &mut skip);
         assert_eq!(tree.children.len(), 1); // outer IfThen
         assert_eq!(tree.children[0].children.len(), 1); // inner IfThen
+    }
+
+    #[test]
+    fn if_then_else_followed_by_if_then() {
+        // Pattern from OnActorGripped: if/else followed by a second if (no else).
+        // structure_bytecode produces flat output; verify brace structure.
+        let stmts = vec![
+            make_stmt(0x10, "if !(LeftHand) jump 0x30"),
+            make_stmt(0x20, "self.Left = GrippedActor"),
+            make_stmt(0x28, "jump 0x40"),
+            make_stmt(0x30, "self.Right = GrippedActor"),
+            make_stmt(0x40, "if !(GrippedActor.IsClimbable) jump 0x60"),
+            make_stmt(0x50, "UpdateClimbing(LeftHand)"),
+            make_stmt(0x60, "OnGripped(GrippedActor)"),
+            make_stmt(0x70, "return nop"),
+        ];
+        let result = structure_bytecode(&stmts, &HashMap::new());
+        let text = result.join("\n");
+        assert!(
+            text.contains("if (LeftHand) {"),
+            "missing first if:\n{}",
+            text
+        );
+        assert!(
+            text.contains("if (GrippedActor.IsClimbable) {"),
+            "missing second if:\n{}",
+            text
+        );
+        // apply_indentation produces correct indent when called at the pipeline end
+        let mut indented = result.clone();
+        apply_indentation(&mut indented);
+        let itext = indented.join("\n");
+        assert!(
+            itext.contains("    UpdateClimbing(LeftHand)"),
+            "IsClimbable body not indented after apply_indentation:\n{}",
+            itext
+        );
+    }
+
+    #[test]
+    fn while_loop_body_indented() {
+        let stmts = vec![
+            make_stmt(0x10, "while (Cond) {"),
+            make_stmt(0x20, "Body()"),
+            make_stmt(0x30, "}"),
+            make_stmt(0x40, "return nop"),
+        ];
+        let result = structure_bytecode(&stmts, &HashMap::new());
+        assert!(
+            result.iter().any(|l| l == "while (Cond) {"),
+            "missing while"
+        );
+        assert!(result.iter().any(|l| l == "Body()"), "missing body");
+        // Verify indentation works
+        let mut indented = result.clone();
+        apply_indentation(&mut indented);
+        assert!(
+            indented.iter().any(|l| l == "    Body()"),
+            "body not indented:\n{}",
+            indented.join("\n")
+        );
+    }
+
+    #[test]
+    fn if_inside_while_indented() {
+        let stmts = vec![
+            make_stmt(0x10, "while (LoopCond) {"),
+            make_stmt(0x18, "if !(X) jump 0x30"),
+            make_stmt(0x20, "IfBody()"),
+            make_stmt(0x30, "AfterIf()"),
+            make_stmt(0x38, "}"),
+            make_stmt(0x40, "return nop"),
+        ];
+        let result = structure_bytecode(&stmts, &HashMap::new());
+        // Flat output has correct braces
+        assert!(result.iter().any(|l| l == "while (LoopCond) {"));
+        assert!(result.iter().any(|l| l == "if (X) {"));
+        // After indentation: double-nested
+        let mut indented = result.clone();
+        apply_indentation(&mut indented);
+        let itext = indented.join("\n");
+        assert!(
+            itext.contains("        IfBody()"),
+            "if body not double-indented:\n{}",
+            itext
+        );
+        assert!(
+            itext.contains("    AfterIf()"),
+            "after-if not single-indented:\n{}",
+            itext
+        );
+    }
+
+    #[test]
+    fn nested_while_loops() {
+        let stmts = vec![
+            make_stmt(0x10, "while (Outer) {"),
+            make_stmt(0x18, "while (Inner) {"),
+            make_stmt(0x20, "Body()"),
+            make_stmt(0x28, "}"),
+            make_stmt(0x30, "}"),
+            make_stmt(0x38, "return nop"),
+        ];
+        let result = structure_bytecode(&stmts, &HashMap::new());
+        let mut indented = result.clone();
+        apply_indentation(&mut indented);
+        let text = indented.join("\n");
+        assert!(
+            text.contains("        Body()"),
+            "body not double-indented:\n{}",
+            text
+        );
+        assert!(
+            text.contains("    while (Inner) {"),
+            "inner while not indented:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn apply_indentation_else_if_chain() {
+        let mut lines = vec![
+            "if (A) {".to_string(),
+            "BodyA()".to_string(),
+            "} else if (B) {".to_string(),
+            "BodyB()".to_string(),
+            "} else {".to_string(),
+            "BodyC()".to_string(),
+            "}".to_string(),
+        ];
+        apply_indentation(&mut lines);
+        assert_eq!(lines[0], "if (A) {");
+        assert_eq!(lines[1], "    BodyA()");
+        assert_eq!(lines[2], "} else if (B) {");
+        assert_eq!(lines[3], "    BodyB()");
+        assert_eq!(lines[4], "} else {");
+        assert_eq!(lines[5], "    BodyC()");
+        assert_eq!(lines[6], "}");
+    }
+
+    #[test]
+    fn apply_indentation_depth_zero_no_prefix() {
+        let mut lines = vec!["TopLevel()".to_string(), "return".to_string()];
+        apply_indentation(&mut lines);
+        assert_eq!(lines[0], "TopLevel()");
+        assert_eq!(lines[1], "return");
+    }
+
+    #[test]
+    fn rewrite_gotos_detects_loop_via_braces() {
+        // goto inside a while loop should become break
+        let mut output = vec![
+            "while (Cond) {".to_string(),
+            "if (X) {".to_string(),
+            "goto L_0050".to_string(),
+            "}".to_string(),
+            "}".to_string(),
+            "L_0050:".to_string(),
+        ];
+        convert_gotos_to_breaks(&mut output);
+        assert!(
+            output.iter().any(|l| l == "break"),
+            "goto not converted to break:\n{}",
+            output.join("\n")
+        );
+    }
+
+    #[test]
+    fn rewrite_gotos_outside_loop_removes() {
+        // goto outside any loop should be removed
+        let mut output = vec![
+            "if (X) {".to_string(),
+            "goto L_0050".to_string(),
+            "}".to_string(),
+            "L_0050:".to_string(),
+        ];
+        convert_gotos_to_breaks(&mut output);
+        assert!(
+            !output.iter().any(|l| l.contains("goto")),
+            "goto not removed:\n{}",
+            output.join("\n")
+        );
     }
 }

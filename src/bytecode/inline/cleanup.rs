@@ -3,8 +3,28 @@
 use super::{
     expr_is_compound, find_at_depth_zero, find_matching_paren, is_ident_char, strip_outer_parens,
 };
-use crate::helpers::indent_of;
 use std::collections::{HashMap, HashSet};
+
+/// Find the closing brace that matches a block-opening line at `open_idx`.
+/// Tracks brace depth so nested blocks are correctly skipped.
+/// `} else {` is treated as a close at the current depth (stops the search
+/// if depth reaches 0) rather than a net-zero open+close.
+fn find_block_close(lines: &[String], open_idx: usize) -> usize {
+    let mut depth = 1i32;
+    let mut idx = open_idx + 1;
+    while idx < lines.len() && depth > 0 {
+        let inner = lines[idx].trim();
+        if inner == "}" || inner.starts_with("} ") {
+            depth -= 1;
+        } else if inner.ends_with(" {") || inner == "{" {
+            depth += 1;
+        }
+        if depth > 0 {
+            idx += 1;
+        }
+    }
+    idx
+}
 
 /// Try to simplify `!(!X)` to `X`. Returns `Some(simplified)` on success.
 ///
@@ -44,12 +64,10 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
 
     // Pass 1: clean each line in place
     for line in lines.iter_mut() {
-        let indent_len = indent_of(line);
-        let indent = &line[..indent_len];
-        let trimmed = line[indent_len..].to_string();
-        let cleaned = clean_line(&trimmed);
+        let trimmed = line.trim();
+        let cleaned = clean_line(trimmed);
         if cleaned != trimmed {
-            *line = format!("{}{}", indent, cleaned);
+            *line = cleaned;
         }
     }
 
@@ -75,8 +93,8 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
         if lines[i].trim() == "return"
             && (next.starts_with("// sequence [")
                 || next.starts_with("// sub-sequence [")
-                || next.starts_with("// case ")
-                || next.starts_with("// switch "))
+                || next.starts_with("case ")
+                || next.starts_with("switch ("))
         {
             lines.remove(i);
             continue;
@@ -84,23 +102,32 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
         i += 1;
     }
 
-    // Pass 3: suppress dead code after unconditional return at indent 0
+    // Pass 3: suppress dead code after unconditional return at brace depth 0
     // Only in non-ubergraph functions (no "---" labels)
     let has_labels = lines.iter().any(|l| l.starts_with("---"));
     if !has_labels {
         let mut dead = false;
+        let mut depth = 0i32;
         lines.retain(|line| {
             let trimmed = line.trim();
+            // Track brace depth
+            if trimmed.starts_with('}') {
+                depth -= 1;
+            }
+            let at_top = depth <= 0;
+            if trimmed.ends_with(" {") || trimmed == "{" {
+                depth += 1;
+            }
             if dead {
                 // Switch/case markers restart live code (case fall-through)
-                if trimmed.starts_with("// case ") || trimmed.starts_with("// switch ") {
+                if trimmed.starts_with("case ") || trimmed.starts_with("switch (") {
                     dead = false;
                     return true;
                 }
                 // Closing braces are structural, keep them
                 trimmed == "}" || trimmed.is_empty()
             } else {
-                if indent_of(line) == 0 && trimmed == "return" {
+                if at_top && trimmed == "return" {
                     dead = true;
                 }
                 true
@@ -112,10 +139,8 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
     rewrite_negated_guards(lines);
 
     // Pass 5: strip trailing unmatched closing braces.
-    // The structurer's safety net (`while indent > 0`) emits a `}` for every
-    // remaining open block.  When flow patterns (Sequences, loops) consume
-    // statements that opened blocks but not those that close them, the output
-    // ends with orphaned `}`.  Count block-level braces and strip the excess.
+    // Per-pin structuring can leave orphaned `}` when flow patterns consume
+    // the block-opening statement but not its close. Count braces and strip excess.
     let opens: usize = lines.iter().filter(|l| l.trim().ends_with('{')).count();
     let closes: usize = lines.iter().filter(|l| l.trim().starts_with('}')).count();
     let excess = closes.saturating_sub(opens);
@@ -179,94 +204,32 @@ pub fn eliminate_constant_condition_branches(lines: &mut Vec<String>) {
         };
 
         let trimmed = lines[idx].trim().to_string();
-        let indent_len = indent_of(&lines[idx]);
-        let indent = lines[idx][..indent_len].to_string();
-
-        let is_block = trimmed.ends_with('{');
+        let is_block = trimmed.ends_with(" {") || trimmed == "{";
 
         if is_block {
-            // Find the matching closing brace at the same indent level
-            let mut depth = 1i32;
-            let mut close_idx = idx + 1;
-            while close_idx < lines.len() && depth > 0 {
-                let inner = lines[close_idx].trim();
-                if inner.ends_with('{') {
-                    depth += 1;
-                } else if inner == "}" || inner.starts_with("} ") {
-                    depth -= 1;
-                }
-                if depth > 0 {
-                    close_idx += 1;
-                }
-            }
+            let close_idx = find_block_close(lines, idx);
 
             if always_taken {
-                // Inline the body: remove if-line and closing brace, dedent body
-                // Also remove any else block after the closing brace
+                // Inline the body: remove if-line and closing brace (or else block)
                 if close_idx < lines.len() && lines[close_idx].trim().starts_with("} else {") {
-                    // Find the end of the else block
-                    let mut else_depth = 1i32;
-                    let mut else_end = close_idx + 1;
-                    while else_end < lines.len() && else_depth > 0 {
-                        let inner = lines[else_end].trim();
-                        if inner.ends_with('{') {
-                            else_depth += 1;
-                        } else if inner == "}" || inner.starts_with("} ") {
-                            else_depth -= 1;
-                        }
-                        if else_depth > 0 {
-                            else_end += 1;
-                        }
-                    }
-                    // Remove else block (close_idx..=else_end)
+                    let else_end = find_block_close(lines, close_idx);
                     if else_end < lines.len() {
                         lines.drain(close_idx..=else_end);
                     }
                 } else if close_idx < lines.len() {
-                    // Just remove the closing brace
                     lines.remove(close_idx);
                 }
-                // Dedent body lines by one level (4 spaces)
-                for line in &mut lines[idx + 1..close_idx] {
-                    let line_trimmed = line.trim().to_string();
-                    let line_indent = indent_of(line);
-                    if line_indent >= 4 {
-                        *line = format!("{}{}", &" ".repeat(line_indent - 4), line_trimmed);
-                    }
-                }
-                // Remove the if-line
                 lines.remove(idx);
-                // Don't advance idx -- re-examine what's now at this position
             } else {
                 // Dead branch: remove the entire block
-                // Check if closing brace is "} else {" -- keep the else body
                 if close_idx < lines.len() && lines[close_idx].trim().starts_with("} else {") {
-                    // Remove if-line through "} else {", keep else body, find else close
+                    // Remove if-line through "} else {", keep else body, remove else close
                     lines.drain(idx..=close_idx);
-                    // Dedent the else body and find its closing brace
-                    let mut else_depth = 1i32;
-                    let mut dedent_idx = idx;
-                    while dedent_idx < lines.len() && else_depth > 0 {
-                        let inner = lines[dedent_idx].trim().to_string();
-                        if inner.ends_with('{') {
-                            else_depth += 1;
-                        } else if inner == "}" || inner.starts_with("} ") {
-                            else_depth -= 1;
-                            if else_depth == 0 {
-                                lines.remove(dedent_idx);
-                                break;
-                            }
-                        }
-                        // Dedent by one level
-                        let line_indent = indent_of(&lines[dedent_idx]);
-                        if line_indent >= 4 {
-                            lines[dedent_idx] =
-                                format!("{}{}", &" ".repeat(line_indent - 4), inner);
-                        }
-                        dedent_idx += 1;
+                    let else_close = find_block_close(lines, idx.saturating_sub(1));
+                    if else_close < lines.len() {
+                        lines.remove(else_close);
                     }
                 } else {
-                    // Remove if-line through closing brace (inclusive)
                     let end = if close_idx < lines.len() {
                         close_idx + 1
                     } else {
@@ -274,23 +237,20 @@ pub fn eliminate_constant_condition_branches(lines: &mut Vec<String>) {
                     };
                     lines.drain(idx..end);
                 }
-                // Don't advance idx
             }
         } else {
             // Single-line form: "if (COND) STMT"
             if always_taken {
-                // Extract the statement after the condition
                 let after_if = trimmed.strip_prefix("if ").unwrap();
                 let close = find_matching_paren(after_if).unwrap();
                 let stmt = after_if[close + 1..].trim();
                 if stmt.is_empty() {
                     lines.remove(idx);
                 } else {
-                    lines[idx] = format!("{}{}", indent, stmt);
+                    lines[idx] = stmt.to_string();
                     idx += 1;
                 }
             } else {
-                // Dead code, remove the line
                 lines.remove(idx);
             }
         }
@@ -500,13 +460,13 @@ pub(super) fn has_toplevel_logical_op(input: &str) -> bool {
 
 /// Rewrite `if (!(COMPOUND)) return` -> `if (COMPOUND) { body }` when the
 /// condition contains `&&`/`||` and the remaining body is <= 8 lines.
+/// All text is flat; uses brace counting for body extent detection.
 fn rewrite_negated_guards(lines: &mut Vec<String>) {
     let mut i = lines.len();
     while i > 0 {
         i -= 1;
         let line = &lines[i];
-        let indent_len = indent_of(line);
-        let trimmed = &line[indent_len..];
+        let trimmed = line.trim();
 
         if !trimmed.starts_with("if (") {
             continue;
@@ -542,24 +502,30 @@ fn rewrite_negated_guards(lines: &mut Vec<String>) {
             continue;
         }
 
-        // Find body extent
-        let guard_indent = indent_len;
+        // Find body extent: scan forward, stop at section boundary, scope exit, or
+        // a closing brace at the same brace depth as the guard
         let mut body_end = i + 1;
+        let mut depth = 0i32;
         while body_end < lines.len() {
-            let trimmed = lines[body_end].trim();
-            if trimmed.starts_with("--- ") && trimmed.ends_with(" ---") {
+            let scan = lines[body_end].trim();
+            if scan.starts_with("--- ") && scan.ends_with(" ---") {
                 break;
             }
-            if trimmed.is_empty() {
+            if scan.is_empty() {
                 body_end += 1;
                 continue;
             }
-            let line_indent = indent_of(&lines[body_end]);
-            if line_indent < guard_indent {
+            if scan.starts_with('}') {
+                depth -= 1;
+                if depth < 0 {
+                    break;
+                }
+            }
+            if scan == "}" && depth == 0 {
                 break;
             }
-            if line_indent == guard_indent && trimmed == "}" {
-                break;
+            if scan.ends_with(" {") || scan == "{" {
+                depth += 1;
             }
             body_end += 1;
         }
@@ -567,8 +533,8 @@ fn rewrite_negated_guards(lines: &mut Vec<String>) {
         // Trim trailing returns and empty lines from body
         let mut effective_end = body_end;
         while effective_end > i + 1 {
-            let trimmed = lines[effective_end - 1].trim();
-            if trimmed == "return" || trimmed.is_empty() {
+            let end_trimmed = lines[effective_end - 1].trim();
+            if end_trimmed == "return" || end_trimmed.is_empty() {
                 effective_end -= 1;
             } else {
                 break;
@@ -580,47 +546,48 @@ fn rewrite_negated_guards(lines: &mut Vec<String>) {
             continue;
         }
 
-        // Rewrite: replace guard with positive if + wrapped body
-        let indent_str = lines[i][..indent_len].to_string();
-        lines[i] = format!("{}if ({}) {{", indent_str, compound);
-        for line in lines.iter_mut().take(effective_end).skip(i + 1) {
-            *line = format!("    {}", line);
-        }
-        lines.insert(effective_end, format!("{}}}", indent_str));
+        // Rewrite: replace guard with positive if, wrap body in braces
+        lines[i] = format!("if ({}) {{", compound);
+        lines.insert(effective_end, "}".to_string());
     }
 }
 
 /// Remove empty if/else blocks, unreferenced labels, and bare temp assignments.
 pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
-    // Strip bare standalone expressions at top level (indent 0).
+    // Strip bare standalone expressions at brace depth 0 (top level).
     // In UberGraph event segments, InputAction events start with an unused
     // key parameter read ($InputActionEvent_Key_N) and sometimes bare true/false
-    // literals.  These are Kismet stack pushes with no consumer.
-    lines.retain(|l| {
-        let trimmed = l.trim();
-        // Standalone iface() calls, interface dispatch artifacts with no side effects.
-        // Only strip when the closing `)` matches the opening `iface(` paren
-        // (i.e., there's no method chain like `iface(X).Method()`).
-        if trimmed.starts_with("iface(") && !trimmed.contains(" = ") {
-            if let Some(close) = find_matching_paren(&trimmed[5..]) {
-                if 5 + close + 1 == trimmed.len() {
+    // literals. These are Kismet stack pushes with no consumer.
+    {
+        let mut depth = 0i32;
+        lines.retain(|l| {
+            let trimmed = l.trim();
+            if trimmed.starts_with('}') {
+                depth -= 1;
+            }
+            let at_top = depth <= 0;
+            if trimmed.ends_with(" {") || trimmed == "{" {
+                depth += 1;
+            }
+            // Standalone iface() calls at any depth
+            if trimmed.starts_with("iface(") && !trimmed.contains(" = ") {
+                if let Some(close) = find_matching_paren(&trimmed[5..]) {
+                    if 5 + close + 1 == trimmed.len() {
+                        return false;
+                    }
+                }
+            }
+            if at_top {
+                if trimmed.starts_with('$') && !trimmed.contains('=') && !trimmed.contains('(') {
+                    return false;
+                }
+                if trimmed == "true" || trimmed == "false" {
                     return false;
                 }
             }
-        }
-        let has_indent = l.len() > trimmed.len();
-        if !has_indent {
-            // Bare temp variable (no assignment or call)
-            if trimmed.starts_with('$') && !trimmed.contains('=') && !trimmed.contains('(') {
-                return false;
-            }
-            // Bare boolean literal
-            if trimmed == "true" || trimmed == "false" {
-                return false;
-            }
-        }
-        true
-    });
+            true
+        });
+    }
 
     // Remove ForEach compiler artifacts: break-hit flag assignments are always
     // internal bookkeeping and never meaningful in pseudocode.
@@ -642,14 +609,12 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
         if !trimmed.ends_with(" = 0") {
             continue;
         }
-        // Check if a while/for loop follows within the next 3 lines at same indent
-        let this_indent = indent_of(&lines[idx]);
+        // Check if a while/for loop follows within the next 3 lines
         let has_loop_nearby = lines[idx + 1..std::cmp::min(idx + 4, lines.len())]
             .iter()
             .any(|l| {
-                let li = indent_of(l);
                 let lt = l.trim();
-                li == this_indent && (lt.starts_with("while (") || lt.starts_with("for ("))
+                lt.starts_with("while (") || lt.starts_with("for (")
             });
         if has_loop_nearby {
             remove_indices.insert(idx);
