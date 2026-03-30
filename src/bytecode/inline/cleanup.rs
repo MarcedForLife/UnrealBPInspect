@@ -102,36 +102,61 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
         i += 1;
     }
 
-    // Pass 3: suppress dead code after unconditional return at brace depth 0
-    // Only in non-ubergraph functions (no "---" labels)
+    // Pass 3: suppress dead code after unconditional `return` (depth 0) or `break` (any depth).
+    // `return` only at depth 0 in non-ubergraph functions; `break` anywhere since it only
+    // terminates the innermost block.
     let has_labels = lines.iter().any(|l| l.starts_with("---"));
-    if !has_labels {
-        let mut dead = false;
+    {
+        // dead_depth: when Some(d), we're suppressing dead code that started at depth d.
+        // Lines are dead until we close back to depth < d.
+        let mut dead_depth: Option<i32> = None;
         let mut depth = 0i32;
         lines.retain(|line| {
             let trimmed = line.trim();
-            // Track brace depth
+
+            // Section boundaries reset dead state
+            if trimmed.starts_with("---") && trimmed.ends_with("---") {
+                dead_depth = None;
+                depth = 0;
+                return true;
+            }
+
+            // Track closing braces
             if trimmed.starts_with('}') {
                 depth -= 1;
+                if dead_depth.is_some_and(|dd| depth < dd) {
+                    dead_depth = None;
+                }
+                return true; // always keep structural braces
             }
-            let at_top = depth <= 0;
+
+            let keep = if let Some(_dd) = dead_depth {
+                // Switch/case markers restart live code (case fall-through)
+                if trimmed.starts_with("case ") || trimmed.starts_with("switch (") {
+                    dead_depth = None;
+                    true
+                } else {
+                    trimmed.is_empty()
+                }
+            } else {
+                true
+            };
+
+            // Track opening braces
             if trimmed.ends_with(" {") || trimmed == "{" {
                 depth += 1;
             }
-            if dead {
-                // Switch/case markers restart live code (case fall-through)
-                if trimmed.starts_with("case ") || trimmed.starts_with("switch (") {
-                    dead = false;
-                    return true;
-                }
-                // Closing braces are structural, keep them
-                trimmed == "}" || trimmed.is_empty()
-            } else {
-                if at_top && trimmed == "return" {
-                    dead = true;
-                }
-                true
+
+            // Start dead zone after unconditional break (any depth) or
+            // return (depth 0, non-ubergraph only)
+            if keep
+                && dead_depth.is_none()
+                && (trimmed == "break" || (!has_labels && depth <= 0 && trimmed == "return"))
+            {
+                dead_depth = Some(depth);
             }
+
+            keep
         });
     }
 
