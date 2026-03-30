@@ -11,9 +11,9 @@ use crate::binary::*;
 use crate::bytecode::{
     apply_indentation, cleanup_structured_output, collect_jump_targets, decode_bytecode,
     discard_unused_assignments, eliminate_constant_condition_branches, fold_summary_patterns,
-    fold_switch_enum_cascade, inline_constant_temps, inline_single_use_temps, reorder_convergence,
-    reorder_flow_patterns, split_by_sequence_markers, strip_orphaned_blocks,
-    strip_unmatched_braces, structure_bytecode,
+    fold_switch_enum_cascade, inline_constant_temps, inline_single_use_temps,
+    rename_loop_temp_vars, reorder_convergence, reorder_flow_patterns, split_by_sequence_markers,
+    strip_orphaned_blocks, strip_unmatched_braces, structure_bytecode,
 };
 use crate::ffield::*;
 use crate::properties::read_properties;
@@ -596,6 +596,7 @@ pub fn structure_and_cleanup(stmts: &[crate::bytecode::BcStatement]) -> Vec<Stri
     // branches (e.g., inlining `Temp_bool = true` into `if (!Temp_bool) return`).
     eliminate_constant_condition_branches(&mut structured);
     strip_orphaned_blocks(&mut structured);
+    rename_loop_temp_vars(&mut structured);
     fold_switch_enum_cascade(&mut structured);
     apply_indentation(&mut structured);
     structured
@@ -638,6 +639,7 @@ fn structure_statements(stmts: &[crate::bytecode::BcStatement]) -> Vec<String> {
     eliminate_constant_condition_branches(&mut all_lines);
     strip_unmatched_braces(&mut all_lines);
     strip_orphaned_blocks(&mut all_lines);
+    rename_loop_temp_vars(&mut all_lines);
     fold_switch_enum_cascade(&mut all_lines);
     apply_indentation(&mut all_lines);
     all_lines

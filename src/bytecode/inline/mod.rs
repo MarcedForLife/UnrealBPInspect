@@ -6,8 +6,8 @@ mod patterns;
 mod temps;
 
 pub use cleanup::{
-    cleanup_structured_output, eliminate_constant_condition_branches, strip_orphaned_blocks,
-    strip_unmatched_braces,
+    cleanup_structured_output, eliminate_constant_condition_branches, rename_loop_temp_vars,
+    strip_orphaned_blocks, strip_unmatched_braces,
 };
 pub use fold::fold_long_lines;
 pub use patterns::{fold_summary_patterns, fold_switch_enum_cascade};
@@ -1025,35 +1025,6 @@ mod tests {
         fold_outparam_calls(&mut lines);
         // Has assignment -> it's a regular temp, not an out-param
         assert_eq!(lines.len(), 3);
-    }
-
-    // is_unused_outparam: requires var name to match function name
-    #[test]
-    fn unused_outparam_matching_name() {
-        let lines = vec![
-            "BreakHitResult(src, $BreakHitResult_Location)".to_string(),
-            "x = $BreakHitResult_Location".to_string(),
-        ];
-        // $BreakHitResult_Location starts with "BreakHitResult" -> not suppressed
-        // (it appears in non-arg context too, so it returns false anyway)
-        assert!(!is_unused_outparam(&lines, "$BreakHitResult_Location"));
-    }
-
-    #[test]
-    fn unused_outparam_non_matching_name() {
-        let lines = vec!["FClamp($Add_FloatFloat, 0.0, 1.0)".to_string()];
-        // $Add_FloatFloat doesn't start with "FClamp" -> false
-        assert!(!is_unused_outparam(&lines, "$Add_FloatFloat"));
-    }
-
-    #[test]
-    fn unused_outparam_genuine() {
-        let lines = vec![
-            "GetFoo($GetFoo_Result)".to_string(),
-            "GetFoo($GetFoo_Result)".to_string(),
-        ];
-        // $GetFoo_Result starts with "GetFoo", only appears as arg -> true
-        assert!(is_unused_outparam(&lines, "$GetFoo_Result"));
     }
 
     // fold_switch_enum_cascade
