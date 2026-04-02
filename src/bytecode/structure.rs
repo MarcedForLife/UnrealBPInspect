@@ -8,7 +8,8 @@
 
 use super::decode::BcStatement;
 use super::flow::{
-    parse_if_jump, parse_jump, parse_jump_computed, parse_pop_flow_if_not, parse_push_flow,
+    parse_continue_if_not, parse_if_jump, parse_jump, parse_jump_computed, parse_pop_flow_if_not,
+    parse_push_flow,
 };
 use crate::helpers::{closes_block, is_loop_header, opens_block, SECTION_SEPARATOR};
 use std::collections::{HashMap, HashSet};
@@ -417,6 +418,9 @@ fn emit_stmts_range(
             if !already_breaking {
                 output.push(keyword.to_string());
             }
+        } else if let Some(cond) = parse_continue_if_not(&stmt.text) {
+            let negated = negate_cond(cond);
+            output.push(format!("if ({}) continue", negated));
         } else if let Some(cond) = parse_pop_flow_if_not(&stmt.text) {
             let keyword = if in_loop(block_stack) {
                 "break"
