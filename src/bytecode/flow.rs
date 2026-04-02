@@ -47,6 +47,15 @@ pub fn parse_pop_flow_if_not(text: &str) -> Option<&str> {
     Some(cond)
 }
 
+/// Parse "continue_if_not(COND)" -> condition string.
+/// This is a synthetic marker emitted for pop_flow_if_not inside ForEach bodies,
+/// where the pop means "skip to next iteration" rather than "break".
+pub fn parse_continue_if_not(text: &str) -> Option<&str> {
+    let inner = text.strip_prefix("continue_if_not(")?;
+    let cond = inner.strip_suffix(')')?;
+    Some(cond)
+}
+
 /// Parse "jump_computed(EXPR)" -> true if it's a computed jump.
 pub fn parse_jump_computed(text: &str) -> bool {
     text.starts_with("jump_computed(")
@@ -806,7 +815,17 @@ fn emit_single_loop(
     if lp.extra_start < lp.extra_end {
         output.extend_from_slice(&stmts[lp.extra_start..lp.extra_end]);
     }
+    let body_output_start = output.len();
     emit_body_range(stmts, lp.body_start_idx, body_end, loops, emitted, output);
+    // In confirmed ForEach bodies, pop_flow_if_not is "continue to next item",
+    // not "break". Rewrite to a marker the structurer handles differently.
+    if lp.foreach.is_some() {
+        for stmt in &mut output[body_output_start..] {
+            if let Some(cond) = parse_pop_flow_if_not(&stmt.text) {
+                stmt.text = format!("continue_if_not({})", cond);
+            }
+        }
+    }
     if lp.foreach.is_none() {
         output.extend_from_slice(&stmts[lp.incr_start..lp.back_jump_idx]);
     }
