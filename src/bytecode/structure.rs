@@ -8,8 +8,10 @@
 
 use super::decode::BcStatement;
 use super::flow::{
-    parse_if_jump, parse_jump, parse_jump_computed, parse_pop_flow_if_not, parse_push_flow,
+    parse_continue_if_not, parse_if_jump, parse_jump, parse_jump_computed, parse_pop_flow_if_not,
+    parse_push_flow,
 };
+use crate::helpers::{closes_block, is_loop_header, opens_block, SECTION_SEPARATOR};
 use std::collections::{HashMap, HashSet};
 
 /// Indentation string per nesting level (4 spaces).
@@ -385,7 +387,7 @@ fn emit_stmts_range(
         if let Some(label) = ctx.label_at.get(&i) {
             if ctx.is_ubergraph
                 && !output.is_empty()
-                && !output.iter().any(|l| l.starts_with("---"))
+                && !output.iter().any(|l| l.starts_with(SECTION_SEPARATOR))
             {
                 let has_content = output.iter().any(|l| {
                     let trimmed = l.trim();
@@ -416,6 +418,9 @@ fn emit_stmts_range(
             if !already_breaking {
                 output.push(keyword.to_string());
             }
+        } else if let Some(cond) = parse_continue_if_not(&stmt.text) {
+            let negated = negate_cond(cond);
+            output.push(format!("if ({}) continue", negated));
         } else if let Some(cond) = parse_pop_flow_if_not(&stmt.text) {
             let keyword = if in_loop(block_stack) {
                 "break"
@@ -556,7 +561,7 @@ pub fn apply_indentation(lines: &mut [String]) {
         }
 
         let closes = trimmed.starts_with('}');
-        let opens = trimmed.ends_with(" {") || trimmed == "{";
+        let opens = opens_block(&trimmed);
 
         if closes {
             depth = depth.saturating_sub(1);
@@ -852,7 +857,10 @@ fn find_break_labels(output: &[String]) -> HashSet<String> {
     let mut labels = HashSet::new();
     for (i, line) in output.iter().enumerate() {
         let trimmed = line.trim();
-        if !trimmed.ends_with(':') || trimmed.starts_with("---") || trimmed.starts_with("//") {
+        if !trimmed.ends_with(':')
+            || trimmed.starts_with(SECTION_SEPARATOR)
+            || trimmed.starts_with("//")
+        {
             continue;
         }
         let label = &trimmed[..trimmed.len() - 1];
@@ -888,13 +896,13 @@ fn rewrite_gotos(output: &mut [String], break_labels: &HashSet<String>) {
             let mut depth = 0i32;
             output[..i].iter().rev().any(|line| {
                 let ltrim = line.trim();
-                if ltrim == "}" || ltrim.starts_with("} ") {
+                if closes_block(ltrim) {
                     depth += 1; // going backward, closing brace increases depth
                 }
-                if ltrim.ends_with(" {") || ltrim == "{" {
+                if opens_block(ltrim) {
                     if depth == 0 {
                         // Found the enclosing block opener
-                        return ltrim.starts_with("while ") || ltrim.starts_with("for ");
+                        return is_loop_header(ltrim);
                     }
                     depth -= 1;
                 }
@@ -918,7 +926,10 @@ fn remove_orphaned_labels(output: &mut Vec<String>, break_labels: &HashSet<Strin
         .collect();
     output.retain(|line| {
         let trimmed = line.trim();
-        if trimmed.ends_with(':') && !trimmed.starts_with("---") && !trimmed.starts_with("//") {
+        if trimmed.ends_with(':')
+            && !trimmed.starts_with(SECTION_SEPARATOR)
+            && !trimmed.starts_with("//")
+        {
             let label = &trimmed[..trimmed.len() - 1];
             if break_labels.contains(label) {
                 return remaining_gotos.contains(label);
@@ -950,11 +961,11 @@ fn find_convergence_extent(output: &[String], code_start: usize) -> usize {
         if j > code_start
             && trimmed.ends_with(':')
             && !trimmed.starts_with("//")
-            && !trimmed.starts_with("---")
+            && !trimmed.starts_with(SECTION_SEPARATOR)
         {
             break;
         }
-        if trimmed.ends_with(" {") || trimmed == "{" {
+        if opens_block(trimmed) {
             depth += 1;
         }
         code_end = j + 1;
@@ -969,10 +980,10 @@ fn find_insertion_point(output: &[String], max_goto: usize) -> usize {
     for (j, line) in output[(max_goto + 1)..].iter().enumerate() {
         let j = j + max_goto + 1;
         let trimmed = line.trim();
-        if trimmed.ends_with(" {") || trimmed == "{" {
+        if opens_block(trimmed) {
             depth += 1;
         }
-        if trimmed == "}" || trimmed.starts_with("} ") {
+        if closes_block(trimmed) {
             if depth == 0 {
                 return j;
             }

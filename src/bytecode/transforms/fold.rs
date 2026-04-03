@@ -5,6 +5,8 @@
 //! one level (4 spaces) beyond the original line's indentation. Runs as the
 //! final pass in `format_summary` on the fully assembled output.
 
+use crate::helpers::SECTION_SEPARATOR;
+
 const MAX_LINE_WIDTH: usize = 120;
 
 /// Fold all lines in `lines` that exceed `MAX_LINE_WIDTH`.
@@ -17,7 +19,7 @@ pub fn fold_long_lines(lines: &mut Vec<String>) {
         }
 
         let trimmed = lines[idx].trim();
-        if trimmed.starts_with("---")
+        if trimmed.starts_with(SECTION_SEPARATOR)
             || trimmed.starts_with("//")
             || trimmed == "}"
             || trimmed == "{"

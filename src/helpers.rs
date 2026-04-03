@@ -72,6 +72,43 @@ pub fn expr_is_compound(expr: &str) -> bool {
         || expr.starts_with('!')
 }
 
+/// Section separator prefix used in structured output (e.g. `--- FunctionName ---`).
+pub const SECTION_SEPARATOR: &str = "---";
+
+/// True if the trimmed line is a section separator (`--- ... ---`).
+pub fn is_section_separator(trimmed: &str) -> bool {
+    trimmed.starts_with(SECTION_SEPARATOR) && trimmed.ends_with(SECTION_SEPARATOR)
+}
+
+/// True if the trimmed line opens a block (`... {` or bare `{`).
+pub fn opens_block(trimmed: &str) -> bool {
+    trimmed.ends_with(" {") || trimmed == "{"
+}
+
+/// True if the trimmed line closes a block (`}` or `} else ...`).
+pub fn closes_block(trimmed: &str) -> bool {
+    trimmed == "}" || trimmed.starts_with("} ")
+}
+
+/// True if the trimmed line is a block boundary (opening or closing brace).
+pub fn is_block_boundary(trimmed: &str) -> bool {
+    opens_block(trimmed) || closes_block(trimmed)
+}
+
+/// Header prefix for `while` loops.
+pub const WHILE_PREFIX: &str = "while (";
+/// Header prefix for `for` loops (both ForEach and ForLoopWithBreak output).
+pub const FOR_PREFIX: &str = "for (";
+/// Header prefix for flow-confirmed ForEach loops (before text-level rewriting).
+pub const FOREACH_PREFIX: &str = "foreach (";
+
+/// True if the trimmed line is a loop header.
+pub fn is_loop_header(trimmed: &str) -> bool {
+    trimmed.starts_with(WHILE_PREFIX)
+        || trimmed.starts_with(FOR_PREFIX)
+        || trimmed.starts_with(FOREACH_PREFIX)
+}
+
 /// Split comma-separated arguments respecting nested parens, brackets, and braces.
 pub fn split_args(input: &str) -> Vec<&str> {
     let mut result = Vec::new();
