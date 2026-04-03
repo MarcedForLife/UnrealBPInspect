@@ -168,7 +168,11 @@ fn collect_struct_fields(
 
 /// Format a struct constructor: `TARGET = TYPE(field1: val1, field2: val2)`.
 /// Omits the label when field name matches the value (positional shorthand).
-fn format_struct_constructor(target: &str, struct_var: &str, fields: &[(String, String)]) -> String {
+fn format_struct_constructor(
+    target: &str,
+    struct_var: &str,
+    fields: &[(String, String)],
+) -> String {
     let type_name = struct_var
         .strip_prefix(MAKE_STRUCT_PREFIX)
         .unwrap_or(struct_var);

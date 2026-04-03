@@ -163,10 +163,7 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
         });
     }
 
-    // Pass 4: rewrite negated guards with compound conditions
-    rewrite_negated_guards(lines);
-
-    // Pass 5: strip trailing unmatched closing braces.
+    // Pass 4: strip trailing unmatched closing braces.
     // Per-pin structuring can leave orphaned `}` when flow patterns consume
     // the block-opening statement but not its close. Count braces and strip excess.
     let opens: usize = lines.iter().filter(|l| l.trim().ends_with('{')).count();
@@ -486,106 +483,13 @@ pub(super) fn has_toplevel_logical_op(input: &str) -> bool {
     find_at_depth_zero(input, " && ").is_some() || find_at_depth_zero(input, " || ").is_some()
 }
 
-/// Rewrite `if (!(COMPOUND)) return` -> `if (COMPOUND) { body }` when the
-/// condition contains `&&`/`||` and the remaining body is <= 8 lines.
-/// All text is flat; uses brace counting for body extent detection.
-fn rewrite_negated_guards(lines: &mut Vec<String>) {
-    let mut i = lines.len();
-    while i > 0 {
-        i -= 1;
-        let line = &lines[i];
-        let trimmed = line.trim();
-
-        if !trimmed.starts_with("if (") {
-            continue;
-        }
-
-        // Find matching ) for the ( after "if "
-        let after_if = &trimmed[3..];
-        let Some(close) = find_matching_paren(after_if) else {
-            continue;
-        };
-        let rest = after_if[close + 1..].trim();
-        if rest != "return" {
-            continue;
-        }
-
-        let cond = after_if[1..close].trim();
-
-        // Must be !(COMPOUND)
-        if !cond.starts_with("!(") {
-            continue;
-        }
-        let Some(inner_close) = find_matching_paren(&cond[1..]) else {
-            continue;
-        };
-        if 1 + inner_close + 1 != cond.len() {
-            continue;
-        }
-
-        let compound = &cond[2..1 + inner_close];
-
-        // Only rewrite compound conditions
-        if !compound.contains(" && ") && !compound.contains(" || ") {
-            continue;
-        }
-
-        // Find body extent: scan forward, stop at section boundary, scope exit, or
-        // a closing brace at the same brace depth as the guard
-        let mut body_end = i + 1;
-        let mut depth = 0i32;
-        while body_end < lines.len() {
-            let scan = lines[body_end].trim();
-            if scan.starts_with("--- ") && scan.ends_with(" ---") {
-                break;
-            }
-            if scan.is_empty() {
-                body_end += 1;
-                continue;
-            }
-            if scan.starts_with('}') {
-                depth -= 1;
-                if depth < 0 {
-                    break;
-                }
-            }
-            if scan == "}" && depth == 0 {
-                break;
-            }
-            if opens_block(scan) {
-                depth += 1;
-            }
-            body_end += 1;
-        }
-
-        // Trim trailing returns and empty lines from body
-        let mut effective_end = body_end;
-        while effective_end > i + 1 {
-            let end_trimmed = lines[effective_end - 1].trim();
-            if end_trimmed == "return" || end_trimmed.is_empty() {
-                effective_end -= 1;
-            } else {
-                break;
-            }
-        }
-
-        let body_count = effective_end - (i + 1);
-        if body_count == 0 || body_count > 8 {
-            continue;
-        }
-
-        // Rewrite: replace guard with positive if, wrap body in braces
-        lines[i] = format!("if ({}) {{", compound);
-        lines.insert(effective_end, "}".to_string());
-    }
-}
-
 /// Shorten UE4 ForEach compiler-generated loop variable names that survived
 /// the ForEach rewriter (typically search-and-break loops with no increment).
 pub fn rename_loop_temp_vars(lines: &mut [String]) {
     // Pairs: (long prefix, short prefix). Suffixed variants like _1 are handled
     // by replacing the prefix, which preserves the suffix.
-    const RENAMES: &[(&str, &str)] = &[(LOOP_COUNTER_VAR, "loop_idx"), (ARRAY_INDEX_VAR, "arr_idx")];
+    const RENAMES: &[(&str, &str)] =
+        &[(LOOP_COUNTER_VAR, "loop_idx"), (ARRAY_INDEX_VAR, "arr_idx")];
     for line in lines.iter_mut() {
         for &(long, short) in RENAMES {
             if line.contains(long) {
@@ -644,8 +548,7 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
     let mut remove_indices: HashSet<usize> = HashSet::new();
     for idx in 0..lines.len() {
         let trimmed = lines[idx].trim();
-        if !(trimmed.starts_with(LOOP_COUNTER_VAR) || trimmed.starts_with(ARRAY_INDEX_VAR))
-        {
+        if !(trimmed.starts_with(LOOP_COUNTER_VAR) || trimmed.starts_with(ARRAY_INDEX_VAR)) {
             continue;
         }
         if !trimmed.ends_with(" = 0") {

@@ -852,51 +852,6 @@ mod tests {
         );
     }
 
-    // ========== fold_cast_inline tests ==========
-
-    #[test]
-    fn cast_inline_basic() {
-        let mut lines = vec![
-            "$Cast = cast<MyType>(GetObj())".to_string(),
-            "if ($Cast) {".to_string(),
-            "self.Foo = $Cast".to_string(),
-            "}".to_string(),
-        ];
-        fold_cast_inline(&mut lines);
-        assert_eq!(lines[0], "if (cast<MyType>(GetObj())) {");
-        assert_eq!(lines[1], "self.Foo = cast<MyType>(GetObj())");
-        assert_eq!(lines[2], "}");
-        assert_eq!(lines.len(), 3);
-    }
-
-    #[test]
-    fn cast_inline_too_many_refs() {
-        let mut lines = vec![
-            "$Cast = cast<T>(expr)".to_string(),
-            "if ($Cast) {".to_string(),
-            "    A($Cast)".to_string(),
-            "    B($Cast)".to_string(),
-            "    C($Cast)".to_string(),
-            "}".to_string(),
-        ];
-        fold_cast_inline(&mut lines);
-        // 4 refs (if + 3 body) > 3, should NOT inline
-        assert_eq!(lines.len(), 6);
-        assert_eq!(lines[0], "$Cast = cast<T>(expr)");
-    }
-
-    #[test]
-    fn cast_inline_already_else_return() {
-        let mut lines = vec![
-            "$Cast = cast<T>(expr) else return".to_string(),
-            "self.Foo = $Cast".to_string(),
-        ];
-        fold_cast_inline(&mut lines);
-        // Should not touch "else return" lines
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], "$Cast = cast<T>(expr) else return");
-    }
-
     // ========== hoist_repeated_ternaries tests ==========
 
     #[test]
@@ -1060,11 +1015,13 @@ mod tests {
     // fold_switch_enum_cascade
     #[test]
     fn switch_enum_cascade_flat() {
+        // After nested-if structuring, guards become wrapping if-blocks
         let mut lines = vec![
             "$SwitchEnum_CmpSuccess = Status != 0".to_string(),
             "if ($SwitchEnum_CmpSuccess) {".to_string(),
             "$SwitchEnum_CmpSuccess = Status != 1".to_string(),
-            "if (!$SwitchEnum_CmpSuccess) return".to_string(),
+            "if ($SwitchEnum_CmpSuccess) {".to_string(),
+            "}".to_string(),
             "}".to_string(),
             "body_after_cascade()".to_string(),
         ];
@@ -1080,7 +1037,8 @@ mod tests {
             "$SwitchEnum_CmpSuccess = X != 0".to_string(),
             "if ($SwitchEnum_CmpSuccess) {".to_string(),
             "$SwitchEnum_CmpSuccess = X != 1".to_string(),
-            "if (!$SwitchEnum_CmpSuccess) return".to_string(),
+            "if ($SwitchEnum_CmpSuccess) {".to_string(),
+            "}".to_string(),
             "}".to_string(),
             "return".to_string(),
         ];
@@ -1119,35 +1077,6 @@ mod tests {
     }
 
     // rewrite_negated_guards
-
-    #[test]
-    fn negated_guard_rewrite_wraps_body() {
-        let mut lines = vec![
-            "if (!(A && B)) return".to_string(),
-            "DoThing()".to_string(),
-            "DoOther()".to_string(),
-        ];
-        cleanup_structured_output(&mut lines);
-        let text = lines.join("\n");
-        assert!(
-            text.contains("if (A && B) {"),
-            "guard not rewritten:\n{}",
-            text
-        );
-        assert!(text.contains("}"), "missing closing brace:\n{}", text);
-    }
-
-    #[test]
-    fn negated_guard_simple_condition_not_rewritten() {
-        // Simple conditions (no && / ||) stay as guards
-        let mut lines = vec!["if (!X) return".to_string(), "DoThing()".to_string()];
-        cleanup_structured_output(&mut lines);
-        assert!(
-            lines.iter().any(|l| l.trim() == "if (!X) return"),
-            "simple guard was rewritten:\n{}",
-            lines.join("\n")
-        );
-    }
 
     #[test]
     fn eliminate_if_true_with_else() {
