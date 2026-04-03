@@ -1,8 +1,12 @@
-//! Temp variable inlining, expression cleanup, and summary pattern folding.
+//! Text-level transforms: temp inlining, expression cleanup, loop/struct/switch
+//! pattern folding, and line formatting.
 
 mod cleanup;
 mod fold;
-mod patterns;
+mod loops;
+mod pipeline;
+mod structs;
+mod switch;
 mod temps;
 
 pub use cleanup::{
@@ -10,11 +14,35 @@ pub use cleanup::{
     strip_orphaned_blocks, strip_unmatched_braces,
 };
 pub use fold::fold_long_lines;
-pub use patterns::{fold_summary_patterns, fold_switch_enum_cascade};
+pub use pipeline::fold_summary_patterns;
+pub use switch::fold_switch_enum_cascade;
 pub use temps::{
     collect_jump_targets, discard_unused_assignments, inline_constant_temps,
     inline_single_use_temps,
 };
+
+// UE4/UE5 compiler-generated variable/function prefixes shared across transforms.
+
+/// Prefix for `$MakeStruct_TYPE` temp variables and field assignments.
+pub(super) const MAKE_STRUCT_PREFIX: &str = "$MakeStruct_";
+
+/// Prefix for `Break*` struct decomposition function calls.
+pub(super) const BREAK_FUNC_PREFIX: &str = "Break";
+
+/// Prefix for `$SwitchEnum_CmpSuccess` cascade comparison variables.
+pub(super) const SWITCH_ENUM_PREFIX: &str = "$SwitchEnum_CmpSuccess";
+
+/// UE4 break-hit flag variable name (may have numeric suffixes like `_1`).
+pub(super) const BREAK_HIT_VAR: &str = "Temp_bool_True_if_break_was_hit_Variable";
+
+/// Prefix for compiler-generated integer temp variables (loop counters, indices).
+pub(super) const TEMP_INT_PREFIX: &str = "Temp_int_";
+
+/// ForEach loop counter variable name.
+pub(super) const LOOP_COUNTER_VAR: &str = "Temp_int_Loop_Counter_Variable";
+
+/// ForEach array index variable name.
+pub(super) const ARRAY_INDEX_VAR: &str = "Temp_int_Array_Index_Variable";
 
 // Shared helpers
 
@@ -52,8 +80,8 @@ pub(super) fn count_var_refs(text: &str, var: &str) -> usize {
 }
 
 pub(super) use crate::helpers::{
-    expr_is_compound, find_at_depth_zero, find_matching_paren, is_ident_char, split_args,
-    strip_outer_parens,
+    closes_block, expr_is_compound, find_at_depth_zero, find_matching_paren, is_block_boundary,
+    is_ident_char, is_loop_header, opens_block, split_args, strip_outer_parens,
 };
 
 /// Check if `var` appears at a word boundary at position `pos` in `text`.
@@ -129,7 +157,9 @@ mod tests {
     use std::collections::HashSet;
 
     use super::cleanup::*;
-    use super::patterns::*;
+    use super::pipeline::*;
+    use super::structs::*;
+    use super::switch::*;
     use super::temps::*;
     use super::*;
 

@@ -14,7 +14,7 @@ src/
   enums.rs             Common UE4 enum argument resolution (ECollisionEnabled, EAttachmentRule, etc.)
   properties.rs        Tagged property deserialiser
   ffield.rs            FField type resolution, function signatures
-  helpers.rs           Shared text utilities (indent_of, find_matching_paren, split_args)
+  helpers.rs           Shared text utilities (indent_of, find_matching_paren, split_args, is_loop_header)
   parser.rs            Asset parser orchestrator (parse_asset, ParseCtx)
   output_text.rs       Dump output mode (--dump)
   output_json.rs       JSON output mode (--json)
@@ -33,11 +33,14 @@ src/
     decode.rs          Expression decoder (~85 opcodes), BcStatement, DecodeCtx, decode_bytecode
     flow.rs            Flow pattern detection (sequences, for-loops, ForEach, convergence reorder)
     structure.rs       Region tree (if/else/loop blocks), apply_indentation post-pass
-    inline/
+    transforms/
       mod.rs           Shared helpers (parse_temp_assignment, substitute_var, etc.), re-exports
       temps.rs         Temp variable inlining, constant folding, dead assignment removal
       cleanup.rs       Line cleanup, bool switch rewriting, brace/goto cleanup, loop var renaming
-      patterns.rs      Summary pattern folding: ForEach, delegates, casts, Break/Make, ternaries, switch/case
+      loops.rs         Loop pattern rewriting: ForEach (confirmed/unconfirmed), ForLoopWithBreak
+      structs.rs       Break/Make struct folding, struct construction, Make* rename
+      switch.rs        Switch/enum cascade folding
+      pipeline.rs      Summary pipeline orchestration, delegates, casts, ternaries, section temps
       fold.rs          Line folding for long pseudocode lines (120-char target)
   update.rs            Self-update from GitHub releases (--update)
 install.sh             macOS/Linux install script (curl | sh)
@@ -92,7 +95,7 @@ The parser reads the binary format sequentially through these modules:
 1. **binary.rs** — Low-level I/O helpers and NameTable
 2. **properties.rs** — Tagged property deserialisation (recursive)
 3. **ffield.rs** — FField child property parsing, type resolution, function signatures
-4. **bytecode/** — Kismet bytecode: expression decoding (~85 opcodes, UE5 LWC support), flow pattern detection, if/else/loop structuring via region tree, single-pass indentation
+4. **bytecode/** — Kismet bytecode: expression decoding (~85 opcodes, UE5 LWC support), flow pattern detection (sequences, ForEach via `foreach (COND) {` markers, ForLoopWithBreak), if/else/loop structuring via region tree, single-pass indentation
 5. **parser.rs** — Orchestrates all parsing: header, name/import/export tables, export data, bytecode
 6. **output_*.rs** — Three output modes: summary (default), dump, JSON. Summary mode uses 2D bounding-box intersection between EdGraph comment boxes/bubble comments and identifiable nodes to place comments inline near corresponding bytecode.
 

@@ -1,8 +1,11 @@
 //! Expression cleanup and structural artifact removal.
 
 use super::{
-    expr_is_compound, find_at_depth_zero, find_matching_paren, is_ident_char, strip_outer_parens,
+    closes_block, expr_is_compound, find_at_depth_zero, find_matching_paren, is_ident_char,
+    is_loop_header, opens_block, strip_outer_parens, ARRAY_INDEX_VAR, BREAK_HIT_VAR,
+    LOOP_COUNTER_VAR,
 };
+use crate::helpers::{is_section_separator, SECTION_SEPARATOR};
 use std::collections::{HashMap, HashSet};
 
 /// Find the closing brace that matches a block-opening line at `open_idx`.
@@ -14,9 +17,9 @@ fn find_block_close(lines: &[String], open_idx: usize) -> usize {
     let mut idx = open_idx + 1;
     while idx < lines.len() && depth > 0 {
         let inner = lines[idx].trim();
-        if inner == "}" || inner.starts_with("} ") {
+        if closes_block(inner) {
             depth -= 1;
-        } else if inner.ends_with(" {") || inner == "{" {
+        } else if opens_block(inner) {
             depth += 1;
         }
         if depth > 0 {
@@ -105,7 +108,7 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
     // Pass 3: suppress dead code after unconditional `return` (depth 0) or `break` (any depth).
     // `return` only at depth 0 in non-ubergraph functions; `break` anywhere since it only
     // terminates the innermost block.
-    let has_labels = lines.iter().any(|l| l.starts_with("---"));
+    let has_labels = lines.iter().any(|l| l.starts_with(SECTION_SEPARATOR));
     {
         // dead_depth: when Some(d), we're suppressing dead code that started at depth d.
         // Lines are dead until we close back to depth < d.
@@ -115,7 +118,7 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
             let trimmed = line.trim();
 
             // Section boundaries reset dead state
-            if trimmed.starts_with("---") && trimmed.ends_with("---") {
+            if is_section_separator(trimmed) {
                 dead_depth = None;
                 depth = 0;
                 return true;
@@ -143,7 +146,7 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
             };
 
             // Track opening braces
-            if trimmed.ends_with(" {") || trimmed == "{" {
+            if opens_block(trimmed) {
                 depth += 1;
             }
 
@@ -229,7 +232,7 @@ pub fn eliminate_constant_condition_branches(lines: &mut Vec<String>) {
         };
 
         let trimmed = lines[idx].trim().to_string();
-        let is_block = trimmed.ends_with(" {") || trimmed == "{";
+        let is_block = opens_block(&trimmed);
 
         if is_block {
             let close_idx = find_block_close(lines, idx);
@@ -549,7 +552,7 @@ fn rewrite_negated_guards(lines: &mut Vec<String>) {
             if scan == "}" && depth == 0 {
                 break;
             }
-            if scan.ends_with(" {") || scan == "{" {
+            if opens_block(scan) {
                 depth += 1;
             }
             body_end += 1;
@@ -582,10 +585,7 @@ fn rewrite_negated_guards(lines: &mut Vec<String>) {
 pub fn rename_loop_temp_vars(lines: &mut [String]) {
     // Pairs: (long prefix, short prefix). Suffixed variants like _1 are handled
     // by replacing the prefix, which preserves the suffix.
-    const RENAMES: &[(&str, &str)] = &[
-        ("Temp_int_Loop_Counter_Variable", "loop_idx"),
-        ("Temp_int_Array_Index_Variable", "arr_idx"),
-    ];
+    const RENAMES: &[(&str, &str)] = &[(LOOP_COUNTER_VAR, "loop_idx"), (ARRAY_INDEX_VAR, "arr_idx")];
     for line in lines.iter_mut() {
         for &(long, short) in RENAMES {
             if line.contains(long) {
@@ -609,7 +609,7 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
                 depth -= 1;
             }
             let at_top = depth <= 0;
-            if trimmed.ends_with(" {") || trimmed == "{" {
+            if opens_block(trimmed) {
                 depth += 1;
             }
             // Standalone iface() calls at any depth
@@ -636,7 +636,7 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
     // internal bookkeeping and never meaningful in pseudocode.
     lines.retain(|l| {
         let trimmed = l.trim();
-        !trimmed.starts_with("Temp_bool_True_if_break_was_hit_Variable") || !trimmed.contains(" = ")
+        !trimmed.starts_with(BREAK_HIT_VAR) || !trimmed.contains(" = ")
     });
 
     // Remove residual counter/index init lines that appear just before a while/for
@@ -644,8 +644,7 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
     let mut remove_indices: HashSet<usize> = HashSet::new();
     for idx in 0..lines.len() {
         let trimmed = lines[idx].trim();
-        if !(trimmed.starts_with("Temp_int_Loop_Counter_Variable")
-            || trimmed.starts_with("Temp_int_Array_Index_Variable"))
+        if !(trimmed.starts_with(LOOP_COUNTER_VAR) || trimmed.starts_with(ARRAY_INDEX_VAR))
         {
             continue;
         }
@@ -655,10 +654,7 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
         // Check if a while/for loop follows within the next 3 lines
         let has_loop_nearby = lines[idx + 1..std::cmp::min(idx + 4, lines.len())]
             .iter()
-            .any(|l| {
-                let lt = l.trim();
-                lt.starts_with("while (") || lt.starts_with("for (")
-            });
+            .any(|l| is_loop_header(l.trim()));
         if has_loop_nearby {
             remove_indices.insert(idx);
         }
@@ -782,10 +778,10 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
 fn brace_depth(lines: &[String]) -> i32 {
     lines.iter().fold(0i32, |d, l| {
         let trimmed = l.trim();
-        if trimmed.ends_with(" {") || trimmed == "{" {
+        if opens_block(trimmed) {
             let close = i32::from(trimmed.starts_with("} "));
             d - close + 1
-        } else if trimmed == "}" || trimmed.starts_with("} ") {
+        } else if closes_block(trimmed) {
             d - 1
         } else {
             d
@@ -797,8 +793,7 @@ fn brace_depth(lines: &[String]) -> i32 {
 /// Resets depth at section boundaries (`---`, `// sequence [`).
 pub fn strip_unmatched_braces(lines: &mut Vec<String>) {
     fn is_boundary(trimmed: &str) -> bool {
-        (trimmed.starts_with("---") && trimmed.ends_with("---"))
-            || trimmed.starts_with("// sequence [")
+        (is_section_separator(trimmed)) || trimmed.starts_with("// sequence [")
     }
 
     // Pass 1: remove orphaned closing braces
@@ -809,7 +804,7 @@ pub fn strip_unmatched_braces(lines: &mut Vec<String>) {
             depth = 0;
             return true;
         }
-        if trimmed.ends_with(" {") || trimmed == "{" {
+        if opens_block(trimmed) {
             // "} else {" both closes and opens, net zero depth change
             if trimmed.starts_with("} ") {
                 if depth == 0 {
@@ -819,7 +814,7 @@ pub fn strip_unmatched_braces(lines: &mut Vec<String>) {
             }
             depth += 1;
             true
-        } else if trimmed == "}" || trimmed.starts_with("} ") {
+        } else if closes_block(trimmed) {
             if depth > 0 {
                 depth -= 1;
                 true
@@ -843,9 +838,9 @@ pub fn strip_unmatched_braces(lines: &mut Vec<String>) {
             depth = 0;
             continue;
         }
-        if trimmed == "}" || trimmed.starts_with("} ") {
+        if closes_block(&trimmed) {
             depth += 1;
-        } else if trimmed.ends_with(" {") || trimmed == "{" {
+        } else if opens_block(&trimmed) {
             if depth > 0 {
                 depth -= 1;
             } else {

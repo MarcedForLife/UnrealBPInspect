@@ -3,17 +3,17 @@
 //! 1. [`decode`]: expression decoding into flat statements
 //! 2. [`flow`]: pattern detection (sequences, loops, convergence reorder)
 //! 3. [`structure`]: if/else reconstruction from jump patterns
-//! 4. [`inline`]: temp inlining, cleanup, summary pattern folding
+//! 4. [`transforms`]: temp inlining, cleanup, summary pattern folding
 
 pub mod decode;
 pub mod flow;
 mod format;
-pub mod inline;
 pub mod names;
 pub mod opcodes;
 pub mod readers;
 pub mod resolve;
 pub mod structure;
+pub mod transforms;
 
 use std::collections::HashMap;
 
@@ -26,13 +26,13 @@ pub use decode::{decode_bytecode, BcStatement};
 pub use flow::{
     parse_if_jump, parse_jump, parse_push_flow, reorder_convergence, reorder_flow_patterns,
 };
-pub use inline::{
+pub use structure::{apply_indentation, structure_bytecode};
+pub use transforms::{
     cleanup_structured_output, collect_jump_targets, discard_unused_assignments,
     eliminate_constant_condition_branches, fold_long_lines, fold_summary_patterns,
     fold_switch_enum_cascade, inline_constant_temps, inline_single_use_temps,
     rename_loop_temp_vars, strip_orphaned_blocks, strip_unmatched_braces,
 };
-pub use structure::{apply_indentation, structure_bytecode};
 
 /// Split BcStatements at `// sequence [N]:` markers.
 /// Returns a list of (optional marker text, body statements).

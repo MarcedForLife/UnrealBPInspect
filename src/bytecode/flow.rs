@@ -47,6 +47,15 @@ pub fn parse_pop_flow_if_not(text: &str) -> Option<&str> {
     Some(cond)
 }
 
+/// Parse "continue_if_not(COND)" -> condition string.
+/// This is a synthetic marker emitted for pop_flow_if_not inside ForEach bodies,
+/// where the pop means "skip to next iteration" rather than "break".
+pub fn parse_continue_if_not(text: &str) -> Option<&str> {
+    let inner = text.strip_prefix("continue_if_not(")?;
+    let cond = inner.strip_suffix(')')?;
+    Some(cond)
+}
+
 /// Parse "jump_computed(EXPR)" -> true if it's a computed jump.
 pub fn parse_jump_computed(text: &str) -> bool {
     text.starts_with("jump_computed(")
@@ -74,9 +83,18 @@ struct ForLoop {
     loop_ctrl_end: usize,
     body_start_idx: usize,
     body_end_idx: usize,
-    // ForEach detection: completion path between loop exit and displaced body
     completion_start: Option<usize>,
     completion_end: Option<usize>,
+    /// When set, this loop is a confirmed ForEach. The flow layer emits
+    /// `foreach {` and suppresses init/increment boilerplate, so the pattern
+    /// layer only needs to extract ITEM/ARRAY from the body.
+    foreach: Option<ForeachInfo>,
+}
+
+/// ForEach-specific details detected by the flow layer.
+struct ForeachInfo {
+    /// Indices of `Temp_int_* = 0` init statements to suppress from output.
+    init_indices: Vec<usize>,
 }
 
 /// Expand a Sequence pin's body boundary by following if/jump targets beyond the
@@ -434,6 +452,77 @@ fn resolve_foreach_body(
     }
 }
 
+/// Detect whether this loop is a ForEach pattern. Checks for `INDEX = COUNTER`
+/// in the extra range or body start, and `COUNTER = ...` in the increment region.
+/// Returns `Some(ForeachInfo)` with init line indices to suppress.
+fn detect_foreach_info(stmts: &[BcStatement], lp: &ForLoop) -> Option<ForeachInfo> {
+    let counter = find_increment_counter(stmts, lp.incr_start, lp.back_jump_idx)?;
+
+    // Check for INDEX = COUNTER in the extra range or body start
+    let body_candidate = (lp.body_start_idx < lp.body_end_idx).then_some(lp.body_start_idx);
+    let has_index_assign = (lp.extra_start..lp.extra_end)
+        .chain(body_candidate)
+        .any(|idx| {
+            stmts[idx]
+                .text
+                .split_once(" = ")
+                .is_some_and(|(lhs, rhs)| lhs.starts_with("Temp_int_") && rhs == counter)
+        });
+    if !has_index_assign {
+        return None;
+    }
+
+    let init_indices = find_foreach_init_stmts(stmts, lp.if_idx);
+    Some(ForeachInfo { init_indices })
+}
+
+/// Scan backward from `if_idx` collecting ForEach init boilerplate to suppress:
+/// `Temp_int_* = 0` init lines and `Temp_bool_* = false` break-hit init.
+/// Skips `$`-prefixed condition computation temps (these are cleaned up later
+/// by `discard_unused_assignments` or `fold_section_temps`).
+fn find_foreach_init_stmts(stmts: &[BcStatement], if_idx: usize) -> Vec<usize> {
+    let mut result = Vec::new();
+    for j in (0..if_idx).rev() {
+        let text = stmts[j].text.as_str();
+        if text.is_empty() {
+            continue;
+        }
+        if text
+            .strip_suffix(" = 0")
+            .is_some_and(|v| v.starts_with("Temp_int_"))
+        {
+            result.push(j);
+            continue;
+        }
+        if text.starts_with("Temp_bool_") && text.ends_with(" = false") {
+            result.push(j);
+            continue;
+        }
+        if text.starts_with('$') {
+            continue; // skip, don't collect
+        }
+        break;
+    }
+    result
+}
+
+/// Extract the counter variable name from the increment region.
+///
+/// The increment region (between push_flow+jump and back_jump) contains statements like:
+///   `$Add_IntInt = COUNTER + 1`
+///   `COUNTER = $Add_IntInt`
+/// We look for the assignment that writes back to a Temp_int variable.
+fn find_increment_counter(
+    stmts: &[BcStatement],
+    incr_start: usize,
+    back_jump_idx: usize,
+) -> Option<&str> {
+    stmts[incr_start..back_jump_idx].iter().find_map(|stmt| {
+        let (lhs, _) = stmt.text.split_once(" = ")?;
+        lhs.starts_with("Temp_int_").then_some(lhs)
+    })
+}
+
 /// Detect for-loops (including ForEach with displaced body and completion path).
 fn detect_for_loops(
     stmts: &[BcStatement],
@@ -523,7 +612,7 @@ fn detect_for_loops(
             continue;
         }
 
-        loops.push(ForLoop {
+        let mut lp = ForLoop {
             cond_text: cond,
             if_idx: i,
             extra_start,
@@ -535,7 +624,10 @@ fn detect_for_loops(
             body_end_idx: body_end,
             completion_start,
             completion_end,
-        });
+            foreach: None,
+        };
+        lp.foreach = detect_foreach_info(stmts, &lp);
+        loops.push(lp);
     }
 
     loops
@@ -707,17 +799,36 @@ fn emit_single_loop(
         mem_offset: lp_offset,
         text: text.to_string(),
     };
-    output.push(marker(&format!("while ({}) {{", lp.cond_text)));
-    if lp.extra_start < lp.extra_end {
-        output.extend_from_slice(&stmts[lp.extra_start..lp.extra_end]);
-    }
     let body_end = if stmts[lp.body_end_idx].text == "return nop" {
         lp.body_end_idx
     } else {
         lp.body_end_idx + 1
     };
+    // Confirmed ForEach: emit `foreach (COND)` and drop the increment.
+    // Unconfirmed: emit `while (COND)` with increment preserved.
+    let keyword = if lp.foreach.is_some() {
+        "foreach"
+    } else {
+        "while"
+    };
+    output.push(marker(&format!("{} ({}) {{", keyword, lp.cond_text)));
+    if lp.extra_start < lp.extra_end {
+        output.extend_from_slice(&stmts[lp.extra_start..lp.extra_end]);
+    }
+    let body_output_start = output.len();
     emit_body_range(stmts, lp.body_start_idx, body_end, loops, emitted, output);
-    output.extend_from_slice(&stmts[lp.incr_start..lp.back_jump_idx]);
+    // In confirmed ForEach bodies, pop_flow_if_not is "continue to next item",
+    // not "break". Rewrite to a marker the structurer handles differently.
+    if lp.foreach.is_some() {
+        for stmt in &mut output[body_output_start..] {
+            if let Some(cond) = parse_pop_flow_if_not(&stmt.text) {
+                stmt.text = format!("continue_if_not({})", cond);
+            }
+        }
+    }
+    if lp.foreach.is_none() {
+        output.extend_from_slice(&stmts[lp.incr_start..lp.back_jump_idx]);
+    }
     output.push(marker("}"));
     // Emit ForEach completion path after the loop.
     // Convert pop_flow to unconditional jumps targeting the function return
@@ -832,6 +943,14 @@ fn emit_reordered(
         used[lp.body_start_idx..=lp.body_end_idx].fill(true);
         if let (Some(cs), Some(ce)) = (lp.completion_start, lp.completion_end) {
             used[cs..=ce].fill(true);
+        }
+        // Suppress init lines for confirmed ForEach loops
+        if let Some(ref info) = lp.foreach {
+            for &idx in &info.init_indices {
+                if idx < used.len() {
+                    used[idx] = true;
+                }
+            }
         }
     }
 
