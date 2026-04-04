@@ -144,7 +144,7 @@ fn used_in_operator_context(text: &str, pos: usize, after: usize) -> bool {
     let after_text = text[after..].trim_start();
 
     let before_op = before.ends_with("!(")
-        || before.ends_with("! ")
+        || before.ends_with('!')
         || OPERATORS.iter().any(|op| before.ends_with(op));
     let after_op = OPERATORS.iter().any(|op| after_text.starts_with(op));
     before_op || after_op

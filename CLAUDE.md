@@ -32,7 +32,7 @@ src/
     resolve.rs         Bytecode reference resolution (obj refs, field paths)
     decode.rs          Expression decoder (~85 opcodes), BcStatement, DecodeCtx, decode_bytecode
     flow.rs            Flow pattern detection (sequences, for-loops, ForEach, convergence reorder)
-    structure.rs       Region tree (if/else/loop blocks), apply_indentation post-pass
+    structure.rs       Region tree (if/else/loop/guard blocks), apply_indentation post-pass
     transforms/
       mod.rs           Shared helpers (parse_temp_assignment, substitute_var, etc.), re-exports
       temps.rs         Temp variable inlining, constant folding, dead assignment removal
