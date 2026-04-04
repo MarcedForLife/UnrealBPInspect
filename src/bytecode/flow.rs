@@ -1308,17 +1308,25 @@ fn duplicate_inline_convergence(
             continue;
         };
 
-        // Convergence must be 4+ pure assignments/calls. Shorter sequences tend
-        // to be loop back-edges or internal control flow rather than shared
+        // Convergence must be 4+ statements. Shorter sequences tend to be
+        // loop back-edges or internal control flow rather than shared
         // post-branch code.
         let conv_range = &stmts[conv_start..exit_jump_idx];
         if conv_range.len() < 4 {
             continue;
         }
-        let has_control_flow = conv_range
-            .iter()
-            .any(|s| parse_if_jump(&s.text).is_some() || parse_jump(&s.text).is_some());
-        if has_control_flow {
+        // Allow control flow in convergence code only if all jumps target
+        // outside the range (safe to duplicate without breaking references)
+        let has_internal_jumps = conv_range.iter().any(|s| {
+            if let Some((_, jt)) = parse_if_jump(&s.text) {
+                find_idx(jt).is_some_and(|ti| ti >= conv_start && ti < exit_jump_idx)
+            } else if let Some(jt) = parse_jump(&s.text) {
+                find_idx(jt).is_some_and(|ti| ti >= conv_start && ti < exit_jump_idx)
+            } else {
+                false
+            }
+        });
+        if has_internal_jumps {
             continue;
         }
 

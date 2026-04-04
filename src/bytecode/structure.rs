@@ -639,8 +639,11 @@ fn detect_else_branch(
                 }
             }
         }
-        // Diverging return: both branches return independently
-        else if (stmt.text == "return nop" || stmt.text == "return") && target_idx < stmts.len() {
+        // Diverging return/pop: both branches exit independently.
+        // pop_flow acts as scope-exit in sequence pin contexts.
+        else if (stmt.text == "return nop" || stmt.text == "return" || stmt.text == "pop_flow")
+            && target_idx < stmts.len()
+        {
             return (Some(check_idx), Some(stmts.len()));
         }
 
