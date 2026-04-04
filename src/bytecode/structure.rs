@@ -666,8 +666,20 @@ fn truncate_false_blocks(
         if blk.target_idx >= end_idx {
             continue;
         }
+        // Scan the else block for an early exit jump targeting end_idx, but
+        // only at if-nesting depth 0. Jumps inside nested if-blocks are their
+        // own branch exits and should not truncate the outer else.
+        let mut if_depth = 0usize;
         for (j, stmt) in stmts.iter().enumerate().take(end_idx).skip(blk.target_idx) {
+            if parse_if_jump(&stmt.text).is_some() {
+                if_depth += 1;
+                continue;
+            }
             if let Some(jt) = parse_jump(&stmt.text) {
+                if if_depth > 0 {
+                    if_depth -= 1;
+                    continue;
+                }
                 if find_target(jt) == Some(end_idx) {
                     blk.else_close_idx = Some(j + 1);
                     break;
