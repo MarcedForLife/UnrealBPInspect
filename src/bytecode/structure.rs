@@ -639,8 +639,11 @@ fn detect_else_branch(
                 }
             }
         }
-        // Diverging return: both branches return independently
-        else if (stmt.text == "return nop" || stmt.text == "return") && target_idx < stmts.len() {
+        // Diverging return/pop: both branches exit independently.
+        // pop_flow acts as scope-exit in sequence pin contexts.
+        else if (stmt.text == "return nop" || stmt.text == "return" || stmt.text == "pop_flow")
+            && target_idx < stmts.len()
+        {
             return (Some(check_idx), Some(stmts.len()));
         }
 
@@ -666,8 +669,20 @@ fn truncate_false_blocks(
         if blk.target_idx >= end_idx {
             continue;
         }
+        // Scan the else block for an early exit jump targeting end_idx, but
+        // only at if-nesting depth 0. Jumps inside nested if-blocks are their
+        // own branch exits and should not truncate the outer else.
+        let mut if_depth = 0usize;
         for (j, stmt) in stmts.iter().enumerate().take(end_idx).skip(blk.target_idx) {
+            if parse_if_jump(&stmt.text).is_some() {
+                if_depth += 1;
+                continue;
+            }
             if let Some(jt) = parse_jump(&stmt.text) {
+                if if_depth > 0 {
+                    if_depth -= 1;
+                    continue;
+                }
                 if find_target(jt) == Some(end_idx) {
                     blk.else_close_idx = Some(j + 1);
                     break;
@@ -792,8 +807,7 @@ fn insert_guard_regions(region: &mut Region, stmts: &[BcStatement], skip: &mut H
             guards.push((idx, cond.to_string()));
         }
         // Unresolvable if_jump: same semantics (not consumed by if-block detection)
-        else if parse_if_jump(&stmts[idx].text).is_some() {
-            let (cond, _) = parse_if_jump(&stmts[idx].text).unwrap();
+        else if let Some((cond, _)) = parse_if_jump(&stmts[idx].text) {
             guards.push((idx, cond.to_string()));
         }
     }
