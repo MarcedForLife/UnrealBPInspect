@@ -1372,9 +1372,60 @@ fn duplicate_inline_convergence(
     None
 }
 
+/// Resolve degenerate back-edge loops: `$var = false; jump backward to if !($var)`.
+///
+/// UE4 compiles cast-failure fallbacks this way instead of jumping directly to
+/// the else-branch. At runtime it sets the condition to false and loops back to
+/// the check, which immediately falls through to the else target. Replace the
+/// backward jump with a forward jump to the else target.
+fn resolve_degenerate_backedge(stmts: &mut Vec<BcStatement>, offset_map: &OffsetMap) -> bool {
+    let find_idx =
+        |target: usize| -> Option<usize> { offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) };
+
+    for (bj_idx, stmt) in stmts.iter().enumerate() {
+        let Some(target) = parse_jump(&stmt.text) else {
+            continue;
+        };
+        let Some(target_idx) = find_idx(target) else {
+            continue;
+        };
+        if target_idx >= bj_idx {
+            continue; // not backward
+        }
+
+        // The target must be an if-jump: `if !(VAR) jump ELSE_TARGET`
+        let Some((cond, else_target)) = parse_if_jump(&stmts[target_idx].text) else {
+            continue;
+        };
+
+        // The statement before the backward jump must set that same variable
+        // to a value that guarantees the condition passes (jumps to else).
+        // Pattern: `VAR = false` before `if !(VAR) jump` means !false = true, so jump taken.
+        if bj_idx == 0 {
+            continue;
+        }
+        let prev = stmts[bj_idx - 1].text.trim();
+        let expected = format!("{} = false", cond);
+        if prev != expected {
+            continue;
+        }
+
+        // Replace both the assignment and the backward jump with a single
+        // forward jump to the else target
+        stmts[bj_idx - 1].text = format!("jump 0x{:x}", else_target);
+        stmts.remove(bj_idx);
+        return true;
+    }
+    false
+}
+
 /// Process a single convergence group. Returns true if a reorder was performed.
 fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
     let offset_map = OffsetMap::build(stmts);
+    // Resolve degenerate back-edges first (cast-failure loops)
+    if resolve_degenerate_backedge(stmts, &offset_map) {
+        return true;
+    }
     if let Some(group) = find_convergence_group(stmts, &offset_map) {
         if let Some(reordered) = build_convergence_reorder(stmts, &group, &offset_map) {
             *stmts = reordered;
