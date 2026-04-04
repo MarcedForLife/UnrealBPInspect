@@ -1330,18 +1330,21 @@ fn duplicate_inline_convergence(
             continue;
         }
 
-        // Must be the only backward reference to this target
-        let other_refs = stmts
+        // Block duplication if there are forward references to the convergence
+        // start (they'd break if the code is relocated). Other backward jumps
+        // are fine: they'll be duplicated in subsequent iterations.
+        let forward_refs = stmts
             .iter()
             .enumerate()
             .filter(|(i, s)| {
                 *i != bj_idx
+                    && *i <= conv_start
                     && parse_jump(&s.text)
                         .and_then(&find_idx)
                         .is_some_and(|ti| ti == conv_start)
             })
             .count();
-        if other_refs > 0 {
+        if forward_refs > 0 {
             continue;
         }
 
