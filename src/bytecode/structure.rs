@@ -203,11 +203,7 @@ fn try_convert_to_else_if(
     skip: &mut HashSet<usize>,
 ) -> bool {
     let then_start = blk.if_idx + 1;
-    let then_end = if blk.jump_idx.is_some() {
-        blk.target_idx - 1
-    } else {
-        blk.target_idx
-    };
+    let then_end = blk.target_idx;
 
     for (ci, child) in region.children.iter().enumerate() {
         if matches!(child.kind, RegionKind::Else) && child.start == blk.if_idx {
@@ -261,11 +257,10 @@ fn insert_if_block(
     let cond_text = blk.cond.clone();
 
     let then_start = blk.if_idx + 1;
-    let then_end = if blk.jump_idx.is_some() {
-        blk.target_idx - 1 // exclude the unconditional jump
-    } else {
-        blk.target_idx
-    };
+    // Include the exit jump in the IfThen region (it's in the skip set
+    // and won't be emitted). This allows nested if-blocks whose else
+    // extends up to the exit jump to fit within the region.
+    let then_end = blk.target_idx;
 
     // Check if this is an else-if chain BEFORE recursing into children.
     // If our if_idx is the start of an existing Else region in this region's
@@ -672,6 +667,8 @@ fn truncate_false_blocks(
         // Scan the else block for an early exit jump targeting end_idx, but
         // only at if-nesting depth 0. Jumps inside nested if-blocks are their
         // own branch exits and should not truncate the outer else.
+        // Assumes UE bytecode pattern: each if_jump is followed by exactly one
+        // unconditional jump (its else-exit) before the next if_jump or body code.
         let mut if_depth = 0usize;
         for (j, stmt) in stmts.iter().enumerate().take(end_idx).skip(blk.target_idx) {
             if parse_if_jump(&stmt.text).is_some() {
@@ -1396,7 +1393,7 @@ mod tests {
         assert!(matches!(tree.children[0].kind, RegionKind::IfThen(_)));
         assert!(matches!(tree.children[1].kind, RegionKind::Else));
         assert_eq!(tree.children[0].start, 1);
-        assert_eq!(tree.children[0].end, 2); // excludes jump_idx
+        assert_eq!(tree.children[0].end, 3); // includes jump_idx (skipped during emit)
         assert_eq!(tree.children[1].start, 3);
         assert_eq!(tree.children[1].end, 5);
         assert!(skip.contains(&0));
