@@ -105,10 +105,15 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
         i += 1;
     }
 
-    // Pass 3: suppress dead code after unconditional `return` (depth 0) or `break` (any depth).
-    // `return` only at depth 0 in non-ubergraph functions; `break` anywhere since it only
-    // terminates the innermost block.
+    // Pass 3: suppress dead code after unconditional `return` or `break`.
+    // In Sequence functions, `return` at any depth is a pin-boundary sentinel
+    // (from flow reorder) and triggers dead code suppression. In non-Sequence
+    // functions, only `return` at depth 0 triggers suppression (deeper returns
+    // may be inside if-blocks with subsequent else content).
+    // UberGraph sections (--- labels ---) disable return-based suppression
+    // entirely since pop_flow semantics differ.
     let has_labels = lines.iter().any(|l| l.starts_with(SECTION_SEPARATOR));
+    let has_sequences = lines.iter().any(|l| l.trim().starts_with("// sequence ["));
     {
         // dead_depth: when Some(d), we're suppressing dead code that started at depth d.
         // Lines are dead until we close back to depth < d.
@@ -117,10 +122,16 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
         lines.retain(|line| {
             let trimmed = line.trim();
 
-            // Section boundaries reset dead state
+            // Section boundaries reset dead state and depth
             if is_section_separator(trimmed) {
                 dead_depth = None;
                 depth = 0;
+                return true;
+            }
+            // Sequence markers reset dead state but NOT depth (they can
+            // appear inside switch/case or other brace-nested structures)
+            if trimmed.starts_with("// sequence [") || trimmed.starts_with("// sub-sequence [") {
+                dead_depth = None;
                 return true;
             }
 
@@ -150,12 +161,13 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
                 depth += 1;
             }
 
-            // Start dead zone after unconditional break (any depth) or
-            // return (depth 0, non-ubergraph only)
-            if keep
-                && dead_depth.is_none()
-                && (trimmed == "break" || (!has_labels && depth <= 0 && trimmed == "return"))
-            {
+            // Start dead zone after unconditional break (any depth) or return.
+            // In Sequence functions: return at any depth (pin-boundary sentinels).
+            // In plain functions: return at depth 0 only.
+            // In UberGraph sections: return never triggers (pop_flow semantics).
+            let return_triggers =
+                trimmed == "return" && !has_labels && (has_sequences || depth <= 0);
+            if keep && dead_depth.is_none() && (trimmed == "break" || return_triggers) {
                 dead_depth = Some(depth);
             }
 
