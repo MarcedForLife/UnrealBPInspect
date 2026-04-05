@@ -654,6 +654,59 @@ mod tests {
         assert!(lines.iter().any(|l| l.trim() == "// sequence [1]:"));
     }
 
+    #[test]
+    fn cleanup_dead_code_after_return_in_sequence_fn() {
+        // In functions with Sequence markers, `return` at any depth should
+        // suppress subsequent dead code (sentinel from pin boundary)
+        let mut lines = vec![
+            "// sequence [0]:".to_string(),
+            "if (cond) {".to_string(),
+            "    Body()".to_string(),
+            "}".to_string(),
+            "return".to_string(),
+            "DeadCode()".to_string(),
+            "// sequence [1]:".to_string(),
+            "LiveCode()".to_string(),
+        ];
+        cleanup_structured_output(&mut lines);
+        let text = lines.join("\n");
+        assert!(text.contains("Body()"), "missing body:\n{}", text);
+        assert!(
+            !text.contains("DeadCode()"),
+            "dead code not removed:\n{}",
+            text
+        );
+        assert!(text.contains("LiveCode()"), "missing live code:\n{}", text);
+    }
+
+    #[test]
+    fn cleanup_dead_code_after_return_nested_in_sequence_fn() {
+        // return inside a brace block should also suppress dead code
+        let mut lines = vec![
+            "// sequence [0]:".to_string(),
+            "if (outer) {".to_string(),
+            "    if (inner) {".to_string(),
+            "        Body()".to_string(),
+            "    }".to_string(),
+            "    return".to_string(),
+            "    DeadCode()".to_string(),
+            "} else {".to_string(),
+            "    ElseBody()".to_string(),
+            "}".to_string(),
+            "// sequence [1]:".to_string(),
+            "LiveCode()".to_string(),
+        ];
+        cleanup_structured_output(&mut lines);
+        let text = lines.join("\n");
+        assert!(text.contains("Body()"), "missing body:\n{}", text);
+        assert!(
+            !text.contains("DeadCode()"),
+            "dead code not removed:\n{}",
+            text
+        );
+        assert!(text.contains("ElseBody()"), "else body lost:\n{}", text);
+    }
+
     // cleanup_structured_output: trailing unmatched braces
     #[test]
     fn cleanup_strips_trailing_unmatched_braces() {

@@ -598,6 +598,9 @@ pub fn structure_and_cleanup(stmts: &[crate::bytecode::BcStatement]) -> Vec<Stri
     strip_orphaned_blocks(&mut structured);
     rename_loop_temp_vars(&mut structured);
     fold_switch_enum_cascade(&mut structured);
+    // Re-run cleanup: switch folding can expose dead code from pin-boundary
+    // sentinels that were hidden inside the cascade's brace nesting.
+    cleanup_structured_output(&mut structured);
     apply_indentation(&mut structured);
     structured
 }
@@ -641,6 +644,9 @@ fn structure_statements(stmts: &[crate::bytecode::BcStatement]) -> Vec<String> {
     strip_orphaned_blocks(&mut all_lines);
     rename_loop_temp_vars(&mut all_lines);
     fold_switch_enum_cascade(&mut all_lines);
+    // Re-run cleanup: switch folding can expose dead code from pin-boundary
+    // sentinels that were hidden inside the cascade's brace nesting.
+    cleanup_structured_output(&mut all_lines);
     apply_indentation(&mut all_lines);
     all_lines
 }
