@@ -50,8 +50,6 @@ fn process_section(lines: &mut Vec<String>) {
     // Structural rewrites (change control flow shape)
     rewrite_loops(lines);
     fold_delegate_bindings(lines);
-    fold_cast_guards(lines);
-    fold_cast_inline(lines);
 
     // Expression folding (collapse multi-statement patterns into expressions)
     fold_break_patterns(lines);
@@ -136,112 +134,6 @@ fn parse_delegate_op(text: &str) -> Option<(String, String, String)> {
         }
     }
     None
-}
-
-/// Fold `$X = cast<T>(expr)` + `if (!$X) return` into `$X = cast<T>(expr) else return`.
-fn fold_cast_guards(lines: &mut Vec<String>) {
-    let mut i = 0;
-    while i + 1 < lines.len() {
-        let trimmed_a = lines[i].trim();
-        let Some((var, _rhs)) = parse_cast_assignment(trimmed_a) else {
-            i += 1;
-            continue;
-        };
-
-        let expected = format!("if (!{}) return", var);
-        if lines[i + 1].trim() != expected {
-            i += 1;
-            continue;
-        }
-
-        lines[i] = format!("{} else return", trimmed_a);
-        lines.remove(i + 1);
-    }
-}
-
-/// Parse `$VAR = cast<...>(...)` assignment where RHS starts with cast</icast</obj_cast<.
-fn parse_cast_assignment(text: &str) -> Option<(&str, &str)> {
-    if !text.starts_with('$') {
-        return None;
-    }
-    let eq_pos = text.find(" = ")?;
-    let var = &text[..eq_pos];
-    if var.contains('.') || var.contains('[') {
-        return None;
-    }
-    let rhs = &text[eq_pos + 3..];
-    if rhs.starts_with("cast<") || rhs.starts_with("icast<") || rhs.starts_with("obj_cast<") {
-        Some((var, rhs))
-    } else {
-        None
-    }
-}
-
-/// Check if line `i` is a cast assignment followed by an if-guard on the same variable.
-/// Returns (var_name, cast_rhs) if the pattern matches.
-fn parse_cast_guard_pair(lines: &[String], i: usize) -> Option<(String, String)> {
-    let trimmed = lines[i].trim();
-    let (var, rhs) = parse_cast_assignment(trimmed)?;
-
-    if trimmed.ends_with("else return") {
-        return None;
-    }
-
-    let expected_if = format!("if ({}) {{", var);
-    if lines.get(i + 1)?.trim() != expected_if {
-        return None;
-    }
-
-    // Count total refs to $VAR in all lines except the assignment
-    let mut total_refs = 0usize;
-    for (j, line) in lines.iter().enumerate() {
-        if j == i {
-            continue;
-        }
-        total_refs += count_var_refs(line.trim(), var);
-    }
-
-    // if-guard = 1 ref, body uses <= 2 refs -> total <= 3
-    if total_refs > 3 {
-        return None;
-    }
-
-    Some((var.to_string(), rhs.to_string()))
-}
-
-/// Inline cast-and-use patterns: `$X = cast<T>(expr)` + `if ($X) { ... $X ... }`
-/// where `$X` is used only in the if-guard and a few body references.
-/// Substitutes the cast expression everywhere and removes the assignment line.
-pub(super) fn fold_cast_inline(lines: &mut Vec<String>) {
-    let mut i = 0;
-    while i < lines.len() {
-        let Some((var, rhs)) = parse_cast_guard_pair(lines, i) else {
-            i += 1;
-            continue;
-        };
-
-        // Substitute cast expression for $VAR everywhere
-        for (j, line) in lines.iter_mut().enumerate() {
-            if j == i {
-                continue;
-            }
-            if count_var_refs(line.trim(), &var) > 0 {
-                let mut text = line.trim().to_string();
-                loop {
-                    let new_text = replace_all_var_refs(&text, &var, &rhs);
-                    if new_text == text {
-                        break;
-                    }
-                    text = new_text;
-                }
-                *line = text;
-            }
-        }
-
-        // Remove the assignment line
-        lines.remove(i);
-        // Don't advance; recheck current position
-    }
 }
 
 /// Replace unused `$temp` out-params with `_` in function calls.
