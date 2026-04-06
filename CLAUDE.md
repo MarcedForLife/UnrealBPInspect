@@ -95,7 +95,7 @@ The parser reads the binary format sequentially through these modules:
 1. **binary.rs** — Low-level I/O helpers and NameTable
 2. **properties.rs** — Tagged property deserialisation (recursive)
 3. **ffield.rs** — FField child property parsing, type resolution, function signatures
-4. **bytecode/** — Kismet bytecode: expression decoding (~85 opcodes, UE5 LWC support), flow pattern detection (sequences, ForEach via `foreach (COND) {` markers, ForLoopWithBreak), if/else/loop structuring via region tree, single-pass indentation
+4. **bytecode/** — Kismet bytecode: expression decoding (~85 opcodes, UE5 LWC support), flow pattern detection (sequences, ForEach via `foreach (COND) {` markers, ForLoopWithBreak, convergence reordering/duplication), if/else/loop structuring via region tree with guard-to-nested-if conversion, single-pass indentation
 5. **parser.rs** — Orchestrates all parsing: header, name/import/export tables, export data, bytecode
 6. **output_*.rs** — Three output modes: summary (default), dump, JSON. Summary mode uses 2D bounding-box intersection between EdGraph comment boxes/bubble comments and identifiable nodes to place comments inline near corresponding bytecode.
 
