@@ -414,10 +414,11 @@
       [2]: "005b: if !($Cast_bSuccess) jump 0x7f"
       [3]: "006b: self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP"
       [4]: "007f: return nop"
-    BytecodeSummary: [StrProperty; 3 items]
-      [0]: "if (cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)) {"
-      [1]: "    self.WinchConstraintInstance = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)"
-      [2]: "}"
+    BytecodeSummary: [StrProperty; 4 items]
+      [0]: "$Cast_AsWinch_Constraint_BP = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)"
+      [1]: "if ($Cast_AsWinch_Constraint_BP) {"
+      [2]: "    self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP"
+      [3]: "}"
     FunctionFlags: "Event|Public|BlueprintPure"
 
   [16] Wheel_GEN_VARIABLE (class: /Script/VRExpansionPlugin.GrippableStaticMeshComponent)

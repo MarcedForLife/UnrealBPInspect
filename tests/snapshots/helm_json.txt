@@ -1369,8 +1369,9 @@
           "value": {
             "inner_type": "StrProperty",
             "items": [
-              "if (cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)) {",
-              "    self.WinchConstraintInstance = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)",
+              "$Cast_AsWinch_Constraint_BP = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)",
+              "if ($Cast_AsWinch_Constraint_BP) {",
+              "    self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP",
               "}"
             ]
           }
@@ -2602,8 +2603,9 @@
     },
     {
       "bytecode": [
-        "if (cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)) {",
-        "    self.WinchConstraintInstance = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)",
+        "$Cast_AsWinch_Constraint_BP = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)",
+        "if ($Cast_AsWinch_Constraint_BP) {",
+        "    self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP",
         "}"
       ],
       "export_index": 15,

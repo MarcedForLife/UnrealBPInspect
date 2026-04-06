@@ -64,11 +64,12 @@ pub fn strip_outer_parens(input: &str) -> &str {
 /// should be parenthesized when embedded in a larger expression.
 pub fn expr_is_compound(expr: &str) -> bool {
     const OPERATORS: &[&str] = &[
-        "&&", "||", "+", "-", "*", "/", "%", ">=", "<=", "==", "!=", ">>", "<<", ">", "<", "?",
+        " && ", " || ", " + ", " - ", " * ", " / ", " % ", " >= ", " <= ", " == ", " != ", " >> ",
+        " << ", " > ", " < ", " ? ",
     ];
     OPERATORS
         .iter()
-        .any(|op| expr.contains(&format!(" {} ", op)))
+        .any(|op| find_at_depth_zero(expr, op).is_some())
         || expr.starts_with('!')
 }
 

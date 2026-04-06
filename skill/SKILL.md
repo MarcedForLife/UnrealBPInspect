@@ -107,7 +107,7 @@ Pseudo-code conventions:
 - `cast<Type>(expr)` -- dynamic cast
 - `ClassName::FunctionName(args)` -- static/library function call
 - `obj.FunctionName(args)` -- context call on an object
-- `if (cond) { ... }` / `if (cond) { ... } else { ... }` -- structured control flow (conditions are inverted from the raw `JumpIfNot` for readability)
+- `if (cond) { ... }` / `if (cond) { ... } else { ... }` -- structured control flow, matching Blueprint Branch node structure
 - `while (cond) { body; increment; }` -- for/ForEach loops (reordered from scattered bytecode into logical order)
 - `// sequence [N]:` -- sequence node pins in execution order
 - `// "Comment text"` -- Blueprint comment boxes and node bubble comments, placed inline near the code they describe
@@ -151,7 +151,7 @@ Use `--filter FunctionName` to focus the diff on a specific function. Exit code 
 
 ## Limitations
 
-- UE4 uncooked `.uasset` files fully supported; UE5 uncooked assets have basic support
+- UE4 uncooked `.uasset` files fully supported; UE5 uncooked assets supported (4.27, 5.3, 5.5 tested)
 - Cooked assets (split `.uasset`/`.uexp`) are not yet supported
 - Some complex bytecode expressions may show as `??(0xNN)` -- the common opcodes are covered
 - Default property values only show non-null values from the CDO

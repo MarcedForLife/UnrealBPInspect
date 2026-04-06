@@ -203,11 +203,7 @@ fn try_convert_to_else_if(
     skip: &mut HashSet<usize>,
 ) -> bool {
     let then_start = blk.if_idx + 1;
-    let then_end = if blk.jump_idx.is_some() {
-        blk.target_idx - 1
-    } else {
-        blk.target_idx
-    };
+    let then_end = blk.target_idx;
 
     for (ci, child) in region.children.iter().enumerate() {
         if matches!(child.kind, RegionKind::Else) && child.start == blk.if_idx {
@@ -261,11 +257,10 @@ fn insert_if_block(
     let cond_text = blk.cond.clone();
 
     let then_start = blk.if_idx + 1;
-    let then_end = if blk.jump_idx.is_some() {
-        blk.target_idx - 1 // exclude the unconditional jump
-    } else {
-        blk.target_idx
-    };
+    // Include the exit jump in the IfThen region (it's in the skip set
+    // and won't be emitted). This allows nested if-blocks whose else
+    // extends up to the exit jump to fit within the region.
+    let then_end = blk.target_idx;
 
     // Check if this is an else-if chain BEFORE recursing into children.
     // If our if_idx is the start of an existing Else region in this region's
@@ -421,23 +416,11 @@ fn emit_stmts_range(
         } else if let Some(cond) = parse_continue_if_not(&stmt.text) {
             let negated = negate_cond(cond);
             output.push(format!("if ({}) continue", negated));
-        } else if let Some(cond) = parse_pop_flow_if_not(&stmt.text) {
-            let keyword = if in_loop(block_stack) {
-                "break"
-            } else {
-                "return"
-            };
-            let negated = negate_cond(cond);
-            output.push(format!("if ({}) {}", negated, keyword));
-        } else if let Some((cond, _target)) = parse_if_jump(&stmt.text) {
-            // Unresolvable conditional jump, treat as guard
-            let negated = negate_cond(cond);
-            let keyword = if in_loop(block_stack) {
-                "break"
-            } else {
-                "return"
-            };
-            output.push(format!("if ({}) {}", negated, keyword));
+        } else if parse_pop_flow_if_not(&stmt.text).is_some() || parse_if_jump(&stmt.text).is_some()
+        {
+            // Residual guard: insert_guard_regions already consumed mid-scope
+            // guards, so anything still here is at the end of its scope with
+            // nothing left to wrap. Suppress it.
         } else if let Some(target) = parse_jump(&stmt.text) {
             if let Some(text) = resolve_jump_line(ctx, i, target, in_loop(block_stack)) {
                 output.push(text);
@@ -524,6 +507,7 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
     suppress_flow_opcodes(stmts, &mut skip);
     let mut region_tree = build_region_tree(stmts.len(), &if_blocks, &mut skip);
     insert_brace_blocks(&mut region_tree, stmts, &mut skip);
+    insert_guard_regions(&mut region_tree, stmts, &mut skip);
     let (label_targets, pending_labels) =
         collect_label_targets(stmts, &skip, &label_at, &find_target);
 
@@ -651,7 +635,9 @@ fn detect_else_branch(
                 }
             }
         }
-        // Diverging return: both branches return independently
+        // Diverging return: both branches exit independently.
+        // pop_flow is excluded, flow reordering emits `return nop` sentinels
+        // at pin boundaries, and internal pop_flow would engulf unrelated code.
         else if (stmt.text == "return nop" || stmt.text == "return") && target_idx < stmts.len() {
             return (Some(check_idx), Some(stmts.len()));
         }
@@ -678,8 +664,22 @@ fn truncate_false_blocks(
         if blk.target_idx >= end_idx {
             continue;
         }
+        // Scan the else block for an early exit jump targeting end_idx, but
+        // only at if-nesting depth 0. Jumps inside nested if-blocks are their
+        // own branch exits and should not truncate the outer else.
+        // Assumes UE bytecode pattern: each if_jump is followed by exactly one
+        // unconditional jump (its else-exit) before the next if_jump or body code.
+        let mut if_depth = 0usize;
         for (j, stmt) in stmts.iter().enumerate().take(end_idx).skip(blk.target_idx) {
+            if parse_if_jump(&stmt.text).is_some() {
+                if_depth += 1;
+                continue;
+            }
             if let Some(jt) = parse_jump(&stmt.text) {
+                if if_depth > 0 {
+                    if_depth -= 1;
+                    continue;
+                }
                 if find_target(jt) == Some(end_idx) {
                     blk.else_close_idx = Some(j + 1);
                     break;
@@ -769,6 +769,59 @@ fn insert_loop_region(
     skip.insert(open_idx);
     skip.insert(close_idx);
     true
+}
+
+/// Convert guard statements (`pop_flow_if_not`, unresolvable `if_jump`) into
+/// IfThen regions that wrap the remaining scope.
+///
+/// This produces output closer to the Blueprint graph where a Branch node's
+/// true pin leads into the body, rather than the inverted `if (!cond) return`
+/// guard style. Consecutive guards nest naturally: each wraps everything
+/// after it in the current scope.
+fn insert_guard_regions(region: &mut Region, stmts: &[BcStatement], skip: &mut HashSet<usize>) {
+    // Process children first (bottom-up) so inner guards are resolved
+    // before outer ones adopt them
+    for child in &mut region.children {
+        insert_guard_regions(child, stmts, skip);
+    }
+
+    // Collect guard positions in this region's gaps (not inside children, not skipped)
+    let mut guards: Vec<(usize, String)> = Vec::new();
+    for idx in region.start..region.end {
+        if idx >= stmts.len() || skip.contains(&idx) {
+            continue;
+        }
+        let in_child = region
+            .children
+            .iter()
+            .any(|c| idx >= c.start && idx < c.end);
+        if in_child {
+            continue;
+        }
+
+        // pop_flow_if_not(COND): exit scope when COND is false, body runs when true
+        if let Some(cond) = parse_pop_flow_if_not(&stmts[idx].text) {
+            guards.push((idx, cond.to_string()));
+        }
+        // Unresolvable if_jump: same semantics (not consumed by if-block detection)
+        else if let Some((cond, _)) = parse_if_jump(&stmts[idx].text) {
+            guards.push((idx, cond.to_string()));
+        }
+    }
+
+    // Process right to left: inner guards get nested inside outer ones
+    for (guard_idx, cond) in guards.into_iter().rev() {
+        let body_start = guard_idx + 1;
+        if body_start >= region.end {
+            continue; // guard at end of scope, nothing to wrap
+        }
+
+        skip.insert(guard_idx);
+
+        let guard_region = Region::new(RegionKind::IfThen(cond), body_start, region.end);
+        let guard_region = adopt_children(region, guard_region);
+        insert_child_sorted(region, guard_region);
+    }
 }
 
 /// Emit the region tree as flat (unindented) text. Braces are emitted for
@@ -1340,7 +1393,7 @@ mod tests {
         assert!(matches!(tree.children[0].kind, RegionKind::IfThen(_)));
         assert!(matches!(tree.children[1].kind, RegionKind::Else));
         assert_eq!(tree.children[0].start, 1);
-        assert_eq!(tree.children[0].end, 2); // excludes jump_idx
+        assert_eq!(tree.children[0].end, 3); // includes jump_idx (skipped during emit)
         assert_eq!(tree.children[1].start, 3);
         assert_eq!(tree.children[1].end, 5);
         assert!(skip.contains(&0));
@@ -1554,6 +1607,94 @@ mod tests {
             !output.iter().any(|l| l.contains("goto")),
             "goto not removed:\n{}",
             output.join("\n")
+        );
+    }
+
+    #[test]
+    fn guard_wraps_remaining_scope() {
+        // pop_flow_if_not(X) should wrap all subsequent code in if (X) { ... }
+        let stmts = vec![
+            make_stmt(0x10, "pop_flow_if_not(IsValid)"),
+            make_stmt(0x20, "DoA()"),
+            make_stmt(0x30, "DoB()"),
+            make_stmt(0x40, "return nop"),
+        ];
+        let result = structure_bytecode(&stmts, &HashMap::new());
+        let text = result.join("\n");
+        assert!(
+            text.contains("if (IsValid) {"),
+            "missing wrapping if:\n{}",
+            text
+        );
+        assert!(text.contains("DoA()"), "missing body A:\n{}", text);
+        assert!(text.contains("DoB()"), "missing body B:\n{}", text);
+    }
+
+    #[test]
+    fn consecutive_guards_nest() {
+        // Two consecutive guards should produce nested if blocks
+        let stmts = vec![
+            make_stmt(0x10, "pop_flow_if_not(A)"),
+            make_stmt(0x20, "pop_flow_if_not(B)"),
+            make_stmt(0x30, "Body()"),
+            make_stmt(0x40, "return nop"),
+        ];
+        let result = structure_bytecode(&stmts, &HashMap::new());
+        let mut indented = result.clone();
+        apply_indentation(&mut indented);
+        let text = indented.join("\n");
+        assert!(text.contains("if (A) {"), "missing outer if:\n{}", text);
+        assert!(
+            text.contains("    if (B) {"),
+            "missing nested if:\n{}",
+            text
+        );
+        assert!(
+            text.contains("        Body()"),
+            "body not double-indented:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn guard_wraps_child_if_block() {
+        // Guard followed by an if/else block: the guard should wrap both
+        let stmts = vec![
+            make_stmt(0x10, "pop_flow_if_not(Valid)"),
+            make_stmt(0x20, "if !(X) jump 0x40"),
+            make_stmt(0x30, "TrueBranch()"),
+            make_stmt(0x40, "FalseBranch()"),
+            make_stmt(0x50, "return nop"),
+        ];
+        let result = structure_bytecode(&stmts, &HashMap::new());
+        let mut indented = result.clone();
+        apply_indentation(&mut indented);
+        let text = indented.join("\n");
+        assert!(text.contains("if (Valid) {"), "missing guard if:\n{}", text);
+        assert!(
+            text.contains("    if (X) {"),
+            "child if not inside guard:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn guard_at_end_of_scope_suppressed() {
+        // Guard as the very last statement (nothing after it to wrap)
+        // should be suppressed rather than appearing as raw bytecode
+        let stmts = vec![
+            make_stmt(0x10, "if !(Outer) jump 0x30"),
+            make_stmt(0x18, "DoWork()"),
+            make_stmt(0x20, "pop_flow_if_not(Cond)"),
+            make_stmt(0x30, "return nop"),
+        ];
+        let result = structure_bytecode(&stmts, &HashMap::new());
+        let text = result.join("\n");
+        assert!(text.contains("DoWork()"), "missing body:\n{}", text);
+        assert!(
+            !text.contains("pop_flow_if_not"),
+            "raw guard leaked:\n{}",
+            text
         );
     }
 }

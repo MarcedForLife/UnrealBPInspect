@@ -105,10 +105,13 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
         i += 1;
     }
 
-    // Pass 3: suppress dead code after unconditional `return` (depth 0) or `break` (any depth).
-    // `return` only at depth 0 in non-ubergraph functions; `break` anywhere since it only
-    // terminates the innermost block.
+    // Pass 3: suppress dead code after unconditional `return` or `break`.
+    // `break` triggers at any depth. `return` trigger rules:
+    //   - Sequence functions: any depth (pin-boundary sentinels from flow reorder)
+    //   - Plain functions: depth 0 only (deeper returns have else content after)
+    //   - UberGraph sections: never (pop_flow semantics differ)
     let has_labels = lines.iter().any(|l| l.starts_with(SECTION_SEPARATOR));
+    let has_sequences = lines.iter().any(|l| l.trim().starts_with("// sequence ["));
     {
         // dead_depth: when Some(d), we're suppressing dead code that started at depth d.
         // Lines are dead until we close back to depth < d.
@@ -117,10 +120,16 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
         lines.retain(|line| {
             let trimmed = line.trim();
 
-            // Section boundaries reset dead state
+            // Section boundaries reset dead state and depth
             if is_section_separator(trimmed) {
                 dead_depth = None;
                 depth = 0;
+                return true;
+            }
+            // Sequence markers reset dead state but NOT depth (they can
+            // appear inside switch/case or other brace-nested structures)
+            if trimmed.starts_with("// sequence [") || trimmed.starts_with("// sub-sequence [") {
+                dead_depth = None;
                 return true;
             }
 
@@ -133,7 +142,7 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
                 return true; // always keep structural braces
             }
 
-            let keep = if let Some(_dd) = dead_depth {
+            let keep = if dead_depth.is_some() {
                 // Switch/case markers restart live code (case fall-through)
                 if trimmed.starts_with("case ") || trimmed.starts_with("switch (") {
                     dead_depth = None;
@@ -150,12 +159,13 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
                 depth += 1;
             }
 
-            // Start dead zone after unconditional break (any depth) or
-            // return (depth 0, non-ubergraph only)
-            if keep
-                && dead_depth.is_none()
-                && (trimmed == "break" || (!has_labels && depth <= 0 && trimmed == "return"))
-            {
+            // Start dead zone after unconditional break (any depth) or return.
+            // In Sequence functions: return at any depth (pin-boundary sentinels).
+            // In plain functions: return at depth 0 only.
+            // In UberGraph sections: return never triggers (pop_flow semantics).
+            let return_triggers =
+                trimmed == "return" && !has_labels && (has_sequences || depth <= 0);
+            if keep && dead_depth.is_none() && (trimmed == "break" || return_triggers) {
                 dead_depth = Some(depth);
             }
 
@@ -163,10 +173,7 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
         });
     }
 
-    // Pass 4: rewrite negated guards with compound conditions
-    rewrite_negated_guards(lines);
-
-    // Pass 5: strip trailing unmatched closing braces.
+    // Pass 4: strip trailing unmatched closing braces.
     // Per-pin structuring can leave orphaned `}` when flow patterns consume
     // the block-opening statement but not its close. Count braces and strip excess.
     let opens: usize = lines.iter().filter(|l| l.trim().ends_with('{')).count();
@@ -486,106 +493,13 @@ pub(super) fn has_toplevel_logical_op(input: &str) -> bool {
     find_at_depth_zero(input, " && ").is_some() || find_at_depth_zero(input, " || ").is_some()
 }
 
-/// Rewrite `if (!(COMPOUND)) return` -> `if (COMPOUND) { body }` when the
-/// condition contains `&&`/`||` and the remaining body is <= 8 lines.
-/// All text is flat; uses brace counting for body extent detection.
-fn rewrite_negated_guards(lines: &mut Vec<String>) {
-    let mut i = lines.len();
-    while i > 0 {
-        i -= 1;
-        let line = &lines[i];
-        let trimmed = line.trim();
-
-        if !trimmed.starts_with("if (") {
-            continue;
-        }
-
-        // Find matching ) for the ( after "if "
-        let after_if = &trimmed[3..];
-        let Some(close) = find_matching_paren(after_if) else {
-            continue;
-        };
-        let rest = after_if[close + 1..].trim();
-        if rest != "return" {
-            continue;
-        }
-
-        let cond = after_if[1..close].trim();
-
-        // Must be !(COMPOUND)
-        if !cond.starts_with("!(") {
-            continue;
-        }
-        let Some(inner_close) = find_matching_paren(&cond[1..]) else {
-            continue;
-        };
-        if 1 + inner_close + 1 != cond.len() {
-            continue;
-        }
-
-        let compound = &cond[2..1 + inner_close];
-
-        // Only rewrite compound conditions
-        if !compound.contains(" && ") && !compound.contains(" || ") {
-            continue;
-        }
-
-        // Find body extent: scan forward, stop at section boundary, scope exit, or
-        // a closing brace at the same brace depth as the guard
-        let mut body_end = i + 1;
-        let mut depth = 0i32;
-        while body_end < lines.len() {
-            let scan = lines[body_end].trim();
-            if scan.starts_with("--- ") && scan.ends_with(" ---") {
-                break;
-            }
-            if scan.is_empty() {
-                body_end += 1;
-                continue;
-            }
-            if scan.starts_with('}') {
-                depth -= 1;
-                if depth < 0 {
-                    break;
-                }
-            }
-            if scan == "}" && depth == 0 {
-                break;
-            }
-            if opens_block(scan) {
-                depth += 1;
-            }
-            body_end += 1;
-        }
-
-        // Trim trailing returns and empty lines from body
-        let mut effective_end = body_end;
-        while effective_end > i + 1 {
-            let end_trimmed = lines[effective_end - 1].trim();
-            if end_trimmed == "return" || end_trimmed.is_empty() {
-                effective_end -= 1;
-            } else {
-                break;
-            }
-        }
-
-        let body_count = effective_end - (i + 1);
-        if body_count == 0 || body_count > 8 {
-            continue;
-        }
-
-        // Rewrite: replace guard with positive if, wrap body in braces
-        lines[i] = format!("if ({}) {{", compound);
-        lines.insert(effective_end, "}".to_string());
-    }
-}
-
 /// Shorten UE4 ForEach compiler-generated loop variable names that survived
 /// the ForEach rewriter (typically search-and-break loops with no increment).
 pub fn rename_loop_temp_vars(lines: &mut [String]) {
     // Pairs: (long prefix, short prefix). Suffixed variants like _1 are handled
     // by replacing the prefix, which preserves the suffix.
-    const RENAMES: &[(&str, &str)] = &[(LOOP_COUNTER_VAR, "loop_idx"), (ARRAY_INDEX_VAR, "arr_idx")];
+    const RENAMES: &[(&str, &str)] =
+        &[(LOOP_COUNTER_VAR, "loop_idx"), (ARRAY_INDEX_VAR, "arr_idx")];
     for line in lines.iter_mut() {
         for &(long, short) in RENAMES {
             if line.contains(long) {
@@ -644,8 +558,7 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
     let mut remove_indices: HashSet<usize> = HashSet::new();
     for idx in 0..lines.len() {
         let trimmed = lines[idx].trim();
-        if !(trimmed.starts_with(LOOP_COUNTER_VAR) || trimmed.starts_with(ARRAY_INDEX_VAR))
-        {
+        if !(trimmed.starts_with(LOOP_COUNTER_VAR) || trimmed.starts_with(ARRAY_INDEX_VAR)) {
             continue;
         }
         if !trimmed.ends_with(" = 0") {

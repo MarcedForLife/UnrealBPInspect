@@ -1308,32 +1308,44 @@ fn duplicate_inline_convergence(
             continue;
         };
 
-        // Convergence must be 4+ pure assignments/calls. Shorter sequences tend
-        // to be loop back-edges or internal control flow rather than shared
+        // Convergence must be 4+ statements. Shorter sequences tend to be
+        // loop back-edges or internal control flow rather than shared
         // post-branch code.
         let conv_range = &stmts[conv_start..exit_jump_idx];
         if conv_range.len() < 4 {
             continue;
         }
-        let has_control_flow = conv_range
-            .iter()
-            .any(|s| parse_if_jump(&s.text).is_some() || parse_jump(&s.text).is_some());
-        if has_control_flow {
+        // Allow control flow in convergence code only if all jumps target
+        // outside the range (safe to duplicate without breaking references)
+        let jump_target_of = |s: &BcStatement| -> Option<usize> {
+            parse_if_jump(&s.text)
+                .map(|(_, jt)| jt)
+                .or_else(|| parse_jump(&s.text))
+        };
+        let has_internal_jumps = conv_range.iter().any(|s| {
+            jump_target_of(s)
+                .and_then(&find_idx)
+                .is_some_and(|ti| ti >= conv_start && ti < exit_jump_idx)
+        });
+        if has_internal_jumps {
             continue;
         }
 
-        // Must be the only backward reference to this target
-        let other_refs = stmts
+        // Block duplication if there are forward references to the convergence
+        // start (they'd break if the code is relocated). Other backward jumps
+        // are fine: they'll be duplicated in subsequent iterations.
+        let forward_refs = stmts
             .iter()
             .enumerate()
             .filter(|(i, s)| {
                 *i != bj_idx
+                    && *i <= conv_start
                     && parse_jump(&s.text)
                         .and_then(&find_idx)
                         .is_some_and(|ti| ti == conv_start)
             })
             .count();
-        if other_refs > 0 {
+        if forward_refs > 0 {
             continue;
         }
 
@@ -1361,9 +1373,60 @@ fn duplicate_inline_convergence(
     None
 }
 
+/// Resolve degenerate back-edge loops: `$var = false; jump backward to if !($var)`.
+///
+/// UE4 compiles cast-failure fallbacks this way instead of jumping directly to
+/// the else-branch. At runtime it sets the condition to false and loops back to
+/// the check, which immediately falls through to the else target. Replace the
+/// backward jump with a forward jump to the else target.
+fn resolve_degenerate_backedge(stmts: &mut Vec<BcStatement>, offset_map: &OffsetMap) -> bool {
+    let find_idx =
+        |target: usize| -> Option<usize> { offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) };
+
+    for (bj_idx, stmt) in stmts.iter().enumerate() {
+        let Some(target) = parse_jump(&stmt.text) else {
+            continue;
+        };
+        let Some(target_idx) = find_idx(target) else {
+            continue;
+        };
+        if target_idx >= bj_idx {
+            continue; // not backward
+        }
+
+        // The target must be an if-jump: `if !(VAR) jump ELSE_TARGET`
+        let Some((cond, else_target)) = parse_if_jump(&stmts[target_idx].text) else {
+            continue;
+        };
+
+        // The statement before the backward jump must set that same variable
+        // to a value that guarantees the condition passes (jumps to else).
+        // Pattern: `VAR = false` before `if !(VAR) jump` means !false = true, so jump taken.
+        if bj_idx == 0 {
+            continue;
+        }
+        let prev = stmts[bj_idx - 1].text.trim();
+        let matches = prev.strip_suffix(" = false").is_some_and(|var| var == cond);
+        if !matches {
+            continue;
+        }
+
+        // Replace both the assignment and the backward jump with a single
+        // forward jump to the else target
+        stmts[bj_idx - 1].text = format!("jump 0x{:x}", else_target);
+        stmts.remove(bj_idx);
+        return true;
+    }
+    false
+}
+
 /// Process a single convergence group. Returns true if a reorder was performed.
 fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
     let offset_map = OffsetMap::build(stmts);
+    // Resolve degenerate back-edges first (cast-failure loops)
+    if resolve_degenerate_backedge(stmts, &offset_map) {
+        return true;
+    }
     if let Some(group) = find_convergence_group(stmts, &offset_map) {
         if let Some(reordered) = build_convergence_reorder(stmts, &group, &offset_map) {
             *stmts = reordered;
