@@ -418,8 +418,9 @@ fn emit_stmts_range(
             output.push(format!("if ({}) continue", negated));
         } else if parse_pop_flow_if_not(&stmt.text).is_some() || parse_if_jump(&stmt.text).is_some()
         {
-            // Guard at end of scope (nothing to wrap). The scope exit
-            // happens naturally, so the guard is redundant. Suppress it.
+            // Residual guard: insert_guard_regions already consumed mid-scope
+            // guards, so anything still here is at the end of its scope with
+            // nothing left to wrap. Suppress it.
         } else if let Some(target) = parse_jump(&stmt.text) {
             if let Some(text) = resolve_jump_line(ctx, i, target, in_loop(block_stack)) {
                 output.push(text);
@@ -634,11 +635,10 @@ fn detect_else_branch(
                 }
             }
         }
-        // Diverging return/pop: both branches exit independently.
-        // pop_flow acts as scope-exit in sequence pin contexts.
-        else if (stmt.text == "return nop" || stmt.text == "return" || stmt.text == "pop_flow")
-            && target_idx < stmts.len()
-        {
+        // Diverging return: both branches exit independently.
+        // pop_flow is excluded, flow reordering emits `return nop` sentinels
+        // at pin boundaries, and internal pop_flow would engulf unrelated code.
+        else if (stmt.text == "return nop" || stmt.text == "return") && target_idx < stmts.len() {
             return (Some(check_idx), Some(stmts.len()));
         }
 

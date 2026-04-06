@@ -106,12 +106,10 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
     }
 
     // Pass 3: suppress dead code after unconditional `return` or `break`.
-    // In Sequence functions, `return` at any depth is a pin-boundary sentinel
-    // (from flow reorder) and triggers dead code suppression. In non-Sequence
-    // functions, only `return` at depth 0 triggers suppression (deeper returns
-    // may be inside if-blocks with subsequent else content).
-    // UberGraph sections (--- labels ---) disable return-based suppression
-    // entirely since pop_flow semantics differ.
+    // `break` triggers at any depth. `return` trigger rules:
+    //   - Sequence functions: any depth (pin-boundary sentinels from flow reorder)
+    //   - Plain functions: depth 0 only (deeper returns have else content after)
+    //   - UberGraph sections: never (pop_flow semantics differ)
     let has_labels = lines.iter().any(|l| l.starts_with(SECTION_SEPARATOR));
     let has_sequences = lines.iter().any(|l| l.trim().starts_with("// sequence ["));
     {
@@ -144,7 +142,7 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
                 return true; // always keep structural braces
             }
 
-            let keep = if let Some(_dd) = dead_depth {
+            let keep = if dead_depth.is_some() {
                 // Switch/case markers restart live code (case fall-through)
                 if trimmed.starts_with("case ") || trimmed.starts_with("switch (") {
                     dead_depth = None;

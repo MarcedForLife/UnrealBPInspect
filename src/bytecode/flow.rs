@@ -1317,14 +1317,15 @@ fn duplicate_inline_convergence(
         }
         // Allow control flow in convergence code only if all jumps target
         // outside the range (safe to duplicate without breaking references)
+        let jump_target_of = |s: &BcStatement| -> Option<usize> {
+            parse_if_jump(&s.text)
+                .map(|(_, jt)| jt)
+                .or_else(|| parse_jump(&s.text))
+        };
         let has_internal_jumps = conv_range.iter().any(|s| {
-            if let Some((_, jt)) = parse_if_jump(&s.text) {
-                find_idx(jt).is_some_and(|ti| ti >= conv_start && ti < exit_jump_idx)
-            } else if let Some(jt) = parse_jump(&s.text) {
-                find_idx(jt).is_some_and(|ti| ti >= conv_start && ti < exit_jump_idx)
-            } else {
-                false
-            }
+            jump_target_of(s)
+                .and_then(&find_idx)
+                .is_some_and(|ti| ti >= conv_start && ti < exit_jump_idx)
         });
         if has_internal_jumps {
             continue;
@@ -1405,8 +1406,8 @@ fn resolve_degenerate_backedge(stmts: &mut Vec<BcStatement>, offset_map: &Offset
             continue;
         }
         let prev = stmts[bj_idx - 1].text.trim();
-        let expected = format!("{} = false", cond);
-        if prev != expected {
+        let matches = prev.strip_suffix(" = false").is_some_and(|var| var == cond);
+        if !matches {
             continue;
         }
 
