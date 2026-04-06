@@ -1,6 +1,6 @@
 //! Loop pattern rewriting: ForEach (confirmed and unconfirmed) and ForLoopWithBreak.
 //!
-//! Converts UE4 loop boilerplate into readable for-loop syntax:
+//! Converts UE loop boilerplate into readable for-loop syntax:
 //! - ForEach: `while (COUNTER < ARRAY.Length()) { INDEX = COUNTER; ITEM = ARRAY[INDEX]; ... }`
 //!   becomes `for (ITEM in ARRAY) { ... }`
 //! - ForLoopWithBreak: `while (VAR <= LIMIT) { ...; VAR = VAR + 1 }`
@@ -21,7 +21,7 @@ pub(super) fn rewrite_loops(lines: &mut Vec<String>) {
     downgrade_unconverted_foreach(lines);
 }
 
-/// Strip UE4 ForEach break-hit flags from while/foreach conditions.
+/// Strip UE ForEach break-hit flags from while/foreach conditions.
 ///
 /// Catches flags that survived temp inlining (when the flag was behind a temp
 /// variable, `strip_break_hit_flag` in flow.rs couldn't strip it at detection time).
@@ -431,7 +431,7 @@ fn try_inline_access_rewrite(
     Some((assign_idx, item))
 }
 
-/// Rewrite UE4 ForLoopWithBreak boilerplate into `for (idx = START to END)`.
+/// Rewrite UE ForLoopWithBreak boilerplate into `for (idx = START to END)`.
 fn rewrite_forloop_with_break(lines: &mut Vec<String>) {
     let mut i = 0;
     while i < lines.len() {

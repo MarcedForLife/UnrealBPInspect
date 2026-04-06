@@ -21,7 +21,7 @@ pub use temps::{
     inline_single_use_temps,
 };
 
-// UE4/UE5 compiler-generated variable/function prefixes shared across transforms.
+// UE compiler-generated variable/function prefixes shared across transforms.
 
 /// Prefix for `$MakeStruct_TYPE` temp variables and field assignments.
 pub(super) const MAKE_STRUCT_PREFIX: &str = "$MakeStruct_";
@@ -32,7 +32,7 @@ pub(super) const BREAK_FUNC_PREFIX: &str = "Break";
 /// Prefix for `$SwitchEnum_CmpSuccess` cascade comparison variables.
 pub(super) const SWITCH_ENUM_PREFIX: &str = "$SwitchEnum_CmpSuccess";
 
-/// UE4 break-hit flag variable name (may have numeric suffixes like `_1`).
+/// UE break-hit flag variable name (may have numeric suffixes like `_1`).
 pub(super) const BREAK_HIT_VAR: &str = "Temp_bool_True_if_break_was_hit_Variable";
 
 /// Prefix for compiler-generated integer temp variables (loop counters, indices).
@@ -1063,6 +1063,37 @@ mod tests {
         fold_outparam_calls(&mut lines);
         // Has assignment -> it's a regular temp, not an out-param
         assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn outparam_single_arg_unrelated_name_skipped() {
+        // Event parameters passed as input should not be treated as out-params.
+        // $ComponentBoundEvent_OtherActor_1 has no relation to AddUnique.
+        let mut lines = vec![
+            "ActorsToConsume.AddUnique($ComponentBoundEvent_OtherActor_1)".to_string(),
+            "if (DoesImplementInterface($ComponentBoundEvent_OtherActor_1, BI_C)) {".to_string(),
+        ];
+        fold_outparam_calls(&mut lines);
+        assert_eq!(
+            lines.len(),
+            2,
+            "unrelated $-arg should not be folded as out-param"
+        );
+    }
+
+    #[test]
+    fn outparam_single_arg_matching_name_folds() {
+        // When the $-var name matches the function name, it's a real out-param.
+        let mut lines = vec![
+            "self.Constraint.GetRotationAlpha($GetRotation_Alpha)".to_string(),
+            "out Angle = ($GetRotation_Alpha * 2.0) - 1.0".to_string(),
+        ];
+        fold_outparam_calls(&mut lines);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0],
+            "out Angle = (self.Constraint.GetRotationAlpha() * 2.0) - 1.0"
+        );
     }
 
     // fold_switch_enum_cascade

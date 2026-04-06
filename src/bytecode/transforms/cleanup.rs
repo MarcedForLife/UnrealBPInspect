@@ -493,7 +493,7 @@ pub(super) fn has_toplevel_logical_op(input: &str) -> bool {
     find_at_depth_zero(input, " && ").is_some() || find_at_depth_zero(input, " || ").is_some()
 }
 
-/// Shorten UE4 ForEach compiler-generated loop variable names that survived
+/// Shorten UE ForEach compiler-generated loop variable names that survived
 /// the ForEach rewriter (typically search-and-break loops with no increment).
 pub fn rename_loop_temp_vars(lines: &mut [String]) {
     // Pairs: (long prefix, short prefix). Suffixed variants like _1 are handled

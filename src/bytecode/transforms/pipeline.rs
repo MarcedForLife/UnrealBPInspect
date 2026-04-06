@@ -503,9 +503,30 @@ fn parse_outparam_call(trimmed: &str) -> Option<OutparamCall> {
     }
     let (arg_idx, out_var) = dollar_args[0];
 
-    // Out-params are always last in UE4 calling convention
+    // Out-params are always last in UE calling convention
     if args.len() > 1 && arg_idx != args.len() - 1 {
         return None;
+    }
+
+    // For single-arg calls, the $-variable must relate to the function name.
+    // UE auto-generates out-param temps as $FuncName_ParamName, so the variable
+    // name starts with or shares a substantial prefix with the function name.
+    // Without this check, event parameters like $ComponentBoundEvent_OtherActor_1
+    // passed as input to AddUnique() get falsely treated as out-params.
+    if args.len() == 1 {
+        let prefix = &trimmed[..paren_start];
+        let func_name = prefix
+            .rsplit_once('.')
+            .map(|(_, name)| name)
+            .unwrap_or(prefix);
+        let var_name = out_var.strip_prefix('$').unwrap_or(out_var);
+        // The var name must start with the function name (ignoring underscores
+        // that UE inserts into temp names as word separators).
+        let func_lower = func_name.to_ascii_lowercase();
+        let var_lower = var_name.replace('_', "").to_ascii_lowercase();
+        if !var_lower.starts_with(&func_lower) {
+            return None;
+        }
     }
 
     // Build the call with the out-param removed
