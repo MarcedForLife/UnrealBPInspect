@@ -303,10 +303,13 @@ fn node_pos(props: &[Property]) -> (i32, i32) {
 /// Node classes whose reference property contains an identifier for comment matching.
 const NODE_IDENTIFIER_REFS: &[(&str, &str)] = &[
     ("K2Node_CallFunction", "FunctionReference"),
+    ("K2Node_CallArrayFunction", "FunctionReference"),
+    ("K2Node_Message", "FunctionReference"),
     (
         "K2Node_CommutativeAssociativeBinaryOperator",
         "FunctionReference",
     ),
+    ("K2Node_VariableGet", "VariableReference"),
     ("K2Node_VariableSet", "VariableReference"),
 ];
 
@@ -378,11 +381,17 @@ fn collect_graph_nodes(
     } else {
         return;
     };
+    let is_pure = node_class == "K2Node_VariableGet";
     let (x, y) = node_pos(node_props);
     graph_nodes
         .entry(graph_name.to_string())
         .or_default()
-        .push(NodeInfo { x, y, identifier });
+        .push(NodeInfo {
+            x,
+            y,
+            identifier,
+            is_pure,
+        });
 }
 
 /// Collect comment boxes, node positions, and event positions from EdGraph exports.

@@ -12,6 +12,7 @@ pub use format::format_summary;
 use std::collections::HashSet;
 use std::fmt::Write;
 
+#[derive(Clone)]
 struct CommentBox {
     text: String,
     x: i32,
@@ -32,6 +33,10 @@ struct NodeInfo {
     x: i32,
     y: i32,
     identifier: String,
+    /// Pure nodes (VariableGet) have no execution pins and produce expressions
+    /// inlined into other statements. Their identifiers appear at multiple
+    /// bytecode locations, making rank-based matching unreliable for box comments.
+    is_pure: bool,
 }
 
 struct UbergraphSection {
@@ -111,6 +116,7 @@ fn emit_comment(buf: &mut String, text: &str, indent: &str) {
 fn strip_node_func_prefix(name: &str) -> String {
     name.strip_prefix("K2_")
         .or_else(|| name.strip_prefix("Conv_"))
+        .or_else(|| name.strip_prefix("Array_"))
         .unwrap_or(name)
         .to_string()
 }
