@@ -994,6 +994,117 @@ fn emit_reordered(
     output
 }
 
+/// Strip FlipFlop and DoOnce latch node boilerplate from raw bytecode.
+///
+/// These nodes compile to `Temp_bool_IsClosed_Variable*` (toggle/gate state) and
+/// `Temp_bool_Has_Been_Initd_Variable*` (first-execution flag) with surrounding
+/// push_flow/pop_flow scope boundaries. The state management is internal to the
+/// node and not meaningful for pseudocode output. Stripping it before flow
+/// reordering prevents the pop_flow boundaries from fragmenting the event body.
+pub fn strip_latch_boilerplate(stmts: &mut Vec<BcStatement>) {
+    let latch_vars = collect_latch_vars(stmts);
+    if latch_vars.is_empty() {
+        return;
+    }
+
+    let mut remove = vec![false; stmts.len()];
+    mark_latch_stmts(stmts, &latch_vars, &mut remove);
+    mark_latch_wrappers(stmts, &mut remove);
+    mark_orphaned_pop_flows(stmts, &mut remove);
+
+    let mut kept_idx = 0;
+    stmts.retain(|_| {
+        let keep = !remove[kept_idx];
+        kept_idx += 1;
+        keep
+    });
+}
+
+/// Collect `Temp_bool_IsClosed_Variable*` and `Temp_bool_Has_Been_Initd_Variable*`
+/// names from assignment statements.
+fn collect_latch_vars(stmts: &[BcStatement]) -> HashSet<String> {
+    let mut vars = HashSet::new();
+    for stmt in stmts {
+        if let Some((var, _)) = stmt.text.trim().split_once(" = ") {
+            if var.starts_with("Temp_bool_IsClosed_Variable")
+                || var.starts_with("Temp_bool_Has_Been_Initd_Variable")
+            {
+                vars.insert(var.to_string());
+            }
+        }
+    }
+    vars
+}
+
+/// Mark latch variable assignments, conditional jumps on latch vars (plus their
+/// trailing pop_flow), and constant-condition gates for removal.
+fn mark_latch_stmts(stmts: &[BcStatement], latch_vars: &HashSet<String>, remove: &mut [bool]) {
+    for (idx, stmt) in stmts.iter().enumerate() {
+        let trimmed = stmt.text.trim();
+
+        if let Some((var, _)) = trimmed.split_once(" = ") {
+            if latch_vars.contains(var) {
+                remove[idx] = true;
+                continue;
+            }
+        }
+
+        if let Some((cond, _)) = parse_if_jump(trimmed) {
+            if latch_vars.contains(cond) {
+                remove[idx] = true;
+                if idx + 1 < stmts.len() && stmts[idx + 1].text == "pop_flow" {
+                    remove[idx + 1] = true;
+                }
+                continue;
+            }
+        }
+
+        if trimmed == "pop_flow_if_not(true)" || trimmed == "pop_flow_if_not(false)" {
+            remove[idx] = true;
+        }
+    }
+}
+
+/// Mark push_flow/jump wrapper pairs whose jump target lands on an already-removed
+/// statement (the wrapper belonged to the stripped latch node).
+fn mark_latch_wrappers(stmts: &[BcStatement], remove: &mut [bool]) {
+    for idx in 0..stmts.len().saturating_sub(1) {
+        if remove[idx] || parse_push_flow(&stmts[idx].text).is_none() {
+            continue;
+        }
+        let Some(jump_target) = parse_jump(&stmts[idx + 1].text) else {
+            continue;
+        };
+        let targets_removed = stmts
+            .iter()
+            .enumerate()
+            .any(|(j, s)| remove[j] && s.mem_offset > 0 && s.mem_offset.abs_diff(jump_target) <= 4);
+        if targets_removed {
+            remove[idx] = true;
+            remove[idx + 1] = true;
+        }
+    }
+}
+
+/// Mark pop_flow statements that became empty scope boundaries after boilerplate
+/// removal. A pop_flow is orphaned when its nearest preceding kept statement is
+/// itself a pop_flow (or nothing precedes it).
+fn mark_orphaned_pop_flows(stmts: &[BcStatement], remove: &mut [bool]) {
+    for idx in 0..stmts.len() {
+        if remove[idx] || stmts[idx].text != "pop_flow" {
+            continue;
+        }
+        let prev_kept = (0..idx).rev().find(|&j| !remove[j]);
+        let orphaned = match prev_kept {
+            Some(prev) => stmts[prev].text == "pop_flow",
+            None => true,
+        };
+        if orphaned {
+            remove[idx] = true;
+        }
+    }
+}
+
 /// Reorder bytecode statements to place sequence/loop bodies in logical execution order.
 pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
     if stmts.is_empty() {
