@@ -1,22 +1,24 @@
 //! Summary formatting: Blueprint header, component tree, variables, function signatures,
 //! and pseudo-code bodies.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Write;
 
-use crate::bytecode::{fold_long_lines, BcStatement};
+use crate::bytecode::fold_long_lines;
 use crate::helpers::indent_of;
-use crate::resolve::*;
-use crate::types::*;
+use crate::resolve::{
+    find_prop, find_prop_object, find_prop_object_array, find_prop_str, find_prop_str_items,
+    prop_value_short, resolve_index, short_class,
+};
+use crate::types::{ImportEntry, ParsedAsset, PropValue, Property};
 
+use super::call_graph::{
+    build_call_graph, build_ubergraph_ctx, collect_local_functions, format_call_graph, UbergraphCtx,
+};
 use super::comments::classify_comments;
-use super::ubergraph::{
-    build_ubergraph_structured, emit_ubergraph_events, is_ubergraph_stub, scan_structured_calls,
-};
-use super::{
-    emit_comment, find_local_calls, section_sep, strip_node_func_prefix, strip_offset_prefix,
-    CommentBox, NodeInfo,
-};
+use super::edgraph::{collect_edgraph_data, merge_event_graph_data, EdGraphData};
+use super::ubergraph::{emit_ubergraph_events, is_ubergraph_stub};
+use super::{emit_comment, section_sep, strip_offset_prefix};
 
 const COMP_SKIP_PROPS: &[&str] = &[
     "StaticMeshImportVersion",
@@ -287,369 +289,6 @@ fn format_variables(
     }
 }
 
-struct EdGraphData {
-    graph_comments: HashMap<String, Vec<CommentBox>>,
-    graph_nodes: HashMap<String, Vec<NodeInfo>>,
-    event_positions: HashMap<String, (i32, i32)>,
-    /// K2Node_InputAction nodes store only InputActionName (e.g., "Jump"),
-    /// not the full stub function name. Stored separately so
-    /// resolve_event_position can pattern-match against InpActEvt_{name}_*.
-    input_action_positions: HashMap<String, (i32, i32)>,
-    /// EdGraph names that are EventGraph sub-pages (contain event-type nodes).
-    /// UE4/UE5 splits the EventGraph into multiple pages (e.g., "BeginPlay",
-    /// "EventTick", "Input") whose comments/nodes must be merged for
-    /// ubergraph comment matching.
-    event_graph_pages: Vec<String>,
-}
-
-fn node_pos(props: &[Property]) -> (i32, i32) {
-    (
-        find_prop_i32(props, "NodePosX").unwrap_or(0),
-        find_prop_i32(props, "NodePosY").unwrap_or(0),
-    )
-}
-
-/// Node classes whose reference property contains an identifier for comment matching.
-const NODE_IDENTIFIER_REFS: &[(&str, &str)] = &[
-    ("K2Node_CallFunction", "FunctionReference"),
-    ("K2Node_CallArrayFunction", "FunctionReference"),
-    ("K2Node_Message", "FunctionReference"),
-    (
-        "K2Node_CommutativeAssociativeBinaryOperator",
-        "FunctionReference",
-    ),
-    ("K2Node_VariableGet", "VariableReference"),
-    ("K2Node_VariableSet", "VariableReference"),
-];
-
-/// Collect comment boxes and bubble comments from a single graph node.
-fn collect_graph_comments(
-    node_class: &str,
-    node_props: &[Property],
-    graph_name: &str,
-    graph_comments: &mut HashMap<String, Vec<CommentBox>>,
-) {
-    // Comment nodes are full box comments with dimensions
-    let is_comment = node_class == "EdGraphNode_Comment";
-    // Non-comment nodes can have bubble comments (skip reroute knots,
-    // their labels describe wire routing, not logic)
-    let is_bubble = !is_comment
-        && node_class != "K2Node_Knot"
-        && find_prop(node_props, "bCommentBubbleVisible")
-            .is_some_and(|p| matches!(p.value, PropValue::Bool(true)));
-
-    if !is_comment && !is_bubble {
-        return;
-    }
-    if let Some(text) = find_prop_str(node_props, "NodeComment") {
-        let (x, y) = node_pos(node_props);
-        let (width, height) = if is_comment {
-            (
-                find_prop_i32(node_props, "NodeWidth").unwrap_or(0),
-                find_prop_i32(node_props, "NodeHeight").unwrap_or(0),
-            )
-        } else {
-            (0, 0)
-        };
-        graph_comments
-            .entry(graph_name.to_string())
-            .or_default()
-            .push(CommentBox {
-                text,
-                x,
-                y,
-                width,
-                height,
-                is_bubble,
-            });
-    }
-}
-
-/// Collect node positions with identifiers for comment placement.
-fn collect_graph_nodes(
-    node_class: &str,
-    node_props: &[Property],
-    graph_name: &str,
-    graph_nodes: &mut HashMap<String, Vec<NodeInfo>>,
-) {
-    let identifier = if let Some(ref_prop) = NODE_IDENTIFIER_REFS
-        .iter()
-        .find(|(cls, _)| *cls == node_class)
-        .map(|(_, prop)| *prop)
-    {
-        let Some(name) = find_struct_field_str(node_props, ref_prop, "MemberName") else {
-            return;
-        };
-        if ref_prop == "FunctionReference" {
-            strip_node_func_prefix(&name)
-        } else {
-            name
-        }
-    } else if node_class == "K2Node_IfThenElse" {
-        "__branch__".to_string()
-    } else {
-        return;
-    };
-    let is_pure = node_class == "K2Node_VariableGet";
-    let (x, y) = node_pos(node_props);
-    graph_nodes
-        .entry(graph_name.to_string())
-        .or_default()
-        .push(NodeInfo {
-            x,
-            y,
-            identifier,
-            is_pure,
-        });
-}
-
-/// Collect comment boxes, node positions, and event positions from EdGraph exports.
-fn collect_edgraph_data(asset: &ParsedAsset, export_names: &[String]) -> EdGraphData {
-    let mut graph_comments: HashMap<String, Vec<CommentBox>> = HashMap::new();
-    let mut graph_nodes: HashMap<String, Vec<NodeInfo>> = HashMap::new();
-    let mut event_positions: HashMap<String, (i32, i32)> = HashMap::new();
-    let mut input_action_positions: HashMap<String, (i32, i32)> = HashMap::new();
-    let mut event_graph_pages: BTreeSet<String> = BTreeSet::new();
-
-    for (hdr, props) in &asset.exports {
-        let class = resolve_index(&asset.imports, export_names, hdr.class_index);
-        if !class.ends_with(".EdGraph") {
-            continue;
-        }
-        let graph_name = &hdr.object_name;
-
-        let node_indices: Vec<i32> = find_prop(props, "Nodes")
-            .or_else(|| find_prop(props, "AllNodes"))
-            .map(|p| match &p.value {
-                PropValue::Array { items, .. } => items
-                    .iter()
-                    .filter_map(|item| {
-                        if let PropValue::Object(idx) = item {
-                            Some(*idx)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            })
-            .unwrap_or_default();
-
-        for idx in &node_indices {
-            if *idx <= 0 {
-                continue;
-            }
-            let export_idx = (*idx - 1) as usize;
-            let Some((node_hdr, node_props)) = asset.exports.get(export_idx) else {
-                continue;
-            };
-            let node_class = resolve_index(&asset.imports, export_names, node_hdr.class_index);
-            let short = short_class(&node_class);
-
-            collect_graph_comments(&short, node_props, graph_name, &mut graph_comments);
-            if short != "EdGraphNode_Comment" {
-                collect_graph_nodes(&short, node_props, graph_name, &mut graph_nodes);
-            }
-
-            // Collect event positions from event-type nodes. These can appear in
-            // the main "EventGraph" or in EventGraph sub-pages (e.g., "BeginPlay",
-            // "EventTick", "Input") that UE4/UE5 creates when the graph is split.
-            let is_event_node = match short.as_str() {
-                "K2Node_Event" | "K2Node_CustomEvent" => {
-                    let event_name = if short == "K2Node_CustomEvent" {
-                        find_prop_str(node_props, "CustomFunctionName")
-                            .or_else(|| get_event_name_opt(node_props))
-                    } else {
-                        get_event_name_opt(node_props)
-                    };
-                    if let Some(name) = event_name {
-                        event_positions.insert(name, node_pos(node_props));
-                    }
-                    true
-                }
-                "K2Node_InputAxisEvent" | "K2Node_ComponentBoundEvent" => {
-                    if let Some(fname) = find_prop_str(node_props, "CustomFunctionName") {
-                        event_positions.insert(fname, node_pos(node_props));
-                    }
-                    true
-                }
-                "K2Node_InputAction" => {
-                    if let Some(action) = find_prop_str(node_props, "InputActionName") {
-                        input_action_positions.insert(action, node_pos(node_props));
-                    }
-                    true
-                }
-                _ => false,
-            };
-            if is_event_node {
-                event_graph_pages.insert(graph_name.clone());
-            }
-        }
-    }
-
-    EdGraphData {
-        graph_comments,
-        graph_nodes,
-        event_positions,
-        input_action_positions,
-        event_graph_pages: event_graph_pages.into_iter().collect(),
-    }
-}
-
-/// Merge comments and nodes from all EventGraph pages, deduplicating entries
-/// that appear on multiple pages (UE4/UE5 shares node references across tabs).
-fn merge_event_graph_data(
-    pages: &[String],
-    edgraph: &EdGraphData,
-) -> (Vec<CommentBox>, Vec<NodeInfo>) {
-    let mut comments: Vec<CommentBox> = Vec::new();
-    let mut nodes: Vec<NodeInfo> = Vec::new();
-    let mut seen_comments: HashSet<(i32, i32, String)> = HashSet::new();
-    let mut seen_nodes: HashSet<(i32, i32, String)> = HashSet::new();
-    for page in pages {
-        if let Some(cbs) = edgraph.graph_comments.get(page) {
-            for cb in cbs {
-                if seen_comments.insert((cb.x, cb.y, cb.text.clone())) {
-                    comments.push(cb.clone());
-                }
-            }
-        }
-        if let Some(ns) = edgraph.graph_nodes.get(page) {
-            for node in ns {
-                if seen_nodes.insert((node.x, node.y, node.identifier.clone())) {
-                    nodes.push(node.clone());
-                }
-            }
-        }
-    }
-    (comments, nodes)
-}
-
-/// Parse a stored bytecode line (`"XXXX: text"`) into a `BcStatement`.
-fn parse_bytecode_line(line: &str) -> Option<BcStatement> {
-    let hex_len = 4;
-    let separator = ": ";
-    let prefix_len = hex_len + separator.len();
-    if line.len() <= prefix_len || line.as_bytes()[hex_len] != b':' {
-        return None;
-    }
-    let offset = usize::from_str_radix(&line[..hex_len], 16).ok()?;
-    Some(BcStatement {
-        mem_offset: offset,
-        text: line[prefix_len..].to_string(),
-    })
-}
-
-/// Parse a single bytecode line for a call to the ubergraph entry point,
-/// returning the offset argument if found.
-fn parse_ubergraph_call(line: &str, call_prefix: &str) -> Option<usize> {
-    let start = line.find(call_prefix)?;
-    let after = &line[start + call_prefix.len()..];
-    let end = after.find(')')?;
-    after[..end].trim().parse::<usize>().ok()
-}
-
-/// Scan non-ubergraph function bytecode for calls to the ubergraph entry point,
-/// returning a bytecode offset to event name mapping.
-fn find_ubergraph_labels(
-    asset: &ParsedAsset,
-    export_names: &[String],
-    ubergraph_name: &str,
-) -> HashMap<usize, String> {
-    let mut labels = HashMap::new();
-    let call_prefix = format!("{}(", ubergraph_name);
-
-    for (hdr, props) in &asset.exports {
-        let class = resolve_index(&asset.imports, export_names, hdr.class_index);
-        if !class.ends_with(".Function") || hdr.object_name.starts_with("ExecuteUbergraph_") {
-            continue;
-        }
-        for line in find_prop_str_items_any(props, &["BytecodeSummary", "Bytecode"]) {
-            if let Some(offset) = parse_ubergraph_call(line, &call_prefix) {
-                labels.insert(offset, hdr.object_name.clone());
-            }
-        }
-    }
-    labels
-}
-
-/// Build the call graph by scanning function bytecodes for cross-references.
-///
-/// Returns `(callees_map, callers_map)` where each maps a function name to the
-/// list of local functions it calls (or is called by).
-fn build_call_graph(
-    asset: &ParsedAsset,
-    export_names: &[String],
-    local_functions: &HashSet<String>,
-    ubergraph_name: Option<&str>,
-    ubergraph_structured: Option<&[String]>,
-) -> (HashMap<String, Vec<String>>, HashMap<String, Vec<String>>) {
-    let mut callees_map: HashMap<String, Vec<String>> = HashMap::new();
-    let mut callers_map: HashMap<String, Vec<String>> = HashMap::new();
-
-    // Scan non-ubergraph functions for calls to local functions
-    for (hdr, props) in &asset.exports {
-        let class = resolve_index(&asset.imports, export_names, hdr.class_index);
-        if !class.ends_with(".Function") {
-            continue;
-        }
-        if hdr.object_name.starts_with("ExecuteUbergraph_") {
-            continue;
-        }
-        if ubergraph_name.is_some() && is_ubergraph_stub(props, ubergraph_name.unwrap_or("")) {
-            continue;
-        }
-
-        let bc_lines = find_prop_str_items_any(props, &["Bytecode", "BytecodeSummary"]);
-        if bc_lines.is_empty() {
-            continue;
-        }
-
-        for line in bc_lines {
-            let code = strip_offset_prefix(line);
-            for callee in find_local_calls(code, local_functions) {
-                if callee == hdr.object_name {
-                    continue;
-                }
-                let entry = callees_map.entry(hdr.object_name.clone()).or_default();
-                if !entry.contains(&callee) {
-                    entry.push(callee.clone());
-                }
-                let entry = callers_map.entry(callee.clone()).or_default();
-                if !entry.contains(&hdr.object_name) {
-                    entry.push(hdr.object_name.clone());
-                }
-            }
-        }
-    }
-
-    // Scan structured ubergraph output for local calls per event section
-    if let Some(structured) = ubergraph_structured {
-        scan_structured_calls(
-            structured,
-            local_functions,
-            &mut callees_map,
-            &mut callers_map,
-        );
-    }
-
-    (callees_map, callers_map)
-}
-
-fn format_call_graph(buf: &mut String, callees_map: &mut HashMap<String, Vec<String>>) {
-    if callees_map.is_empty() {
-        return;
-    }
-    let mut entries: Vec<(&String, &mut Vec<String>)> = callees_map.iter_mut().collect();
-    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-    writeln!(buf, "Call graph:").unwrap();
-    for (caller, callees) in &mut entries {
-        callees.sort();
-        writeln!(buf, "  {} \u{2192} {}", caller, callees.join(", ")).unwrap();
-    }
-    writeln!(buf).unwrap();
-}
-
 /// Emit a single function's bytecode with inline and top-level comments.
 fn emit_function_body(
     buf: &mut String,
@@ -738,66 +377,11 @@ fn emit_ubergraph_section(
     );
 }
 
-/// Context for ubergraph (EventGraph) processing, built once and shared
-/// across call graph scanning and function emission.
-struct UbergraphCtx {
-    name: String,
-    labels: HashMap<usize, String>,
-    structured: Vec<String>,
-}
-
-/// Build the ubergraph context if an ExecuteUbergraph function exists.
-fn build_ubergraph_ctx(asset: &ParsedAsset, export_names: &[String]) -> Option<UbergraphCtx> {
-    let (hdr, props) = asset
-        .exports
-        .iter()
-        .find(|(hdr, _)| hdr.object_name.starts_with("ExecuteUbergraph_"))?;
-    let name = hdr.object_name.clone();
-    let labels = find_ubergraph_labels(asset, export_names, &name);
-    if labels.is_empty() {
-        return None;
-    }
-    let stmts: Vec<BcStatement> = find_prop_str_items(props, "Bytecode")
-        .iter()
-        .filter_map(|line| parse_bytecode_line(line))
-        .collect();
-    let structured = build_ubergraph_structured(stmts, &labels)?;
-    Some(UbergraphCtx {
-        name,
-        labels,
-        structured,
-    })
-}
-
-/// Collect the set of local function names, including ubergraph event names.
-fn collect_local_functions(
-    asset: &ParsedAsset,
-    export_names: &[String],
-    ubergraph_ctx: Option<&UbergraphCtx>,
-) -> HashSet<String> {
-    let mut names: HashSet<String> = asset
-        .exports
-        .iter()
-        .filter(|(hdr, _)| {
-            let class = resolve_index(&asset.imports, export_names, hdr.class_index);
-            class.ends_with(".Function") && !hdr.object_name.starts_with("ExecuteUbergraph_")
-        })
-        .map(|(hdr, _)| hdr.object_name.clone())
-        .collect();
-    if let Some(ctx) = ubergraph_ctx {
-        for event_name in ctx.labels.values() {
-            names.insert(event_name.clone());
-        }
-    }
-    names
-}
-
 /// Emit all function exports: ubergraph events and regular functions.
 fn format_functions(
     buf: &mut String,
     asset: &ParsedAsset,
     export_names: &[String],
-    filters: &[String],
     ubergraph_ctx: Option<&UbergraphCtx>,
     edgraph: &EdGraphData,
     callers_map: &HashMap<String, Vec<String>>,
@@ -806,9 +390,6 @@ fn format_functions(
     for (hdr, props) in &asset.exports {
         let class = resolve_index(&asset.imports, export_names, hdr.class_index);
         if !class.ends_with(".Function") {
-            continue;
-        }
-        if !matches_filter(&hdr.object_name, filters) {
             continue;
         }
         if let Some(ctx) = ubergraph_ctx {
@@ -855,7 +436,16 @@ fn format_functions(
     }
 }
 
-pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
+fn filter_flags_for_summary(flags: &str) -> String {
+    const NOISE: &[&str] = &["BlueprintCallable"];
+    flags
+        .split('|')
+        .filter(|f| !NOISE.contains(&f.trim()))
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
+pub fn format_summary(asset: &ParsedAsset) -> String {
     let mut buf = String::new();
     let export_names: Vec<String> = asset
         .exports
@@ -884,7 +474,6 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
         &mut buf,
         asset,
         &export_names,
-        filters,
         ubergraph_ctx.as_ref(),
         &edgraph,
         &callers_map,
@@ -893,18 +482,4 @@ pub fn format_summary(asset: &ParsedAsset, filters: &[String]) -> String {
     let mut final_lines: Vec<String> = buf.split('\n').map(|l| l.to_string()).collect();
     fold_long_lines(&mut final_lines);
     final_lines.join("\n")
-}
-fn get_event_name_opt(props: &[Property]) -> Option<String> {
-    // Try EventReference.MemberName first, then FunctionReference.MemberName
-    find_struct_field_str(props, "EventReference", "MemberName")
-        .or_else(|| find_struct_field_str(props, "FunctionReference", "MemberName"))
-}
-
-fn filter_flags_for_summary(flags: &str) -> String {
-    const NOISE: &[&str] = &["BlueprintCallable"];
-    flags
-        .split('|')
-        .filter(|f| !NOISE.contains(&f.trim()))
-        .collect::<Vec<_>>()
-        .join("|")
 }
