@@ -21,8 +21,11 @@ src/
   output_summary/
     mod.rs             Shared types (CommentBox, NodeInfo, UbergraphSection), re-exports
     comments.rs        EdGraph comment/bubble parsing, spatial matching, classification
+    edgraph.rs         EdGraph data collection: comments, node positions, event positions
+    call_graph.rs      Call graph construction, ubergraph context, local function collection
     ubergraph.rs       Ubergraph event splitting, resume block matching, cross-segment jumps
     format.rs          Summary formatting: component tree, variables, functions, inline comments
+    filter.rs          Post-processing filter for summary output (--filter)
   output_diff.rs       Diff output mode (--diff: unified diff of two summaries)
   bytecode/
     mod.rs             OffsetMap, sub-module re-exports

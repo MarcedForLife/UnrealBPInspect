@@ -1,6 +1,6 @@
 use similar::TextDiff;
 
-use crate::output_summary::format_summary;
+use crate::output_summary::{filter_summary, format_summary};
 use crate::parser::parse_asset;
 
 /// Compare two `.uasset` files and return a unified diff of their summaries.
@@ -17,8 +17,8 @@ pub fn format_diff(
 ) -> anyhow::Result<(String, bool)> {
     let before_asset = parse_asset(before_data, false)?;
     let after_asset = parse_asset(after_data, false)?;
-    let before_text = format_summary(&before_asset, filters);
-    let after_text = format_summary(&after_asset, filters);
+    let before_text = filter_summary(&format_summary(&before_asset), filters);
+    let after_text = filter_summary(&format_summary(&after_asset), filters);
 
     if before_text == after_text {
         return Ok((String::new(), false));

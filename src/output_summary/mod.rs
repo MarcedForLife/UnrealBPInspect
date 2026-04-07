@@ -3,10 +3,14 @@
 //! EdGraph comments are placed near corresponding bytecode via 2D bounding-box
 //! intersection between comment regions and node positions.
 
+mod call_graph;
 mod comments;
+mod edgraph;
+mod filter;
 mod format;
 mod ubergraph;
 
+pub use filter::filter_summary;
 pub use format::format_summary;
 
 use std::collections::HashSet;
