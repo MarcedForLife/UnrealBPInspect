@@ -13,7 +13,7 @@ use crate::bytecode::{
     discard_unused_assignments, eliminate_constant_condition_branches, fold_summary_patterns,
     fold_switch_enum_cascade, inline_constant_temps, inline_single_use_temps,
     rename_loop_temp_vars, reorder_convergence, reorder_flow_patterns, split_by_sequence_markers,
-    strip_orphaned_blocks, strip_unmatched_braces, structure_bytecode,
+    strip_latch_boilerplate, strip_orphaned_blocks, strip_unmatched_braces, structure_bytecode,
 };
 use crate::ffield::*;
 use crate::properties::read_properties;
@@ -612,7 +612,9 @@ pub fn structure_and_cleanup(stmts: &[crate::bytecode::BcStatement]) -> Vec<Stri
 /// and structures each body independently. This prevents switch cascades and
 /// other control flow from spanning across sequence boundaries.
 fn structure_statements(stmts: &[crate::bytecode::BcStatement]) -> Vec<String> {
-    let mut reordered = reorder_flow_patterns(stmts);
+    let mut cleaned = stmts.to_vec();
+    strip_latch_boilerplate(&mut cleaned);
+    let mut reordered = reorder_flow_patterns(&cleaned);
     reorder_convergence(&mut reordered);
     let jump_targets = collect_jump_targets(&reordered);
     inline_constant_temps(&mut reordered, &jump_targets);

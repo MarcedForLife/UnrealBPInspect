@@ -25,6 +25,7 @@ pub const JUMP_OFFSET_TOLERANCE: usize = 4;
 pub use decode::{decode_bytecode, BcStatement};
 pub use flow::{
     parse_if_jump, parse_jump, parse_push_flow, reorder_convergence, reorder_flow_patterns,
+    strip_latch_boilerplate,
 };
 pub use structure::{apply_indentation, structure_bytecode};
 pub use transforms::{
