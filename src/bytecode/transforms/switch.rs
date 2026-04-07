@@ -1,4 +1,4 @@
-//! Switch/enum cascade folding: converts nested if-else chains from UE4's
+//! Switch/enum cascade folding: converts nested if-else chains from UE's
 //! "Switch on Enum" node into `switch (VAR) { case N: { ... } }` pseudocode.
 
 use super::SWITCH_ENUM_PREFIX;
@@ -6,7 +6,7 @@ use crate::helpers::opens_block;
 
 /// Fold `$SwitchEnum_CmpSuccess` cascades into `switch (VAR) { case: ... }`.
 ///
-/// UE4's "Switch on Enum" node compiles to cascading comparisons:
+/// UE's "Switch on Enum" node compiles to cascading comparisons:
 ///   `$SwitchEnum_CmpSuccess = VAR != N` / `if (!...) return` or `if (...) { ... }`
 /// After structuring, this produces deeply nested if-blocks with case bodies at
 /// decreasing indent levels. This pass detects the cascade, collects case

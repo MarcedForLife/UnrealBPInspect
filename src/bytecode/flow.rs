@@ -1375,7 +1375,7 @@ fn duplicate_inline_convergence(
 
 /// Resolve degenerate back-edge loops: `$var = false; jump backward to if !($var)`.
 ///
-/// UE4 compiles cast-failure fallbacks this way instead of jumping directly to
+/// UE compiles cast-failure fallbacks this way instead of jumping directly to
 /// the else-branch. At runtime it sets the condition to false and loops back to
 /// the check, which immediately falls through to the else target. Replace the
 /// backward jump with a forward jump to the else target.
