@@ -6,8 +6,8 @@ use std::fmt::Write;
 use crate::bytecode::{
     apply_indentation, collect_jump_targets, discard_unused_assignments, fold_switch_enum_cascade,
     inline_constant_temps, inline_single_use_temps, reorder_convergence, reorder_flow_patterns,
-    split_by_sequence_markers, strip_orphaned_blocks, strip_unmatched_braces, BcStatement,
-    OffsetMap, JUMP_OFFSET_TOLERANCE,
+    split_by_sequence_markers, strip_latch_boilerplate, strip_orphaned_blocks,
+    strip_unmatched_braces, BcStatement, OffsetMap, JUMP_OFFSET_TOLERANCE,
 };
 use crate::helpers::indent_of;
 use crate::parser::structure_and_cleanup;
@@ -216,10 +216,14 @@ pub(super) fn build_ubergraph_structured(
         return None;
     }
 
-    // Flow reorder the entire UberGraph first; Sequence node
-    // body blocks are scattered across events and push_flow/pop_flow
-    // pairs need the whole function to resolve correctly.
-    let mut reordered = reorder_flow_patterns(&stmts);
+    // Strip FlipFlop/DoOnce latch boilerplate before flow reordering,
+    // so their pop_flow boundaries don't fragment event bodies.
+    let mut cleaned = stmts;
+    strip_latch_boilerplate(&mut cleaned);
+    // Flow reorder the entire UberGraph; Sequence node body blocks are
+    // scattered across events and push_flow/pop_flow pairs need the
+    // whole function to resolve correctly.
+    let mut reordered = reorder_flow_patterns(&cleaned);
     reorder_convergence(&mut reordered);
 
     // Now split into per-event segments and process each through
