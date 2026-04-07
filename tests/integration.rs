@@ -2,7 +2,7 @@ mod common;
 
 use unreal_bp_inspect::output_diff::format_diff;
 use unreal_bp_inspect::output_json::to_json;
-use unreal_bp_inspect::output_summary::format_summary;
+use unreal_bp_inspect::output_summary::{filter_summary, format_summary};
 use unreal_bp_inspect::output_text::format_text;
 use unreal_bp_inspect::parser::parse_asset;
 
@@ -29,7 +29,7 @@ fn helm_structural_checks() {
 fn helm_summary_snapshot() {
     let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
     let asset = parse_asset(&data, false).unwrap();
-    let output = format_summary(&asset, &[]);
+    let output = format_summary(&asset);
     common::assert_snapshot("helm_summary", &output);
 }
 
@@ -64,8 +64,8 @@ fn helm_json_snapshot() {
 fn helm_filter_works() {
     let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
     let asset = parse_asset(&data, false).unwrap();
-    let full = format_summary(&asset, &[]);
-    let filtered = format_summary(&asset, &["getsteeringangle".to_string()]);
+    let full = format_summary(&asset);
+    let filtered = filter_summary(&full, &["getsteeringangle".to_string()]);
     assert!(!filtered.is_empty());
     assert!(
         filtered.len() < full.len(),
@@ -103,12 +103,12 @@ fn garbage_input_returns_error() {
 fn output_determinism() {
     let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
     let asset = parse_asset(&data, false).unwrap();
-    let baseline_summary = format_summary(&asset, &[]);
+    let baseline_summary = format_summary(&asset);
     let baseline_text = format_text(&asset, &[]);
     let baseline_json = serde_json::to_string_pretty(&to_json(&asset, &[])).unwrap();
     for _ in 0..4 {
         assert_eq!(
-            format_summary(&asset, &[]),
+            format_summary(&asset),
             baseline_summary,
             "summary output is nondeterministic"
         );

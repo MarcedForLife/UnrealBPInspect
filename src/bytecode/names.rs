@@ -44,7 +44,7 @@ pub fn clean_bc_name(name: &str) -> String {
 
 /// Normalize UE5 LWC (Large World Coordinates) name variants back to UE4 equivalents
 /// for clean cross-version diffs.
-fn normalize_lwc_name(name: &str) -> String {
+pub fn normalize_lwc_name(name: &str) -> String {
     let mut s = name.to_string();
     // Binary math ops: _DoubleDouble -> _FloatFloat
     s = s.replace("_DoubleDouble", "_FloatFloat");
