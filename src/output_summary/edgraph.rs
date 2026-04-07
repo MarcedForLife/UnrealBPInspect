@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use crate::bytecode::names::normalize_lwc_name;
 use crate::resolve::{
     find_prop, find_prop_i32, find_prop_str, find_struct_field_str, resolve_index, short_class,
 };
@@ -102,6 +103,9 @@ fn collect_graph_nodes(
         let Some(name) = find_struct_field_str(node_props, ref_prop, "MemberName") else {
             return;
         };
+        // Normalize LWC names so UE5 node identifiers (e.g. Add_DoubleDouble)
+        // match the normalized bytecode (Add_FloatFloat) for comment placement.
+        let name = normalize_lwc_name(&name);
         if ref_prop == "FunctionReference" {
             strip_node_func_prefix(&name)
         } else {
