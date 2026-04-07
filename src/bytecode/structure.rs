@@ -407,7 +407,7 @@ fn emit_stmts_range(
             } else {
                 "return"
             };
-            // UE4 ForEach-with-break emits multiple pop_flow to unwind the
+            // UE ForEach-with-break emits multiple pop_flow to unwind the
             // flow stack. Only the first one is semantically meaningful.
             let already_breaking = output.last().is_some_and(|l| l.trim() == keyword);
             if !already_breaking {

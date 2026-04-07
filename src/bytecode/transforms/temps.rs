@@ -162,7 +162,7 @@ fn substitute_var_all(text: &str, var: &str, expr: &str) -> String {
 }
 
 /// Inline `Temp_*` / `$temp` variables that are always assigned the same value.
-/// UE4 Select nodes re-assign the index input before every use; this pass
+/// UE Select nodes re-assign the index input before every use; this pass
 /// collapses `Temp_bool_Variable = LeftHand` + `switch(Temp_bool_Variable)`
 /// into `switch(LeftHand)`.
 pub fn inline_constant_temps(stmts: &mut Vec<BcStatement>, jump_targets: &HashSet<usize>) {
@@ -178,7 +178,7 @@ pub fn inline_constant_temps(stmts: &mut Vec<BcStatement>, jump_targets: &HashSe
     }
 
     // Keep only variables where ALL assignments have the same expression.
-    // - Multi-assignment (any prefix): UE4 Select pattern re-assigns before each use
+    // - Multi-assignment (any prefix): UE Select pattern re-assigns before each use
     // - Single-assignment (Temp_* only): safe to inline since Temp_ vars are read-only
     //   Select indices, never out-parameters.  $-prefixed temps may be out-params
     //   modified by function calls, so single assignments are left to inline_single_use_temps.
