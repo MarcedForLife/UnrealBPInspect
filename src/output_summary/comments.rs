@@ -163,8 +163,17 @@ pub(super) fn find_comment_line(
         }
     }
 
+    // For box comments, prefer execution nodes (CallFunction, VariableSet)
+    // over pure nodes (VariableGet). Pure nodes produce expressions inlined
+    // at multiple bytecode locations, so rank-based matching is unreliable
+    // and can pull the comment to an unrelated outer line.
+    let has_execution = !comment.is_bubble && contained.iter().any(|n| !n.is_pure);
+
     let mut min_line: Option<usize> = None;
     for node in &contained {
+        if has_execution && node.is_pure {
+            continue;
+        }
         let rank = match node_rank(node, nodes) {
             Some(r) => r,
             None => continue,

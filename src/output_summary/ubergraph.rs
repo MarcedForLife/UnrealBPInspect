@@ -20,6 +20,16 @@ use super::{
     ResumeBlock, UbergraphSection, FUZZY_LABEL_WINDOW,
 };
 
+/// Maximum number of event-wrapping comment boxes to emit per event section.
+/// Events may be nested inside multiple organizational boxes (section label +
+/// sub-group + descriptive label); 3 levels covers observed real-world layouts.
+const MAX_EVENT_WRAPPING_COMMENTS: usize = 3;
+
+/// Maximum number of events a comment box can contain and still be treated as
+/// an intentional multi-event group. Boxes containing more events are likely
+/// organizational section dividers placed for visual layout, not semantic groupings.
+const MAX_MULTI_EVENT_GROUP_SIZE: usize = 3;
+
 /// Rewrite jumps targeting offsets outside or unresolvable within the current segment.
 /// Uses the same +/-4 byte fuzzy lookup as structure_bytecode. Unresolvable targets
 /// become past-end sentinels (implicit return/break).
@@ -293,8 +303,91 @@ pub(super) fn build_ubergraph_structured(
     }
 }
 
+/// Resolve an event's graph node position by section name.
+///
+/// Primary: exact match in event_positions (K2Node_Event, K2Node_CustomEvent,
+/// K2Node_InputAxisEvent, K2Node_ComponentBoundEvent).
+/// Fallback: K2Node_InputAction stubs are named InpActEvt_{ActionName}_K2Node_*,
+/// so extract the action name and look up in input_action_positions.
+fn resolve_event_position(
+    section_name: &str,
+    event_positions: &HashMap<String, (i32, i32)>,
+    input_action_positions: &HashMap<String, (i32, i32)>,
+) -> Option<(i32, i32)> {
+    if let Some(&pos) = event_positions.get(section_name) {
+        return Some(pos);
+    }
+    if let Some(rest) = section_name.strip_prefix("InpActEvt_") {
+        if let Some(end) = rest.find("_K2Node_InputActionEvent_") {
+            let action = &rest[..end];
+            return input_action_positions.get(action).copied();
+        }
+    }
+    None
+}
+
+/// Assign each non-multi-event comment to an event section.
+///
+/// Position data determines containment only (which events are inside a box).
+/// Among contained events, the first in section order (structural flow) is
+/// chosen, not the visually closest. Bubbles use distance to the nearest event.
+/// Multi-event group comments are excluded (handled separately as headers).
+///
+/// `section_order` maps event name to its position in the ubergraph output,
+/// so "first in flow" means earliest bytecode offset.
+fn assign_comments_to_events(
+    comments: &[CommentBox],
+    all_positions: &[(String, (i32, i32))],
+    multi_event_idxs: &HashSet<usize>,
+    section_order: &HashMap<String, usize>,
+) -> HashMap<usize, String> {
+    let mut assignment: HashMap<usize, String> = HashMap::new();
+    for (i, cb) in comments.iter().enumerate() {
+        if multi_event_idxs.contains(&i) {
+            continue;
+        }
+        // Box comments: find contained events, pick the first in flow order
+        if !cb.is_bubble && cb.width > 0 && cb.height > 0 {
+            let first_in_flow = all_positions
+                .iter()
+                .filter(|(_, (ex, ey))| cb.contains_point(*ex, *ey))
+                .min_by_key(|(name, _)| {
+                    section_order
+                        .get(name.as_str())
+                        .copied()
+                        .unwrap_or(usize::MAX)
+                });
+            if let Some((name, _)) = first_in_flow {
+                assignment.insert(i, name.clone());
+                continue;
+            }
+        }
+        // Bubbles and non-containing boxes: nearest event by distance
+        let nearest = all_positions.iter().min_by_key(|(_, (ex, ey))| {
+            let dx = (*ex - cb.x) as i64;
+            let dy = (*ey - cb.y) as i64;
+            dx * dx + dy * dy
+        });
+        if let Some((name, _)) = nearest {
+            assignment.insert(i, name.clone());
+        }
+    }
+    assignment
+}
+
+/// Pre-computed comment classification data shared across event sections.
+struct EventCommentCtx {
+    multi_event_idxs: HashSet<usize>,
+    small_group_idxs: HashSet<usize>,
+    /// Maps comment index to the nearest event name. Each comment appears
+    /// in at most one event's output, preventing cross-event leakage.
+    comment_assignments: HashMap<usize, String>,
+}
+
 /// Classify comments for a single ubergraph event section.
 ///
+/// Uses pre-computed comment assignments (nearest-event) to ensure each
+/// comment appears in at most one event's output.
 /// Returns event-wrapping comments (top-level) and inline-positioned comments.
 fn classify_event_comments<'a>(
     section_name: &str,
@@ -302,10 +395,20 @@ fn classify_event_comments<'a>(
     comments: &'a [CommentBox],
     nodes: &[NodeInfo],
     event_positions: &HashMap<String, (i32, i32)>,
-    multi_event_idxs: &HashSet<usize>,
+    input_action_positions: &HashMap<String, (i32, i32)>,
+    ctx: &EventCommentCtx,
 ) -> (Vec<&'a CommentBox>, Vec<(usize, &'a CommentBox)>) {
-    let Some(&(ex, ey)) = event_positions.get(section_name) else {
+    let Some((ex, ey)) =
+        resolve_event_position(section_name, event_positions, input_action_positions)
+    else {
         return (Vec::new(), Vec::new());
+    };
+
+    // Only consider comments assigned to this event
+    let assigned_to_me = |idx: usize| -> bool {
+        ctx.comment_assignments
+            .get(&idx)
+            .is_some_and(|name| name == section_name)
     };
 
     // Event-wrapping comment boxes (contain the event node) -> top-level
@@ -313,15 +416,19 @@ fn classify_event_comments<'a>(
     let mut event_wrapping: Vec<&CommentBox> = comments
         .iter()
         .enumerate()
-        .filter(|(i, c)| !c.is_bubble && c.contains_point(ex, ey) && !multi_event_idxs.contains(i))
+        .filter(|(i, c)| {
+            !c.is_bubble
+                && c.contains_point(ex, ey)
+                && !ctx.multi_event_idxs.contains(i)
+                && assigned_to_me(*i)
+        })
         .map(|(_, c)| c)
         .collect();
     event_wrapping.sort_by_key(|c| ((c.width as i64) * (c.height as i64), c.x, c.y));
-    event_wrapping.truncate(2);
+    event_wrapping.truncate(MAX_EVENT_WRAPPING_COMMENTS);
 
-    // Remaining comments: try to inline using node-to-bytecode matching.
-    // Scope to the Y range of the event's wrapping comment box to prevent
-    // leaking between nearby events.
+    // Scope nodes to the event's wrapping box Y-range for correct rank
+    // computation. Without this, node_rank counts duplicates across events.
     let mut inline: Vec<(usize, &CommentBox)> = Vec::new();
     if !nodes.is_empty() {
         let (scope_y_min, scope_y_max) = event_wrapping
@@ -335,10 +442,6 @@ fn classify_event_comments<'a>(
             })
             .unwrap_or((ey - 400, ey + 400));
 
-        // Scope nodes to the event's Y range for correct rank computation.
-        // Without this, node_rank counts duplicates across all events
-        // (e.g. two Delay nodes), inflating the rank beyond what the
-        // scoped bytecode lines contain.
         let scoped_nodes: Vec<NodeInfo> = nodes
             .iter()
             .filter(|n| n.y >= scope_y_min && n.y <= scope_y_max)
@@ -349,14 +452,7 @@ fn classify_event_comments<'a>(
             .iter()
             .enumerate()
             .filter(|(i, c)| {
-                if event_wrapping.iter().any(|ew| std::ptr::eq(*ew, *c)) {
-                    return false;
-                }
-                if multi_event_idxs.contains(i) {
-                    return false;
-                }
-                let center_y = if c.is_bubble { c.y } else { c.y + c.height / 2 };
-                center_y >= scope_y_min && center_y <= scope_y_max
+                !event_wrapping.iter().any(|ew| std::ptr::eq(*ew, *c)) && assigned_to_me(*i)
             })
             .map(|(_, c)| c)
             .collect();
@@ -378,6 +474,7 @@ pub(super) fn emit_ubergraph_events(
     comments: Option<&[CommentBox]>,
     nodes: Option<&[NodeInfo]>,
     event_positions: &HashMap<String, (i32, i32)>,
+    input_action_positions: &HashMap<String, (i32, i32)>,
     callers_map: &HashMap<String, Vec<String>>,
 ) {
     let (sections, resume_blocks) = split_ubergraph_sections(lines);
@@ -413,28 +510,58 @@ pub(super) fn emit_ubergraph_events(
         }
     }
 
-    // Identify comment boxes covering multiple events, emit once as group header
-    let multi_event_idxs: HashSet<usize> = if let Some(cbs) = comments {
-        cbs.iter()
-            .enumerate()
-            .filter_map(|(i, cb)| {
-                if cb.is_bubble {
-                    return None;
+    // Identify comment boxes covering multiple events, emit once as group header.
+    // Small groups (2-3 events) also indent their contained events.
+    // Large organizational boxes (4+ events) are emitted as headers but don't
+    // cause indentation, since they're canvas section dividers rather than
+    // intentional semantic groups.
+    let mut multi_event_idxs: HashSet<usize> = HashSet::new();
+    let mut small_group_idxs: HashSet<usize> = HashSet::new();
+    if let Some(cbs) = comments {
+        for (i, cb) in cbs.iter().enumerate() {
+            if cb.is_bubble {
+                continue;
+            }
+            let count = event_positions
+                .values()
+                .chain(input_action_positions.values())
+                .filter(|&&(ex, ey)| cb.contains_point(ex, ey))
+                .count();
+            if count > 1 {
+                multi_event_idxs.insert(i);
+                if count <= MAX_MULTI_EVENT_GROUP_SIZE {
+                    small_group_idxs.insert(i);
                 }
-                let count = event_positions
-                    .values()
-                    .filter(|&&(ex, ey)| cb.contains_point(ex, ey))
-                    .count();
-                if count > 1 {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
-            .collect()
+            }
+        }
+    }
+
+    // Pre-assign each non-multi-event comment to its nearest event.
+    // Section order captures structural flow (bytecode offset order).
+    let mut all_event_positions: Vec<(String, (i32, i32))> = Vec::new();
+    let mut section_order: HashMap<String, usize> = HashMap::new();
+    for (si, section) in sections.iter().enumerate() {
+        if section.name.is_empty() || section.name == "(latent resume)" {
+            continue;
+        }
+        if let Some(pos) =
+            resolve_event_position(&section.name, event_positions, input_action_positions)
+        {
+            all_event_positions.push((section.name.clone(), pos));
+            section_order.insert(section.name.clone(), si);
+        }
+    }
+    let comment_assignments: HashMap<usize, String> = if let Some(cbs) = comments {
+        assign_comments_to_events(cbs, &all_event_positions, &multi_event_idxs, &section_order)
     } else {
-        HashSet::new()
+        HashMap::new()
     };
+    let ctx = EventCommentCtx {
+        multi_event_idxs,
+        small_group_idxs,
+        comment_assignments,
+    };
+
     let mut emitted_group_comments: HashSet<usize> = HashSet::new();
     let mut emitted_event_count = 0usize;
 
@@ -469,7 +596,8 @@ pub(super) fn emit_ubergraph_events(
                     cbs,
                     nodes.unwrap_or(&[]),
                     event_positions,
-                    &multi_event_idxs,
+                    input_action_positions,
+                    &ctx,
                 )
             } else {
                 (Vec::new(), Vec::new())
@@ -478,40 +606,41 @@ pub(super) fn emit_ubergraph_events(
             (Vec::new(), Vec::new())
         };
 
-        // Determine if this event is inside a multi-event comment group
-        let in_group = if let Some(cbs) = comments {
-            if let Some(&(ex, ey)) = event_positions.get(&section.name) {
-                cbs.iter()
-                    .enumerate()
-                    .any(|(i, cb)| multi_event_idxs.contains(&i) && cb.contains_point(ex, ey))
-            } else {
-                false
-            }
+        // Resolve the event's graph position once for group/indent checks.
+        let event_pos = if !section.name.is_empty() {
+            resolve_event_position(&section.name, event_positions, input_action_positions)
         } else {
-            false
+            None
+        };
+
+        // Small intentional groups (2-3 events) indent their contents.
+        // Large organizational boxes (4+ events) emit headers but don't indent.
+        let in_group = match (comments, event_pos) {
+            (Some(cbs), Some((ex, ey))) => cbs
+                .iter()
+                .enumerate()
+                .any(|(i, cb)| ctx.small_group_idxs.contains(&i) && cb.contains_point(ex, ey)),
+            _ => false,
         };
         let sig_indent = if in_group { "    " } else { "  " };
         let body_indent = if in_group { "        " } else { "    " };
 
         if !section.name.is_empty() {
-            // Emit multi-event group headers (once, on first event in group)
-            if let Some(cbs) = comments {
-                if let Some(&(ex, ey)) = event_positions.get(&section.name) {
-                    for (i, cb) in cbs.iter().enumerate() {
-                        if multi_event_idxs.contains(&i)
-                            && !emitted_group_comments.contains(&i)
-                            && cb.contains_point(ex, ey)
-                        {
-                            emit_comment(buf, &cb.text, "  ");
-                            emitted_group_comments.insert(i);
-                        }
+            // Emit small group headers (once, on first contained event)
+            if let (Some(cbs), Some((ex, ey))) = (comments, event_pos) {
+                for (i, cb) in cbs.iter().enumerate() {
+                    if ctx.small_group_idxs.contains(&i)
+                        && !emitted_group_comments.contains(&i)
+                        && cb.contains_point(ex, ey)
+                    {
+                        emit_comment(buf, &cb.text, "  ");
+                        emitted_group_comments.insert(i);
                     }
                 }
             }
             if let Some(callers) = callers_map.get(&section.name) {
                 writeln!(buf, "{}// called by: {}", sig_indent, callers.join(", ")).unwrap();
             }
-            // Per-event comments before signature
             for cb in &top_level_comments {
                 emit_comment(buf, &cb.text, sig_indent);
             }
