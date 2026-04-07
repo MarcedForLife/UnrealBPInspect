@@ -55,16 +55,16 @@ bp-inspect [OPTIONS] <PATH>...
 
 Accepts one or more `.uasset` files or directories. Directories are scanned recursively.
 
-| Flag               | Description                                                |
-| ------------------ | ---------------------------------------------------------- |
-| `--dump`           | Full import/export/property dump (verbose diagnostic view) |
-| `--json`           | Full structured output as JSON                             |
-| `--diff`           | Compare two `.uasset` files (unified diff of summaries)    |
-| `--filter <name>`  | Filter exports by name (substring match, comma-separated)  |
-| `--update`         | Update bp-inspect to the latest release                    |
-| `--context <N>`    | Context lines in diff output (default: 3)                  |
-| `--debug`          | Dump raw table data for format investigation               |
-| `-V` / `--version` | Print version                                              |
+| Flag                       | Description                                             |
+| -------------------------- | ------------------------------------------------------- |
+| `-f` / `--filter <term>`   | Filter output by substring (comma-separated, see below) |
+| `-j` / `--json`            | Full structured output as JSON                          |
+| `-d` / `--diff`            | Compare two `.uasset` files (unified diff of summaries) |
+| `--context <N>`            | Context lines in diff output (default: 3)               |
+| `--update [version]`       | Update to the latest (or specified) release             |
+| `--dump`                   | Full import/export/property dump (verbose diagnostic)   |
+| `--debug`                  | Dump raw table data for format investigation            |
+| `-V` / `--version`         | Print version                                           |
 
 ### Default output
 
@@ -102,12 +102,12 @@ Larger Blueprints include call graphs and decoded functions:
 
 ```
 Call graph:
-  InitialiseHandPhysics -> EnableHandPhysics
-  OnComponentGripped -> DisableHandPhysics, ResolveFingerPoses
-  OnGripReleased -> EnableHandPhysics
-  ReceiveBeginPlay -> InitialiseHandPhysics, ScaleHandToPlayer
-  ReceiveTick -> TeleportHandToController
-  ResolveFingerPoses -> ResolveFingerPose
+  InitialiseHandPhysics → EnableHandPhysics
+  OnComponentGripped → DisableHandPhysics, ResolveFingerPoses
+  OnGripReleased → EnableHandPhysics
+  ReceiveBeginPlay → InitialiseHandPhysics, ScaleHandToPlayer
+  ReceiveTick → TeleportHandToController
+  ResolveFingerPoses → ResolveFingerPose
   ...
 ```
 
@@ -146,14 +146,63 @@ Latent actions (Delay, MoveTo) show their resume continuation inline:
     self.SkeletalMeshComponent.SetMassOverrideInKg(self.RootBoneName, self.OriginalHandMass, true)
 ```
 
-
 ### Filtering
 
-Drill into a specific function while keeping class context:
+`--filter` searches across all sections of the output, case-insensitive. It shows matching components, variables, functions (by name or body content), and the related call graph entries.
+
+Filter by a function or event name:
 
 ```sh
-bp-inspect MyBlueprint.uasset --filter MyFunction
+bp-inspect MyBlueprint.uasset --filter ReceiveTick
 ```
+
+```
+Blueprint: VRHand_BP (extends SkeletalMeshActor)
+
+Call graph:
+  ReceiveTick → TeleportHandToController
+
+Functions:
+  ReceiveTick():
+    ...
+    if ((!self.GrippingActor) && ($VSize >= self.MaxHandDistance)) {
+        TeleportHandToController()
+    }
+
+  TeleportHandToController() [Public|BlueprintPure]
+    ...
+```
+
+Filter by a variable name to see its definition and every function that references it:
+
+```sh
+bp-inspect MyBlueprint.uasset --filter GrippingActor
+```
+
+```
+Blueprint: VRHand_BP (extends SkeletalMeshActor)
+
+Variables:
+  GrippingActor: bool
+
+Call graph:
+  OnComponentGripped → DisableHandPhysics, ResolveFingerPoses
+  OnGripReleased → EnableHandPhysics
+  ...
+
+Functions:
+  OnGripReleased():
+    ...
+    self.GrippingActor = false
+    ...
+
+  OnComponentGripped(GrippedActor: GrippedComponent_Struct) [Public|BlueprintPure]
+    ...
+    self.GrippingActor = true
+    ...
+```
+
+Multiple terms can be comma-separated: `--filter health,mana`.
 
 ### Batch / directory mode
 
@@ -170,6 +219,21 @@ bp-inspect --diff Old_BP.uasset New_BP.uasset
 ```
 
 Outputs a unified diff of the decoded summaries. Exit code 0 means identical, 1 means differences found. Combine with `--filter` to compare specific functions.
+
+```diff
+ Variables:
+-  MaxHandDistance: float = 50.0000
++  MaxHandDistance: float = 75.0000
+ ...
+@@ -290,8 +290,8 @@
+   UserConstructionScript() [Event|Public|BlueprintPure]
+     // "Set the appropriate mesh"
+-    self.SkeletalMeshComponent.SetSkeletalMesh(switch(self.Hand) { ... }, true)
++    self.SkeletalMeshComponent.SetSkinnedAssetAndUpdate(switch(self.Hand) { ... }, true)
+     // "Set the appropriate animation blueprint"
+-    self.SkeletalMeshComponent.SetAnimClass(switch(self.Hand) { ... })
++    self.SkeletalMeshComponent.SetAnimInstanceClass(switch(self.Hand) { ... })
+```
 
 ### JSON mode
 
@@ -206,19 +270,6 @@ git config --global diff.bp-inspect.textconv /path/to/bp-inspect
 
 # Windows - use forward slashes
 git config --global diff.bp-inspect.textconv C:/Tools/bp-inspect.exe
-```
-
-### What it looks like
-
-```diff
-$ git diff Content/Blueprints/MyBlueprint.uasset
-
--  GripStrength: float = 0.8
-+  GripStrength: float = 1.2
-
-   OnGripReleased():
--    Delay(0.5000)
-+    Delay(1.0000)
 ```
 
 ### Notes
@@ -278,28 +329,26 @@ The goal is output that reads like hand-written pseudocode, not a bytecode dump.
 ### Building
 
 ```sh
-cargo build                        # dev build
-cargo build --release              # optimised build → target/release/bp-inspect
+cargo build             # dev build
+cargo build --release   # optimised build → target/release/bp-inspect
 ```
 
 ### Running locally
 
 ```sh
-cargo run -- samples/ue_4.27/MyBlueprint.uasset                       # human-readable summary (default)
-cargo run -- samples/ue_4.27/MyBlueprint.uasset --dump                # full import/export/property dump
-cargo run -- samples/ue_4.27/MyBlueprint.uasset --json                # full JSON output
-cargo run -- samples/ue_4.27/MyBlueprint.uasset --filter MyFunction   # single function
-cargo run -- --diff samples/ue_4.27/A.uasset samples/ue_5.5/A.uasset # compare two files
-cargo run -- samples/                                                 # all .uasset files in directory
+cargo run -- samples/<file>.uasset                        # summary (default)
+cargo run -- samples/<file>.uasset --filter ReceiveTick   # filter by event
+cargo run -- --diff samples/A.uasset samples/B.uasset     # compare two files
+cargo run -- samples/                                     # all files in directory
 ```
 
 ### Testing
 
 ```sh
-cargo test                         # run all tests
-cargo test -- --nocapture          # run with stdout visible
-cargo test inline                  # run tests matching "inline"
-UPDATE_SNAPSHOTS=1 cargo test      # update snapshot files after intentional output changes
+cargo test                      # run all tests
+cargo test -- --nocapture       # run with stdout visible
+cargo test inline               # run tests matching "inline"
+UPDATE_SNAPSHOTS=1 cargo test   # update snapshot files after intentional output changes
 ```
 
 **Unit tests** live inline in source files (`#[cfg(test)]`). They test private helpers that aren't accessible from outside their module. **Integration tests** in `tests/` exercise the public API end-to-end with snapshot regression and structural assertions.
