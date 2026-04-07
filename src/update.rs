@@ -115,8 +115,8 @@ fn validate_binary(bytes: &[u8]) -> Result<()> {
     let valid_magic = if cfg!(target_os = "linux") {
         bytes.starts_with(b"\x7fELF")
     } else if cfg!(target_os = "macos") {
-        let magic = u32::from_be_bytes(bytes[..4].try_into().unwrap_or_default());
-        matches!(magic, 0xFEEDFACE | 0xFEEDFACF | 0xCAFEBABE | 0xBEBAFECA)
+        // Mach-O 64-bit magic (little-endian on disk) or universal binary
+        bytes.starts_with(&[0xCF, 0xFA, 0xED, 0xFE]) || bytes.starts_with(&[0xCA, 0xFE, 0xBA, 0xBE])
     } else if cfg!(target_os = "windows") {
         bytes.starts_with(b"MZ")
     } else {
