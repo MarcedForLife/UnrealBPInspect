@@ -11,8 +11,8 @@ use crate::bytecode::{
 };
 use crate::helpers::indent_of;
 use crate::parser::structure_and_cleanup;
-use crate::resolve::*;
-use crate::types::*;
+use crate::resolve::find_prop_str_items_any;
+use crate::types::Property;
 
 use super::comments::find_comment_line;
 use super::{
