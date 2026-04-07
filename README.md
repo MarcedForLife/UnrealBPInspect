@@ -68,11 +68,13 @@ Accepts one or more `.uasset` files or directories. Directories are scanned recu
 
 ### Default output
 
-Shows the Blueprint as a single readable document with components, variables, and decoded functions:
+Shows the Blueprint as a single readable document with components, variables, call graph, and decoded functions with inline comments:
 
 ```sh
 $ bp-inspect Helm_BP.uasset
+```
 
+```
 Blueprint: Helm_BP (extends Actor)
 
 Components:
@@ -94,15 +96,54 @@ Components:
 
 Variables:
   WinchConstraintInstance: WinchConstraint_BP_C*
+```
 
-Functions:
-  GetSteeringAngle(out SteeringAngle: float) [Public|HasOutParms|BlueprintPure|Const]
-    out SteeringAngle = (self.WinchConstraintInstance.GetRotationAlpha() * 2.0000) - 1.0000
-  UserConstructionScript() [Event|Public|BlueprintPure]
-    $Cast_AsWinch_Constraint_BP = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)
-    if ($Cast_AsWinch_Constraint_BP) {
-        self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP
+Larger Blueprints include call graphs and decoded functions:
+
+```
+Call graph:
+  InitialiseHandPhysics -> EnableHandPhysics
+  OnComponentGripped -> DisableHandPhysics, ResolveFingerPoses
+  OnGripReleased -> EnableHandPhysics
+  ReceiveBeginPlay -> InitialiseHandPhysics, ScaleHandToPlayer
+  ReceiveTick -> TeleportHandToController
+  ResolveFingerPoses -> ResolveFingerPose
+  ...
+```
+
+Functions are decompiled into structured pseudocode with Blueprint comments placed inline:
+
+```
+  ReceiveBeginPlay():
+    // "Resize the hand based on the players height (breaks physical animation)"
+    ScaleHandToPlayer(self.PlayerHeight)
+    // "Do first time setup and enable physics for the hand"
+    InitialiseHandPhysics()
+    // "Bind on player teleported events"
+    $Cast_AsVRPlayer_BP = cast<VRPlayer_BP_C>(self.MotionController.GetOwner())
+    if ($Cast_AsVRPlayer_BP) {
+        $Cast_AsVRPlayer_BP.OnCharacterTeleported_Bind += self.OnOwnerTeleported
+        // "Bind player status updates to update the player state widget"
+        if (IsValid(self.PlayerStateWidget)) {
+            $Cast_AsVRPlayer_BP.PlayerStatusesUpdated += self.OnPlayerStatusesUpdated
+        }
     }
+```
+
+Latent actions (Delay, MoveTo) show their resume continuation inline:
+
+```
+  // "On grip released"
+  OnGripReleased():
+    self.SkeletalMeshComponent.DetachFromComponent(KeepWorld, KeepWorld, KeepWorld, true)
+    EnableHandPhysics()
+    self.GrippingActor = false
+    // "Since we simulate gravity on gripped components, wait a little bit
+    //  before restoring the hands mass. This stops the gripped component
+    //  from being launched when held from the bottom"
+    Delay(0.5000)
+    // after delay:
+    self.SkeletalMeshComponent.SetMassOverrideInKg(self.RootBoneName, self.OriginalHandMass, true)
 ```
 
 
