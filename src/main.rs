@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use unreal_bp_inspect::output_diff::format_diff;
 use unreal_bp_inspect::output_json::to_json;
-use unreal_bp_inspect::output_summary::format_summary;
+use unreal_bp_inspect::output_summary::{filter_summary, format_summary};
 use unreal_bp_inspect::output_text::format_text;
 use unreal_bp_inspect::parser::parse_asset;
 use unreal_bp_inspect::update::run_update;
@@ -25,19 +25,19 @@ struct Cli {
     update: Option<String>,
 
     /// Output as JSON
-    #[arg(long)]
+    #[arg(long, short)]
     json: bool,
 
     /// Full import/export/property dump
     #[arg(long)]
     dump: bool,
 
-    /// Filter exports by name (substring match, comma-separated)
+    /// Filter output by substring (comma-separated, case-insensitive)
     #[arg(long, short)]
     filter: Option<String>,
 
     /// Compare two .uasset files (requires exactly 2 paths)
-    #[arg(long)]
+    #[arg(long, short)]
     diff: bool,
 
     /// Number of context lines in diff output (default: 3)
@@ -91,7 +91,7 @@ fn process_file(path: &Path, mode: &OutputMode, filters: &[String], debug: bool)
     let asset =
         parse_asset(&data, debug).with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(match mode {
-        OutputMode::Summary => format_summary(&asset, filters),
+        OutputMode::Summary => filter_summary(&format_summary(&asset), filters),
         OutputMode::Dump => format_text(&asset, filters),
         OutputMode::Json => serde_json::to_string_pretty(&to_json(&asset, filters)).unwrap(),
     })
