@@ -5,6 +5,7 @@ use super::{
     is_loop_header, opens_block, strip_outer_parens, ARRAY_INDEX_VAR, BREAK_HIT_VAR,
     LOOP_COUNTER_VAR,
 };
+use crate::bytecode::SEQUENCE_MARKER_PREFIX;
 use crate::helpers::{is_section_separator, SECTION_SEPARATOR};
 use std::collections::{HashMap, HashSet};
 
@@ -94,7 +95,7 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
     while i + 1 < lines.len() {
         let next = lines[i + 1].trim();
         if lines[i].trim() == "return"
-            && (next.starts_with("// sequence [")
+            && (next.starts_with(SEQUENCE_MARKER_PREFIX)
                 || next.starts_with("// sub-sequence [")
                 || next.starts_with("case ")
                 || next.starts_with("switch ("))
@@ -111,7 +112,9 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
     //   - Plain functions: depth 0 only (deeper returns have else content after)
     //   - UberGraph sections: never (pop_flow semantics differ)
     let has_labels = lines.iter().any(|l| l.starts_with(SECTION_SEPARATOR));
-    let has_sequences = lines.iter().any(|l| l.trim().starts_with("// sequence ["));
+    let has_sequences = lines
+        .iter()
+        .any(|l| l.trim().starts_with(SEQUENCE_MARKER_PREFIX));
     {
         // dead_depth: when Some(d), we're suppressing dead code that started at depth d.
         // Lines are dead until we close back to depth < d.
@@ -128,7 +131,9 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
             }
             // Sequence markers reset dead state but NOT depth (they can
             // appear inside switch/case or other brace-nested structures)
-            if trimmed.starts_with("// sequence [") || trimmed.starts_with("// sub-sequence [") {
+            if trimmed.starts_with(SEQUENCE_MARKER_PREFIX)
+                || trimmed.starts_with("// sub-sequence [")
+            {
                 dead_depth = None;
                 return true;
             }
@@ -509,6 +514,44 @@ pub fn rename_loop_temp_vars(lines: &mut [String]) {
     }
 }
 
+/// Remove orphaned Break* calls left behind by temp inlining.
+///
+/// BreakTransform, BreakHitResult, etc. are pure functions that decompose a
+/// struct into out parameters. After inlining, the out params become property
+/// accessors on the first argument (e.g. `EXPR.Location`), making the call
+/// a no-op. Detect this pattern and remove the dead lines.
+pub fn strip_inlined_break_calls(lines: &mut Vec<String>) {
+    lines.retain(|line| {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("Break") {
+            return true;
+        }
+        let paren_start = match trimmed.find('(') {
+            Some(p) => p,
+            None => return true,
+        };
+        // Verify the prefix is a plain identifier (no assignment, no method call)
+        if trimmed[..paren_start].contains(' ') || trimmed[..paren_start].contains('.') {
+            return true;
+        }
+        let inner = match find_matching_paren(&trimmed[paren_start..]) {
+            Some(close) if paren_start + close + 1 == trimmed.len() => {
+                &trimmed[paren_start + 1..paren_start + close]
+            }
+            _ => return true,
+        };
+        let args = crate::helpers::split_args(inner);
+        if args.len() < 2 {
+            return true;
+        }
+        let first = args[0];
+        let is_dead = args[1..]
+            .iter()
+            .all(|arg| arg.starts_with(first) && arg.as_bytes().get(first.len()) == Some(&b'.'));
+        !is_dead
+    });
+}
+
 /// Remove empty if/else blocks, unreferenced labels, and bare temp assignments.
 pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
     // Strip bare standalone expressions at brace depth 0 (top level).
@@ -544,6 +587,39 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
             }
             true
         });
+    }
+
+    // Strip labels inside else blocks and their orphaned gotos.
+    // When convergence extraction is blocked for labels at else-block starts,
+    // the label and goto survive as artifacts. Remove the labels first, then
+    // any gotos that no longer have a matching label.
+    {
+        let mut else_labels: HashSet<String> = HashSet::new();
+        for i in 1..lines.len() {
+            let trimmed = lines[i].trim();
+            if trimmed.starts_with("L_") && trimmed.ends_with(':') && !trimmed.contains(' ') {
+                let prev = lines[i - 1].trim();
+                if prev.starts_with("} else") {
+                    else_labels.insert(trimmed[..trimmed.len() - 1].to_string());
+                }
+            }
+        }
+        if !else_labels.is_empty() {
+            lines.retain(|l| {
+                let trimmed = l.trim();
+                // Remove the label itself
+                if trimmed.ends_with(':') && else_labels.contains(&trimmed[..trimmed.len() - 1]) {
+                    return false;
+                }
+                // Remove gotos targeting the label
+                if let Some(target) = trimmed.strip_prefix("goto ") {
+                    if else_labels.contains(target) {
+                        return false;
+                    }
+                }
+                true
+            });
+        }
     }
 
     // Remove ForEach compiler artifacts: break-hit flag assignments are always
@@ -706,7 +782,7 @@ fn brace_depth(lines: &[String]) -> i32 {
 /// Resets depth at section boundaries (`---`, `// sequence [`).
 pub fn strip_unmatched_braces(lines: &mut Vec<String>) {
     fn is_boundary(trimmed: &str) -> bool {
-        (is_section_separator(trimmed)) || trimmed.starts_with("// sequence [")
+        (is_section_separator(trimmed)) || trimmed.starts_with(SEQUENCE_MARKER_PREFIX)
     }
 
     // Pass 1: remove orphaned closing braces

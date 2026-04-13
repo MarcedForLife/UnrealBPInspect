@@ -22,10 +22,19 @@ use std::collections::HashMap;
 /// single-step granularity covers the common case of one missed adjustment.
 pub const JUMP_OFFSET_TOLERANCE: usize = 4;
 
+// Bytecode statement text constants used across flow, structure, and transform passes.
+pub const RETURN_NOP: &str = "return nop";
+pub const POP_FLOW: &str = "pop_flow";
+pub const SEQUENCE_MARKER_PREFIX: &str = "// sequence [";
+
+/// Target line width for pseudocode readability. Used by temp inlining (skip
+/// substitutions that would exceed this), line folding, and ternary hoisting.
+pub const MAX_LINE_WIDTH: usize = 120;
+
 pub use decode::{decode_bytecode, BcStatement};
 pub use flow::{
-    parse_if_jump, parse_jump, parse_push_flow, reorder_convergence, reorder_flow_patterns,
-    strip_latch_boilerplate,
+    find_first_unmatched_pop, find_last_unmatched_pop, flow_depth, parse_if_jump, parse_jump,
+    parse_push_flow, reorder_convergence, reorder_flow_patterns, strip_latch_boilerplate,
 };
 pub use structure::{apply_indentation, structure_bytecode};
 pub use transforms::{
@@ -44,7 +53,7 @@ pub fn split_by_sequence_markers(stmts: &[BcStatement]) -> Vec<(Option<String>, 
     let marker_indices: Vec<usize> = stmts
         .iter()
         .enumerate()
-        .filter(|(_, s)| s.text.starts_with("// sequence ["))
+        .filter(|(_, s)| s.text.starts_with(SEQUENCE_MARKER_PREFIX))
         .map(|(i, _)| i)
         .collect();
 

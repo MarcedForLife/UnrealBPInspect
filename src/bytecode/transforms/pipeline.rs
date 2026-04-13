@@ -429,7 +429,7 @@ fn parse_negated_bool_at(text: &str, bang_pos: usize) -> Option<NegatedBoolRewri
 /// `obj.Func($outParam)` where `$outParam` is referenced exactly once later
 /// -> substitute `obj.Func()` for `$outParam` and remove the standalone call.
 pub(super) fn fold_outparam_calls(lines: &mut Vec<String>) {
-    const MAX_LINE: usize = 120;
+    use crate::bytecode::MAX_LINE_WIDTH;
     let mut i = 0;
     while i < lines.len() {
         let trimmed = lines[i].trim().to_string();
@@ -458,7 +458,7 @@ pub(super) fn fold_outparam_calls(lines: &mut Vec<String>) {
             &candidate.call_expr,
         );
 
-        if replacement.len() > MAX_LINE {
+        if replacement.len() > MAX_LINE_WIDTH {
             i += 1;
             continue;
         }
@@ -579,7 +579,7 @@ fn find_single_ref(lines: &[String], skip_idx: usize, var: &str) -> Option<usize
 /// Runs on `Vec<String>` (indented lines) after structuring, catching temps
 /// that survived pre-structure inlining due to cross-section ref counts.
 fn fold_section_temps(lines: &mut Vec<String>) {
-    const MAX_LINE: usize = 120;
+    use crate::bytecode::MAX_LINE_WIDTH;
     const MAX_PASSES: usize = 4;
 
     for _ in 0..MAX_PASSES {
@@ -651,7 +651,7 @@ fn fold_section_temps(lines: &mut Vec<String>) {
 
             let shortens = current_expr.len() + 2 <= var_name.len();
             let trivial = is_trivial_expr(&current_expr);
-            if !shortens && !trivial && replacement.len() > MAX_LINE {
+            if !shortens && !trivial && replacement.len() > MAX_LINE_WIDTH {
                 continue;
             }
 

@@ -16,8 +16,10 @@ pub struct BcStatement {
     /// In-memory bytecode offset (adjusted for FName size differences).
     /// Used by structure/flow passes to resolve jump targets.
     pub mem_offset: usize,
-    /// Additional offsets absorbed when temp inlining merges statements.
-    /// Jump targets pointing to these offsets resolve to this statement.
+    /// Additional offsets absorbed when temp inlining removes statements.
+    /// Populated by transform passes (not the decoder) so that `OffsetMap`
+    /// can still resolve jump targets that pointed to the removed statement.
+    /// Empty for the vast majority of statements (no heap allocation).
     pub offset_aliases: Vec<usize>,
     pub text: String,
 }

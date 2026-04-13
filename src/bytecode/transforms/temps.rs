@@ -4,24 +4,19 @@ use super::{
     count_var_refs, expr_has_call, is_trivial_expr, parse_temp_assignment, substitute_var,
 };
 use crate::bytecode::decode::BcStatement;
+use crate::bytecode::flow::{parse_if_jump, parse_jump};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// Collect all bytecode offsets that are targets of if-jumps.
+/// Collect all bytecode offsets that are jump targets (conditional and unconditional).
 /// Used to protect these offsets from being lost when inline passes remove statements.
 pub fn collect_jump_targets(stmts: &[BcStatement]) -> HashSet<usize> {
     let mut targets = HashSet::new();
     for stmt in stmts {
-        // Conditional jumps: "if !(cond) jump 0xTARGET"
-        if let Some(pos) = stmt.text.rfind(") jump 0x") {
-            if let Ok(target) = usize::from_str_radix(&stmt.text[pos + 9..], 16) {
-                targets.insert(target);
-            }
+        if let Some((_, target)) = parse_if_jump(&stmt.text) {
+            targets.insert(target);
         }
-        // Unconditional jumps: "jump 0xTARGET"
-        if let Some(hex) = stmt.text.strip_prefix("jump 0x") {
-            if let Ok(target) = usize::from_str_radix(hex, 16) {
-                targets.insert(target);
-            }
+        if let Some(target) = parse_jump(&stmt.text) {
+            targets.insert(target);
         }
     }
     targets
@@ -82,9 +77,8 @@ pub fn inline_constant_temps(stmts: &mut Vec<BcStatement>, jump_targets: &HashSe
 /// - Start with `$` (compiler temporaries)
 /// - Are assigned exactly once (`$X = expr`)
 /// - Are referenced exactly once in a later statement
-/// - Would not produce a line longer than MAX_LINE chars
+/// - Would not produce a line longer than MAX_LINE_WIDTH chars
 pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
-    const MAX_LINE: usize = 120;
     const MAX_PASSES: usize = 6;
 
     for _ in 0..MAX_PASSES {
@@ -119,7 +113,7 @@ pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
             }
         }
 
-        let mut removed: Vec<usize> = Vec::new();
+        let mut removed: HashSet<usize> = HashSet::new();
         let mut inlined_any = false;
         for (assign_idx, var_name, _) in &to_inline {
             if removed.contains(assign_idx) {
@@ -150,18 +144,20 @@ pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
             let replacement = substitute_var(&stmts[target_idx].text, var_name, &current_expr);
             let shortens = current_expr.len() + 2 <= var_name.len();
             let trivial = is_trivial_expr(&current_expr);
-            if !shortens && !trivial && replacement.len() > MAX_LINE {
+            if !shortens && !trivial && replacement.len() > crate::bytecode::MAX_LINE_WIDTH {
                 continue;
             }
             stmts[target_idx].text = replacement;
-            removed.push(*assign_idx);
+            removed.insert(*assign_idx);
             inlined_any = true;
         }
 
-        removed.sort_unstable();
-        for idx in removed.into_iter().rev() {
-            stmts.remove(idx);
-        }
+        let mut idx = 0;
+        stmts.retain(|_| {
+            let keep = !removed.contains(&idx);
+            idx += 1;
+            keep
+        });
         if !inlined_any {
             break;
         }
