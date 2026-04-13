@@ -30,9 +30,11 @@ pub use flow::{
 pub use structure::{apply_indentation, structure_bytecode};
 pub use transforms::{
     cleanup_structured_output, collect_jump_targets, discard_unused_assignments,
-    eliminate_constant_condition_branches, fold_long_lines, fold_summary_patterns,
-    fold_switch_enum_cascade, inline_constant_temps, inline_single_use_temps,
-    rename_loop_temp_vars, strip_orphaned_blocks, strip_unmatched_braces,
+    discard_unused_assignments_text, eliminate_constant_condition_branches,
+    fold_cascade_across_sequences, fold_long_lines, fold_summary_patterns,
+    fold_switch_enum_cascade, inline_constant_temps, inline_constant_temps_text,
+    inline_single_use_temps, rename_loop_temp_vars, strip_inlined_break_calls,
+    strip_orphaned_blocks, strip_unmatched_braces,
 };
 
 /// Split BcStatements at `// sequence [N]:` markers.
@@ -85,14 +87,19 @@ pub struct OffsetMap {
 }
 
 impl OffsetMap {
-    /// Build from statements, filtering out entries with mem_offset == 0.
+    /// Build from statements, including offset aliases from inlined temps.
     pub fn build(stmts: &[BcStatement]) -> Self {
-        let exact: HashMap<usize, usize> = stmts
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.mem_offset > 0)
-            .map(|(i, s)| (s.mem_offset, i))
-            .collect();
+        let mut exact: HashMap<usize, usize> = HashMap::new();
+        for (i, stmt) in stmts.iter().enumerate() {
+            if stmt.mem_offset > 0 {
+                exact.insert(stmt.mem_offset, i);
+            }
+            for &alias in &stmt.offset_aliases {
+                if alias > 0 {
+                    exact.entry(alias).or_insert(i);
+                }
+            }
+        }
         let mut sorted: Vec<(usize, usize)> = exact.iter().map(|(&off, &idx)| (off, idx)).collect();
         sorted.sort_by_key(|&(off, _)| off);
         OffsetMap { exact, sorted }
