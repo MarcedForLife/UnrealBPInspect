@@ -181,17 +181,19 @@ pub(super) fn extract_parenthesized_ternaries(input: &str) -> Vec<String> {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'(' {
-            if let Some(close) = find_matching_paren(&input[i..]) {
-                let inner = &input[i + 1..i + close];
-                // Check for ` ? ` and ` : ` at paren depth 0 inside
-                if has_ternary_at_depth_zero(inner) {
-                    results.push(input[i..i + close + 1].to_string());
+            // Skip function-call parens: `(` preceded by an identifier char
+            // is a call argument list, not a ternary grouping.
+            let is_call = i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+            if !is_call {
+                if let Some(close) = find_matching_paren(&input[i..]) {
+                    let inner = &input[i + 1..i + close];
+                    // Check for ` ? ` and ` : ` at paren depth 0 inside
+                    if has_ternary_at_depth_zero(inner) {
+                        results.push(input[i..i + close + 1].to_string());
+                    }
                 }
-                // Don't skip past close; there may be nested ternaries inside
-                i += 1;
-            } else {
-                i += 1;
             }
+            i += 1;
         } else {
             i += 1;
         }

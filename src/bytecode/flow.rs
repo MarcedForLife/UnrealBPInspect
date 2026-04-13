@@ -702,14 +702,9 @@ impl<'a> SequenceEmitter<'a> {
         } else {
             "sequence"
         };
-        let marker = |text: &str| BcStatement {
-            mem_offset: seq_offset,
-            text: text.to_string(),
-        };
-        let sentinel = |idx: usize| BcStatement {
-            mem_offset: self.stmts[idx].mem_offset,
-            text: "return nop".to_string(),
-        };
+        let marker = |text: &str| BcStatement::new(seq_offset, text.to_string());
+        let sentinel =
+            |idx: usize| BcStatement::new(self.stmts[idx].mem_offset, "return nop".to_string());
 
         // Emit each pin body, following unconditional jumps to child Sequences
         for (pi, pin) in seq.pins.iter().enumerate() {
@@ -795,10 +790,7 @@ fn emit_single_loop(
 ) {
     emitted.insert(lp.if_idx);
     let lp_offset = stmts[lp.if_idx].mem_offset;
-    let marker = |text: &str| BcStatement {
-        mem_offset: lp_offset,
-        text: text.to_string(),
-    };
+    let marker = |text: &str| BcStatement::new(lp_offset, text.to_string());
     let body_end = if stmts[lp.body_end_idx].text == "return nop" {
         lp.body_end_idx
     } else {
@@ -846,18 +838,15 @@ fn emit_single_loop(
                 continue;
             }
             if stmt.text == "pop_flow" {
-                output.push(BcStatement {
-                    mem_offset: stmt.mem_offset,
-                    text: format!("jump 0x{:x}", end_offset),
-                });
+                output.push(BcStatement::new(
+                    stmt.mem_offset,
+                    format!("jump 0x{:x}", end_offset),
+                ));
                 // Anchor: the next statement's offset must survive in the
                 // OffsetMap even if inline passes remove its original statement.
                 if let Some(next) = completion.get(rel + 1) {
                     if next.mem_offset > 0 {
-                        output.push(BcStatement {
-                            mem_offset: next.mem_offset,
-                            text: String::new(),
-                        });
+                        output.push(BcStatement::new(next.mem_offset, String::new()));
                     }
                 }
                 continue;
@@ -1132,7 +1121,8 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
 /// structure_bytecode can detect if/else correctly. Loops until no groups remain.
 pub fn reorder_convergence(stmts: &mut Vec<BcStatement>) {
     // Loop because each reorder shifts indices; process one convergence group per iteration.
-    loop {
+    // Cap iterations to prevent oscillation between competing reordering passes.
+    for _ in 0..20 {
         if stmts.len() < 4 {
             return;
         }
@@ -1300,10 +1290,7 @@ fn build_convergence_reorder(
 
     // Insert synthetic jump to convergence (so structure.rs sees a forward jump)
     let conv_offset = stmts[group.target_idx].mem_offset;
-    output.push(BcStatement {
-        mem_offset: 0,
-        text: format!("jump 0x{:x}", conv_offset),
-    });
+    output.push(BcStatement::new(0, format!("jump 0x{:x}", conv_offset)));
 
     // Emit displaced blocks (deepest if_idx first = inner-false before outer-false)
     for db in &displaced {
@@ -1311,10 +1298,10 @@ fn build_convergence_reorder(
             output.push(stmt.clone());
         }
         // Replace backward jump with forward jump to convergence
-        output.push(BcStatement {
-            mem_offset: stmts[db.block_end].mem_offset,
-            text: format!("jump 0x{:x}", conv_offset),
-        });
+        output.push(BcStatement::new(
+            stmts[db.block_end].mem_offset,
+            format!("jump 0x{:x}", conv_offset),
+        ));
     }
 
     // Emit convergence code
@@ -1426,15 +1413,16 @@ fn duplicate_inline_convergence(
         if conv_range.len() < 4 {
             continue;
         }
-        // Allow control flow in convergence code only if all jumps target
-        // outside the range (safe to duplicate without breaking references)
-        let jump_target_of = |s: &BcStatement| -> Option<usize> {
-            parse_if_jump(&s.text)
+        // Reject convergence code with internal jumps (targets within the
+        // range). Shared post-branch code is straight-line; internal control
+        // flow means this isn't a simple convergence pattern.
+        let jump_target_of = |stmt: &BcStatement| -> Option<usize> {
+            parse_if_jump(&stmt.text)
                 .map(|(_, jt)| jt)
-                .or_else(|| parse_jump(&s.text))
+                .or_else(|| parse_jump(&stmt.text))
         };
-        let has_internal_jumps = conv_range.iter().any(|s| {
-            jump_target_of(s)
+        let has_internal_jumps = conv_range.iter().any(|stmt| {
+            jump_target_of(stmt)
                 .and_then(&find_idx)
                 .is_some_and(|ti| ti >= conv_start && ti < exit_jump_idx)
         });
@@ -1465,16 +1453,13 @@ fn duplicate_inline_convergence(
         output.extend_from_slice(&stmts[..bj_idx]);
         // Convergence code (duplicated)
         for orig in conv_range {
-            output.push(BcStatement {
-                mem_offset: 0,
-                text: orig.text.clone(),
-            });
+            output.push(BcStatement::new(0, orig.text.clone()));
         }
         // Exit jump (duplicated, keeps the same forward target)
-        output.push(BcStatement {
-            mem_offset: stmts[bj_idx].mem_offset,
-            text: stmts[exit_jump_idx].text.clone(),
-        });
+        output.push(BcStatement::new(
+            stmts[bj_idx].mem_offset,
+            stmts[exit_jump_idx].text.clone(),
+        ));
         // Everything after the backward jump
         output.extend_from_slice(&stmts[bj_idx + 1..]);
 
@@ -1531,6 +1516,163 @@ fn resolve_degenerate_backedge(stmts: &mut Vec<BcStatement>, offset_map: &Offset
     false
 }
 
+/// Resolve a displaced else-block sitting between a nested if's true and false branches.
+///
+/// The UE bytecode compiler sometimes lays out an outer if's else-block between
+/// an inner (nested) if's true and false branches:
+///
+/// ```text
+/// [outer_if] if !(A) jump ELSE_A       // outer condition
+///   ...
+///   [inner_if] if !(B) jump FALSE_B    // nested condition, FALSE_B > ELSE_A
+///     ... true branch ...
+///     jump END
+///   ELSE_A:                             // outer else, displaced here
+///     short_terminated_code
+///     jump END
+///   FALSE_B:                            // inner false branch
+///     ...
+/// ```
+///
+/// This prevents the structure module from nesting inner_if inside outer_if
+/// (the inner target crosses the outer else boundary). Fix by moving the
+/// displaced else past the inner false branch, with a synthetic forward jump
+/// as a boundary marker so `detect_else_branch` can still find it.
+fn resolve_displaced_else(stmts: &mut Vec<BcStatement>) -> bool {
+    let offset_map = OffsetMap::build(stmts);
+    let find_idx =
+        |target: usize| -> Option<usize> { offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) };
+    let last_offset = stmts.last().map_or(0, |s| s.mem_offset);
+
+    // Collect all if_jumps with their resolved target indices
+    let if_jumps: Vec<(usize, usize)> = stmts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, stmt)| {
+            let (_, target) = parse_if_jump(&stmt.text)?;
+            let target_idx = find_idx(target)?;
+            (target_idx > i).then_some((i, target_idx))
+        })
+        .collect();
+
+    // Find an (outer, inner) pair where inner.target > outer.target and
+    // the displaced block [outer.target, inner.target) is short and terminated.
+    // Additionally require a forward exit jump just before outer.target to confirm
+    // this is a true-branch exit followed by a displaced else (not arbitrary code).
+    for &(outer_idx, outer_target) in &if_jumps {
+        for &(inner_idx, inner_target) in &if_jumps {
+            if inner_idx <= outer_idx || inner_idx >= outer_target {
+                continue; // inner must be between outer_if and outer_target
+            }
+            if inner_target <= outer_target {
+                continue; // inner target must cross the outer boundary
+            }
+            let displaced_start = outer_target;
+            let displaced_end = inner_target; // exclusive
+            let displaced_len = displaced_end - displaced_start;
+            if displaced_len == 0 || displaced_len > 8 {
+                continue; // too long or empty
+            }
+            // Don't move blocks that are already near the end (e.g., from a
+            // previous iteration). We place moved blocks before the final return
+            // nop, so skip if the displaced block is in the last few statements.
+            if displaced_start + displaced_len + 2 >= stmts.len() {
+                continue;
+            }
+
+            // Require a forward exit jump just before the displaced block.
+            // This confirms the pattern: the inner if's true branch exits,
+            // then the displaced else follows. Without this, we might move
+            // code that isn't actually a displaced else.
+            let has_exit_before = (inner_idx + 1..displaced_start).rev().any(|check| {
+                let trimmed = stmts[check].text.trim();
+                if trimmed.is_empty() || trimmed.starts_with("//") {
+                    return false;
+                }
+                if let Some(jt) = parse_jump(trimmed) {
+                    if let Some(jt_idx) = find_idx(jt) {
+                        return jt_idx >= inner_target;
+                    }
+                    return jt > last_offset;
+                }
+                false
+            });
+            if !has_exit_before {
+                continue;
+            }
+
+            // Verify every executable path through the displaced block terminates:
+            // all non-comment statements lead to a jump past inner_target or a return
+            let all_terminated = stmts[displaced_start..displaced_end].iter().all(|stmt| {
+                let trimmed = stmt.text.trim();
+                if trimmed.is_empty() || trimmed.starts_with("//") {
+                    return true; // non-executable
+                }
+                if trimmed == "return nop" || trimmed == "return" {
+                    return true;
+                }
+                // Accept function calls and assignments, they'll be followed
+                // by a terminating jump
+                if let Some(jt) = parse_jump(trimmed) {
+                    if let Some(jt_idx) = find_idx(jt) {
+                        return jt_idx >= inner_target;
+                    }
+                    return jt > last_offset; // past function end
+                }
+                true // non-jump executable (call, assignment), OK
+            });
+            // The last executable statement must actually be a jump or return
+            let last_terminates = stmts[displaced_start..displaced_end]
+                .iter()
+                .rev()
+                .find(|s| {
+                    let trimmed = s.text.trim();
+                    !trimmed.is_empty() && !trimmed.starts_with("//")
+                })
+                .is_some_and(|s| {
+                    let trimmed = s.text.trim();
+                    if trimmed == "return nop" || trimmed == "return" {
+                        return true;
+                    }
+                    if let Some(jt) = parse_jump(trimmed) {
+                        if let Some(jt_idx) = find_idx(jt) {
+                            return jt_idx >= inner_target;
+                        }
+                        return jt > last_offset;
+                    }
+                    false
+                });
+            if !all_terminated || !last_terminates {
+                continue;
+            }
+
+            // Build reordered output: remove [displaced_start..displaced_end),
+            // append a synthetic forward jump + the displaced block at the end
+            // (before the final return nop).
+            let displaced_block: Vec<BcStatement> = stmts[displaced_start..displaced_end].to_vec();
+            let displaced_offset = stmts[displaced_start].mem_offset;
+
+            let mut output: Vec<BcStatement> = Vec::with_capacity(stmts.len() + 1);
+            output.extend_from_slice(&stmts[..displaced_start]);
+            output.extend_from_slice(&stmts[displaced_end..stmts.len() - 1]);
+            // Synthetic forward jump targeting the displaced block's original offset.
+            // This tells detect_else_branch where the true branch exits and the
+            // else starts.
+            output.push(BcStatement::new(0, format!("jump 0x{displaced_offset:x}")));
+            output.extend(displaced_block);
+            // Final return nop
+            if let Some(last) = stmts.last() {
+                output.push(last.clone());
+            }
+
+            *stmts = output;
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Process a single convergence group. Returns true if a reorder was performed.
 fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
     let offset_map = OffsetMap::build(stmts);
@@ -1543,6 +1685,10 @@ fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
             *stmts = reordered;
             return true;
         }
+    }
+    // Displaced else: short terminated else-block between a nested if's branches
+    if resolve_displaced_else(stmts) {
+        return true;
     }
     // Fallback: duplicate inline convergence (single backward jump into a branch body)
     if let Some(reordered) = duplicate_inline_convergence(stmts, &offset_map) {

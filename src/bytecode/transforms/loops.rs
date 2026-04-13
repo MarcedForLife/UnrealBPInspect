@@ -123,6 +123,19 @@ fn resolve_item(
     if let Some((get_idx, item)) =
         find_explicit_get(lines, header_idx + 1, close_idx, &access_pattern)
     {
+        // Compiler temp names ($Array_Get_Item etc.) are noisy, derive a
+        // clean name instead while still removing the explicit get line.
+        let item = if item.starts_with('$') {
+            let derived = derive_item_name(array, lines, header_idx, close_idx);
+            for line in &mut lines[header_idx + 1..close_idx] {
+                while count_var_refs(line, &item) > 0 {
+                    *line = substitute_var(line, &item, &derived);
+                }
+            }
+            derived
+        } else {
+            item
+        };
         (item, vec![get_idx])
     } else {
         let item = derive_item_name(array, lines, header_idx, close_idx);
