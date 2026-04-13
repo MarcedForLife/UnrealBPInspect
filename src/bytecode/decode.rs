@@ -16,7 +16,22 @@ pub struct BcStatement {
     /// In-memory bytecode offset (adjusted for FName size differences).
     /// Used by structure/flow passes to resolve jump targets.
     pub mem_offset: usize,
+    /// Additional offsets absorbed when temp inlining removes statements.
+    /// Populated by transform passes (not the decoder) so that `OffsetMap`
+    /// can still resolve jump targets that pointed to the removed statement.
+    /// Empty for the vast majority of statements (no heap allocation).
+    pub offset_aliases: Vec<usize>,
     pub text: String,
+}
+
+impl BcStatement {
+    pub fn new(mem_offset: usize, text: impl Into<String>) -> Self {
+        Self {
+            mem_offset,
+            text: text.into(),
+            offset_aliases: Vec::new(),
+        }
+    }
 }
 
 /// Immutable context shared across recursive decode calls.
@@ -742,10 +757,7 @@ pub fn decode_bytecode(
             Some(s) => match s.as_str() {
                 "nop" | "wire_trace" | "tracepoint" | "instrumentation" => continue,
                 _ => {
-                    stmts.push(BcStatement {
-                        mem_offset: mem_start,
-                        text: s,
-                    });
+                    stmts.push(BcStatement::new(mem_start, s));
                 }
             },
             None => break,

@@ -11,14 +11,14 @@ mod temps;
 
 pub use cleanup::{
     cleanup_structured_output, eliminate_constant_condition_branches, rename_loop_temp_vars,
-    strip_orphaned_blocks, strip_unmatched_braces,
+    strip_inlined_break_calls, strip_orphaned_blocks, strip_unmatched_braces,
 };
 pub use fold::fold_long_lines;
 pub use pipeline::fold_summary_patterns;
-pub use switch::fold_switch_enum_cascade;
+pub use switch::{fold_cascade_across_sequences, fold_switch_enum_cascade};
 pub use temps::{
-    collect_jump_targets, discard_unused_assignments, inline_constant_temps,
-    inline_single_use_temps,
+    collect_jump_targets, discard_unused_assignments, discard_unused_assignments_text,
+    inline_constant_temps, inline_constant_temps_text, inline_single_use_temps,
 };
 
 // UE compiler-generated variable/function prefixes shared across transforms.
@@ -60,6 +60,10 @@ pub(super) fn parse_temp_assignment(text: &str) -> Option<(&str, &str)> {
     let expr = &text[eq_pos + 3..];
     // Must not be a persistent frame assignment
     if expr.ends_with("[persistent]") {
+        return None;
+    }
+    // Reject function call argument continuations (expression ends with comma)
+    if expr.ends_with(',') {
         return None;
     }
     Some((var, expr))
@@ -464,22 +468,10 @@ mod tests {
     fn inline_constant_temps_same_expr() {
         use crate::bytecode::decode::BcStatement;
         let mut stmts = vec![
-            BcStatement {
-                mem_offset: 0,
-                text: "Temp_bool_Variable = LeftHand".into(),
-            },
-            BcStatement {
-                mem_offset: 10,
-                text: "x = switch(Temp_bool_Variable) { false: A, true: B }".into(),
-            },
-            BcStatement {
-                mem_offset: 20,
-                text: "Temp_bool_Variable = LeftHand".into(),
-            },
-            BcStatement {
-                mem_offset: 30,
-                text: "y = switch(Temp_bool_Variable) { false: C, true: D }".into(),
-            },
+            BcStatement::new(0, "Temp_bool_Variable = LeftHand"),
+            BcStatement::new(10, "x = switch(Temp_bool_Variable) { false: A, true: B }"),
+            BcStatement::new(20, "Temp_bool_Variable = LeftHand"),
+            BcStatement::new(30, "y = switch(Temp_bool_Variable) { false: C, true: D }"),
         ];
         inline_constant_temps(&mut stmts, &HashSet::new());
         assert_eq!(stmts.len(), 2);
@@ -491,22 +483,10 @@ mod tests {
     fn inline_constant_temps_different_exprs_skipped() {
         use crate::bytecode::decode::BcStatement;
         let mut stmts = vec![
-            BcStatement {
-                mem_offset: 0,
-                text: "Temp_bool_Variable = LeftHand".into(),
-            },
-            BcStatement {
-                mem_offset: 10,
-                text: "x = Temp_bool_Variable".into(),
-            },
-            BcStatement {
-                mem_offset: 20,
-                text: "Temp_bool_Variable = RightHand".into(),
-            },
-            BcStatement {
-                mem_offset: 30,
-                text: "y = Temp_bool_Variable".into(),
-            },
+            BcStatement::new(0, "Temp_bool_Variable = LeftHand"),
+            BcStatement::new(10, "x = Temp_bool_Variable"),
+            BcStatement::new(20, "Temp_bool_Variable = RightHand"),
+            BcStatement::new(30, "y = Temp_bool_Variable"),
         ];
         inline_constant_temps(&mut stmts, &HashSet::new());
         // Different exprs -> not inlined, all 4 remain
@@ -518,18 +498,9 @@ mod tests {
         use crate::bytecode::decode::BcStatement;
         // Single Temp_* assignment, multiple references; should be inlined
         let mut stmts = vec![
-            BcStatement {
-                mem_offset: 0,
-                text: "Temp_0 = foo".into(),
-            },
-            BcStatement {
-                mem_offset: 10,
-                text: "bar(Temp_0)".into(),
-            },
-            BcStatement {
-                mem_offset: 20,
-                text: "baz(Temp_0)".into(),
-            },
+            BcStatement::new(0, "Temp_0 = foo"),
+            BcStatement::new(10, "bar(Temp_0)"),
+            BcStatement::new(20, "baz(Temp_0)"),
         ];
         inline_constant_temps(&mut stmts, &HashSet::new());
         assert_eq!(stmts.len(), 2);
@@ -542,18 +513,9 @@ mod tests {
         use crate::bytecode::decode::BcStatement;
         // $-prefixed single assignment may be out-param, skip
         let mut stmts = vec![
-            BcStatement {
-                mem_offset: 0,
-                text: "$Param = _".into(),
-            },
-            BcStatement {
-                mem_offset: 10,
-                text: "Foo($Param)".into(),
-            },
-            BcStatement {
-                mem_offset: 20,
-                text: "x = $Param + 1".into(),
-            },
+            BcStatement::new(0, "$Param = _"),
+            BcStatement::new(10, "Foo($Param)"),
+            BcStatement::new(20, "x = $Param + 1"),
         ];
         inline_constant_temps(&mut stmts, &HashSet::new());
         assert_eq!(stmts.len(), 3); // unchanged
@@ -564,14 +526,8 @@ mod tests {
     fn discard_removes_pure_unused_assignment() {
         use crate::bytecode::decode::BcStatement;
         let mut stmts = vec![
-            BcStatement {
-                mem_offset: 0,
-                text: "$Temp = SomeValue".into(),
-            },
-            BcStatement {
-                mem_offset: 10,
-                text: "DoWork()".into(),
-            },
+            BcStatement::new(0, "$Temp = SomeValue"),
+            BcStatement::new(10, "DoWork()"),
         ];
         discard_unused_assignments(&mut stmts);
         assert_eq!(stmts.len(), 1);
@@ -582,14 +538,8 @@ mod tests {
     fn discard_keeps_call_unused_assignment() {
         use crate::bytecode::decode::BcStatement;
         let mut stmts = vec![
-            BcStatement {
-                mem_offset: 0,
-                text: "$Temp = SomeCall()".into(),
-            },
-            BcStatement {
-                mem_offset: 10,
-                text: "DoWork()".into(),
-            },
+            BcStatement::new(0, "$Temp = SomeCall()"),
+            BcStatement::new(10, "DoWork()"),
         ];
         discard_unused_assignments(&mut stmts);
         assert_eq!(stmts.len(), 2);
@@ -600,14 +550,8 @@ mod tests {
     fn discard_removes_switch_unused_assignment() {
         use crate::bytecode::decode::BcStatement;
         let mut stmts = vec![
-            BcStatement {
-                mem_offset: 0,
-                text: "$Temp = switch(X) { false: A, true: B }".into(),
-            },
-            BcStatement {
-                mem_offset: 10,
-                text: "DoWork()".into(),
-            },
+            BcStatement::new(0, "$Temp = switch(X) { false: A, true: B }"),
+            BcStatement::new(10, "DoWork()"),
         ];
         discard_unused_assignments(&mut stmts);
         assert_eq!(stmts.len(), 1);
@@ -1206,5 +1150,38 @@ mod tests {
             "missing Keep:\n{}",
             lines.join("\n")
         );
+    }
+
+    #[test]
+    fn strip_break_transform_dead() {
+        let mut lines = vec![
+            "        BreakTransform($VRHand.GetSocketTransform($VRHand.GripSocketName, RTS_World), $VRHand.GetSocketTransform($VRHand.GripSocketName, RTS_World).Location, $VRHand.GetSocketTransform($VRHand.GripSocketName, RTS_World).Rotation, $VRHand.GetSocketTransform($VRHand.GripSocketName, RTS_World).Scale)".to_string(),
+            "        if (cond) {".to_string(),
+        ];
+        strip_inlined_break_calls(&mut lines);
+        assert_eq!(lines.len(), 1, "dead BreakTransform should be removed");
+        assert!(lines[0].contains("if (cond)"));
+    }
+
+    #[test]
+    fn strip_break_transform_exact_bytecode_summary_line() {
+        // Exact line from ProcessDesiredGrip BytecodeSummary
+        let mut lines = vec![
+            "        BreakTransform($VRHand.SkeletalMeshComponent.GetSocketTransform($VRHand.GripSocketName, RTS_World), $VRHand.SkeletalMeshComponent.GetSocketTransform($VRHand.GripSocketName, RTS_World).Location, $VRHand.SkeletalMeshComponent.GetSocketTransform($VRHand.GripSocketName, RTS_World).Rotation, $VRHand.SkeletalMeshComponent.GetSocketTransform($VRHand.GripSocketName, RTS_World).Scale)".to_string(),
+        ];
+        strip_inlined_break_calls(&mut lines);
+        assert!(
+            lines.is_empty(),
+            "dead BreakTransform should be removed, got: {:?}",
+            lines
+        );
+    }
+
+    #[test]
+    fn strip_break_keeps_live_call() {
+        let mut lines =
+            vec!["BreakTransform($Transform, $Location, $Rotation, $Scale)".to_string()];
+        strip_inlined_break_calls(&mut lines);
+        assert_eq!(lines.len(), 1, "live BreakTransform should be kept");
     }
 }

@@ -16,12 +16,13 @@ src/
   ffield.rs            FField type resolution, function signatures
   helpers.rs           Shared text utilities (indent_of, find_matching_paren, split_args, is_loop_header)
   parser.rs            Asset parser orchestrator (parse_asset, ParseCtx)
+  pins.rs              EdGraph pin parsing (K2Node pin connections, LinkedTo, SubPins)
   output_text.rs       Dump output mode (--dump)
   output_json.rs       JSON output mode (--json)
   output_summary/
     mod.rs             Shared types (CommentBox, NodeInfo, UbergraphSection), re-exports
-    comments.rs        EdGraph comment/bubble parsing, spatial matching, classification
-    edgraph.rs         EdGraph data collection: comments, node positions, event positions
+    comments.rs        EdGraph comment/bubble matching: rank-based, cluster-based, classification
+    edgraph.rs         EdGraph data collection: comments, node positions, event positions, pin-based ownership BFS
     call_graph.rs      Call graph construction, ubergraph context, local function collection
     ubergraph.rs       Ubergraph event splitting, resume block matching, cross-segment jumps
     format.rs          Summary formatting: component tree, variables, functions, inline comments
@@ -99,8 +100,8 @@ The parser reads the binary format sequentially through these modules:
 2. **properties.rs** — Tagged property deserialisation (recursive)
 3. **ffield.rs** — FField child property parsing, type resolution, function signatures
 4. **bytecode/** — Kismet bytecode: expression decoding (~85 opcodes, UE5 LWC support), flow pattern detection (sequences, ForEach via `foreach (COND) {` markers, ForLoopWithBreak, convergence reordering/duplication, FlipFlop/DoOnce latch stripping), if/else/loop structuring via region tree with guard-to-nested-if conversion, single-pass indentation
-5. **parser.rs** — Orchestrates all parsing: header, name/import/export tables, export data, bytecode
-6. **output_*.rs** — Three output modes: summary (default), dump, JSON. Summary mode uses 2D bounding-box intersection between EdGraph comment boxes/bubble comments and identifiable nodes to place comments inline near corresponding bytecode.
+5. **parser.rs** — Orchestrates all parsing: header, name/import/export tables, export data, bytecode, EdGraph pin connections
+6. **output_*.rs** — Three output modes: summary (default), dump, JSON. Summary mode places EdGraph comments inline near corresponding bytecode using: (a) pin-based event ownership via BFS through execution pins to assign comments to the correct event section, falling back to (b) cluster-based spatial matching against bytecode identifiers.
 
 Key dependency flow: `types` + `binary` → `resolve` → `properties` + `ffield` → `bytecode` → `parser` → `output_*`
 

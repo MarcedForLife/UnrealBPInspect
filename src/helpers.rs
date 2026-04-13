@@ -73,6 +73,12 @@ pub fn expr_is_compound(expr: &str) -> bool {
         || expr.starts_with('!')
 }
 
+/// True if the (already trimmed) line is non-executable: empty or a comment.
+/// Used to skip marker/comment lines when scanning for real statements.
+pub fn is_comment_or_empty(trimmed: &str) -> bool {
+    trimmed.is_empty() || trimmed.starts_with("//")
+}
+
 /// Section separator prefix used in structured output (e.g. `--- FunctionName ---`).
 pub const SECTION_SEPARATOR: &str = "---";
 
