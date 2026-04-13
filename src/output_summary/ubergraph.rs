@@ -4,26 +4,26 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use crate::bytecode::{
-    apply_indentation, collect_jump_targets, discard_unused_assignments, fold_switch_enum_cascade,
-    inline_constant_temps, inline_single_use_temps, reorder_convergence, reorder_flow_patterns,
-    split_by_sequence_markers, strip_latch_boilerplate, strip_orphaned_blocks,
-    strip_unmatched_braces, BcStatement, OffsetMap, JUMP_OFFSET_TOLERANCE,
+    apply_indentation, collect_jump_targets, discard_unused_assignments, find_first_unmatched_pop,
+    fold_switch_enum_cascade, inline_constant_temps, inline_single_use_temps, parse_jump,
+    reorder_convergence, reorder_flow_patterns, split_by_sequence_markers, strip_latch_boilerplate,
+    strip_orphaned_blocks, strip_unmatched_braces, BcStatement, OffsetMap, JUMP_OFFSET_TOLERANCE,
+    POP_FLOW, RETURN_NOP,
 };
 use crate::helpers::indent_of;
 use crate::parser::structure_and_cleanup;
 use crate::resolve::find_prop_str_items_any;
-use crate::types::Property;
+use crate::types::{NodePinData, Property};
 
-use super::comments::find_comment_line;
+use super::comments::{
+    build_node_index, build_ownership_index, classify_comment_by_pins, find_comment_line,
+    find_comment_line_clustered, map_export_to_line, CommentPlacement,
+};
+use super::edgraph::EdGraphData;
 use super::{
     emit_comment, find_local_calls, section_sep, strip_resume_annotation, CommentBox, NodeInfo,
-    ResumeBlock, UbergraphSection, FUZZY_LABEL_WINDOW,
+    ResumeBlock, UbergraphSection, FUZZY_LABEL_WINDOW, LATENT_RESUME_SECTION,
 };
-
-/// Maximum number of event-wrapping comment boxes to emit per event section.
-/// Events may be nested inside multiple organizational boxes (section label +
-/// sub-group + descriptive label); 3 levels covers observed real-world layouts.
-const MAX_EVENT_WRAPPING_COMMENTS: usize = 3;
 
 /// Maximum number of events a comment box can contain and still be treated as
 /// an intentional multi-event group. Boxes containing more events are likely
@@ -68,10 +68,89 @@ fn resolve_cross_segment_jumps(stmts: &mut Vec<BcStatement>) {
     }
 
     // Add sentinel so find_target_idx_or_end can resolve to it
-    stmts.push(BcStatement {
-        mem_offset: sentinel_offset,
-        text: "return nop".to_string(),
-    });
+    stmts.push(BcStatement::new(sentinel_offset, RETURN_NOP.to_string()));
+}
+
+/// Relocate event body code that the compiler placed non-contiguously.
+///
+/// UE4 sometimes compiles an event entry point as a bare backward `jump 0xXXX`
+/// (a trampoline), with the actual body sitting physically within another event's
+/// offset range. Label-based splitting would misattribute the body to the wrong
+/// event. This pass detects those trampolines and moves the target block inline
+/// at the entry point so splitting works correctly.
+fn inline_event_trampolines(stmts: &mut Vec<BcStatement>, sorted_labels: &[(usize, &String)]) {
+    // Collect label entry offsets for the "no other label in the block" safety check.
+    let label_offsets: HashSet<usize> = sorted_labels.iter().map(|&(off, _)| off).collect();
+
+    // Process one trampoline per iteration because each relocation shifts indices.
+    loop {
+        let offset_map = OffsetMap::build(stmts);
+        let mut relocated = false;
+
+        for &(label_off, _) in sorted_labels {
+            // Find entry statement (same fuzzy matching as split_stmts_by_labels)
+            let entry_idx = match stmts.iter().position(|s| {
+                s.mem_offset >= label_off && s.mem_offset <= label_off + FUZZY_LABEL_WINDOW
+            }) {
+                Some(i) => i,
+                None => continue,
+            };
+
+            // Must be a bare unconditional jump
+            let target_off = match parse_jump(&stmts[entry_idx].text) {
+                Some(t) => t,
+                None => continue,
+            };
+
+            // Resolve target in current statement list
+            let target_idx = match offset_map.find_fuzzy(target_off, JUMP_OFFSET_TOLERANCE) {
+                Some(i) => i,
+                None => continue,
+            };
+
+            // Only backward jumps (body placed earlier than entry point)
+            if target_idx >= entry_idx {
+                continue;
+            }
+
+            // Block ends at the first pop_flow at depth 0 (inclusive),
+            // which exits the event back to the ubergraph's initial push_flow.
+            let Some(block_end) = find_first_unmatched_pop(stmts, target_idx, entry_idx) else {
+                continue;
+            };
+
+            // Safety: skip if another label entry falls within the block we'd move
+            let block_start_off = stmts[target_idx].mem_offset;
+            let block_end_off = stmts[block_end].mem_offset;
+            let other_label_in_block = label_offsets
+                .iter()
+                .any(|&off| off != label_off && off >= block_start_off && off <= block_end_off);
+            if other_label_in_block {
+                continue;
+            }
+
+            // Extract the block, then replace the trampoline jump with it.
+            // After drain, entry_idx shifts backward by block length.
+            let trampoline_off = stmts[entry_idx].mem_offset;
+            let block_len = block_end - target_idx + 1;
+            let mut block: Vec<BcStatement> =
+                stmts.drain(target_idx..target_idx + block_len).collect();
+
+            // Stamp the first relocated statement with the trampoline's offset so
+            // split_stmts_by_labels can still match the label to this event.
+            block[0].mem_offset = trampoline_off;
+
+            let new_entry_idx = entry_idx - block_len;
+            stmts.splice(new_entry_idx..new_entry_idx + 1, block);
+
+            relocated = true;
+            break; // Restart: indices have shifted
+        }
+
+        if !relocated {
+            break;
+        }
+    }
 }
 
 /// Split raw BcStatements into per-event segments using label offsets.
@@ -146,7 +225,7 @@ fn split_at_return_nop(stmts: &[BcStatement]) -> Vec<Vec<BcStatement>> {
     let mut blocks: Vec<Vec<BcStatement>> = Vec::new();
     let mut current: Vec<BcStatement> = Vec::new();
     for stmt in stmts {
-        if stmt.text == "return nop" || stmt.text == "pop_flow" {
+        if stmt.text == RETURN_NOP || stmt.text == POP_FLOW {
             if !current.is_empty() {
                 blocks.push(std::mem::take(&mut current));
             }
@@ -192,7 +271,7 @@ pub(super) fn split_ubergraph_sections(
 
     let mut resume_blocks: Vec<ResumeBlock> = Vec::new();
     for section in &sections {
-        if section.name != "(latent resume)" {
+        if section.name != LATENT_RESUME_SECTION {
             continue;
         }
         let mut block_lines: Vec<String> = Vec::new();
@@ -244,13 +323,16 @@ pub(super) fn build_ubergraph_structured(
         ubergraph_labels.iter().map(|(k, v)| (*k, v)).collect();
     sorted_labels.sort_by_key(|(offset, _)| *offset);
 
+    // Relocate event bodies that the compiler placed as backward trampolines.
+    inline_event_trampolines(&mut reordered, &sorted_labels);
+
     let segments = split_stmts_by_labels(&reordered, &sorted_labels);
     let mut all_lines: Vec<String> = Vec::new();
     for (name, segment_stmts) in &segments {
         if !name.is_empty() {
             all_lines.push(format!("--- {} ---", name));
         } else if !segment_stmts.is_empty() {
-            all_lines.push("--- (latent resume) ---".to_string());
+            all_lines.push(format!("--- {} ---", LATENT_RESUME_SECTION));
         }
         if segment_stmts.is_empty() {
             continue;
@@ -303,168 +385,382 @@ pub(super) fn build_ubergraph_structured(
     }
 }
 
+/// Extract the short action name from an InputAction event stub.
+///
+/// `InpActEvt_Fly_K2Node_InputActionEvent_6` returns `Some("Fly")`.
+fn extract_input_action_name(section_name: &str) -> Option<&str> {
+    let rest = section_name.strip_prefix("InpActEvt_")?;
+    let end = rest.find("_K2Node_InputActionEvent_")?;
+    Some(&rest[..end])
+}
+
 /// Resolve an event's graph node position by section name.
 ///
-/// Primary: exact match in event_positions (K2Node_Event, K2Node_CustomEvent,
-/// K2Node_InputAxisEvent, K2Node_ComponentBoundEvent).
-/// Fallback: K2Node_InputAction stubs are named InpActEvt_{ActionName}_K2Node_*,
+/// Primary: exact match in event_positions.
+/// Fallback: K2Node_InputAction stubs are named `InpActEvt_{ActionName}_K2Node_*`,
 /// so extract the action name and look up in input_action_positions.
 fn resolve_event_position(
     section_name: &str,
-    event_positions: &HashMap<String, (i32, i32)>,
-    input_action_positions: &HashMap<String, (i32, i32)>,
-) -> Option<(i32, i32)> {
-    if let Some(&pos) = event_positions.get(section_name) {
-        return Some(pos);
+    event_positions: &HashMap<String, (i32, i32, String)>,
+    input_action_positions: &HashMap<String, (i32, i32, String)>,
+) -> Option<(i32, i32, String)> {
+    if let Some(pos) = event_positions.get(section_name) {
+        return Some(pos.clone());
     }
-    if let Some(rest) = section_name.strip_prefix("InpActEvt_") {
-        if let Some(end) = rest.find("_K2Node_InputActionEvent_") {
-            let action = &rest[..end];
-            return input_action_positions.get(action).copied();
-        }
-    }
-    None
+    let action = extract_input_action_name(section_name)?;
+    input_action_positions.get(action).cloned()
 }
 
-/// Assign each non-multi-event comment to an event section.
+/// Resolve an event name to its ubergraph section name.
 ///
-/// Position data determines containment only (which events are inside a box).
-/// Among contained events, the first in section order (structural flow) is
-/// chosen, not the visually closest. Bubbles use distance to the nearest event.
-/// Multi-event group comments are excluded (handled separately as headers).
-///
-/// `section_order` maps event name to its position in the ubergraph output,
-/// so "first in flow" means earliest bytecode offset.
-fn assign_comments_to_events(
+/// Most events match directly. K2Node_InputAction events store the short
+/// InputActionName (e.g. "Fly") in event_export_indices, but sections use
+/// the full stub name (e.g. "InpActEvt_Fly_K2Node_InputActionEvent_6").
+fn resolve_section_name<'a>(event_name: &str, sections: &'a [UbergraphSection]) -> Option<&'a str> {
+    if let Some(section) = sections.iter().find(|s| s.name == event_name) {
+        return Some(&section.name);
+    }
+    sections
+        .iter()
+        .find(|s| extract_input_action_name(&s.name) == Some(event_name))
+        .map(|s| s.name.as_str())
+}
+
+/// Map a line index in the full structured output to its enclosing section (name, start_line).
+fn section_for_line<'a>(
+    line_idx: usize,
+    boundaries: &[(usize, &'a str)],
+) -> Option<(usize, &'a str)> {
+    boundaries
+        .iter()
+        .rev()
+        .find(|(start, _)| *start <= line_idx)
+        .map(|&(start, name)| (start, name))
+}
+
+/// Pre-computed ubergraph comment data shared across event sections.
+struct UbergraphCommentCtx<'a> {
+    small_group_idxs: HashSet<usize>,
+    /// Inline comments matched against the full unsplit bytecode, then mapped
+    /// to sections. Key is section name, value is (section-local line index, comment).
+    section_inline: HashMap<String, Vec<(usize, &'a CommentBox)>>,
+    /// Event-wrapping comments per section (box comments containing the event node).
+    section_wrapping: HashMap<String, Vec<&'a CommentBox>>,
+}
+
+/// Identify box comments that span multiple event nodes (group headers / section dividers).
+/// Returns (multi_event_indices, small_group_indices) where small groups have 2-3 events.
+fn classify_multi_event_comments(
     comments: &[CommentBox],
-    all_positions: &[(String, (i32, i32))],
-    multi_event_idxs: &HashSet<usize>,
-    section_order: &HashMap<String, usize>,
-) -> HashMap<usize, String> {
-    let mut assignment: HashMap<usize, String> = HashMap::new();
+    edgraph: &EdGraphData,
+) -> (HashSet<usize>, HashSet<usize>) {
+    let mut multi_event_idxs: HashSet<usize> = HashSet::new();
+    let mut small_group_idxs: HashSet<usize> = HashSet::new();
+    for (i, cb) in comments.iter().enumerate() {
+        if cb.is_bubble {
+            continue;
+        }
+        let event_count = edgraph
+            .event_positions
+            .values()
+            .chain(edgraph.input_action_positions.values())
+            .filter(|(ex, ey, page)| page == &cb.graph_page && cb.contains_point(*ex, *ey))
+            .count();
+        if event_count > 1 {
+            multi_event_idxs.insert(i);
+            if event_count <= MAX_MULTI_EVENT_GROUP_SIZE {
+                small_group_idxs.insert(i);
+            }
+        }
+    }
+    (multi_event_idxs, small_group_idxs)
+}
+
+/// Place a comment classified as BubbleOwned or InlineAtEntry into a section.
+///
+/// Uses BFS ownership to find the preferred event section, then validates against
+/// bytecode. Falls back to trying each section in order when ownership is ambiguous.
+fn place_pin_classified_comment(
+    cb: &CommentBox,
+    owner_export: usize,
+    ownership_index: &HashMap<usize, String>,
+    sections: &[UbergraphSection],
+    nodes: &[NodeInfo],
+    node_index: &HashMap<usize, &NodeInfo>,
+    pin_data: &HashMap<usize, NodePinData>,
+) -> Option<(String, usize)> {
+    let try_section = |section: &UbergraphSection| -> Option<(String, usize)> {
+        let local_idx =
+            map_export_to_line(owner_export, nodes, node_index, pin_data, &section.lines)?;
+        let refined = if !cb.is_bubble {
+            find_comment_line(cb, nodes, &section.lines).unwrap_or(local_idx)
+        } else {
+            local_idx
+        };
+        Some((section.name.clone(), refined))
+    };
+
+    // Prefer the BFS-owned event's section
+    if let Some(event_name) = ownership_index.get(&owner_export) {
+        let resolved = resolve_section_name(event_name, sections);
+        if let Some(section) = resolved.and_then(|n| sections.iter().find(|s| s.name == n)) {
+            if let Some(result) = try_section(section) {
+                return Some(result);
+            }
+        }
+    }
+    // Fallback: try each event section in order
+    sections
+        .iter()
+        .filter(|s| s.is_event())
+        .find_map(try_section)
+}
+
+/// Try spatial and cluster fallback paths for a comment that pin-based placement couldn't resolve.
+fn place_comment_by_fallback<'a>(
+    cb: &'a CommentBox,
+    sections: &[UbergraphSection],
+    nodes: &[NodeInfo],
+    full_lines: &[String],
+    section_boundaries: &[(usize, &str)],
+    edgraph: &EdGraphData,
+    section_inline: &mut HashMap<String, Vec<(usize, &'a CommentBox)>>,
+) {
+    // Spatial: match against same-page event sections
+    for section in sections {
+        if !section.is_event() {
+            continue;
+        }
+        let event_page = resolve_event_position(
+            &section.name,
+            &edgraph.event_positions,
+            &edgraph.input_action_positions,
+        )
+        .map(|(_, _, page)| page);
+        if event_page.as_ref().is_some_and(|p| p == &cb.graph_page) {
+            if let Some(local_idx) = find_comment_line(cb, nodes, &section.lines) {
+                section_inline
+                    .entry(section.name.clone())
+                    .or_default()
+                    .push((local_idx, cb));
+                return;
+            }
+        }
+    }
+
+    // Cluster: match against full bytecode, then map to a section
+    if let Some(full_line_idx) = find_comment_line_clustered(cb, nodes, full_lines) {
+        if let Some((start, section_name)) = section_for_line(full_line_idx, section_boundaries) {
+            section_inline
+                .entry(section_name.to_string())
+                .or_default()
+                .push((full_line_idx - start, cb));
+        }
+    }
+}
+
+/// Build all ubergraph comment data in a single pass.
+///
+/// Uses pin-based event ownership to assign comments to sections when all
+/// contained nodes belong to a single event. Falls back to cluster-based
+/// matching against full bytecode when ownership is ambiguous or unavailable.
+fn build_ubergraph_comment_ctx<'a>(
+    comments: &'a [CommentBox],
+    nodes: &[NodeInfo],
+    full_lines: &[String],
+    section_boundaries: &[(usize, &str)],
+    sections: &[UbergraphSection],
+    edgraph: &EdGraphData,
+    pin_data: &HashMap<usize, NodePinData>,
+) -> UbergraphCommentCtx<'a> {
+    let (multi_event_idxs, small_group_idxs) = classify_multi_event_comments(comments, edgraph);
+
+    let node_index = build_node_index(nodes);
+    let section_names: Vec<&str> = sections.iter().map(|s| s.name.as_str()).collect();
+    let ownership_index = build_ownership_index(&edgraph.event_node_ownership, &section_names);
+
+    let mut section_wrapping: HashMap<String, Vec<&CommentBox>> = HashMap::new();
+    let mut section_inline: HashMap<String, Vec<(usize, &CommentBox)>> = HashMap::new();
+
     for (i, cb) in comments.iter().enumerate() {
         if multi_event_idxs.contains(&i) {
             continue;
         }
-        // Box comments: find contained events, pick the first in flow order
-        if !cb.is_bubble && cb.width > 0 && cb.height > 0 {
-            let first_in_flow = all_positions
-                .iter()
-                .filter(|(_, (ex, ey))| cb.contains_point(*ex, *ey))
-                .min_by_key(|(name, _)| {
-                    section_order
-                        .get(name.as_str())
-                        .copied()
-                        .unwrap_or(usize::MAX)
-                });
-            if let Some((name, _)) = first_in_flow {
-                assignment.insert(i, name.clone());
-                continue;
+
+        let placement = classify_comment_by_pins(
+            cb,
+            pin_data,
+            &edgraph.all_node_positions,
+            &edgraph.event_export_indices,
+        );
+
+        let placed = match placement {
+            CommentPlacement::BubbleOwned { owner_export }
+            | CommentPlacement::InlineAtEntry {
+                entry_export: owner_export,
+            } => {
+                if let Some((name, idx)) = place_pin_classified_comment(
+                    cb,
+                    owner_export,
+                    &ownership_index,
+                    sections,
+                    nodes,
+                    &node_index,
+                    pin_data,
+                ) {
+                    section_inline.entry(name).or_default().push((idx, cb));
+                    true
+                } else {
+                    false
+                }
             }
-        }
-        // Bubbles and non-containing boxes: nearest event by distance
-        let nearest = all_positions.iter().min_by_key(|(_, (ex, ey))| {
-            let dx = (*ex - cb.x) as i64;
-            let dy = (*ey - cb.y) as i64;
-            dx * dx + dy * dy
-        });
-        if let Some((name, _)) = nearest {
-            assignment.insert(i, name.clone());
+            CommentPlacement::EventWrapping { ref event_name } => {
+                let key = resolve_section_name(event_name, sections)
+                    .unwrap_or(event_name)
+                    .to_string();
+                section_wrapping.entry(key).or_default().push(cb);
+                true
+            }
+            CommentPlacement::Fallback => false,
+        };
+
+        if !placed {
+            place_comment_by_fallback(
+                cb,
+                sections,
+                nodes,
+                full_lines,
+                section_boundaries,
+                edgraph,
+                &mut section_inline,
+            );
         }
     }
-    assignment
+    for list in section_inline.values_mut() {
+        list.sort_by_key(|(idx, _)| *idx);
+    }
+
+    UbergraphCommentCtx {
+        small_group_idxs,
+        section_inline,
+        section_wrapping,
+    }
 }
 
-/// Pre-computed comment classification data shared across event sections.
-struct EventCommentCtx {
-    multi_event_idxs: HashSet<usize>,
-    small_group_idxs: HashSet<usize>,
-    /// Maps comment index to the nearest event name. Each comment appears
-    /// in at most one event's output, preventing cross-event leakage.
-    comment_assignments: HashMap<usize, String>,
+/// Extract `/*resume:0xHEX*/` offset from a bytecode line.
+fn parse_resume_offset(line: &str) -> Option<usize> {
+    let marker = line.find("/*resume:0x")?;
+    let hex_start = marker + 11;
+    let hex_end = line[hex_start..].find("*/")? + hex_start;
+    usize::from_str_radix(&line[hex_start..hex_end], 16).ok()
 }
 
-/// Classify comments for a single ubergraph event section.
-///
-/// Uses pre-computed comment assignments (nearest-event) to ensure each
-/// comment appears in at most one event's output.
-/// Returns event-wrapping comments (top-level) and inline-positioned comments.
-fn classify_event_comments<'a>(
-    section_name: &str,
-    section_lines: &[String],
-    comments: &'a [CommentBox],
-    nodes: &[NodeInfo],
-    event_positions: &HashMap<String, (i32, i32)>,
-    input_action_positions: &HashMap<String, (i32, i32)>,
-    ctx: &EventCommentCtx,
-) -> (Vec<&'a CommentBox>, Vec<(usize, &'a CommentBox)>) {
-    let Some((ex, ey)) =
-        resolve_event_position(section_name, event_positions, input_action_positions)
-    else {
-        return (Vec::new(), Vec::new());
-    };
+/// Build a map of (section_index, resume_block_index) pairs by matching
+/// `/*resume:0xHEX*/` annotations in order of appearance to resume blocks.
+fn build_delay_resume_map(
+    sections: &[UbergraphSection],
+    resume_count: usize,
+) -> Vec<(usize, usize)> {
+    let mut map: Vec<(usize, usize)> = Vec::new();
+    let mut resume_idx = 0usize;
+    for (si, section) in sections.iter().enumerate() {
+        if !section.is_event() {
+            continue;
+        }
+        for line in &section.lines {
+            if parse_resume_offset(line).is_some() && resume_idx < resume_count {
+                map.push((si, resume_idx));
+                resume_idx += 1;
+            }
+        }
+    }
+    map
+}
 
-    // Only consider comments assigned to this event
-    let assigned_to_me = |idx: usize| -> bool {
-        ctx.comment_assignments
-            .get(&idx)
-            .is_some_and(|name| name == section_name)
-    };
-
-    // Event-wrapping comment boxes (contain the event node) -> top-level
-    // Exclude multi-event comments (handled as group headers)
-    let mut event_wrapping: Vec<&CommentBox> = comments
+/// Build a table mapping full-output line indices to event section names.
+fn build_section_boundaries(lines: &[String]) -> Vec<(usize, String)> {
+    lines
         .iter()
         .enumerate()
-        .filter(|(i, c)| {
-            !c.is_bubble
-                && c.contains_point(ex, ey)
-                && !ctx.multi_event_idxs.contains(i)
-                && assigned_to_me(*i)
-        })
-        .map(|(_, c)| c)
-        .collect();
-    event_wrapping.sort_by_key(|c| ((c.width as i64) * (c.height as i64), c.x, c.y));
-    event_wrapping.truncate(MAX_EVENT_WRAPPING_COMMENTS);
-
-    // Scope nodes to the event's wrapping box Y-range for correct rank
-    // computation. Without this, node_rank counts duplicates across events.
-    let mut inline: Vec<(usize, &CommentBox)> = Vec::new();
-    if !nodes.is_empty() {
-        let (scope_y_min, scope_y_max) = event_wrapping
-            .iter()
-            .fold(None, |acc: Option<(i32, i32)>, c| {
-                let (y1, y2) = (c.y, c.y + c.height);
-                match acc {
-                    Some((min_y, max_y)) => Some((min_y.min(y1), max_y.max(y2))),
-                    None => Some((y1, y2)),
+        .filter_map(|(i, line)| {
+            let trimmed = line.trim();
+            if trimmed.starts_with("--- ") && trimmed.ends_with(" ---") {
+                let name = &trimmed[4..trimmed.len() - 4];
+                if !name.is_empty() && name != LATENT_RESUME_SECTION {
+                    return Some((i + 1, name.to_string()));
                 }
-            })
-            .unwrap_or((ey - 400, ey + 400));
-
-        let scoped_nodes: Vec<NodeInfo> = nodes
-            .iter()
-            .filter(|n| n.y >= scope_y_min && n.y <= scope_y_max)
-            .cloned()
-            .collect();
-
-        let remaining: Vec<&CommentBox> = comments
-            .iter()
-            .enumerate()
-            .filter(|(i, c)| {
-                !event_wrapping.iter().any(|ew| std::ptr::eq(*ew, *c)) && assigned_to_me(*i)
-            })
-            .map(|(_, c)| c)
-            .collect();
-        for cb in remaining {
-            if let Some(line_idx) = find_comment_line(cb, &scoped_nodes, section_lines) {
-                inline.push((line_idx, cb));
             }
-        }
-        inline.sort_by_key(|(idx, _)| *idx);
-    }
+            None
+        })
+        .collect()
+}
 
-    (event_wrapping, inline)
+/// Resolve indentation for an event section based on group membership.
+fn event_indentation(
+    section_name: &str,
+    ctx: &UbergraphCommentCtx,
+    comments: Option<&[CommentBox]>,
+    edgraph: &EdGraphData,
+) -> (&'static str, &'static str) {
+    let event_pos = if !section_name.is_empty() {
+        resolve_event_position(
+            section_name,
+            &edgraph.event_positions,
+            &edgraph.input_action_positions,
+        )
+    } else {
+        None
+    };
+    let in_group = match (comments, &event_pos) {
+        (Some(cbs), Some((ex, ey, page))) => cbs.iter().enumerate().any(|(i, cb)| {
+            ctx.small_group_idxs.contains(&i)
+                && cb.graph_page == *page
+                && cb.contains_point(*ex, *ey)
+        }),
+        _ => false,
+    };
+    if in_group {
+        ("    ", "        ")
+    } else {
+        ("  ", "    ")
+    }
+}
+
+/// Emit bytecode lines with interleaved inline comments and resume blocks.
+fn emit_section_body(
+    buf: &mut String,
+    section: &UbergraphSection,
+    inline_comments: &[(usize, &CommentBox)],
+    resume_blocks: &[ResumeBlock],
+    section_resumes: &[usize],
+    body_indent: &str,
+) {
+    let mut resume_pos = 0;
+    let mut inline_idx = 0;
+    for (i, line) in section.lines.iter().enumerate() {
+        while inline_idx < inline_comments.len() && inline_comments[inline_idx].0 == i {
+            let ws_len = indent_of(line);
+            let indent = format!("{}{}", body_indent, &line[..ws_len]);
+            emit_comment(buf, &inline_comments[inline_idx].1.text, &indent);
+            inline_idx += 1;
+        }
+
+        let clean = strip_resume_annotation(line);
+        if clean.trim() == "return" {
+            continue;
+        }
+        writeln!(buf, "{}{}", body_indent, clean).unwrap();
+
+        if parse_resume_offset(line).is_some() && resume_pos < section_resumes.len() {
+            if let Some(rb) = resume_blocks.get(section_resumes[resume_pos]) {
+                writeln!(buf, "{}// after delay:", body_indent).unwrap();
+                for rline in &rb.lines {
+                    writeln!(buf, "{}{}", body_indent, rline).unwrap();
+                }
+            }
+            resume_pos += 1;
+        }
+    }
 }
 
 /// Split ubergraph structured output into per-event sections and inline latent resumes.
@@ -473,108 +769,50 @@ pub(super) fn emit_ubergraph_events(
     lines: &[String],
     comments: Option<&[CommentBox]>,
     nodes: Option<&[NodeInfo]>,
-    event_positions: &HashMap<String, (i32, i32)>,
-    input_action_positions: &HashMap<String, (i32, i32)>,
+    edgraph: &EdGraphData,
+    pin_data: &HashMap<usize, NodePinData>,
     callers_map: &HashMap<String, Vec<String>>,
 ) {
     let (sections, resume_blocks) = split_ubergraph_sections(lines);
+    let delay_resume_map = build_delay_resume_map(&sections, resume_blocks.len());
 
-    // Latent resume matching: latent actions (Delay, MoveTo, etc.) pause execution
-    // and resume at a bytecode offset stored in LatentActionInfo.skip_offset. The decoder
-    // annotates these calls with /*resume:0xHEX*/ (see decode.rs). Resume blocks appear
-    // at the start of the ubergraph as "(latent resume)" sections. We match them to their
-    // originating Delay() calls by order of appearance and inline them after the call.
-    let parse_resume_offset = |line: &str| -> Option<usize> {
-        let marker = line.find("/*resume:0x")?;
-        let hex_start = marker + 11;
-        let hex_end = line[hex_start..].find("*/")? + hex_start;
-        usize::from_str_radix(&line[hex_start..hex_end], 16).ok()
-    };
+    let section_boundaries = build_section_boundaries(lines);
+    let boundary_refs: Vec<(usize, &str)> = section_boundaries
+        .iter()
+        .map(|(i, name)| (*i, name.as_str()))
+        .collect();
 
-    // Build a map of resume_offset -> resume_block_index
-    // Resume blocks appear in order at the start of the ubergraph, and offsets
-    // are the bytecode positions where each block starts
-    let mut delay_resume_map: Vec<(usize, usize)> = Vec::new(); // (section_idx, resume_block_idx)
-    let mut resume_idx = 0usize;
-    for (si, section) in sections.iter().enumerate() {
-        if section.name == "(latent resume)" {
-            continue;
-        }
-        for line in &section.lines {
-            if let Some(_offset) = parse_resume_offset(line) {
-                if resume_idx < resume_blocks.len() {
-                    delay_resume_map.push((si, resume_idx));
-                    resume_idx += 1;
-                }
-            }
-        }
-    }
-
-    // Identify comment boxes covering multiple events, emit once as group header.
-    // Small groups (2-3 events) also indent their contained events.
-    // Large organizational boxes (4+ events) are emitted as headers but don't
-    // cause indentation, since they're canvas section dividers rather than
-    // intentional semantic groups.
-    let mut multi_event_idxs: HashSet<usize> = HashSet::new();
-    let mut small_group_idxs: HashSet<usize> = HashSet::new();
-    if let Some(cbs) = comments {
-        for (i, cb) in cbs.iter().enumerate() {
-            if cb.is_bubble {
-                continue;
-            }
-            let count = event_positions
-                .values()
-                .chain(input_action_positions.values())
-                .filter(|&&(ex, ey)| cb.contains_point(ex, ey))
-                .count();
-            if count > 1 {
-                multi_event_idxs.insert(i);
-                if count <= MAX_MULTI_EVENT_GROUP_SIZE {
-                    small_group_idxs.insert(i);
-                }
-            }
-        }
-    }
-
-    // Pre-assign each non-multi-event comment to its nearest event.
-    // Section order captures structural flow (bytecode offset order).
-    let mut all_event_positions: Vec<(String, (i32, i32))> = Vec::new();
-    let mut section_order: HashMap<String, usize> = HashMap::new();
-    for (si, section) in sections.iter().enumerate() {
-        if section.name.is_empty() || section.name == "(latent resume)" {
-            continue;
-        }
-        if let Some(pos) =
-            resolve_event_position(&section.name, event_positions, input_action_positions)
-        {
-            all_event_positions.push((section.name.clone(), pos));
-            section_order.insert(section.name.clone(), si);
-        }
-    }
-    let comment_assignments: HashMap<usize, String> = if let Some(cbs) = comments {
-        assign_comments_to_events(cbs, &all_event_positions, &multi_event_idxs, &section_order)
+    let ctx = if let Some(cbs) = comments {
+        build_ubergraph_comment_ctx(
+            cbs,
+            nodes.unwrap_or(&[]),
+            lines,
+            &boundary_refs,
+            &sections,
+            edgraph,
+            pin_data,
+        )
     } else {
-        HashMap::new()
+        UbergraphCommentCtx {
+            small_group_idxs: HashSet::new(),
+            section_inline: HashMap::new(),
+            section_wrapping: HashMap::new(),
+        }
     };
-    let ctx = EventCommentCtx {
-        multi_event_idxs,
-        small_group_idxs,
-        comment_assignments,
-    };
+
+    // Pre-compute per-section resume block indices from the flat delay_resume_map.
+    let mut section_resume_map: HashMap<usize, Vec<usize>> = HashMap::new();
+    for &(si, ri) in &delay_resume_map {
+        section_resume_map.entry(si).or_default().push(ri);
+    }
 
     let mut emitted_group_comments: HashSet<usize> = HashSet::new();
     let mut emitted_event_count = 0usize;
 
-    // Emit each event section as a standalone function
     for (si, section) in sections.iter().enumerate() {
-        if section.name == "(latent resume)" {
+        if !section.is_event() {
             continue;
         }
-        if section.name.is_empty() && section.lines.is_empty() {
-            continue;
-        }
-
-        // Skip empty unnamed preamble sections
         if section.name.is_empty() {
             let has_content = section.lines.iter().any(|l| {
                 let trimmed = l.trim();
@@ -587,104 +825,61 @@ pub(super) fn emit_ubergraph_events(
 
         section_sep(buf, &mut emitted_event_count);
 
-        // Classify comments for this event section
-        let (top_level_comments, inline_comments) = if !section.name.is_empty() {
-            if let Some(cbs) = comments {
-                classify_event_comments(
-                    &section.name,
-                    &section.lines,
-                    cbs,
-                    nodes.unwrap_or(&[]),
-                    event_positions,
-                    input_action_positions,
-                    &ctx,
-                )
-            } else {
-                (Vec::new(), Vec::new())
-            }
-        } else {
-            (Vec::new(), Vec::new())
-        };
+        let (sig_indent, body_indent) = event_indentation(&section.name, &ctx, comments, edgraph);
 
-        // Resolve the event's graph position once for group/indent checks.
-        let event_pos = if !section.name.is_empty() {
-            resolve_event_position(&section.name, event_positions, input_action_positions)
-        } else {
-            None
-        };
+        let empty_wrapping: Vec<&CommentBox> = Vec::new();
+        let empty_inline: Vec<(usize, &CommentBox)> = Vec::new();
+        let top_level = ctx
+            .section_wrapping
+            .get(&section.name)
+            .unwrap_or(&empty_wrapping);
+        let inline = ctx
+            .section_inline
+            .get(&section.name)
+            .unwrap_or(&empty_inline);
 
-        // Small intentional groups (2-3 events) indent their contents.
-        // Large organizational boxes (4+ events) emit headers but don't indent.
-        let in_group = match (comments, event_pos) {
-            (Some(cbs), Some((ex, ey))) => cbs
-                .iter()
-                .enumerate()
-                .any(|(i, cb)| ctx.small_group_idxs.contains(&i) && cb.contains_point(ex, ey)),
-            _ => false,
-        };
-        let sig_indent = if in_group { "    " } else { "  " };
-        let body_indent = if in_group { "        " } else { "    " };
-
+        // Emit section header: group comments, callers, wrapping comments, signature
         if !section.name.is_empty() {
-            // Emit small group headers (once, on first contained event)
-            if let (Some(cbs), Some((ex, ey))) = (comments, event_pos) {
-                for (i, cb) in cbs.iter().enumerate() {
-                    if ctx.small_group_idxs.contains(&i)
-                        && !emitted_group_comments.contains(&i)
-                        && cb.contains_point(ex, ey)
-                    {
-                        emit_comment(buf, &cb.text, "  ");
-                        emitted_group_comments.insert(i);
+            if let Some(cbs) = comments {
+                let event_pos = resolve_event_position(
+                    &section.name,
+                    &edgraph.event_positions,
+                    &edgraph.input_action_positions,
+                );
+                if let Some((ex, ey, ref page)) = event_pos {
+                    for (i, cb) in cbs.iter().enumerate() {
+                        if ctx.small_group_idxs.contains(&i)
+                            && !emitted_group_comments.contains(&i)
+                            && cb.graph_page == *page
+                            && cb.contains_point(ex, ey)
+                        {
+                            emit_comment(buf, &cb.text, "  ");
+                            emitted_group_comments.insert(i);
+                        }
                     }
                 }
             }
             if let Some(callers) = callers_map.get(&section.name) {
                 writeln!(buf, "{}// called by: {}", sig_indent, callers.join(", ")).unwrap();
             }
-            for cb in &top_level_comments {
+            for cb in top_level {
                 emit_comment(buf, &cb.text, sig_indent);
             }
             writeln!(buf, "{}{}():", sig_indent, section.name).unwrap();
         }
-        // Find the first entry in delay_resume_map for this section
-        let mut drm_pos = delay_resume_map
-            .iter()
-            .position(|&(s, _)| s == si)
-            .unwrap_or(delay_resume_map.len());
 
-        let mut inline_idx = 0;
-        for (i, line) in section.lines.iter().enumerate() {
-            // Emit any inline comments targeting this line
-            while inline_idx < inline_comments.len() && inline_comments[inline_idx].0 == i {
-                let ws_len = indent_of(line);
-                let indent = format!("{}{}", body_indent, &line[..ws_len]);
-                emit_comment(buf, &inline_comments[inline_idx].1.text, &indent);
-                inline_idx += 1;
-            }
-
-            // Strip resume annotations from displayed output
-            let clean = strip_resume_annotation(line);
-            let trimmed = clean.trim();
-            if trimmed == "return" {
-                continue;
-            } // trailing returns are implicit
-            writeln!(buf, "{}{}", body_indent, clean).unwrap();
-
-            // If this line had a Delay with a resume, inline the next resume block
-            if parse_resume_offset(line).is_some()
-                && drm_pos < delay_resume_map.len()
-                && delay_resume_map[drm_pos].0 == si
-            {
-                let resume_idx = delay_resume_map[drm_pos].1;
-                if let Some(rb) = resume_blocks.get(resume_idx) {
-                    writeln!(buf, "{}// after delay:", body_indent).unwrap();
-                    for rline in &rb.lines {
-                        writeln!(buf, "{}{}", body_indent, rline).unwrap();
-                    }
-                }
-                drm_pos += 1;
-            }
-        }
+        let section_resumes = section_resume_map
+            .get(&si)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        emit_section_body(
+            buf,
+            section,
+            inline,
+            &resume_blocks,
+            section_resumes,
+            body_indent,
+        );
     }
 }
 
@@ -705,7 +900,7 @@ pub(super) fn scan_structured_calls(
     let mut resume_idx = 0usize;
     let mut event_resume_lines: HashMap<String, Vec<String>> = HashMap::new();
     for section in &sections {
-        if section.name.is_empty() || section.name == "(latent resume)" {
+        if !section.is_event() {
             continue;
         }
         for line in &section.lines {
@@ -733,7 +928,7 @@ pub(super) fn scan_structured_calls(
 
     // Scan each event section + its resume blocks for local function calls
     for section in &sections {
-        if section.name.is_empty() || section.name == "(latent resume)" {
+        if !section.is_event() {
             continue;
         }
         for line in &section.lines {
@@ -762,7 +957,7 @@ pub(super) fn is_ubergraph_stub(props: &[Property], ug_name: &str) -> bool {
     let meaningful: Vec<&str> = lines
         .iter()
         .map(|line| super::strip_offset_prefix(line).trim())
-        .filter(|code| !matches!(*code, "" | "return" | "return nop"))
+        .filter(|code| !matches!(*code, "" | "return" | RETURN_NOP))
         .collect();
     if meaningful.is_empty() {
         return false;
@@ -779,10 +974,7 @@ mod tests {
     use super::*;
 
     fn stmt(offset: usize, text: &str) -> BcStatement {
-        BcStatement {
-            mem_offset: offset,
-            text: text.to_string(),
-        }
+        BcStatement::new(offset, text.to_string())
     }
 
     #[test]
