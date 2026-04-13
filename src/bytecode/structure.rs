@@ -8,9 +8,10 @@
 
 use super::decode::BcStatement;
 use super::flow::{
-    parse_continue_if_not, parse_if_jump, parse_jump, parse_jump_computed, parse_pop_flow_if_not,
-    parse_push_flow,
+    find_first_unmatched_pop, flow_depth, parse_continue_if_not, parse_if_jump, parse_jump,
+    parse_jump_computed, parse_pop_flow_if_not, parse_push_flow,
 };
+use super::{POP_FLOW, RETURN_NOP};
 use crate::helpers::{closes_block, is_loop_header, opens_block, SECTION_SEPARATOR};
 use std::collections::{HashMap, HashSet};
 
@@ -341,7 +342,7 @@ fn resolve_jump_line(
 ) -> Option<String> {
     if let Some(target_idx) = (ctx.find_target_idx_or_end)(target) {
         let is_jump_to_end = target_idx >= ctx.stmts.len()
-            || (target_idx == ctx.stmts.len() - 1 && ctx.stmts[target_idx].text == "return nop");
+            || (target_idx == ctx.stmts.len() - 1 && ctx.stmts[target_idx].text == RETURN_NOP);
         if is_jump_to_end {
             if in_loop {
                 Some("break".to_string())
@@ -401,7 +402,7 @@ fn emit_stmts_range(
 
         let stmt = &ctx.stmts[i];
 
-        if stmt.text == "pop_flow" {
+        if stmt.text == POP_FLOW {
             let keyword = if in_loop(block_stack) {
                 "break"
             } else {
@@ -426,7 +427,7 @@ fn emit_stmts_range(
                 output.push(text);
             }
         } else {
-            let text = if stmt.text == "return nop" {
+            let text = if stmt.text == RETURN_NOP {
                 "return"
             } else {
                 &stmt.text
@@ -455,7 +456,7 @@ fn collect_label_targets(
         if let Some(target) = parse_jump(&stmt.text) {
             if let Some(target_idx) = find_target_idx_or_end(target) {
                 let is_jump_to_end_label = target_idx >= stmts.len()
-                    || (target_idx == stmts.len() - 1 && stmts[target_idx].text == "return nop");
+                    || (target_idx == stmts.len() - 1 && stmts[target_idx].text == RETURN_NOP);
                 if is_jump_to_end_label {
                     // Will be break or omitted
                 } else if let Some(lbl) = label_at.get(&target_idx) {
@@ -575,9 +576,17 @@ fn detect_if_blocks(
         let Some((cond, target)) = parse_if_jump(&stmt.text) else {
             continue;
         };
-        let Some(target_idx) = find_target(target) else {
+        let Some(mut target_idx) = find_target(target) else {
             continue;
         };
+
+        // A pop_flow can't be the start of a false branch; it's a flow exit.
+        // Fuzzy offset resolution sometimes lands on a pop_flow when the actual
+        // target is a filtered opcode (wire_trace) between the pop_flow and the
+        // next statement. Advance past it.
+        if target_idx < stmts.len() && stmts[target_idx].text == POP_FLOW {
+            target_idx += 1;
+        }
 
         // Check for an else branch: search backward from the false-branch start
         // for the true-branch's terminating jump or return
@@ -597,6 +606,25 @@ fn detect_if_blocks(
     truncate_false_blocks(&mut if_blocks, stmts, find_target);
 
     if_blocks
+}
+
+/// Check whether a `pop_flow` at `pop_idx` is unmatched within `[start, pop_idx)`.
+///
+/// When the push/pop pairs in the range are balanced (net depth 0), the pop_flow
+/// at `pop_idx` is a genuine scope exit, not part of a nested push/pop pair.
+fn is_unmatched_pop_flow(stmts: &[BcStatement], start: usize, pop_idx: usize) -> bool {
+    flow_depth(stmts, start, pop_idx) == 0
+}
+
+/// Find where the false branch ends when the true branch terminates with pop_flow.
+///
+/// The first `pop_flow` at depth 0 from `start` is the false branch's own exit.
+/// Returns exclusive end (pop_flow index + 1) so the pop_flow is included in the
+/// else region and emitted as `return`/`break`.
+fn find_else_end_by_pop_flow(stmts: &[BcStatement], start: usize) -> usize {
+    find_first_unmatched_pop(stmts, start, stmts.len())
+        .map(|idx| idx + 1)
+        .unwrap_or(stmts.len())
 }
 
 /// Check if the true-branch ends with an unconditional jump (else) or return (diverging).
@@ -636,10 +664,21 @@ fn detect_else_branch(
             }
         }
         // Diverging return: both branches exit independently.
-        // pop_flow is excluded, flow reordering emits `return nop` sentinels
-        // at pin boundaries, and internal pop_flow would engulf unrelated code.
-        else if (stmt.text == "return nop" || stmt.text == "return") && target_idx < stmts.len() {
+        else if (stmt.text == RETURN_NOP || stmt.text == "return") && target_idx < stmts.len() {
             return (Some(check_idx), Some(stmts.len()));
+        }
+        // Diverging pop_flow: the true branch exits via pop_flow back to the
+        // enclosing push_flow. Safe only when the pop_flow is unmatched (not
+        // from a nested push/pop pair within the true body). The else end is
+        // found by scanning forward for the false branch's own balanced pop_flow.
+        // Unlike the return case, jump_idx stays None so the pop_flow remains
+        // visible and emits as return/break in the true branch.
+        else if stmt.text == POP_FLOW
+            && target_idx < stmts.len()
+            && is_unmatched_pop_flow(stmts, if_idx + 1, check_idx)
+        {
+            let end_idx = find_else_end_by_pop_flow(stmts, target_idx);
+            return (None, Some(end_idx));
         }
 
         // Any other executable statement means no else detected
@@ -683,6 +722,14 @@ fn truncate_false_blocks(
                 if find_target(jt) == Some(end_idx) {
                     blk.else_close_idx = Some(j + 1);
                     break;
+                }
+                // Backward jump to before the else start: control is returning
+                // to earlier convergence code, so the else body ends here.
+                if let Some(target_idx) = find_target(jt) {
+                    if target_idx < blk.target_idx {
+                        blk.else_close_idx = Some(j + 1);
+                        break;
+                    }
                 }
             }
         }
@@ -1162,6 +1209,12 @@ fn has_boundary_between(output: &[String], label_name: &str, goto_idx: usize) ->
     let Some(label_idx) = output.iter().position(|l| l.trim() == label_text) else {
         return false;
     };
+    // A label at the start of an else block isn't a convergence target,
+    // it's the else body's entry. Skip single-goto convergence here so
+    // extraction doesn't empty the else and destroy its braces.
+    if label_idx > 0 && output[label_idx - 1].trim().starts_with("} else") {
+        return false;
+    }
     let (lo, hi) = if label_idx < goto_idx {
         (label_idx, goto_idx)
     } else {
@@ -1232,10 +1285,7 @@ mod tests {
     }
 
     fn make_stmt(offset: usize, text: &str) -> BcStatement {
-        BcStatement {
-            mem_offset: offset,
-            text: text.to_string(),
-        }
+        BcStatement::new(offset, text.to_string())
     }
 
     #[test]
@@ -1694,6 +1744,53 @@ mod tests {
         assert!(
             !text.contains("pop_flow_if_not"),
             "raw guard leaked:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn pop_flow_terminates_true_branch_with_else() {
+        // Pattern: if !(cond) jump TARGET; true_body; pop_flow; TARGET: false_body; pop_flow
+        let stmts = vec![
+            make_stmt(0x10, "if !($IsValid) jump 0x40"),
+            make_stmt(0x20, "SpawnSound()"),
+            make_stmt(0x30, "pop_flow"),
+            make_stmt(0x40, "PrintString(\"no sound\")"),
+            make_stmt(0x50, "pop_flow"),
+            make_stmt(0x60, "AfterBlock()"),
+        ];
+        let result = structure_bytecode(&stmts, &HashMap::new());
+        let text = result.join("\n");
+        assert!(text.contains("} else {"), "missing else:\n{}", text);
+        assert!(
+            text.contains("SpawnSound()"),
+            "missing true body:\n{}",
+            text
+        );
+        assert!(
+            text.contains("PrintString(\"no sound\")"),
+            "missing false body:\n{}",
+            text
+        );
+    }
+
+    #[test]
+    fn nested_push_pop_not_treated_as_else_terminator() {
+        // push_flow/pop_flow pair inside true body is balanced, not an exit
+        let stmts = vec![
+            make_stmt(0x10, "if !(Cond) jump 0x60"),
+            make_stmt(0x20, "push_flow 0x40"),
+            make_stmt(0x28, "DoWork()"),
+            make_stmt(0x30, "pop_flow"),
+            make_stmt(0x40, "AfterPush()"),
+            make_stmt(0x50, "pop_flow"),
+            make_stmt(0x60, "FalseBody()"),
+        ];
+        let result = structure_bytecode(&stmts, &HashMap::new());
+        let text = result.join("\n");
+        assert!(
+            text.contains("AfterPush()"),
+            "push/pop body lost:\n{}",
             text
         );
     }

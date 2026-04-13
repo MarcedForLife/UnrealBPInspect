@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 
 use super::SWITCH_ENUM_PREFIX;
 use crate::bytecode::decode::BcStatement;
-use crate::bytecode::flow::{parse_if_jump, parse_jump, parse_push_flow};
-use crate::bytecode::JUMP_OFFSET_TOLERANCE;
+use crate::bytecode::flow::{find_last_unmatched_pop, parse_if_jump, parse_jump, parse_push_flow};
+use crate::bytecode::{JUMP_OFFSET_TOLERANCE, POP_FLOW, RETURN_NOP};
 use crate::helpers::opens_block;
 
 /// Fold `$SwitchEnum_CmpSuccess` cascades into `switch (VAR) { case: ... }`.
@@ -208,9 +208,7 @@ fn parse_switch_enum_assign(trimmed: &str) -> Option<(String, String, String)> {
     ))
 }
 
-// ---------------------------------------------------------------------------
 // BcStatement-level cascade fold (pre-split)
-// ---------------------------------------------------------------------------
 
 /// A detected cascade case: value and jump target offset from the if-jump.
 struct CascadeCase {
@@ -326,7 +324,7 @@ fn extract_push_jump_bodies(
     let inline_start = push_idx + 2;
     let inline_pop = stmts[inline_start..max_idx]
         .iter()
-        .position(|s| s.text.trim() == "pop_flow")
+        .position(|s| s.text.trim() == POP_FLOW)
         .map(|p| p + inline_start)?;
 
     // Exclusive body start: resolve the jump target.
@@ -335,22 +333,9 @@ fn extract_push_jump_bodies(
         .position(|s| s.mem_offset.abs_diff(jump_target) <= JUMP_OFFSET_TOLERANCE)
         .map(|p| p + inline_pop + 1)?;
 
-    // Exclusive body end: find the last pop_flow before non-flow code.
-    // Scan forward from exclusive_start tracking push/pop balance.
-    let mut balance = 0i32;
-    let mut last_exit_pop = exclusive_start;
-    for (idx, stmt) in stmts.iter().enumerate().take(max_idx).skip(exclusive_start) {
-        let trimmed = stmt.text.trim();
-        if parse_push_flow(trimmed).is_some() {
-            balance += 1;
-        } else if trimmed == "pop_flow" {
-            if balance > 0 {
-                balance -= 1;
-            } else {
-                last_exit_pop = idx;
-            }
-        }
-    }
+    // Exclusive body end: the last pop_flow at depth 0 exits the block.
+    let last_exit_pop =
+        find_last_unmatched_pop(stmts, exclusive_start, max_idx).unwrap_or(exclusive_start);
     let exclusive_end = last_exit_pop + 1;
 
     Some((exclusive_start..exclusive_end, inline_start..inline_pop))
@@ -498,7 +483,7 @@ fn detect_cascade_in_prefix(
 /// Find the end of meaningful content (skip trailing `return nop`).
 fn find_content_end(stmts: &[BcStatement]) -> usize {
     let mut end = stmts.len();
-    while end > 0 && stmts[end - 1].text.trim() == "return nop" {
+    while end > 0 && stmts[end - 1].text.trim() == RETURN_NOP {
         end -= 1;
     }
     end
@@ -515,7 +500,7 @@ fn resolve_target_after(
 ) -> Option<usize> {
     let mut best: Option<(usize, usize)> = None; // (distance, index)
     for (idx, stmt) in stmts.iter().enumerate().skip(start_idx) {
-        if stmt.text.trim() == "return nop" {
+        if stmt.text.trim() == RETURN_NOP {
             continue;
         }
         let dist = target_offset.abs_diff(stmt.mem_offset);
@@ -535,5 +520,5 @@ fn resolve_target_after(
 /// Stmts to strip when building case bodies: synthetic sentinels from
 /// sequence emission that would create spurious `return` in the output.
 fn should_strip_from_case_body(text: &str) -> bool {
-    text.trim() == "return nop"
+    text.trim() == RETURN_NOP
 }

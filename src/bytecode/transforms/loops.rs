@@ -10,7 +10,7 @@ use super::{
     closes_block, count_var_refs, is_block_boundary, opens_block, parse_temp_assignment,
     strip_outer_parens, substitute_var, BREAK_HIT_VAR, TEMP_INT_PREFIX,
 };
-use crate::helpers::{is_section_separator, FOREACH_PREFIX, WHILE_PREFIX};
+use crate::helpers::{is_comment_or_empty, is_section_separator, FOREACH_PREFIX, WHILE_PREFIX};
 
 /// Run all loop rewriting passes in order.
 pub(super) fn rewrite_loops(lines: &mut Vec<String>) {
@@ -218,7 +218,7 @@ fn strip_leading_init_lines(lines: &mut Vec<String>, loop_idx: usize) {
     let mut j = loop_idx + 1;
     while j < lines.len() {
         let trimmed = lines[j].trim();
-        if trimmed.is_empty() || trimmed.starts_with("//") {
+        if is_comment_or_empty(trimmed) {
             j += 1;
             continue;
         }
@@ -242,7 +242,7 @@ fn find_explicit_get(
 ) -> Option<(usize, String)> {
     let (rel, line) = lines[start..close_idx].iter().enumerate().find(|(_, l)| {
         let trimmed = l.trim();
-        !trimmed.is_empty() && !trimmed.starts_with("//")
+        !is_comment_or_empty(trimmed)
     })?;
     let trimmed = line.trim();
     let (item, rhs) = trimmed.split_once(" = ")?;
@@ -421,7 +421,7 @@ fn try_inline_access_rewrite(
         .enumerate()
         .find(|(_, l)| {
             let trimmed = l.trim();
-            !trimmed.is_empty() && !trimmed.starts_with("//")
+            !is_comment_or_empty(trimmed)
         })
         .filter(|(_, l)| l.trim().starts_with(&assign_prefix))
         .map(|(rel, _)| rel + while_idx + 1)?;
@@ -507,7 +507,7 @@ fn find_forloop_init(lines: &[String], while_idx: usize, counter: &str) -> Optio
     let init_prefix = format!("{} = ", counter);
     for j in (0..while_idx).rev() {
         let trimmed = lines[j].trim();
-        if trimmed.is_empty() || trimmed.starts_with("//") {
+        if is_comment_or_empty(trimmed) {
             continue;
         }
         if is_section_separator(trimmed) || is_block_boundary(trimmed) {
