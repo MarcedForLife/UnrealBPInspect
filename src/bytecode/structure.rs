@@ -32,6 +32,7 @@ const STRUCTURE_OFFSET_TOLERANCE: usize = 8;
 ///
 /// The wrapping is critical: `!A && B` means `(!A) && B`, not `!(A && B)`,
 /// so compound conditions must get `!()` not just `!` prefix.
+#[cfg(test)]
 fn negate_cond(cond: &str) -> String {
     // Already negated simple expr: !X -> X
     if cond.starts_with('!') && !cond.starts_with("!(") {
@@ -414,10 +415,9 @@ fn emit_stmts_range(
             if !already_breaking {
                 output.push(keyword.to_string());
             }
-        } else if let Some(cond) = parse_continue_if_not(&stmt.text) {
-            let negated = negate_cond(cond);
-            output.push(format!("if ({}) continue", negated));
-        } else if parse_pop_flow_if_not(&stmt.text).is_some() || parse_if_jump(&stmt.text).is_some()
+        } else if parse_continue_if_not(&stmt.text).is_some()
+            || parse_pop_flow_if_not(&stmt.text).is_some()
+            || parse_if_jump(&stmt.text).is_some()
         {
             // Residual guard: insert_guard_regions already consumed mid-scope
             // guards, so anything still here is at the end of its scope with
@@ -846,8 +846,12 @@ fn insert_guard_regions(region: &mut Region, stmts: &[BcStatement], skip: &mut H
             continue;
         }
 
-        // pop_flow_if_not(COND): exit scope when COND is false, body runs when true
+        // pop_flow_if_not(COND) / continue_if_not(COND): exit scope or skip
+        // iteration when COND is false. The body runs when true, matching the
+        // Blueprint Branch node's true-pin path.
         if let Some(cond) = parse_pop_flow_if_not(&stmts[idx].text) {
+            guards.push((idx, cond.to_string()));
+        } else if let Some(cond) = parse_continue_if_not(&stmts[idx].text) {
             guards.push((idx, cond.to_string()));
         }
         // Unresolvable if_jump: same semantics (not consumed by if-block detection)
