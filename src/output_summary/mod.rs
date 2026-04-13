@@ -1,7 +1,7 @@
 //! Summary output mode (default).
 //!
-//! EdGraph comments are placed near corresponding bytecode via 2D bounding-box
-//! intersection between comment regions and node positions.
+//! EdGraph comments are placed inline near corresponding bytecode using pin-based
+//! structural analysis (exec entry points, BFS ownership) with spatial fallback.
 
 mod call_graph;
 mod comments;
@@ -24,6 +24,11 @@ struct CommentBox {
     width: i32,
     height: i32,
     is_bubble: bool,
+    /// EdGraph page this comment belongs to (e.g. "EventGraph", "BeginPlay").
+    graph_page: String,
+    /// For bubble comments: 1-based export index of the owning node.
+    /// Allows direct lookup via pin data instead of spatial proximity.
+    owner_export: usize,
 }
 
 impl CommentBox {
@@ -41,6 +46,13 @@ struct NodeInfo {
     /// inlined into other statements. Their identifiers appear at multiple
     /// bytecode locations, making rank-based matching unreliable for box comments.
     is_pure: bool,
+    /// True for K2Node_VariableSet nodes. Assignment lines (`self.X = ...`) are
+    /// matched instead of any reference, preventing false matches on read-only usage.
+    is_variable_set: bool,
+    /// 1-based export index in the asset, used for pin-based event ownership lookup.
+    export_index: usize,
+    /// EdGraph page this node belongs to.
+    graph_page: String,
 }
 
 struct UbergraphSection {
@@ -48,16 +60,26 @@ struct UbergraphSection {
     lines: Vec<String>,
 }
 
+impl UbergraphSection {
+    fn is_event(&self) -> bool {
+        !self.name.is_empty() && self.name != LATENT_RESUME_SECTION
+    }
+}
+
 struct ResumeBlock {
     lines: Vec<String>,
 }
 
+/// Synthetic identifier for K2Node_IfThenElse (Branch) nodes.
+const BRANCH_IDENTIFIER: &str = "__branch__";
+
+/// Section name for latent resume blocks in the ubergraph.
+const LATENT_RESUME_SECTION: &str = "(latent resume)";
+
 const COMMENT_WRAP_WIDTH: usize = 100;
 const MAX_BUBBLE_DISTANCE_SQ: i64 = 640_000; // 800px squared
 const FUZZY_LABEL_WINDOW: usize = 8;
-
-// Bytecode lines are stored as "XXXX: text" where XXXX is a 4-char hex offset
-const OFFSET_PREFIX_LEN: usize = "0000: ".len(); // 6
+const OFFSET_PREFIX_LEN: usize = "0000: ".len();
 
 /// Strip the hex offset prefix from a bytecode line (e.g. `0012: expr` -> `expr`).
 fn strip_offset_prefix(line: &str) -> &str {
@@ -105,7 +127,7 @@ fn emit_comment(buf: &mut String, text: &str, indent: &str) {
             1 => writeln!(buf, "{}\"{}\"", prefix, wrapped[0]).unwrap(),
             n => {
                 writeln!(buf, "{}\"{}", prefix, wrapped[0]).unwrap();
-                for (i, segment) in wrapped.iter().enumerate().take(n).skip(1) {
+                for (i, segment) in wrapped.iter().enumerate().skip(1) {
                     if i == n - 1 {
                         writeln!(buf, "{} {}\"", prefix, segment).unwrap();
                     } else {

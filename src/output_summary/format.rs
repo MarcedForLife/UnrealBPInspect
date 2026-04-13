@@ -10,6 +10,7 @@ use crate::resolve::{
     find_prop, find_prop_object, find_prop_object_array, find_prop_str, find_prop_str_items,
     prop_value_short, resolve_index, short_class,
 };
+use crate::types::NodePinData;
 use crate::types::{ImportEntry, ParsedAsset, PropValue, Property};
 
 use super::call_graph::{
@@ -295,14 +296,14 @@ fn emit_function_body(
     func_name: &str,
     props: &[Property],
     edgraph: &EdGraphData,
+    pin_data: &HashMap<usize, NodePinData>,
     callers_map: &HashMap<String, Vec<String>>,
-    sig: &str,
-    flags: &str,
+    signature: &str,
 ) {
     if let Some(callers) = callers_map.get(func_name) {
         writeln!(buf, "  // called by: {}", callers.join(", ")).unwrap();
     }
-    writeln!(buf, "  {}{}", sig, flags).unwrap();
+    writeln!(buf, "  {}", signature).unwrap();
 
     let bc_lines: Vec<String> = {
         let summary = find_prop_str_items(props, "BytecodeSummary");
@@ -320,7 +321,13 @@ fn emit_function_body(
     let nodes = edgraph.graph_nodes.get(func_name);
     let (top_level, inline) = if let Some(cbs) = comments {
         let node_slice = nodes.map(|v| v.as_slice()).unwrap_or(&[]);
-        classify_comments(cbs, node_slice, &bc_lines)
+        classify_comments(
+            cbs,
+            node_slice,
+            &bc_lines,
+            pin_data,
+            &edgraph.all_node_positions,
+        )
     } else {
         (Vec::new(), Vec::new())
     };
@@ -353,6 +360,7 @@ fn emit_ubergraph_section(
     buf: &mut String,
     structured: &[String],
     edgraph: &EdGraphData,
+    pin_data: &HashMap<usize, NodePinData>,
     callers_map: &HashMap<String, Vec<String>>,
 ) {
     let (ug_comments, ug_nodes) = merge_event_graph_data(&edgraph.event_graph_pages, edgraph);
@@ -371,8 +379,8 @@ fn emit_ubergraph_section(
         structured,
         ug_comments_ref,
         ug_nodes_ref,
-        &edgraph.event_positions,
-        &edgraph.input_action_positions,
+        edgraph,
+        pin_data,
         callers_map,
     );
 }
@@ -415,20 +423,21 @@ fn format_functions(
         if let Some(ctx) = ubergraph_ctx {
             if hdr.object_name.starts_with("ExecuteUbergraph_") {
                 section_sep(buf, &mut emitted_count);
-                emit_ubergraph_section(buf, &ctx.structured, edgraph, callers_map);
+                emit_ubergraph_section(buf, &ctx.structured, edgraph, &asset.pin_data, callers_map);
                 continue;
             }
         }
 
         section_sep(buf, &mut emitted_count);
+        let signature = format!("{}{}", sig, flags);
         emit_function_body(
             buf,
             &hdr.object_name,
             props,
             edgraph,
+            &asset.pin_data,
             callers_map,
-            &sig,
-            &flags,
+            &signature,
         );
     }
     if emitted_count > 0 {
