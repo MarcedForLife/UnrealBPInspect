@@ -3,10 +3,10 @@
 //! Detects Sequence nodes, ForLoop, ForEach, and convergence patterns in flat bytecode,
 //! then reorders so downstream structuring sees natural control flow.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::decode::BcStatement;
-use super::{OffsetMap, JUMP_OFFSET_TOLERANCE};
+use super::{OffsetMap, JUMP_OFFSET_TOLERANCE, POP_FLOW, RETURN_NOP, SEQUENCE_MARKER_PREFIX};
 
 /// Offset tolerance for ForEach loop body detection. Jump targets use in-memory offsets
 /// but we index by on-disk offsets + cumulative mem_adj. The drift accumulates from
@@ -45,6 +45,61 @@ pub fn parse_pop_flow_if_not(text: &str) -> Option<&str> {
     let inner = text.strip_prefix("pop_flow_if_not(")?;
     let cond = inner.strip_suffix(')')?;
     Some(cond)
+}
+
+/// Net push_flow/pop_flow depth change across `stmts[start..end)`.
+///
+/// Returns 0 when all push_flows are matched by pop_flows in the range.
+pub fn flow_depth(stmts: &[BcStatement], start: usize, end: usize) -> i32 {
+    let mut balance: i32 = 0;
+    for stmt in &stmts[start..end] {
+        if parse_push_flow(&stmt.text).is_some() {
+            balance += 1;
+        } else if stmt.text == POP_FLOW {
+            balance -= 1;
+        }
+    }
+    balance
+}
+
+/// Find the first `pop_flow` at nesting depth 0 in `stmts[start..end)`.
+///
+/// Tracks push_flow/pop_flow pairs, returning the index of the first pop_flow
+/// that isn't matched by an earlier push_flow within the range.
+pub fn find_first_unmatched_pop(stmts: &[BcStatement], start: usize, end: usize) -> Option<usize> {
+    let mut depth: i32 = 0;
+    for (idx, stmt) in stmts.iter().enumerate().take(end).skip(start) {
+        if parse_push_flow(&stmt.text).is_some() {
+            depth += 1;
+        } else if stmt.text == POP_FLOW {
+            if depth > 0 {
+                depth -= 1;
+            } else {
+                return Some(idx);
+            }
+        }
+    }
+    None
+}
+
+/// Find the last `pop_flow` at nesting depth 0 in `stmts[start..end)`.
+///
+/// Like `find_first_unmatched_pop` but returns the last matching index.
+pub fn find_last_unmatched_pop(stmts: &[BcStatement], start: usize, end: usize) -> Option<usize> {
+    let mut depth: i32 = 0;
+    let mut last: Option<usize> = None;
+    for (idx, stmt) in stmts.iter().enumerate().take(end).skip(start) {
+        if parse_push_flow(&stmt.text).is_some() {
+            depth += 1;
+        } else if stmt.text == POP_FLOW {
+            if depth > 0 {
+                depth -= 1;
+            } else {
+                last = Some(idx);
+            }
+        }
+    }
+    last
 }
 
 /// Parse "continue_if_not(COND)" -> condition string.
@@ -121,7 +176,7 @@ fn expand_body_end(
                     if target_idx > be && !in_other_pin {
                         if let Some(displaced_end) = stmts[target_idx..]
                             .iter()
-                            .position(|s| s.text == "pop_flow")
+                            .position(|s| s.text == POP_FLOW)
                             .map(|p| p + target_idx)
                         {
                             if displaced_end > be {
@@ -164,7 +219,7 @@ fn find_displaced_blocks(
         // Find the pop_flow that ends this displaced block
         let Some(displaced_end) = stmts[target_idx..]
             .iter()
-            .position(|s| s.text == "pop_flow")
+            .position(|s| s.text == POP_FLOW)
             .map(|p| p + target_idx)
         else {
             continue;
@@ -209,7 +264,7 @@ fn detect_grouped_sequences(stmts: &[BcStatement], offset_map: &OffsetMap) -> Ve
         let inline_start = scan_idx;
         let inline_end = stmts[inline_start..]
             .iter()
-            .position(|s| s.text == "pop_flow")
+            .position(|s| s.text == POP_FLOW)
             .map(|p| p + inline_start);
         let Some(inline_end) = inline_end else {
             i += 1;
@@ -225,7 +280,7 @@ fn detect_grouped_sequences(stmts: &[BcStatement], offset_map: &OffsetMap) -> Ve
             let body_start = body_scan;
             let Some(initial_end) = stmts[body_start..]
                 .iter()
-                .position(|s| s.text == "pop_flow")
+                .position(|s| s.text == POP_FLOW)
                 .map(|p| p + body_start)
             else {
                 break;
@@ -334,7 +389,7 @@ fn detect_interleaved_sequences(
         let inline_start = scan_idx;
         let inline_end = stmts[inline_start..]
             .iter()
-            .position(|s| s.text == "pop_flow")
+            .position(|s| s.text == POP_FLOW)
             .map(|p| p + inline_start);
         let Some(inline_end) = inline_end else {
             i += 1;
@@ -353,7 +408,7 @@ fn detect_interleaved_sequences(
             // to include displaced blocks (switch case bodies, etc.)
             let Some(initial_end) = stmts[body_start..]
                 .iter()
-                .position(|s| s.text == "pop_flow")
+                .position(|s| s.text == POP_FLOW)
                 .map(|p| p + body_start)
             else {
                 all_found = false;
@@ -381,7 +436,7 @@ fn detect_interleaved_sequences(
             let meaningful = stmts[inline_start..inline_end]
                 .iter()
                 .filter(|s| {
-                    s.text != "pop_flow"
+                    s.text != POP_FLOW
                         && !s.text.starts_with("push_flow ")
                         && !s.text.starts_with("pop_flow_if_not(")
                 })
@@ -438,7 +493,7 @@ fn resolve_foreach_body(
             .map(|(idx, _)| idx)?;
         // Fuzzy matching can land on a preceding terminator; skip to real content
         while body_idx < stmts.len()
-            && (stmts[body_idx].text == "pop_flow" || stmts[body_idx].text == "return nop")
+            && (stmts[body_idx].text == POP_FLOW || stmts[body_idx].text == RETURN_NOP)
         {
             body_idx += 1;
         }
@@ -574,7 +629,7 @@ fn detect_for_loops(
 
         let pop_idx = stmts[(back_jump_idx + 1)..stmts.len().min(back_jump_idx + 3)]
             .iter()
-            .position(|s| s.text == "pop_flow")
+            .position(|s| s.text == POP_FLOW)
             .map(|p| p + back_jump_idx + 1);
 
         // For ForEach loops, the body is displaced AFTER the completion path.
@@ -702,14 +757,9 @@ impl<'a> SequenceEmitter<'a> {
         } else {
             "sequence"
         };
-        let marker = |text: &str| BcStatement {
-            mem_offset: seq_offset,
-            text: text.to_string(),
-        };
-        let sentinel = |idx: usize| BcStatement {
-            mem_offset: self.stmts[idx].mem_offset,
-            text: "return nop".to_string(),
-        };
+        let marker = |text: &str| BcStatement::new(seq_offset, text.to_string());
+        let sentinel =
+            |idx: usize| BcStatement::new(self.stmts[idx].mem_offset, RETURN_NOP.to_string());
 
         // Emit each pin body, following unconditional jumps to child Sequences
         for (pi, pin) in seq.pins.iter().enumerate() {
@@ -795,11 +845,8 @@ fn emit_single_loop(
 ) {
     emitted.insert(lp.if_idx);
     let lp_offset = stmts[lp.if_idx].mem_offset;
-    let marker = |text: &str| BcStatement {
-        mem_offset: lp_offset,
-        text: text.to_string(),
-    };
-    let body_end = if stmts[lp.body_end_idx].text == "return nop" {
+    let marker = |text: &str| BcStatement::new(lp_offset, text.to_string());
+    let body_end = if stmts[lp.body_end_idx].text == RETURN_NOP {
         lp.body_end_idx
     } else {
         lp.body_end_idx + 1
@@ -845,19 +892,16 @@ fn emit_single_loop(
             if parse_push_flow(&stmt.text).is_some() || parse_jump(&stmt.text).is_some() {
                 continue;
             }
-            if stmt.text == "pop_flow" {
-                output.push(BcStatement {
-                    mem_offset: stmt.mem_offset,
-                    text: format!("jump 0x{:x}", end_offset),
-                });
+            if stmt.text == POP_FLOW {
+                output.push(BcStatement::new(
+                    stmt.mem_offset,
+                    format!("jump 0x{:x}", end_offset),
+                ));
                 // Anchor: the next statement's offset must survive in the
                 // OffsetMap even if inline passes remove its original statement.
                 if let Some(next) = completion.get(rel + 1) {
                     if next.mem_offset > 0 {
-                        output.push(BcStatement {
-                            mem_offset: next.mem_offset,
-                            text: String::new(),
-                        });
+                        output.push(BcStatement::new(next.mem_offset, String::new()));
                     }
                 }
                 continue;
@@ -869,7 +913,7 @@ fn emit_single_loop(
     // share the same body_end_idx (inflated to stmts.len()-1), and emitting
     // it inside the parent body would cause dead code elimination to strip
     // the parent's completion path.
-    if !nested && stmts[lp.body_end_idx].text == "return nop" {
+    if !nested && stmts[lp.body_end_idx].text == RETURN_NOP {
         output.push(stmts[lp.body_end_idx].clone());
     }
 }
@@ -1052,7 +1096,7 @@ fn mark_latch_stmts(stmts: &[BcStatement], latch_vars: &HashSet<String>, remove:
         if let Some((cond, _)) = parse_if_jump(trimmed) {
             if latch_vars.contains(cond) {
                 remove[idx] = true;
-                if idx + 1 < stmts.len() && stmts[idx + 1].text == "pop_flow" {
+                if idx + 1 < stmts.len() && stmts[idx + 1].text == POP_FLOW {
                     remove[idx + 1] = true;
                 }
                 continue;
@@ -1091,12 +1135,12 @@ fn mark_latch_wrappers(stmts: &[BcStatement], remove: &mut [bool]) {
 /// itself a pop_flow (or nothing precedes it).
 fn mark_orphaned_pop_flows(stmts: &[BcStatement], remove: &mut [bool]) {
     for idx in 0..stmts.len() {
-        if remove[idx] || stmts[idx].text != "pop_flow" {
+        if remove[idx] || stmts[idx].text != POP_FLOW {
             continue;
         }
         let prev_kept = (0..idx).rev().find(|&j| !remove[j]);
         let orphaned = match prev_kept {
-            Some(prev) => stmts[prev].text == "pop_flow",
+            Some(prev) => stmts[prev].text == POP_FLOW,
             None => true,
         };
         if orphaned {
@@ -1125,363 +1169,481 @@ pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
     emit_reordered(stmts, &sequences, &loops, &mut used, &offset_map)
 }
 
-/// Reorder displaced if/else branches caused by convergence inlining.
+/// Reorder bytecode statements so that if/else branches use forward jumps.
 ///
-/// The compiler sometimes inlines shared convergence code after one branch, then uses
-/// backward jumps from others. We reorder so all jumps become forward and
-/// structure_bytecode can detect if/else correctly. Loops until no groups remain.
+/// Builds a basic-block control flow graph from jump patterns and linearizes it
+/// via recursive DFS, placing true-bodies before false-bodies at every conditional.
+/// Convergence blocks (shared code targeted by multiple paths) stay in place and
+/// become `goto` labels that `structure_bytecode`'s `extract_convergence` handles.
 pub fn reorder_convergence(stmts: &mut Vec<BcStatement>) {
-    // Loop because each reorder shifts indices; process one convergence group per iteration.
-    loop {
-        if stmts.len() < 4 {
-            return;
-        }
-        if !reorder_one_convergence(stmts) {
-            return;
-        }
+    if stmts.len() < 4 {
+        return;
     }
-}
 
-struct ConvergenceGroup {
-    target_idx: usize,
-    jump_indices: Vec<usize>,
-    conv_end: usize,
-}
-
-/// Find the earliest convergence group: 2+ backward unconditional jumps sharing a target.
-/// Scans for the convergence extent with if-nesting depth tracking.
-fn find_convergence_group(
-    stmts: &[BcStatement],
-    offset_map: &OffsetMap,
-) -> Option<ConvergenceGroup> {
-    use std::collections::HashMap;
-
-    let find_idx =
-        |target: usize| -> Option<usize> { offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) };
-
-    // Find backward unconditional jumps (target resolves to earlier index)
-    let mut backward_jumps: Vec<(usize, usize)> = Vec::new(); // (jump_idx, target_idx)
-    for (i, stmt) in stmts.iter().enumerate() {
-        if let Some(target) = parse_jump(&stmt.text) {
-            if let Some(target_idx) = find_idx(target) {
-                if target_idx < i {
-                    backward_jumps.push((i, target_idx));
-                }
-            }
+    // Pre-pass: resolve degenerate back-edges (cast-failure `VAR = false; jump backward`)
+    for _ in 0..10 {
+        let offset_map = OffsetMap::build(stmts);
+        if !resolve_degenerate_backedge(stmts, &offset_map) {
+            break;
         }
     }
 
-    // Group by target; need 2+ backward jumps to same target
-    let mut target_groups: HashMap<usize, Vec<usize>> = HashMap::new();
-    for &(jump_idx, target_idx) in &backward_jumps {
-        target_groups.entry(target_idx).or_default().push(jump_idx);
-    }
-
-    // Process the earliest convergence group first (by target index) so that
-    // index shifts from reordering don't invalidate later groups
-    let mut conv = None;
-    for (&target_idx, jump_indices) in &target_groups {
-        if jump_indices.len() < 2 {
-            continue;
-        }
-        if conv
-            .as_ref()
-            .is_none_or(|(ti, _): &(usize, Vec<usize>)| target_idx < *ti)
-        {
-            conv = Some((target_idx, jump_indices.clone()));
-        }
-    }
-    let (conv_target_idx, mut jump_indices) = conv?;
-    jump_indices.sort();
-
-    // Find convergence code extent: from target_idx to the exit jump that leaves the
-    // convergence block. Track if-nesting depth so that jumps inside nested if/else
-    // blocks within the convergence code don't prematurely terminate the scan.
-    // Each if-jump increments depth, and its exit jump decrements it. Only a jump at
-    // depth 0 marks the true convergence exit.
-    let mut conv_end = conv_target_idx;
-    let mut if_depth = 0usize;
-    for (j, stmt) in stmts.iter().enumerate().skip(conv_target_idx) {
-        conv_end = j;
-        if parse_if_jump(&stmt.text).is_some() {
-            if_depth += 1;
-            continue;
-        }
-        if let Some(jt) = parse_jump(&stmt.text) {
-            if if_depth > 0 {
-                if_depth -= 1;
-                continue;
-            }
-            if let Some(jt_idx) = find_idx(jt) {
-                if jt_idx > j {
-                    break;
-                }
-            }
-            if jt > stmts.last().map(|s| s.mem_offset).unwrap_or(0) {
-                break;
-            }
-        }
-    }
-
-    Some(ConvergenceGroup {
-        target_idx: conv_target_idx,
-        jump_indices,
-        conv_end,
-    })
-}
-
-/// Match each backward jump to its if-statement and build the reordered output
-/// with displaced blocks placed before convergence code.
-fn build_convergence_reorder(
-    stmts: &[BcStatement],
-    group: &ConvergenceGroup,
-    offset_map: &OffsetMap,
-) -> Option<Vec<BcStatement>> {
-    use std::collections::HashSet;
-
-    let find_idx =
-        |target: usize| -> Option<usize> { offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) };
-
-    // Build a set of all displaced block ranges (between conv_end and the backward jumps).
-    let all_displaced_start = group.conv_end + 1;
-    let &all_displaced_end = group.jump_indices.last()?;
-
-    if all_displaced_start > all_displaced_end || all_displaced_end >= stmts.len() {
-        return None;
-    }
-
-    // Each backward jump terminates a displaced block. Find which if-statement's false
-    // target matches the start of each block.
-    struct DisplacedBlock {
-        if_idx: usize,
-        block_start: usize,
-        block_end: usize, // inclusive (the backward jump itself)
-    }
-    let mut displaced: Vec<DisplacedBlock> = Vec::new();
-
-    // Determine block boundaries: blocks are separated by the backward jumps.
-    // First block starts at all_displaced_start, subsequent blocks start after prev jump.
-    let mut block_starts: Vec<usize> = vec![all_displaced_start];
-    for &ji in &group.jump_indices[..group.jump_indices.len() - 1] {
-        block_starts.push(ji + 1);
-    }
-
-    for (bi, &jump_idx) in group.jump_indices.iter().enumerate() {
-        let block_start = block_starts[bi];
-        let mut found = false;
-        for (i, stmt) in stmts.iter().enumerate().take(group.target_idx) {
-            if let Some((_, target)) = parse_if_jump(&stmt.text) {
-                if let Some(target_idx) = find_idx(target) {
-                    if target_idx == block_start {
-                        displaced.push(DisplacedBlock {
-                            if_idx: i,
-                            block_start,
-                            block_end: jump_idx,
-                        });
-                        found = true;
-                        break;
-                    }
-                }
-            }
-        }
-        if !found {
-            return None;
-        }
-    }
-
-    // Sort displaced blocks by if_idx descending (deeper nested first)
-    displaced.sort_by(|a, b| b.if_idx.cmp(&a.if_idx));
-
-    // Build the reordered output:
-    // [before convergence] [synthetic jump] [displaced blocks deepest-first] [convergence] [after]
-    let mut output: Vec<BcStatement> = Vec::new();
-
-    output.extend_from_slice(&stmts[..group.target_idx]);
-
-    // Insert synthetic jump to convergence (so structure.rs sees a forward jump)
-    let conv_offset = stmts[group.target_idx].mem_offset;
-    output.push(BcStatement {
-        mem_offset: 0,
-        text: format!("jump 0x{:x}", conv_offset),
+    // Early exit if no backward jumps remain
+    let offset_map = OffsetMap::build(stmts);
+    let has_backward = stmts.iter().enumerate().any(|(i, stmt)| {
+        parse_jump(&stmt.text)
+            .and_then(|t| offset_map.find_fuzzy(t, JUMP_OFFSET_TOLERANCE))
+            .is_some_and(|ti| ti < i)
     });
-
-    // Emit displaced blocks (deepest if_idx first = inner-false before outer-false)
-    for db in &displaced {
-        for stmt in &stmts[db.block_start..db.block_end] {
-            output.push(stmt.clone());
-        }
-        // Replace backward jump with forward jump to convergence
-        output.push(BcStatement {
-            mem_offset: stmts[db.block_end].mem_offset,
-            text: format!("jump 0x{:x}", conv_offset),
-        });
+    if !has_backward {
+        return;
     }
 
-    // Emit convergence code
-    output.extend_from_slice(&stmts[group.target_idx..=group.conv_end]);
-
-    // Emit anything after convergence that isn't a displaced block
-    let displaced_range: HashSet<usize> = displaced
+    // Skip linearization for functions with sequence markers. Sequences are
+    // split and structured independently by structure_statements, so backward
+    // jumps within sequence bodies are handled per-body. Linearizing the full
+    // function would disrupt the sequence/cascade prefix layout that
+    // fold_cascade_across_sequences depends on.
+    let has_sequences = stmts
         .iter()
-        .flat_map(|db| db.block_start..=db.block_end)
-        .collect();
-    for (j, stmt) in stmts.iter().enumerate().skip(group.conv_end + 1) {
-        if !displaced_range.contains(&j) {
-            output.push(stmt.clone());
-        }
+        .any(|s| s.text.starts_with(SEQUENCE_MARKER_PREFIX));
+    if has_sequences {
+        return;
     }
 
-    Some(output)
+    // Phase 1: split into basic blocks
+    let (mut blocks, stmt_to_block) = build_basic_blocks(stmts, &offset_map);
+    if blocks.is_empty() {
+        return;
+    }
+
+    // Phase 2: wire edges
+    wire_block_edges(&mut blocks, stmts, &offset_map, &stmt_to_block);
+
+    // Phase 3: linearize via recursive DFS
+    let in_degree = compute_in_degree(&blocks);
+    let predecessors = compute_predecessors(&blocks);
+
+    let mut output: Vec<BcStatement> = Vec::with_capacity(stmts.len() + 8);
+    linearize_blocks(
+        &mut blocks,
+        stmts,
+        &in_degree,
+        &predecessors,
+        0,
+        &mut output,
+    );
+    // Sweep unemitted blocks (convergence points, unreachable code)
+    for bid in 0..blocks.len() {
+        linearize_blocks(
+            &mut blocks,
+            stmts,
+            &in_degree,
+            &predecessors,
+            bid,
+            &mut output,
+        );
+    }
+
+    *stmts = output;
 }
 
-/// Duplicate inline convergence code into sibling branches.
+// Basic-block graph types and helpers for reorder_convergence
+
+type BlockId = usize;
+
+struct BasicBlock {
+    /// Statement indices into the original stmts array.
+    stmt_range: std::ops::Range<usize>,
+    exit: BlockExit,
+    emitted: bool,
+}
+
+#[derive(Clone)]
+enum BlockExit {
+    /// Implicit fall-through to the next block in original layout.
+    FallThrough,
+    /// Unconditional jump to another block.
+    Jump(BlockId),
+    /// Conditional branch: fall_through is the true-body, target is the false-body.
+    CondJump {
+        fall_through: BlockId,
+        target: BlockId,
+    },
+    /// Terminal statement (return, pop_flow). No successor.
+    Terminal,
+}
+
+/// Phase 1: split statements into basic blocks at jump boundaries.
 ///
-/// The compiler sometimes places shared post-branch code inside the first
-/// if-branch and uses a backward jump from a sibling branch to reach it.
-/// Instead of extracting and reordering, we duplicate the convergence code
-/// at the backward jump site so each branch is self-contained.
-///
-/// Pattern detected:
-/// ```text
-/// if !(COND) jump ELSE
-///   specific_code
-///   convergence_code          // [conv_start..exit_jump)
-///   jump END                  // exit_jump
-/// ELSE:
-///   ...
-///   jump conv_start           // backward jump, replaced with duplicated code
-/// ```
-fn duplicate_inline_convergence(
+/// A block boundary is placed:
+/// - After every jump, conditional jump, terminal, or jump_computed
+/// - Before every statement whose mem_offset is a jump target
+fn build_basic_blocks(
     stmts: &[BcStatement],
     offset_map: &OffsetMap,
-) -> Option<Vec<BcStatement>> {
-    let find_idx =
-        |target: usize| -> Option<usize> { offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) };
-    let last_offset = stmts.last()?.mem_offset;
-
-    for (bj_idx, stmt) in stmts.iter().enumerate() {
-        let Some(target) = parse_jump(&stmt.text) else {
-            continue;
-        };
-        let Some(conv_start) = find_idx(target) else {
-            continue;
-        };
-        if conv_start >= bj_idx {
-            continue; // not backward
-        }
-
-        // Skip dead-code backward jumps (preceded by a forward exit)
-        if bj_idx > 0 {
-            if let Some(prev_target) = parse_jump(&stmts[bj_idx - 1].text) {
-                if let Some(prev_idx) = find_idx(prev_target) {
-                    if prev_idx > bj_idx {
-                        continue;
-                    }
-                }
-                if prev_target > last_offset {
-                    continue;
-                }
+) -> (Vec<BasicBlock>, HashMap<usize, BlockId>) {
+    // Collect all jump target offsets and resolve to statement indices
+    let mut target_indices: HashSet<usize> = HashSet::new();
+    for stmt in stmts {
+        if let Some((_, target)) = parse_if_jump(&stmt.text) {
+            if let Some(idx) = offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) {
+                target_indices.insert(idx);
             }
         }
-
-        // Target must be inside a branch (an if-jump's true body)
-        let mut if_idx_found = false;
-        for if_stmt in stmts.iter().take(conv_start) {
-            if let Some((_, false_target)) = parse_if_jump(&if_stmt.text) {
-                if let Some(false_idx) = find_idx(false_target) {
-                    if false_idx > conv_start && false_idx <= bj_idx {
-                        if_idx_found = true;
-                    }
-                }
+        if let Some(target) = parse_jump(&stmt.text) {
+            if let Some(idx) = offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) {
+                target_indices.insert(idx);
             }
         }
-        if !if_idx_found {
-            continue;
-        }
-
-        // Find the exit jump (forward jump to end) after conv_start
-        let mut exit_jump_idx = None;
-        for (j, exit_stmt) in stmts.iter().enumerate().take(bj_idx).skip(conv_start) {
-            if let Some(exit_target) = parse_jump(&exit_stmt.text) {
-                if let Some(exit_idx) = find_idx(exit_target) {
-                    if exit_idx > bj_idx {
-                        exit_jump_idx = Some(j);
-                        break;
-                    }
-                }
-                if exit_target > last_offset {
-                    exit_jump_idx = Some(j);
-                    break;
-                }
+        if let Some(target) = parse_push_flow(&stmt.text) {
+            if let Some(idx) = offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) {
+                target_indices.insert(idx);
             }
         }
-        let Some(exit_jump_idx) = exit_jump_idx else {
-            continue;
-        };
-
-        // Convergence must be 4+ statements. Shorter sequences tend to be
-        // loop back-edges or internal control flow rather than shared
-        // post-branch code.
-        let conv_range = &stmts[conv_start..exit_jump_idx];
-        if conv_range.len() < 4 {
-            continue;
-        }
-        // Allow control flow in convergence code only if all jumps target
-        // outside the range (safe to duplicate without breaking references)
-        let jump_target_of = |s: &BcStatement| -> Option<usize> {
-            parse_if_jump(&s.text)
-                .map(|(_, jt)| jt)
-                .or_else(|| parse_jump(&s.text))
-        };
-        let has_internal_jumps = conv_range.iter().any(|s| {
-            jump_target_of(s)
-                .and_then(&find_idx)
-                .is_some_and(|ti| ti >= conv_start && ti < exit_jump_idx)
-        });
-        if has_internal_jumps {
-            continue;
-        }
-
-        // Block duplication if there are forward references to the convergence
-        // start (they'd break if the code is relocated). Other backward jumps
-        // are fine: they'll be duplicated in subsequent iterations.
-        let forward_refs = stmts
-            .iter()
-            .enumerate()
-            .filter(|(i, s)| {
-                *i != bj_idx
-                    && *i <= conv_start
-                    && parse_jump(&s.text)
-                        .and_then(&find_idx)
-                        .is_some_and(|ti| ti == conv_start)
-            })
-            .count();
-        if forward_refs > 0 {
-            continue;
-        }
-
-        // Duplicate: replace the backward jump with a copy of convergence + exit
-        let mut output: Vec<BcStatement> = Vec::new();
-        output.extend_from_slice(&stmts[..bj_idx]);
-        // Convergence code (duplicated)
-        for orig in conv_range {
-            output.push(BcStatement {
-                mem_offset: 0,
-                text: orig.text.clone(),
-            });
-        }
-        // Exit jump (duplicated, keeps the same forward target)
-        output.push(BcStatement {
-            mem_offset: stmts[bj_idx].mem_offset,
-            text: stmts[exit_jump_idx].text.clone(),
-        });
-        // Everything after the backward jump
-        output.extend_from_slice(&stmts[bj_idx + 1..]);
-
-        return Some(output);
     }
 
-    None
+    let mut blocks: Vec<BasicBlock> = Vec::new();
+    let mut current_start = 0;
+
+    let is_block_end = |stmt: &BcStatement| -> bool {
+        stmt.text == RETURN_NOP
+            || stmt.text == "return"
+            || stmt.text == POP_FLOW
+            || parse_jump(&stmt.text).is_some()
+            || parse_if_jump(&stmt.text).is_some()
+            || parse_jump_computed(&stmt.text)
+    };
+
+    for (i, stmt) in stmts.iter().enumerate() {
+        // Start a new block if this statement is a jump target
+        if target_indices.contains(&i) && i > current_start {
+            blocks.push(BasicBlock {
+                stmt_range: current_start..i,
+                exit: BlockExit::FallThrough,
+                emitted: false,
+            });
+            current_start = i;
+        }
+
+        if is_block_end(stmt) {
+            blocks.push(BasicBlock {
+                stmt_range: current_start..i + 1,
+                exit: BlockExit::FallThrough, // patched in wire_block_edges
+                emitted: false,
+            });
+            current_start = i + 1;
+        }
+    }
+    // Remaining statements form a final block
+    if current_start < stmts.len() {
+        blocks.push(BasicBlock {
+            stmt_range: current_start..stmts.len(),
+            exit: BlockExit::FallThrough,
+            emitted: false,
+        });
+    }
+
+    // Build stmt_index -> block_id map for each block's first statement
+    let mut stmt_to_block: HashMap<usize, BlockId> = HashMap::new();
+    for (bid, block) in blocks.iter().enumerate() {
+        stmt_to_block.insert(block.stmt_range.start, bid);
+    }
+
+    (blocks, stmt_to_block)
+}
+
+/// Phase 2: examine each block's last statement and set its exit edge.
+fn wire_block_edges(
+    blocks: &mut [BasicBlock],
+    stmts: &[BcStatement],
+    offset_map: &OffsetMap,
+    stmt_to_block: &HashMap<usize, BlockId>,
+) {
+    let resolve_target = |target_offset: usize| -> Option<BlockId> {
+        let stmt_idx = offset_map.find_fuzzy(target_offset, JUMP_OFFSET_TOLERANCE)?;
+        stmt_to_block.get(&stmt_idx).copied()
+    };
+
+    for bid in 0..blocks.len() {
+        let range = &blocks[bid].stmt_range;
+        if range.is_empty() {
+            continue;
+        }
+        let last_idx = range.end - 1;
+        let last_text = &stmts[last_idx].text;
+        let next_block = bid + 1;
+
+        if last_text == RETURN_NOP || last_text == "return" || last_text == POP_FLOW {
+            blocks[bid].exit = BlockExit::Terminal;
+        } else if let Some((_, target)) = parse_if_jump(last_text) {
+            let ft = if next_block < blocks.len() {
+                next_block
+            } else {
+                bid
+            };
+            blocks[bid].exit = match resolve_target(target) {
+                Some(tbid) => BlockExit::CondJump {
+                    fall_through: ft,
+                    target: tbid,
+                },
+                None => BlockExit::FallThrough,
+            };
+        } else if let Some(target) = parse_jump(last_text) {
+            blocks[bid].exit = match resolve_target(target) {
+                Some(tbid) => BlockExit::Jump(tbid),
+                None => BlockExit::FallThrough,
+            };
+        } else if parse_jump_computed(last_text) {
+            blocks[bid].exit = BlockExit::Terminal;
+        }
+        // else: FallThrough (default)
+    }
+}
+
+/// Compute incoming edge count for each block.
+fn compute_in_degree(blocks: &[BasicBlock]) -> Vec<usize> {
+    let mut deg = vec![0usize; blocks.len()];
+    for (bid, block) in blocks.iter().enumerate() {
+        match &block.exit {
+            BlockExit::FallThrough => {
+                if bid + 1 < blocks.len() {
+                    deg[bid + 1] += 1;
+                }
+            }
+            BlockExit::Jump(target) => {
+                deg[*target] += 1;
+            }
+            BlockExit::CondJump {
+                fall_through,
+                target,
+            } => {
+                deg[*fall_through] += 1;
+                deg[*target] += 1;
+            }
+            BlockExit::Terminal => {}
+        }
+    }
+    deg
+}
+
+/// Build predecessor lists: for each block, which blocks have edges to it.
+fn compute_predecessors(blocks: &[BasicBlock]) -> Vec<Vec<BlockId>> {
+    let mut preds = vec![Vec::new(); blocks.len()];
+    for (bid, block) in blocks.iter().enumerate() {
+        match &block.exit {
+            BlockExit::FallThrough => {
+                if bid + 1 < blocks.len() {
+                    preds[bid + 1].push(bid);
+                }
+            }
+            BlockExit::Jump(target) => {
+                preds[*target].push(bid);
+            }
+            BlockExit::CondJump {
+                fall_through,
+                target,
+            } => {
+                preds[*fall_through].push(bid);
+                preds[*target].push(bid);
+            }
+            BlockExit::Terminal => {}
+        }
+    }
+    preds
+}
+
+/// Phase 3: recursive DFS linearization.
+///
+/// Emits blocks in an order where conditional jumps always target forward positions:
+/// - CondJump: emit fall-through (true body) first, then target (false body)
+/// - Jump to single-entry block: follow inline
+/// - Jump to multi-entry block: leave the jump in place (becomes goto label)
+/// - FallThrough: follow next block, insert synthetic jump if already emitted
+fn linearize_blocks(
+    blocks: &mut [BasicBlock],
+    stmts: &[BcStatement],
+    in_degree: &[usize],
+    predecessors: &[Vec<BlockId>],
+    bid: BlockId,
+    output: &mut Vec<BcStatement>,
+) {
+    if bid >= blocks.len() || blocks[bid].emitted {
+        return;
+    }
+    blocks[bid].emitted = true;
+
+    // Emit this block's statements
+    let range = blocks[bid].stmt_range.clone();
+    for idx in range {
+        output.push(stmts[idx].clone());
+    }
+
+    let exit = blocks[bid].exit.clone();
+    match exit {
+        BlockExit::Terminal => {}
+
+        BlockExit::FallThrough => {
+            let next = bid + 1;
+            if next < blocks.len() {
+                if !blocks[next].emitted && in_degree[next] <= 1 {
+                    // Single-entry successor: follow inline
+                    linearize_blocks(blocks, stmts, in_degree, predecessors, next, output);
+                } else {
+                    // Multi-entry or already emitted: insert a synthetic forward
+                    // jump so detect_else_branch can find the true-branch exit
+                    let target_offset = stmts[blocks[next].stmt_range.start].mem_offset;
+                    output.push(BcStatement::new(0, format!("jump 0x{target_offset:x}")));
+                }
+            }
+        }
+
+        BlockExit::Jump(target) => {
+            // Follow single-entry targets inline; leave multi-entry convergence
+            // blocks in place (their jump becomes a goto in structure_bytecode)
+            if target < blocks.len() && in_degree[target] <= 1 && !blocks[target].emitted {
+                linearize_blocks(blocks, stmts, in_degree, predecessors, target, output);
+            }
+        }
+
+        BlockExit::CondJump {
+            fall_through,
+            target,
+        } => {
+            if fall_through < blocks.len()
+                && in_degree[fall_through] > 1
+                && target < blocks.len()
+                && in_degree[target] <= 1
+            {
+                // The fall-through is a multi-entry convergence block. Emit the
+                // single-entry false body first, then the convergence. This
+                // creates a guard: `if !(cond) { false-body } convergence`.
+                // Negate the if-jump so structure_bytecode sees the guard with
+                // the correct condition: `if (cond) { false-body }`.
+                negate_last_if_jump(stmts, &blocks[bid].stmt_range, output);
+                linearize_blocks(blocks, stmts, in_degree, predecessors, target, output);
+                linearize_blocks(blocks, stmts, in_degree, predecessors, fall_through, output);
+            } else {
+                // Standard case: emit true body (fall-through) first, then
+                // false body (target).
+                linearize_blocks(blocks, stmts, in_degree, predecessors, fall_through, output);
+                if target < blocks.len() && in_degree[target] <= 1 {
+                    linearize_blocks(blocks, stmts, in_degree, predecessors, target, output);
+                }
+                // If the target was deferred (in_degree > 1), try emitting it now
+                // that the fall-through has been emitted. This handles the common
+                // case where both branches of an inner if/else converge to a block
+                // that should stay within the current scope.
+                if target < blocks.len()
+                    && !blocks[target].emitted
+                    && all_predecessors_emitted(blocks, predecessors, target)
+                {
+                    linearize_blocks(blocks, stmts, in_degree, predecessors, target, output);
+                }
+            }
+
+            // After both branches, find their common convergence point and
+            // emit it if all its predecessors have been emitted.
+            if let Some(conv) = find_convergence_target(blocks, fall_through, target) {
+                if !blocks[conv].emitted && all_predecessors_emitted(blocks, predecessors, conv) {
+                    linearize_blocks(blocks, stmts, in_degree, predecessors, conv, output);
+                }
+            }
+        }
+    }
+}
+
+/// Negate the last if-jump in the output.
+///
+/// When the guard pattern swaps true/false body order, the if-jump condition
+/// needs to be inverted. We wrap the condition in an extra `!()` so the
+/// structurer (which strips the outer `!`) gets the negated condition.
+/// Double-negation is cleaned up by `cleanup_structured_output`.
+fn negate_last_if_jump(
+    stmts: &[BcStatement],
+    block_range: &std::ops::Range<usize>,
+    output: &mut [BcStatement],
+) {
+    if block_range.is_empty() {
+        return;
+    }
+    let last_idx = block_range.end - 1;
+    let last_text = &stmts[last_idx].text;
+    if let Some((cond, target)) = parse_if_jump(last_text) {
+        // Find this statement in the output (it was just emitted)
+        if let Some(out_stmt) = output.last_mut() {
+            if out_stmt.text == *last_text {
+                out_stmt.text = format!("if !(!{cond}) jump 0x{target:x}");
+            }
+        }
+    }
+}
+
+/// Check if all blocks that jump to `target` have been emitted.
+fn all_predecessors_emitted(
+    blocks: &[BasicBlock],
+    predecessors: &[Vec<BlockId>],
+    target: BlockId,
+) -> bool {
+    if target >= predecessors.len() {
+        return true;
+    }
+    predecessors[target]
+        .iter()
+        .all(|&pred| blocks[pred].emitted)
+}
+
+/// Find the convergence target of two branches: the block that both paths
+/// eventually jump to. Walks through nested branches recursively to collect
+/// all exit targets, then returns the shared target (lowest block ID if multiple).
+fn find_convergence_target(
+    blocks: &[BasicBlock],
+    branch_a: BlockId,
+    branch_b: BlockId,
+) -> Option<BlockId> {
+    let mut targets_a: HashSet<BlockId> = HashSet::new();
+    let mut visited_a: HashSet<BlockId> = HashSet::new();
+    collect_branch_exits(blocks, branch_a, &mut targets_a, &mut visited_a);
+
+    let mut targets_b: HashSet<BlockId> = HashSet::new();
+    let mut visited_b: HashSet<BlockId> = HashSet::new();
+    collect_branch_exits(blocks, branch_b, &mut targets_b, &mut visited_b);
+
+    // The convergence point is the lowest-numbered block that both branches exit to
+    targets_a.intersection(&targets_b).copied().min()
+}
+
+/// Recursively collect all Jump targets reachable from a block, following
+/// all edge types transitively. The `visited` set prevents infinite loops
+/// from backward edges.
+fn collect_branch_exits(
+    blocks: &[BasicBlock],
+    bid: BlockId,
+    targets: &mut HashSet<BlockId>,
+    visited: &mut HashSet<BlockId>,
+) {
+    if bid >= blocks.len() || !visited.insert(bid) {
+        return;
+    }
+    match &blocks[bid].exit {
+        BlockExit::Terminal => {}
+        BlockExit::Jump(target) => {
+            targets.insert(*target);
+            // Follow through to collect the target's own exits, enabling
+            // convergence detection across multi-entry blocks.
+            collect_branch_exits(blocks, *target, targets, visited);
+        }
+        BlockExit::FallThrough => {
+            collect_branch_exits(blocks, bid + 1, targets, visited);
+        }
+        BlockExit::CondJump {
+            fall_through,
+            target,
+        } => {
+            collect_branch_exits(blocks, *fall_through, targets, visited);
+            collect_branch_exits(blocks, *target, targets, visited);
+        }
+    }
 }
 
 /// Resolve degenerate back-edge loops: `$var = false; jump backward to if !($var)`.
@@ -1526,27 +1688,6 @@ fn resolve_degenerate_backedge(stmts: &mut Vec<BcStatement>, offset_map: &Offset
         // forward jump to the else target
         stmts[bj_idx - 1].text = format!("jump 0x{:x}", else_target);
         stmts.remove(bj_idx);
-        return true;
-    }
-    false
-}
-
-/// Process a single convergence group. Returns true if a reorder was performed.
-fn reorder_one_convergence(stmts: &mut Vec<BcStatement>) -> bool {
-    let offset_map = OffsetMap::build(stmts);
-    // Resolve degenerate back-edges first (cast-failure loops)
-    if resolve_degenerate_backedge(stmts, &offset_map) {
-        return true;
-    }
-    if let Some(group) = find_convergence_group(stmts, &offset_map) {
-        if let Some(reordered) = build_convergence_reorder(stmts, &group, &offset_map) {
-            *stmts = reordered;
-            return true;
-        }
-    }
-    // Fallback: duplicate inline convergence (single backward jump into a branch body)
-    if let Some(reordered) = duplicate_inline_convergence(stmts, &offset_map) {
-        *stmts = reordered;
         return true;
     }
     false

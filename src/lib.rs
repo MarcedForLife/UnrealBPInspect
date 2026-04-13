@@ -12,6 +12,7 @@ pub mod output_json;
 pub mod output_summary;
 pub mod output_text;
 pub mod parser;
+pub mod pins;
 pub mod properties;
 pub mod resolve;
 pub mod types;

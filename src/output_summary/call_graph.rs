@@ -19,10 +19,7 @@ pub(super) fn parse_bytecode_line(line: &str) -> Option<BcStatement> {
         return None;
     }
     let offset = usize::from_str_radix(&line[..hex_len], 16).ok()?;
-    Some(BcStatement {
-        mem_offset: offset,
-        text: line[prefix_len..].to_string(),
-    })
+    Some(BcStatement::new(offset, line[prefix_len..].to_string()))
 }
 
 /// Parse a single bytecode line for a call to the ubergraph entry point,

@@ -1,5 +1,7 @@
 //! Core data types shared across the parser.
 
+use std::collections::HashMap;
+
 // -- UE4 file_ver gates --
 pub const VER_UE4_TEMPLATE_INDEX: i32 = 459;
 pub const VER_UE4_PROPERTY_GUID: i32 = 503;
@@ -97,7 +99,47 @@ pub struct Property {
     pub value: PropValue,
 }
 
+pub const PIN_DIRECTION_INPUT: u8 = 0;
+pub const PIN_DIRECTION_OUTPUT: u8 = 1;
+pub const PIN_TYPE_EXEC: &str = "exec";
+
+/// A single pin on an EdGraph node.
+#[derive(Debug, Clone)]
+pub struct EdGraphPin {
+    /// Pin name from FName serialization. For sub-pins on split structs,
+    /// contains field identifiers (e.g. "Output_Get_IsClimbable_8_...").
+    pub name: String,
+    /// Pin category from FEdGraphPinType (e.g. "exec", "bool", "object").
+    pub pin_type: String,
+    pub direction: u8,
+    /// 1-based export indices of nodes connected to this pin via LinkedTo.
+    pub linked_to: Vec<usize>,
+}
+
+impl EdGraphPin {
+    pub fn is_exec_output(&self) -> bool {
+        self.pin_type == PIN_TYPE_EXEC && self.direction == PIN_DIRECTION_OUTPUT
+    }
+
+    pub fn is_data_output(&self) -> bool {
+        self.pin_type != PIN_TYPE_EXEC && self.direction == PIN_DIRECTION_OUTPUT
+    }
+
+    pub fn is_data_input(&self) -> bool {
+        self.pin_type != PIN_TYPE_EXEC && self.direction == PIN_DIRECTION_INPUT
+    }
+}
+
+/// Pin data parsed from a K2Node export's post-property serialization.
+#[derive(Debug, Clone)]
+pub struct NodePinData {
+    pub pins: Vec<EdGraphPin>,
+}
+
 pub struct ParsedAsset {
     pub imports: Vec<ImportEntry>,
     pub exports: Vec<(ExportHeader, Vec<Property>)>,
+    /// Pin connection data per export index (1-based). Only populated for
+    /// EdGraph node exports where pin serialization was successfully parsed.
+    pub pin_data: HashMap<usize, NodePinData>,
 }

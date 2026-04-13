@@ -41,7 +41,9 @@ pub fn read_fstring(reader: &mut Reader) -> Result<String> {
             .trim_end_matches('\0')
             .to_string())
     } else {
-        let count = (-len) as usize;
+        let count = len.checked_neg().map(|val| val as usize).unwrap_or(0);
+        anyhow::ensure!(count > 0, "FString UTF-16 count overflow");
+        anyhow::ensure!(count < 1_000_000, "FString UTF-16 count={count}");
         let mut s = vec![0u8; count * 2];
         reader.read_exact(&mut s)?;
         let utf16: Vec<u16> = s
