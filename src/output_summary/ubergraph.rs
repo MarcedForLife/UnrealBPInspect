@@ -753,7 +753,6 @@ fn emit_section_body(
 
         if parse_resume_offset(line).is_some() && resume_pos < section_resumes.len() {
             if let Some(rb) = resume_blocks.get(section_resumes[resume_pos]) {
-                writeln!(buf, "{}// after delay:", body_indent).unwrap();
                 for rline in &rb.lines {
                     writeln!(buf, "{}{}", body_indent, rline).unwrap();
                 }

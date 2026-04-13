@@ -142,7 +142,6 @@ Latent actions (Delay, MoveTo) show their resume continuation inline:
     //  before restoring the hands mass. This stops the gripped component
     //  from being launched when held from the bottom"
     Delay(0.5000)
-    // after delay:
     self.SkeletalMeshComponent.SetMassOverrideInKg(self.RootBoneName, self.OriginalHandMass, true)
 ```
 
