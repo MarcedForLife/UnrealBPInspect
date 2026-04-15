@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use crate::bytecode::fold_long_lines;
+use crate::bytecode::transforms::fold_long_lines;
 use crate::helpers::indent_of;
 use crate::resolve::{
     find_prop, find_prop_object, find_prop_object_array, find_prop_str, find_prop_str_items,
