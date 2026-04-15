@@ -8,15 +8,8 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::binary::*;
-use crate::bytecode::{
-    apply_indentation, cleanup_structured_output, collect_jump_targets, decode_bytecode,
-    discard_unused_assignments, discard_unused_assignments_text,
-    eliminate_constant_condition_branches, fold_cascade_across_sequences, fold_summary_patterns,
-    fold_switch_enum_cascade, inline_constant_temps, inline_constant_temps_text,
-    inline_single_use_temps, rename_loop_temp_vars, reorder_convergence, reorder_flow_patterns,
-    split_by_sequence_markers, strip_inlined_break_calls, strip_latch_boilerplate,
-    strip_orphaned_blocks, strip_unmatched_braces, structure_bytecode, SEQUENCE_MARKER_PREFIX,
-};
+use crate::bytecode::decode_bytecode;
+use crate::bytecode::pipeline::structure_function;
 use crate::ffield::*;
 use crate::pins::scan_for_pins;
 use crate::properties::read_properties;
@@ -288,8 +281,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
         debug,
     };
     let mut exports = Vec::with_capacity(export_headers.len());
-    let mut pin_data_map: std::collections::HashMap<usize, NodePinData> =
-        std::collections::HashMap::new();
+    let mut pin_data_map: HashMap<usize, NodePinData> = HashMap::new();
     for (ei, hdr) in export_headers.iter().enumerate() {
         if hdr.serial_size <= 0
             || hdr.serial_offset < 0
@@ -607,7 +599,7 @@ fn parse_and_structure_bytecode(
     });
 
     // Run the structuring pipeline: reorder, inline, structure, cleanup
-    let structured = structure_statements(&stmts);
+    let structured = structure_function(&stmts);
     if !structured.is_empty() {
         props.push(Property {
             name: "BytecodeSummary".into(),
@@ -618,106 +610,6 @@ fn parse_and_structure_bytecode(
         });
     }
     Ok(())
-}
-
-/// Run the inline/structure/cleanup pipeline on pre-processed statements.
-pub fn structure_and_cleanup(stmts: &[crate::bytecode::BcStatement]) -> Vec<String> {
-    let mut structured = structure_bytecode(stmts, &HashMap::new());
-    cleanup_structured_output(&mut structured);
-    post_structure_cleanup(&mut structured);
-    structured
-}
-
-/// Shared post-structure cleanup pipeline: temp inlining, pattern folding,
-/// dead code removal, switch cascade folding, indentation, and brace fixup.
-///
-/// Called after `structure_bytecode` + initial `cleanup_structured_output` on
-/// both single-segment and multi-segment paths.
-fn post_structure_cleanup(lines: &mut Vec<String>) {
-    // Temp inlining runs post-structure so that structure detection has the
-    // full statement array with intact mem_offsets for jump target resolution.
-    inline_constant_temps_text(lines);
-    discard_unused_assignments_text(lines);
-    fold_summary_patterns(lines);
-    // Remove Break* calls left orphaned by fold_break_patterns: when out params
-    // were inlined by an earlier pass, fold_break_patterns skips the call but
-    // the accessor-form arguments make the call dead code.
-    strip_inlined_break_calls(lines);
-    // Re-run after pattern folding: temp inlining can create new constant-condition
-    // branches (e.g., inlining `Temp_bool = true` into `if (!Temp_bool) return`).
-    eliminate_constant_condition_branches(lines);
-    strip_orphaned_blocks(lines);
-    rename_loop_temp_vars(lines);
-    fold_switch_enum_cascade(lines);
-    // Re-run cleanup: switch folding can expose dead code from pin-boundary
-    // sentinels that were hidden inside the cascade's brace nesting.
-    cleanup_structured_output(lines);
-    strip_unmatched_braces(lines);
-    apply_indentation(lines);
-    // Strip bare "// on loop complete:" markers (used internally by dedup_completion_paths
-    // but redundant in output since the closing brace already shows the loop ended).
-    // Annotated variants like "// on loop complete: (same as pre-loop setup)" are kept.
-    lines.retain(|line| line.trim() != "// on loop complete:");
-}
-
-/// Run the full statement structuring pipeline: flow reordering, temp inlining,
-/// if/else reconstruction, expression cleanup, and pattern folding.
-///
-/// When the function has Sequence pins, splits by `// sequence [N]:` markers
-/// and structures each body independently. This prevents switch cascades and
-/// other control flow from spanning across sequence boundaries.
-fn structure_statements(stmts: &[crate::bytecode::BcStatement]) -> Vec<String> {
-    let mut cleaned = stmts.to_vec();
-    strip_latch_boilerplate(&mut cleaned);
-    let mut reordered = reorder_flow_patterns(&cleaned);
-    reorder_convergence(&mut reordered);
-    let jump_targets = collect_jump_targets(&reordered);
-    inline_constant_temps(&mut reordered, &jump_targets);
-    inline_single_use_temps(&mut reordered);
-    discard_unused_assignments(&mut reordered);
-
-    let sub_segments = split_by_sequence_markers(&reordered);
-
-    // When a switch-enum cascade in the prefix targets sequence pin bodies,
-    // fold it into switch/case text with each case body structured
-    // independently. This prevents the cascade scaffold from being separated
-    // from its targets by sequence splitting.
-    if sub_segments.len() > 1 {
-        let first_marker_idx = reordered
-            .iter()
-            .position(|s| s.text.starts_with(SEQUENCE_MARKER_PREFIX))
-            .unwrap_or(0);
-        if first_marker_idx > 0 {
-            if let Some(mut lines) =
-                fold_cascade_across_sequences(&reordered, first_marker_idx, structure_and_cleanup)
-            {
-                // Re-apply indentation on the combined output so the
-                // switch/case wrapper and case bodies are properly nested.
-                apply_indentation(&mut lines);
-                return lines;
-            }
-        }
-    }
-    if sub_segments.len() <= 1 {
-        return structure_and_cleanup(&reordered);
-    }
-
-    // Structure each pin independently (proper if/else blocks per pin),
-    // but defer pattern folding to the combined output so cross-pin
-    // variable references are preserved.
-    let mut all_lines = Vec::new();
-    for (marker, body) in &sub_segments {
-        if let Some(marker_text) = marker {
-            all_lines.push(marker_text.clone());
-        }
-        if !body.is_empty() {
-            let mut structured = structure_bytecode(body, &HashMap::new());
-            cleanup_structured_output(&mut structured);
-            all_lines.extend(structured);
-        }
-    }
-    post_structure_cleanup(&mut all_lines);
-    all_lines
 }
 
 fn debug_peek_script(reader: &mut Reader, name: &str, end: u64) -> Result<()> {
