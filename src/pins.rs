@@ -22,40 +22,68 @@ const MAX_SUBPIN_COUNT: i32 = 50;
 /// Maximum SubPin nesting depth to prevent stack overflow on corrupt data.
 const MAX_SUBPIN_DEPTH: usize = 10;
 
+/// Maximum bytes past the property stream to scan for pin data.
+/// K2Node class-specific data is typically 0-60 bytes of flags and references.
+const MAX_SCAN_DISTANCE: u64 = 256;
+
 /// Scan forward from the current reader position to find pin data.
 ///
 /// K2Node subclasses serialize class-specific data between the tagged
 /// property stream and the pin array. We scan at 4-byte (i32) alignment
 /// looking for the pin signature: deprecated_count(i32=0) followed by a
 /// reasonable pin_count(i32 in 1..MAX_PIN_COUNT), then attempt to parse
-/// pins at each candidate. Tries both UE5 and UE4 formats for UE5 assets.
+/// pins at each candidate.
+///
+/// `hint` is an offset delta from a previous successful scan. When provided,
+/// the hinted position is tried before falling back to a linear scan. Returns
+/// the successful delta for the caller to cache.
 pub fn scan_for_pins(
     reader: &mut Reader,
     name_table: &NameTable,
     end: u64,
     ver: AssetVersion,
-) -> Option<Vec<EdGraphPin>> {
+    hint: Option<u64>,
+) -> (Option<Vec<EdGraphPin>>, Option<u64>) {
     let scan_start = reader.position();
-    let scan_limit = end.saturating_sub(8);
+    let scan_limit = (scan_start + MAX_SCAN_DISTANCE).min(end.saturating_sub(8));
 
     // First try at the current position (no scan needed if properties consumed correctly)
     let direct = try_pins_at(reader, name_table, end, ver, scan_start);
     if direct.is_some() {
-        return direct;
+        return (direct, Some(0));
+    }
+
+    // Try the hinted offset from a previous successful scan
+    if let Some(delta) = hint {
+        if delta > 0 {
+            let hinted_pos = scan_start + delta;
+            if hinted_pos <= scan_limit {
+                let result = try_pins_at(reader, name_table, end, ver, hinted_pos);
+                if result.is_some() {
+                    return (result, Some(delta));
+                }
+            }
+        }
     }
 
     // Scan at i32 alignment for the deprecated_count=0 + pin_count signature
     let mut pos = scan_start;
     while pos <= scan_limit {
-        reader.seek(SeekFrom::Start(pos)).ok()?;
+        if reader.seek(SeekFrom::Start(pos)).is_err() {
+            break;
+        }
 
-        let deprecated = read_i32(reader).ok()?;
+        let Ok(deprecated) = read_i32(reader) else {
+            break;
+        };
         if deprecated != 0 {
             pos += 4;
             continue;
         }
 
-        let pin_count_val = read_i32(reader).ok()?;
+        let Ok(pin_count_val) = read_i32(reader) else {
+            break;
+        };
         if !(1..=MAX_PIN_COUNT).contains(&pin_count_val) {
             pos += 4;
             continue;
@@ -63,16 +91,17 @@ pub fn scan_for_pins(
 
         let result = try_pins_at(reader, name_table, end, ver, pos);
         if result.is_some() {
-            return result;
+            return (result, Some(pos - scan_start));
         }
 
         pos += 4;
     }
 
-    None
+    (None, hint)
 }
 
-/// Try parsing pins at a specific position, with UE5/UE4 format negotiation.
+/// Try parsing pins at a specific position. For UE5 assets, tries the UE5
+/// format first and falls back to UE4 only if it fails.
 fn try_pins_at(
     reader: &mut Reader,
     name_table: &NameTable,
@@ -83,14 +112,12 @@ fn try_pins_at(
     if ver.file_ver_ue5 > 0 {
         reader.seek(SeekFrom::Start(pos)).ok()?;
         let ue5_result = try_parse_pins(reader, name_table, end, true);
-        reader.seek(SeekFrom::Start(pos)).ok()?;
-        let ue4_result = try_parse_pins(reader, name_table, end, false);
-        match (ue5_result, ue4_result) {
-            (Some(a), Some(b)) => Some(if a.len() >= b.len() { a } else { b }),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
+        if ue5_result.is_some() {
+            return ue5_result;
         }
+        // UE5 format failed, try UE4 as fallback
+        reader.seek(SeekFrom::Start(pos)).ok()?;
+        try_parse_pins(reader, name_table, end, false)
     } else {
         reader.seek(SeekFrom::Start(pos)).ok()?;
         try_parse_pins(reader, name_table, end, false)
