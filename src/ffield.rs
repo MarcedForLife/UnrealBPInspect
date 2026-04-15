@@ -6,7 +6,7 @@ use anyhow::Result;
 use std::io::Read;
 
 use crate::binary::*;
-use crate::resolve::*;
+use crate::resolve::{resolve_index, short_class};
 use crate::types::*;
 
 /// Extra data layout after the common FProperty header, shared across skip and resolve functions.
