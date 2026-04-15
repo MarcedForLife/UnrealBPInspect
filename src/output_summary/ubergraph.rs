@@ -3,16 +3,20 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
+use crate::bytecode::flow::{
+    find_first_unmatched_pop, parse_jump, reorder_convergence, reorder_flow_patterns,
+    strip_latch_boilerplate,
+};
+use crate::bytecode::pipeline::structure_segment;
+use crate::bytecode::structure::apply_indentation;
+use crate::bytecode::transforms::{
+    fold_switch_enum_cascade, strip_orphaned_blocks, strip_unmatched_braces,
+};
 use crate::bytecode::{
-    apply_indentation, collect_jump_targets, discard_unused_assignments, find_first_unmatched_pop,
-    fold_switch_enum_cascade, inline_constant_temps, inline_single_use_temps, parse_jump,
-    reorder_convergence, reorder_flow_patterns, split_by_sequence_markers, strip_latch_boilerplate,
-    strip_orphaned_blocks, strip_unmatched_braces, BcStatement, OffsetMap, JUMP_OFFSET_TOLERANCE,
-    POP_FLOW, RETURN_NOP,
+    split_by_sequence_markers, BcStatement, OffsetMap, JUMP_OFFSET_TOLERANCE, POP_FLOW, RETURN_NOP,
 };
 use crate::helpers::indent_of;
-use crate::parser::structure_and_cleanup;
-use crate::resolve::find_prop_str_items_any;
+use crate::prop_query::find_prop_str_items_any;
 use crate::types::{NodePinData, Property};
 
 use super::comments::{
@@ -29,47 +33,6 @@ use super::{
 /// an intentional multi-event group. Boxes containing more events are likely
 /// organizational section dividers placed for visual layout, not semantic groupings.
 const MAX_MULTI_EVENT_GROUP_SIZE: usize = 3;
-
-/// Rewrite jumps targeting offsets outside or unresolvable within the current segment.
-/// Uses the same +/-4 byte fuzzy lookup as structure_bytecode. Unresolvable targets
-/// become past-end sentinels (implicit return/break).
-fn resolve_cross_segment_jumps(stmts: &mut Vec<BcStatement>) {
-    if stmts.is_empty() {
-        return;
-    }
-
-    let offset_map = OffsetMap::build(stmts);
-    let max_offset = stmts.iter().map(|s| s.mem_offset).max().unwrap();
-    let sentinel_offset = max_offset + 1;
-
-    for stmt in stmts.iter_mut() {
-        // Pattern: "if !(COND) jump 0xHEX"
-        if let Some(jump_pos) = stmt.text.find(") jump 0x") {
-            let hex_start = jump_pos + 9; // after ") jump 0x"
-            let hex_str = &stmt.text[hex_start..];
-            let hex_end = hex_str
-                .find(|c: char| !c.is_ascii_hexdigit())
-                .unwrap_or(hex_str.len());
-            if let Ok(t) = usize::from_str_radix(&hex_str[..hex_end], 16) {
-                if t <= max_offset && offset_map.find_fuzzy(t, JUMP_OFFSET_TOLERANCE).is_none() {
-                    stmt.text =
-                        format!("{}jump 0x{:x}", &stmt.text[..jump_pos + 2], sentinel_offset);
-                }
-            }
-        }
-        // Pattern: standalone "jump 0xHEX"
-        else if let Some(hex_str) = stmt.text.strip_prefix("jump 0x") {
-            if let Ok(t) = usize::from_str_radix(hex_str, 16) {
-                if t <= max_offset && offset_map.find_fuzzy(t, JUMP_OFFSET_TOLERANCE).is_none() {
-                    stmt.text = format!("jump 0x{:x}", sentinel_offset);
-                }
-            }
-        }
-    }
-
-    // Add sentinel so find_target_idx_or_end can resolve to it
-    stmts.push(BcStatement::new(sentinel_offset, RETURN_NOP.to_string()));
-}
 
 /// Relocate event body code that the compiler placed non-contiguously.
 ///
@@ -202,18 +165,6 @@ fn split_stmts_by_labels(
         segments.push((current_name, current_stmts));
     }
     segments
-}
-
-/// Run the full structuring pipeline on a slice of BcStatements:
-/// resolve cross-segment jumps, inline temps, structure, cleanup.
-fn structure_segment(stmts: &[BcStatement]) -> Vec<String> {
-    let mut seg = stmts.to_vec();
-    resolve_cross_segment_jumps(&mut seg);
-    let jump_targets = collect_jump_targets(&seg);
-    inline_constant_temps(&mut seg, &jump_targets);
-    inline_single_use_temps(&mut seg);
-    discard_unused_assignments(&mut seg);
-    structure_and_cleanup(&seg)
 }
 
 /// Split a latent resume segment at `return nop` or `pop_flow` boundaries.
@@ -971,6 +922,7 @@ pub(super) fn is_ubergraph_stub(props: &[Property], ug_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bytecode::pipeline::resolve_cross_segment_jumps;
 
     fn stmt(offset: usize, text: &str) -> BcStatement {
         BcStatement::new(offset, text.to_string())

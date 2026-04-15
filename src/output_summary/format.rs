@@ -4,12 +4,13 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use crate::bytecode::fold_long_lines;
+use crate::bytecode::transforms::fold_long_lines;
 use crate::helpers::indent_of;
-use crate::resolve::{
+use crate::prop_query::{
     find_prop, find_prop_object, find_prop_object_array, find_prop_str, find_prop_str_items,
-    prop_value_short, resolve_index, short_class,
+    prop_value_short,
 };
+use crate::resolve::{resolve_index, short_class};
 use crate::types::NodePinData;
 use crate::types::{ImportEntry, ParsedAsset, PropValue, Property};
 

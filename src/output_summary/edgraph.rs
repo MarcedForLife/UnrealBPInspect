@@ -4,9 +4,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::bytecode::names::normalize_lwc_name;
-use crate::resolve::{
-    find_prop, find_prop_i32, find_prop_str, find_struct_field_str, resolve_index, short_class,
-};
+use crate::prop_query::{find_prop, find_prop_i32, find_prop_str, find_struct_field_str};
+use crate::resolve::{resolve_index, short_class};
 use crate::types::{ParsedAsset, PropValue, Property};
 
 use super::{strip_node_func_prefix, CommentBox, NodeInfo, BRANCH_IDENTIFIER};

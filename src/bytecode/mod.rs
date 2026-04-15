@@ -1,15 +1,17 @@
 //! Kismet bytecode decoding and structuring pipeline.
 //!
-//! 1. [`decode`]: expression decoding into flat statements
-//! 2. [`flow`]: pattern detection (sequences, loops, convergence reorder)
-//! 3. [`structure`]: if/else reconstruction from jump patterns
-//! 4. [`transforms`]: temp inlining, cleanup, summary pattern folding
+//! - [`decode`] - expression decoding into flat statements
+//! - [`flow`] - pattern detection (sequences, loops, convergence reorder)
+//! - [`structure`] - if/else reconstruction from jump patterns
+//! - [`transforms`] - temp inlining, cleanup, summary pattern folding
+//! - [`pipeline`] - orchestration (wires the above stages together)
 
 pub mod decode;
 pub mod flow;
 mod format;
 pub mod names;
 pub mod opcodes;
+pub mod pipeline;
 pub mod readers;
 pub mod resolve;
 pub mod structure;
@@ -32,19 +34,6 @@ pub const SEQUENCE_MARKER_PREFIX: &str = "// sequence [";
 pub const MAX_LINE_WIDTH: usize = 120;
 
 pub use decode::{decode_bytecode, BcStatement};
-pub use flow::{
-    find_first_unmatched_pop, find_last_unmatched_pop, flow_depth, parse_if_jump, parse_jump,
-    parse_push_flow, reorder_convergence, reorder_flow_patterns, strip_latch_boilerplate,
-};
-pub use structure::{apply_indentation, structure_bytecode};
-pub use transforms::{
-    cleanup_structured_output, collect_jump_targets, discard_unused_assignments,
-    discard_unused_assignments_text, eliminate_constant_condition_branches,
-    fold_cascade_across_sequences, fold_long_lines, fold_summary_patterns,
-    fold_switch_enum_cascade, inline_constant_temps, inline_constant_temps_text,
-    inline_single_use_temps, rename_loop_temp_vars, strip_inlined_break_calls,
-    strip_orphaned_blocks, strip_unmatched_braces,
-};
 
 /// Split BcStatements at `// sequence [N]:` markers.
 /// Returns a list of (optional marker text, body statements).

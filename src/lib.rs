@@ -13,6 +13,7 @@ pub mod output_summary;
 pub mod output_text;
 pub mod parser;
 pub mod pins;
+pub mod prop_query;
 pub mod properties;
 pub mod resolve;
 pub mod types;
