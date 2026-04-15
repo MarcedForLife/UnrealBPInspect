@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use crate::resolve::*;
+use crate::resolve::{matches_filter, resolve_import_path, resolve_index};
 use crate::types::*;
 
 /// Format a parsed asset as a verbose text dump. Filters restrict to matching export names.

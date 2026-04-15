@@ -2,7 +2,8 @@
 
 use serde_json::{json, Value};
 
-use crate::resolve::*;
+use crate::prop_query::{find_prop, find_prop_str};
+use crate::resolve::{matches_filter, resolve_import_path, resolve_index};
 use crate::types::*;
 
 /// Convert a parsed asset to a JSON value. Filters restrict to matching export names.

@@ -13,7 +13,7 @@ use crate::bytecode::pipeline::structure_function;
 use crate::ffield::*;
 use crate::pins::scan_for_pins;
 use crate::properties::read_properties;
-use crate::resolve::*;
+use crate::resolve::{format_func_flags, resolve_index, short_class};
 use crate::types::*;
 
 /// Package file magic number (first 4 bytes of every valid `.uasset`).

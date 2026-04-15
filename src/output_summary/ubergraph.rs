@@ -16,7 +16,7 @@ use crate::bytecode::{
     split_by_sequence_markers, BcStatement, OffsetMap, JUMP_OFFSET_TOLERANCE, POP_FLOW, RETURN_NOP,
 };
 use crate::helpers::indent_of;
-use crate::resolve::find_prop_str_items_any;
+use crate::prop_query::find_prop_str_items_any;
 use crate::types::{NodePinData, Property};
 
 use super::comments::{
