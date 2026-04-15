@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use crate::bytecode::BcStatement;
-use crate::resolve::{find_prop_str_items, find_prop_str_items_any, resolve_index};
+use crate::prop_query::{find_prop_str_items, find_prop_str_items_any};
+use crate::resolve::resolve_index;
 use crate::types::ParsedAsset;
 
 use super::ubergraph::{build_ubergraph_structured, is_ubergraph_stub, scan_structured_calls};
