@@ -282,6 +282,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
     };
     let mut exports = Vec::with_capacity(export_headers.len());
     let mut pin_data_map: HashMap<usize, NodePinData> = HashMap::new();
+    let mut pin_scan_hint: Option<u64> = None;
     for (ei, hdr) in export_headers.iter().enumerate() {
         if hdr.serial_size <= 0
             || hdr.serial_offset < 0
@@ -312,7 +313,9 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
                     // tagged property stream and the pin array. Scan forward
                     // from the current position looking for the pin data
                     // signature: deprecated_count(0) + reasonable pin_count.
-                    let pins = scan_for_pins(&mut reader, &name_table, end, ver);
+                    let (pins, new_hint) =
+                        scan_for_pins(&mut reader, &name_table, end, ver, pin_scan_hint);
+                    pin_scan_hint = new_hint;
                     if let Some(ref pins) = pins {
                         pin_data_map.insert(ei + 1, NodePinData { pins: pins.clone() });
                     }
