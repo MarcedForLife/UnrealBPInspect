@@ -911,3 +911,50 @@ fn strip_redundant_gotos(lines: &mut Vec<String>) {
         });
     }
 }
+
+/// Strip implicit return statements that add no information.
+///
+/// UE emits a pop_flow for every scope exit, which the structurer renders as
+/// `return`. These are redundant when nothing executable follows at the same
+/// or outer scope (the function would end there anyway). Two patterns:
+///
+/// 1. `} else { return }` from unconnected branch pins, collapsed to `}`.
+/// 2. `return` as the last statement in any block at the end of a function.
+pub fn strip_implicit_returns(lines: &mut Vec<String>) {
+    let at_function_end = |lines: &[String], from: usize| -> bool {
+        lines[from..].iter().all(|line| {
+            let trimmed = line.trim();
+            trimmed == "}" || trimmed.is_empty() || trimmed.starts_with("//")
+        })
+    };
+
+    // Work backwards so removals don't shift indices of earlier matches.
+    let mut idx = lines.len();
+    while idx >= 2 {
+        idx -= 1;
+
+        let trimmed = lines[idx].trim();
+
+        // `} else { \n return \n }` -> `}`
+        if trimmed == "}"
+            && lines[idx - 1].trim() == "return"
+            && lines[idx - 2].trim() == "} else {"
+            && at_function_end(lines, idx + 1)
+        {
+            lines.drain(idx - 1..=idx);
+            lines[idx - 2] = lines[idx - 2].replace("} else {", "}");
+            idx = (idx - 2).min(lines.len());
+            continue;
+        }
+
+        // `return` before closing `}` at end of function
+        if trimmed == "return"
+            && idx + 1 < lines.len()
+            && lines[idx + 1].trim() == "}"
+            && at_function_end(lines, idx + 1)
+        {
+            lines.remove(idx);
+            idx = idx.min(lines.len());
+        }
+    }
+}

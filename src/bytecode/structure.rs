@@ -479,11 +479,11 @@ fn is_block_exit(text: &str) -> bool {
     text == POP_FLOW || text == RETURN_NOP || text == "return"
 }
 
-/// Find the exclusive end of an else block starting at `start`.
+/// Find the exclusive end index of a block starting at `start`.
 ///
-/// Returns the index after the first unmatched `pop_flow` or depth-0
-/// `return nop` / `return`, whichever comes first.
-fn find_block_terminator(stmts: &[BcStatement], start: usize) -> usize {
+/// Scans for the first unmatched `pop_flow` or depth-0 `return nop` /
+/// `return`, and returns the index after it.
+fn find_block_end(stmts: &[BcStatement], start: usize) -> usize {
     let mut depth: i32 = 0;
     for (idx, stmt) in stmts.iter().enumerate().skip(start) {
         if parse_push_flow(&stmt.text).is_some() {
@@ -577,7 +577,7 @@ fn reorder_displaced_else(stmts: &[BcStatement]) -> Option<Vec<BcStatement>> {
                 if !has_exit {
                     continue;
                 }
-                let inner_else_end = find_block_terminator(working, inner_target);
+                let inner_else_end = find_block_end(working, inner_target);
                 if inner_else_end <= inner_target {
                     continue;
                 }
