@@ -1,15 +1,17 @@
 //! Kismet bytecode decoding and structuring pipeline.
 //!
-//! 1. [`decode`]: expression decoding into flat statements
-//! 2. [`flow`]: pattern detection (sequences, loops, convergence reorder)
-//! 3. [`structure`]: if/else reconstruction from jump patterns
-//! 4. [`transforms`]: temp inlining, cleanup, summary pattern folding
+//! - [`decode`] - expression decoding into flat statements
+//! - [`flow`] - pattern detection (sequences, loops, convergence reorder)
+//! - [`structure`] - if/else reconstruction from jump patterns
+//! - [`transforms`] - temp inlining, cleanup, summary pattern folding
+//! - [`pipeline`] - orchestration (wires the above stages together)
 
 pub mod decode;
 pub mod flow;
 mod format;
 pub mod names;
 pub mod opcodes;
+pub mod pipeline;
 pub mod readers;
 pub mod resolve;
 pub mod structure;
