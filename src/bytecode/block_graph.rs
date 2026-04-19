@@ -8,20 +8,14 @@
 //! event's partition so the entry block's control flow, not physical
 //! offsets, drives emission order).
 //!
-//! Phase 1 extracted the CFG construction from `flow.rs`. Phase 2 added
-//! recognition of post-latch artifacts: `}` (body-end from
-//! `transform_latch_patterns`) ends a block and produces a
+//! Post-latch artifacts are recognized during block construction: `}`
+//! (body-end from `transform_latch_patterns`) ends a block and produces a
 //! [`BlockExit::LatchTerminal`], and blocks opening with a `DoOnce(name)` /
 //! `FlipFlop(name)` header are tagged with [`BlockMetadata::LatchBody`].
-//! Phase 3 moved the linearization DFS here so both call sites share one
-//! implementation. Phase 4 collapses Sequence dispatch chains (grouped and
-//! interleaved `push_flow`/`jump` layouts) into opaque
-//! [`BlockMetadata::SequenceSuperBlock`] blocks so DFS linearization can walk
-//! past them without tearing the Sequence pattern that downstream
-//! `reorder_flow_patterns` re-detects.
-//!
-//! Future phases will add a `LoopSuperBlock` variant so for-loops and ForEach
-//! bodies flow through the same graph.
+//! Sequence dispatch chains (grouped and interleaved `push_flow`/`jump`
+//! layouts) are collapsed into opaque [`BlockMetadata::SequenceSuperBlock`]
+//! blocks so the DFS linearization can walk past them without tearing the
+//! Sequence pattern that downstream `reorder_flow_patterns` re-detects.
 //!
 //! # Terminology
 //!
@@ -56,14 +50,51 @@ use std::ops::Range;
 
 use super::decode::BcStatement;
 use super::flow::{detect_sequence_spans, parse_if_jump, parse_jump, parse_jump_computed};
-use super::{OffsetMap, BARE_RETURN, BLOCK_CLOSE, JUMP_OFFSET_TOLERANCE, POP_FLOW, RETURN_NOP};
+use super::{
+    OffsetMap, BARE_RETURN, BLOCK_CLOSE, JUMP_OFFSET_TOLERANCE, POP_FLOW, RETURN_NOP,
+    STRUCTURE_OFFSET_TOLERANCE,
+};
 
 pub(crate) type BlockId = usize;
 
-/// Classification of a block for downstream linearization passes.
+/// Knobs that vary between `BlockCfg::build` and `BlockCfg::build_for_structurer`.
 ///
-/// Phase 2 adds `LatchBody`. Phase 4 adds `SequenceSuperBlock`.
-/// Future phases add `LoopSuperBlock`.
+/// The linearization callers (`reorder_convergence`, ubergraph event
+/// linearization) resolve jumps at [`JUMP_OFFSET_TOLERANCE`] (4) and rely on
+/// Sequence super-block collapse to keep dispatch chains atomic during DFS.
+/// The structurer runs after further mem_adj drift has accumulated and needs
+/// [`STRUCTURE_OFFSET_TOLERANCE`] (8) plus the raw (uncollapsed) block layout
+/// so it can see the `if !(cond) jump` exit of a block that would otherwise
+/// be buried inside a sequence super-block.
+#[derive(Debug, Clone, Copy)]
+struct BlockCfgConfig {
+    /// Fuzzy tolerance passed to `OffsetMap::find_fuzzy` when resolving
+    /// jump/push_flow targets to statement indices.
+    jump_tolerance: usize,
+    /// Whether to fold detected Sequence dispatches into
+    /// [`BlockMetadata::SequenceSuperBlock`] atoms.
+    collapse_sequence_super_blocks: bool,
+}
+
+impl BlockCfgConfig {
+    /// Configuration used by the shared linearization callers.
+    fn linearization() -> Self {
+        Self {
+            jump_tolerance: JUMP_OFFSET_TOLERANCE,
+            collapse_sequence_super_blocks: true,
+        }
+    }
+
+    /// Configuration used by the structurer's else-branch CFG query.
+    fn structurer() -> Self {
+        Self {
+            jump_tolerance: STRUCTURE_OFFSET_TOLERANCE,
+            collapse_sequence_super_blocks: false,
+        }
+    }
+}
+
+/// Classification of a block for downstream linearization passes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) enum BlockMetadata {
     #[default]
@@ -97,8 +128,8 @@ pub(crate) struct Block {
     /// Statement indices into the original `stmts` slice passed to [`BlockCfg::build`].
     pub stmt_range: Range<usize>,
     pub exit: BlockExit,
-    /// Latch-body / super-block classification. Currently only read in tests,
-    /// but populated in real CFGs so Phase 3+ can consume it.
+    /// Latch-body / super-block classification. Only consumed by tests today;
+    /// populated in real CFGs so downstream passes can consume it later.
     #[allow(dead_code)]
     pub metadata: BlockMetadata,
     /// Linearization bookkeeping. Set true once this block's statements have
@@ -155,21 +186,72 @@ pub(crate) struct BlockCfg {
 }
 
 impl BlockCfg {
-    /// Build a block-level CFG over `stmts`.
+    /// Build a block-level CFG over `stmts` for the linearization callers.
     ///
     /// Splits into basic blocks at jump boundaries, then wires exit edges by
-    /// parsing each block's last statement. Jump targets are resolved through
-    /// `offset_map` with [`JUMP_OFFSET_TOLERANCE`].
+    /// parsing each block's last statement. Jump targets are resolved at
+    /// [`JUMP_OFFSET_TOLERANCE`] and detected Sequence dispatches are
+    /// collapsed into opaque super-blocks.
     pub fn build(stmts: &[BcStatement], offset_map: &OffsetMap) -> Self {
-        let (blocks, stmt_to_block) = build_basic_blocks(stmts, offset_map);
+        Self::build_with_config(stmts, offset_map, BlockCfgConfig::linearization())
+    }
+
+    /// Build a block-level CFG for the structurer's else-branch query.
+    ///
+    /// Uses [`STRUCTURE_OFFSET_TOLERANCE`] (instead of
+    /// [`JUMP_OFFSET_TOLERANCE`]) so jump targets still resolve after the
+    /// mem_adj drift accumulated by earlier passes, and skips Sequence
+    /// super-block collapse so the `if !(cond) jump` exit of a block inside
+    /// a Sequence stays visible to `detect_else_branch_via_cfg`.
+    pub fn build_for_structurer(stmts: &[BcStatement], offset_map: &OffsetMap) -> Self {
+        Self::build_with_config(stmts, offset_map, BlockCfgConfig::structurer())
+    }
+
+    fn build_with_config(
+        stmts: &[BcStatement],
+        offset_map: &OffsetMap,
+        config: BlockCfgConfig,
+    ) -> Self {
+        let (blocks, stmt_to_block) = build_basic_blocks(stmts, offset_map, config.jump_tolerance);
         let mut cfg = BlockCfg {
             blocks,
             stmt_to_block,
         };
-        wire_block_edges(&mut cfg.blocks, stmts, offset_map, &cfg.stmt_to_block);
+        wire_block_edges(
+            &mut cfg.blocks,
+            stmts,
+            offset_map,
+            &cfg.stmt_to_block,
+            config.jump_tolerance,
+        );
         annotate_latch_bodies(&mut cfg.blocks, stmts);
-        collapse_sequence_super_blocks(&mut cfg, stmts, offset_map);
+        if config.collapse_sequence_super_blocks {
+            collapse_sequence_super_blocks(&mut cfg, stmts, offset_map);
+        }
         cfg
+    }
+
+    /// Block whose `stmt_range` contains `stmt_idx`, or `None` when the index
+    /// falls outside every block's range.
+    pub fn block_of(&self, stmt_idx: usize) -> Option<BlockId> {
+        if let Some(&bid) = self.stmt_to_block.get(&stmt_idx) {
+            return Some(bid);
+        }
+        // Blocks are built in physical order, so starts are non-decreasing.
+        // Find the rightmost block whose start is <= stmt_idx.
+        let pos = self
+            .blocks
+            .partition_point(|b| b.stmt_range.start <= stmt_idx);
+        if pos == 0 {
+            return None;
+        }
+        let bid = pos - 1;
+        let range = &self.blocks[bid].stmt_range;
+        if stmt_idx < range.end {
+            Some(bid)
+        } else {
+            None
+        }
     }
 
     /// Incoming edge count for every block, indexed by `BlockId`.
@@ -235,22 +317,23 @@ fn compute_latch_body_ranges(stmts: &[BcStatement]) -> Vec<(usize, usize)> {
 fn build_basic_blocks(
     stmts: &[BcStatement],
     offset_map: &OffsetMap,
+    jump_tolerance: usize,
 ) -> (Vec<Block>, HashMap<usize, BlockId>) {
     // Collect all jump target offsets and resolve to statement indices
     let mut target_indices: HashSet<usize> = HashSet::new();
     for stmt in stmts {
         if let Some((_, target)) = parse_if_jump(&stmt.text) {
-            if let Some(idx) = offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) {
+            if let Some(idx) = offset_map.find_fuzzy(target, jump_tolerance) {
                 target_indices.insert(idx);
             }
         }
         if let Some(target) = parse_jump(&stmt.text) {
-            if let Some(idx) = offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) {
+            if let Some(idx) = offset_map.find_fuzzy(target, jump_tolerance) {
                 target_indices.insert(idx);
             }
         }
         if let Some(target) = super::flow::parse_push_flow(&stmt.text) {
-            if let Some(idx) = offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) {
+            if let Some(idx) = offset_map.find_fuzzy(target, jump_tolerance) {
                 target_indices.insert(idx);
             }
         }
@@ -331,9 +414,10 @@ fn wire_block_edges(
     stmts: &[BcStatement],
     offset_map: &OffsetMap,
     stmt_to_block: &HashMap<usize, BlockId>,
+    jump_tolerance: usize,
 ) {
     let resolve_target = |target_offset: usize| -> Option<BlockId> {
-        let stmt_idx = offset_map.find_fuzzy(target_offset, JUMP_OFFSET_TOLERANCE)?;
+        let stmt_idx = offset_map.find_fuzzy(target_offset, jump_tolerance)?;
         stmt_to_block.get(&stmt_idx).copied()
     };
 
@@ -659,12 +743,12 @@ pub(crate) fn all_predecessors_emitted(
 ///
 /// An "outside predecessor" filter (reject any candidate whose
 /// predecessors lie outside `reachable_from_a ∪ reachable_from_b`) was
-/// drafted for Phase 5 but regresses functions like `AttemptGrip` where
-/// a legitimate convergence candidate has a backward predecessor from
-/// code that emits later in the stream. The terminal-branch guard alone
-/// is sufficient to prevent the `EvaluateClimbing` regression -- the
-/// broader filter over-rejects. Revisit when there's CFG-level data on
-/// exactly which join points should be excluded.
+/// drafted earlier but regresses functions like `AttemptGrip` where a
+/// legitimate convergence candidate has a backward predecessor from code
+/// that emits later in the stream. The terminal-branch guard alone is
+/// sufficient to prevent the `EvaluateClimbing` regression, the broader
+/// filter over-rejects. Revisit when there's CFG-level data on exactly
+/// which join points should be excluded.
 pub(crate) fn find_convergence_target(
     blocks: &[Block],
     branch_a: BlockId,
@@ -762,8 +846,9 @@ pub(crate) fn linearize_blocks(
                     linearize_blocks(blocks, stmts, in_degree, predecessors, next, output);
                 } else {
                     // Multi-entry or already emitted: insert a synthetic
-                    // forward jump so detect_else_branch sees an explicit
-                    // branch exit even when the successor is deferred.
+                    // forward jump so the structurer's else-branch detector
+                    // sees an explicit branch exit even when the successor
+                    // is deferred.
                     let target_offset = stmts[blocks[next].stmt_range.start].mem_offset;
                     output.push(BcStatement::new(0, format!("jump 0x{target_offset:x}")));
                 }
