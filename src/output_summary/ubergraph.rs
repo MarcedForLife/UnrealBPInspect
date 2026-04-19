@@ -14,7 +14,10 @@ use crate::bytecode::structure::apply_indentation;
 use crate::bytecode::transforms::{
     fold_switch_enum_cascade, strip_orphaned_blocks, strip_unmatched_braces,
 };
-use crate::bytecode::{split_by_sequence_markers, BcStatement, OffsetMap, POP_FLOW, RETURN_NOP};
+use crate::bytecode::{
+    split_by_sequence_markers, BcStatement, OffsetMap, BARE_RETURN, BLOCK_CLOSE, POP_FLOW,
+    RETURN_NOP, STRUCTURE_OFFSET_TOLERANCE,
+};
 use crate::helpers::indent_of;
 use crate::prop_query::find_prop_str_items_any;
 use crate::types::{NodePinData, Property};
@@ -94,7 +97,7 @@ pub(super) fn split_ubergraph_sections(
         }
         let mut block_lines: Vec<String> = Vec::new();
         for line in &section.lines {
-            if line.trim() == "return" {
+            if line.trim() == BARE_RETURN {
                 if !block_lines.is_empty() {
                     resume_blocks.push(ResumeBlock { lines: block_lines });
                     block_lines = Vec::new();
@@ -155,9 +158,15 @@ fn linearize_from_entry(
         .map(|s| s.mem_offset)
         .unwrap_or(0);
 
-    // If the entry is already the first statement, the partition is in
-    // natural control-flow order. Linearizing here would lose context that
-    // `reorder_flow_patterns` / `reorder_convergence` rely on.
+    // When the entry is already the first statement, the partition is already
+    // in natural control-flow order. Running the CFG walk here collapses
+    // if/else structures that `reorder_convergence` would otherwise linearize
+    // correctly: DFS emits then-body then else-body in offset order, but the
+    // later `renumber_offsets` rewrites both branches onto a single monotonic
+    // stride, losing the offset gap that `reorder_convergence`'s backward-edge
+    // detection and `block_graph::find_convergence_target` use to identify the
+    // shared post-branch block. The visible symptom is a nested `if` emerging
+    // at the wrong indent (observed on VRPlayer axis handlers).
     if stmts.first().is_some_and(|s| s.mem_offset == entry_offset) {
         return;
     }
@@ -172,7 +181,7 @@ fn linearize_from_entry(
     // bytes away from any decoded statement because filtered wire_trace /
     // tracepoint opcodes sit at the exact entry address.
     let entry_block = offset_map
-        .find_fuzzy_forward(entry_offset, 8)
+        .find_fuzzy_forward(entry_offset, STRUCTURE_OFFSET_TOLERANCE)
         .and_then(|stmt_idx| cfg.stmt_to_block.get(&stmt_idx).copied())
         .unwrap_or(0);
 
@@ -240,8 +249,8 @@ fn renumber_offsets(stmts: &mut [BcStatement]) {
     let pre_map = OffsetMap::build(stmts);
     let resolve = |target: usize| -> Option<usize> {
         pre_map
-            .find_fuzzy_forward(target, 8)
-            .or_else(|| pre_map.find_fuzzy(target, 8))
+            .find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
+            .or_else(|| pre_map.find_fuzzy(target, STRUCTURE_OFFSET_TOLERANCE))
             .map(|stmt_idx| (stmt_idx + 1) * STRIDE)
     };
 
@@ -287,21 +296,27 @@ fn normalize_jump_targets(stmts: &mut [BcStatement]) {
             if parse_push_flow(&trimmed).is_some() {
                 continue;
             }
-            if let Some(target_idx) = offset_map.find_fuzzy_forward(target, 8) {
+            if let Some(target_idx) =
+                offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
+            {
                 let exact = stmts[target_idx].mem_offset;
                 if exact != target {
                     stmts[idx].text = format!("jump 0x{:x}", exact);
                 }
             }
         } else if let Some((cond, target)) = parse_if_jump(&trimmed) {
-            if let Some(target_idx) = offset_map.find_fuzzy_forward(target, 8) {
+            if let Some(target_idx) =
+                offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
+            {
                 let exact = stmts[target_idx].mem_offset;
                 if exact != target {
                     stmts[idx].text = format!("if !({}) jump 0x{:x}", cond, exact);
                 }
             }
         } else if let Some(target) = parse_push_flow(&trimmed) {
-            if let Some(target_idx) = offset_map.find_fuzzy_forward(target, 8) {
+            if let Some(target_idx) =
+                offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
+            {
                 let exact = stmts[target_idx].mem_offset;
                 if exact != target {
                     stmts[idx].text = format!("push_flow 0x{:x}", exact);
@@ -326,10 +341,15 @@ fn collapse_jump_chains(stmts: &mut Vec<BcStatement>) {
     // sees consistent addresses.
     normalize_jump_targets(stmts);
 
-    // Track offsets of intermediate trampoline jumps that this pass elides.
-    // Only these should be removed in the dead-code filter below; any other
-    // bare jumps represent legitimate control-flow edges (e.g. backward edges
-    // out of latch bodies) that later passes rely on.
+    // Invariant: a jump's offset is inserted here iff the chain-walk rewrote
+    // some predecessor to skip over it, making it a trampoline candidate. The
+    // retain filter below removes only offsets in this set (if also
+    // unreferenced and not reachable by fallthrough). Any bare jump absent
+    // from this set is a legitimate control-flow edge the later passes
+    // (`BlockCfg::build`, `reorder_convergence`, structurer goto handling)
+    // need, e.g. backward edges out of latch bodies or forward edges the walk
+    // chose not to collapse. Callers that introduce new jump rewrites must
+    // update this set, otherwise stale trampolines survive.
     let mut elided_offsets: HashSet<usize> = HashSet::new();
 
     // Collapse bare jump chains: jump A -> jump B -> actual_code becomes jump B
@@ -344,7 +364,9 @@ fn collapse_jump_chains(stmts: &mut Vec<BcStatement>) {
                 if parse_push_flow(&trimmed).is_some() {
                     continue;
                 }
-                let Some(target_idx) = chain_map.find_fuzzy_forward(target, 8) else {
+                let Some(target_idx) =
+                    chain_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
+                else {
                     continue;
                 };
                 let target_text = stmts[target_idx].text.trim().to_string();
@@ -360,7 +382,9 @@ fn collapse_jump_chains(stmts: &mut Vec<BcStatement>) {
             }
 
             if let Some((cond, target)) = parse_if_jump(&trimmed) {
-                let Some(target_idx) = chain_map.find_fuzzy_forward(target, 8) else {
+                let Some(target_idx) =
+                    chain_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
+                else {
                     continue;
                 };
                 let target_text = stmts[target_idx].text.trim().to_string();
@@ -385,17 +409,23 @@ fn collapse_jump_chains(stmts: &mut Vec<BcStatement>) {
     for stmt in stmts.iter() {
         let trimmed = stmt.text.trim();
         if let Some(target) = parse_jump(trimmed) {
-            if let Some(idx) = final_offset_map.find_fuzzy_forward(target, 8) {
+            if let Some(idx) =
+                final_offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
+            {
                 referenced_offsets.insert(stmts[idx].mem_offset);
             }
         }
         if let Some((_, target)) = parse_if_jump(trimmed) {
-            if let Some(idx) = final_offset_map.find_fuzzy_forward(target, 8) {
+            if let Some(idx) =
+                final_offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
+            {
                 referenced_offsets.insert(stmts[idx].mem_offset);
             }
         }
         if let Some(target) = parse_push_flow(trimmed) {
-            if let Some(idx) = final_offset_map.find_fuzzy_forward(target, 8) {
+            if let Some(idx) =
+                final_offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
+            {
                 referenced_offsets.insert(stmts[idx].mem_offset);
             }
         }
@@ -448,11 +478,11 @@ fn is_flow_terminator(text: &str) -> bool {
     if parse_jump(trimmed).is_some() && parse_push_flow(trimmed).is_none() {
         return true;
     }
-    if trimmed == POP_FLOW || trimmed == RETURN_NOP || trimmed == "return" {
+    if trimmed == POP_FLOW || trimmed == RETURN_NOP || trimmed == BARE_RETURN {
         return true;
     }
     // A closing brace from latch/loop/if block emission.
-    if trimmed == "}" {
+    if trimmed == BLOCK_CLOSE {
         return true;
     }
     false
@@ -996,7 +1026,7 @@ fn emit_section_body(
         }
 
         let clean = strip_resume_annotation(line);
-        if clean.trim() == "return" {
+        if clean.trim() == BARE_RETURN {
             continue;
         }
         writeln!(buf, "{}{}", body_indent, clean).unwrap();
@@ -1214,7 +1244,7 @@ pub(super) fn is_ubergraph_stub(props: &[Property], ug_name: &str) -> bool {
     let meaningful: Vec<&str> = lines
         .iter()
         .map(|line| super::strip_offset_prefix(line).trim())
-        .filter(|code| !matches!(*code, "" | "return" | RETURN_NOP))
+        .filter(|code| !matches!(*code, "" | BARE_RETURN | RETURN_NOP))
         .collect();
     if meaningful.is_empty() {
         return false;
@@ -1453,5 +1483,28 @@ mod tests {
         ];
         strip_orphaned_blocks(&mut lines);
         assert!(lines.iter().any(|l| l.contains("$SomeVar")));
+    }
+
+    #[test]
+    fn collapse_preserves_non_trampoline_backward_jump() {
+        // Backward jump that the chain-walk cannot collapse (target is a real
+        // statement, not another bare jump) must survive collapse_jump_chains.
+        // The predecessor is a plain call (not a flow terminator) and nothing
+        // else references the jump's offset, so the only thing keeping it alive
+        // is the elided_offsets invariant: offsets absent from that set are
+        // never stripped.
+        let mut stmts = vec![
+            stmt(0x10, "loop_body_call()"),
+            stmt(0x20, "another_call()"),
+            stmt(0x30, "jump 0x10"),
+            stmt(0x40, "tail_call()"),
+        ];
+        collapse_jump_chains(&mut stmts);
+        let has_backward_jump = stmts.iter().any(|s| s.text.trim() == "jump 0x10");
+        assert!(
+            has_backward_jump,
+            "backward jump not in elided_offsets must survive collapse_jump_chains; got {:?}",
+            stmts.iter().map(|s| s.text.clone()).collect::<Vec<_>>()
+        );
     }
 }

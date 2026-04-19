@@ -5,7 +5,7 @@ use super::{
     is_loop_header, opens_block, strip_outer_parens, ARRAY_INDEX_VAR, BREAK_HIT_VAR,
     LOOP_COUNTER_VAR,
 };
-use crate::bytecode::SEQUENCE_MARKER_PREFIX;
+use crate::bytecode::{SEQUENCE_MARKER_PREFIX, SUB_SEQUENCE_MARKER_PREFIX};
 use crate::helpers::{is_section_separator, SECTION_SEPARATOR};
 use std::collections::{HashMap, HashSet};
 
@@ -96,7 +96,7 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
         let next = lines[i + 1].trim();
         if lines[i].trim() == "return"
             && (next.starts_with(SEQUENCE_MARKER_PREFIX)
-                || next.starts_with("// sub-sequence [")
+                || next.starts_with(SUB_SEQUENCE_MARKER_PREFIX)
                 || next.starts_with("case ")
                 || next.starts_with("switch ("))
         {
@@ -132,7 +132,7 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
             // Sequence markers reset dead state but NOT depth (they can
             // appear inside switch/case or other brace-nested structures)
             if trimmed.starts_with(SEQUENCE_MARKER_PREFIX)
-                || trimmed.starts_with("// sub-sequence [")
+                || trimmed.starts_with(SUB_SEQUENCE_MARKER_PREFIX)
             {
                 dead_depth = None;
                 return true;

@@ -7,7 +7,10 @@ use std::collections::HashSet;
 
 use super::block_graph::{linearize_blocks, BlockCfg};
 use super::decode::BcStatement;
-use super::{OffsetMap, JUMP_OFFSET_TOLERANCE, POP_FLOW, RETURN_NOP, SEQUENCE_MARKER_PREFIX};
+use super::{
+    sequence_marker, sub_sequence_marker, OffsetMap, BLOCK_CLOSE, JUMP_OFFSET_TOLERANCE,
+    LOOP_COMPLETE_MARKER, POP_FLOW, RETURN_NOP, SEQUENCE_MARKER_PREFIX,
+};
 
 /// Offset tolerance for ForEach loop body detection. Jump targets use in-memory offsets
 /// but we index by on-disk offsets + cumulative mem_adj. The drift accumulates from
@@ -829,21 +832,22 @@ struct SequenceEmitter<'a> {
 impl<'a> SequenceEmitter<'a> {
     fn emit(&mut self, seq: &SequenceNode, depth: usize, output: &mut Vec<BcStatement>) {
         let seq_offset = self.stmts[seq.chain_start].mem_offset;
-        // Child sequences use "sub-sequence" markers so that
-        // split_by_sequence_markers (which splits on "// sequence [")
-        // doesn't tear the parent pin body apart.
-        let prefix = if depth > 0 {
-            "sub-sequence"
-        } else {
-            "sequence"
+        // Child sequences use sub-sequence markers so that split_by_sequence_markers
+        // (which splits on SEQUENCE_MARKER_PREFIX) doesn't tear the parent pin body apart.
+        let build_marker = |idx: usize| -> String {
+            if depth > 0 {
+                sub_sequence_marker(idx)
+            } else {
+                sequence_marker(idx)
+            }
         };
-        let marker = |text: &str| BcStatement::new(seq_offset, text.to_string());
+        let marker = |text: String| BcStatement::new(seq_offset, text);
         let sentinel =
             |idx: usize| BcStatement::new(self.stmts[idx].mem_offset, RETURN_NOP.to_string());
 
         // Emit each pin body, following unconditional jumps to child Sequences
         for (pi, pin) in seq.pins.iter().enumerate() {
-            output.push(marker(&format!("// {} [{}]:", prefix, pi)));
+            output.push(marker(build_marker(pi)));
             output.extend_from_slice(&self.stmts[pin.body_start_idx..pin.body_end_idx]);
             self.emit_child_sequences(pin.body_start_idx, pin.body_end_idx, depth, output);
             // Sentinel so if-else exit jumps within the body can resolve
@@ -851,7 +855,7 @@ impl<'a> SequenceEmitter<'a> {
         }
 
         // Inline body (after all pin dispatch pairs)
-        output.push(marker(&format!("// {} [{}]:", prefix, seq.pins.len())));
+        output.push(marker(build_marker(seq.pins.len())));
         output.extend_from_slice(&self.stmts[seq.chain_end..seq.inline_end]);
         self.emit_child_sequences(seq.chain_end, seq.inline_end, depth, output);
         output.push(sentinel(seq.inline_end));
@@ -956,7 +960,7 @@ fn emit_single_loop(
     if lp.foreach.is_none() {
         output.extend_from_slice(&stmts[lp.incr_start..lp.back_jump_idx]);
     }
-    output.push(marker("}"));
+    output.push(marker(BLOCK_CLOSE));
     // Emit ForEach completion path after the loop.
     // Convert pop_flow to unconditional jumps targeting the function return
     // so the structurer can detect if/else boundaries (skip-else pattern).
@@ -965,7 +969,7 @@ fn emit_single_loop(
     // needs for else-branch resolution.
     // Strip push_flow and plain jumps which are loop control artifacts.
     if let (Some(cs), Some(ce)) = (lp.completion_start, lp.completion_end) {
-        output.push(marker("// on loop complete:"));
+        output.push(marker(LOOP_COMPLETE_MARKER));
         let end_offset = stmts[lp.body_end_idx].mem_offset;
         let completion = &stmts[cs..=ce];
         for (rel, stmt) in completion.iter().enumerate() {
@@ -1260,10 +1264,20 @@ pub fn reorder_convergence(stmts: &mut Vec<BcStatement>) {
         return;
     }
 
-    // Pre-pass: resolve degenerate back-edges (cast-failure `VAR = false; jump backward`)
-    for _ in 0..10 {
+    // Pre-pass: resolve degenerate back-edges (cast-failure `VAR = false; jump backward`).
+    // Each call rewrites at most one back-edge, so run until convergence. The
+    // defensive upper bound (statement count) prevents a buggy rewrite from
+    // infinite-looping; each successful pass removes a statement, so real
+    // blueprints terminate well below the bound.
+    let max_iterations = stmts.len();
+    let mut iter_count = 0;
+    loop {
         let offset_map = OffsetMap::build(stmts);
         if !resolve_degenerate_backedge(stmts, &offset_map) {
+            break;
+        }
+        iter_count += 1;
+        if iter_count >= max_iterations {
             break;
         }
     }
@@ -1284,6 +1298,12 @@ pub fn reorder_convergence(stmts: &mut Vec<BcStatement>) {
     // jumps within sequence bodies are handled per-body. Linearizing the full
     // function would disrupt the sequence/cascade prefix layout that
     // fold_cascade_across_sequences depends on.
+    //
+    // The ubergraph pipeline also keeps this gate. Running `reorder_convergence`
+    // on a whole UberGraph event with sequence markers was found to regress
+    // VRPlayer ReceiveTick (lost `ProcessDesiredGrip` block, scrambled
+    // SetSwimming/SetUnderwater if/else). See `docs/pipeline-coupling-audit.md`
+    // point #2, the refactor was attempted and reverted.
     let has_sequences = stmts
         .iter()
         .any(|s| s.text.starts_with(SEQUENCE_MARKER_PREFIX));
