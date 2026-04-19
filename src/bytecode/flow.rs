@@ -3,8 +3,9 @@
 //! Detects Sequence nodes, ForLoop, ForEach, and convergence patterns in flat bytecode,
 //! then reorders so downstream structuring sees natural control flow.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
+use super::block_graph::{linearize_blocks, BlockCfg};
 use super::decode::BcStatement;
 use super::{OffsetMap, JUMP_OFFSET_TOLERANCE, POP_FLOW, RETURN_NOP, SEQUENCE_MARKER_PREFIX};
 
@@ -126,6 +127,74 @@ struct SequenceNode {
     chain_end: usize,
     inline_end: usize,
     pins: Vec<SequencePin>,
+}
+
+/// Public description of a detected Sequence's statement span.
+///
+/// Exposed so `block_graph` can collapse each Sequence into a single
+/// super-block before linearization. Indices refer to statements in the
+/// source stream passed to the detector.
+#[derive(Debug, Clone)]
+pub(crate) struct SequenceSpan {
+    pub chain: std::ops::Range<usize>,
+    pub inline_body: std::ops::Range<usize>,
+    pub pins: Vec<std::ops::Range<usize>>,
+}
+
+impl SequenceSpan {
+    /// Smallest contiguous statement range covering the dispatch chain,
+    /// inline body, and every pin body.
+    pub fn full_range(&self) -> std::ops::Range<usize> {
+        let mut end = self.inline_body.end;
+        for pin in &self.pins {
+            if pin.end > end {
+                end = pin.end;
+            }
+        }
+        self.chain.start..end
+    }
+}
+
+/// Detect every Sequence super-block (grouped + interleaved dispatch chains).
+///
+/// Returns spans sorted by `chain.start`. Parent Sequences that dispatch to
+/// child Sequences are kept in the result — callers that need to collapse
+/// non-overlapping ranges should skip any span whose `full_range` lies inside
+/// an already-consumed range.
+pub(crate) fn detect_sequence_spans(
+    stmts: &[BcStatement],
+    offset_map: &OffsetMap,
+) -> Vec<SequenceSpan> {
+    let mut sequences = detect_grouped_sequences(stmts, offset_map);
+    // Mark statements consumed by grouped sequences so interleaved detection
+    // doesn't re-match the same push_flow/jump pairs.
+    let mut used = vec![false; stmts.len()];
+    for seq in &sequences {
+        let chain_end = seq.inline_end.min(stmts.len().saturating_sub(1));
+        used[seq.chain_start..=chain_end].fill(true);
+        for pin in &seq.pins {
+            let end = pin.body_end_idx.min(stmts.len().saturating_sub(1));
+            used[pin.body_start_idx..=end].fill(true);
+        }
+    }
+    detect_interleaved_sequences(stmts, &used, offset_map, &mut sequences);
+    // SequenceNode uses inclusive end indices for inline_end and pin body_end_idx
+    // (they point AT the pop_flow terminator). Convert to half-open ranges that
+    // include the terminator so the super-block's stmt_range covers it.
+    let mut spans: Vec<SequenceSpan> = sequences
+        .into_iter()
+        .map(|seq| SequenceSpan {
+            chain: seq.chain_start..seq.chain_end,
+            inline_body: seq.chain_end..(seq.inline_end + 1),
+            pins: seq
+                .pins
+                .into_iter()
+                .map(|pin| pin.body_start_idx..(pin.body_end_idx + 1))
+                .collect(),
+        })
+        .collect();
+    spans.sort_by_key(|span| span.chain.start);
+    spans
 }
 
 struct ForLoop {
@@ -425,6 +494,17 @@ fn detect_interleaved_sequences(
             });
         }
         if !all_found || pins.len() != jump_targets.len() {
+            i += 1;
+            continue;
+        }
+
+        // Pin bodies must come after the inline body in the stream. In a
+        // legitimate Sequence, push_flow/jump dispatches target code that
+        // lives past the inline body's pop_flow. When a target lands inside
+        // or before the inline body, this is a degenerate layout (commonly
+        // seen in post-latch streams where scaffolding was removed) and
+        // treating it as a Sequence produces duplicated pin markers.
+        if pins.iter().any(|p| p.body_start_idx <= inline_end) {
             i += 1;
             continue;
         }
@@ -1211,439 +1291,25 @@ pub fn reorder_convergence(stmts: &mut Vec<BcStatement>) {
         return;
     }
 
-    // Phase 1: split into basic blocks
-    let (mut blocks, stmt_to_block) = build_basic_blocks(stmts, &offset_map);
-    if blocks.is_empty() {
+    // Phase 1+2: build block-level CFG (split + wire edges)
+    let mut cfg = BlockCfg::build(stmts, &offset_map);
+    if cfg.blocks.is_empty() {
         return;
     }
 
-    // Phase 2: wire edges
-    wire_block_edges(&mut blocks, stmts, &offset_map, &stmt_to_block);
-
     // Phase 3: linearize via recursive DFS
-    let in_degree = compute_in_degree(&blocks);
-    let predecessors = compute_predecessors(&blocks);
+    let in_degree = cfg.compute_in_degree();
+    let predecessors = cfg.compute_predecessors();
+    let blocks = &mut cfg.blocks;
 
     let mut output: Vec<BcStatement> = Vec::with_capacity(stmts.len() + 8);
-    linearize_blocks(
-        &mut blocks,
-        stmts,
-        &in_degree,
-        &predecessors,
-        0,
-        &mut output,
-    );
+    linearize_blocks(blocks, stmts, &in_degree, &predecessors, 0, &mut output);
     // Sweep unemitted blocks (convergence points, unreachable code)
     for bid in 0..blocks.len() {
-        linearize_blocks(
-            &mut blocks,
-            stmts,
-            &in_degree,
-            &predecessors,
-            bid,
-            &mut output,
-        );
+        linearize_blocks(blocks, stmts, &in_degree, &predecessors, bid, &mut output);
     }
 
     *stmts = output;
-}
-
-// Basic-block graph types and helpers for reorder_convergence
-
-type BlockId = usize;
-
-struct BasicBlock {
-    /// Statement indices into the original stmts array.
-    stmt_range: std::ops::Range<usize>,
-    exit: BlockExit,
-    emitted: bool,
-}
-
-#[derive(Clone)]
-enum BlockExit {
-    /// Implicit fall-through to the next block in original layout.
-    FallThrough,
-    /// Unconditional jump to another block.
-    Jump(BlockId),
-    /// Conditional branch: fall_through is the true-body, target is the false-body.
-    CondJump {
-        fall_through: BlockId,
-        target: BlockId,
-    },
-    /// Terminal statement (return, pop_flow). No successor.
-    Terminal,
-}
-
-/// Phase 1: split statements into basic blocks at jump boundaries.
-///
-/// A block boundary is placed:
-/// - After every jump, conditional jump, terminal, or jump_computed
-/// - Before every statement whose mem_offset is a jump target
-fn build_basic_blocks(
-    stmts: &[BcStatement],
-    offset_map: &OffsetMap,
-) -> (Vec<BasicBlock>, HashMap<usize, BlockId>) {
-    // Collect all jump target offsets and resolve to statement indices
-    let mut target_indices: HashSet<usize> = HashSet::new();
-    for stmt in stmts {
-        if let Some((_, target)) = parse_if_jump(&stmt.text) {
-            if let Some(idx) = offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) {
-                target_indices.insert(idx);
-            }
-        }
-        if let Some(target) = parse_jump(&stmt.text) {
-            if let Some(idx) = offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) {
-                target_indices.insert(idx);
-            }
-        }
-        if let Some(target) = parse_push_flow(&stmt.text) {
-            if let Some(idx) = offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) {
-                target_indices.insert(idx);
-            }
-        }
-    }
-
-    let mut blocks: Vec<BasicBlock> = Vec::new();
-    let mut current_start = 0;
-
-    let is_block_end = |stmt: &BcStatement| -> bool {
-        stmt.text == RETURN_NOP
-            || stmt.text == "return"
-            || stmt.text == POP_FLOW
-            || parse_jump(&stmt.text).is_some()
-            || parse_if_jump(&stmt.text).is_some()
-            || parse_jump_computed(&stmt.text)
-    };
-
-    for (i, stmt) in stmts.iter().enumerate() {
-        // Start a new block if this statement is a jump target
-        if target_indices.contains(&i) && i > current_start {
-            blocks.push(BasicBlock {
-                stmt_range: current_start..i,
-                exit: BlockExit::FallThrough,
-                emitted: false,
-            });
-            current_start = i;
-        }
-
-        if is_block_end(stmt) {
-            blocks.push(BasicBlock {
-                stmt_range: current_start..i + 1,
-                exit: BlockExit::FallThrough, // patched in wire_block_edges
-                emitted: false,
-            });
-            current_start = i + 1;
-        }
-    }
-    // Remaining statements form a final block
-    if current_start < stmts.len() {
-        blocks.push(BasicBlock {
-            stmt_range: current_start..stmts.len(),
-            exit: BlockExit::FallThrough,
-            emitted: false,
-        });
-    }
-
-    // Build stmt_index -> block_id map for each block's first statement
-    let mut stmt_to_block: HashMap<usize, BlockId> = HashMap::new();
-    for (bid, block) in blocks.iter().enumerate() {
-        stmt_to_block.insert(block.stmt_range.start, bid);
-    }
-
-    (blocks, stmt_to_block)
-}
-
-/// Phase 2: examine each block's last statement and set its exit edge.
-fn wire_block_edges(
-    blocks: &mut [BasicBlock],
-    stmts: &[BcStatement],
-    offset_map: &OffsetMap,
-    stmt_to_block: &HashMap<usize, BlockId>,
-) {
-    let resolve_target = |target_offset: usize| -> Option<BlockId> {
-        let stmt_idx = offset_map.find_fuzzy(target_offset, JUMP_OFFSET_TOLERANCE)?;
-        stmt_to_block.get(&stmt_idx).copied()
-    };
-
-    for bid in 0..blocks.len() {
-        let range = &blocks[bid].stmt_range;
-        if range.is_empty() {
-            continue;
-        }
-        let last_idx = range.end - 1;
-        let last_text = &stmts[last_idx].text;
-        let next_block = bid + 1;
-
-        if last_text == RETURN_NOP || last_text == "return" || last_text == POP_FLOW {
-            blocks[bid].exit = BlockExit::Terminal;
-        } else if let Some((_, target)) = parse_if_jump(last_text) {
-            let ft = if next_block < blocks.len() {
-                next_block
-            } else {
-                bid
-            };
-            blocks[bid].exit = match resolve_target(target) {
-                Some(tbid) => BlockExit::CondJump {
-                    fall_through: ft,
-                    target: tbid,
-                },
-                None => BlockExit::FallThrough,
-            };
-        } else if let Some(target) = parse_jump(last_text) {
-            blocks[bid].exit = match resolve_target(target) {
-                Some(tbid) => BlockExit::Jump(tbid),
-                None => BlockExit::FallThrough,
-            };
-        } else if parse_jump_computed(last_text) {
-            blocks[bid].exit = BlockExit::Terminal;
-        }
-        // else: FallThrough (default)
-    }
-}
-
-/// Compute incoming edge count for each block.
-fn compute_in_degree(blocks: &[BasicBlock]) -> Vec<usize> {
-    let mut deg = vec![0usize; blocks.len()];
-    for (bid, block) in blocks.iter().enumerate() {
-        match &block.exit {
-            BlockExit::FallThrough => {
-                if bid + 1 < blocks.len() {
-                    deg[bid + 1] += 1;
-                }
-            }
-            BlockExit::Jump(target) => {
-                deg[*target] += 1;
-            }
-            BlockExit::CondJump {
-                fall_through,
-                target,
-            } => {
-                deg[*fall_through] += 1;
-                deg[*target] += 1;
-            }
-            BlockExit::Terminal => {}
-        }
-    }
-    deg
-}
-
-/// Build predecessor lists: for each block, which blocks have edges to it.
-fn compute_predecessors(blocks: &[BasicBlock]) -> Vec<Vec<BlockId>> {
-    let mut preds = vec![Vec::new(); blocks.len()];
-    for (bid, block) in blocks.iter().enumerate() {
-        match &block.exit {
-            BlockExit::FallThrough => {
-                if bid + 1 < blocks.len() {
-                    preds[bid + 1].push(bid);
-                }
-            }
-            BlockExit::Jump(target) => {
-                preds[*target].push(bid);
-            }
-            BlockExit::CondJump {
-                fall_through,
-                target,
-            } => {
-                preds[*fall_through].push(bid);
-                preds[*target].push(bid);
-            }
-            BlockExit::Terminal => {}
-        }
-    }
-    preds
-}
-
-/// Phase 3: recursive DFS linearization.
-///
-/// Emits blocks in an order where conditional jumps always target forward positions:
-/// - CondJump: emit fall-through (true body) first, then target (false body)
-/// - Jump to single-entry block: follow inline
-/// - Jump to multi-entry block: leave the jump in place (becomes goto label)
-/// - FallThrough: follow next block, insert synthetic jump if already emitted
-fn linearize_blocks(
-    blocks: &mut [BasicBlock],
-    stmts: &[BcStatement],
-    in_degree: &[usize],
-    predecessors: &[Vec<BlockId>],
-    bid: BlockId,
-    output: &mut Vec<BcStatement>,
-) {
-    if bid >= blocks.len() || blocks[bid].emitted {
-        return;
-    }
-    blocks[bid].emitted = true;
-
-    // Emit this block's statements
-    let range = blocks[bid].stmt_range.clone();
-    for idx in range {
-        output.push(stmts[idx].clone());
-    }
-
-    let exit = blocks[bid].exit.clone();
-    match exit {
-        BlockExit::Terminal => {}
-
-        BlockExit::FallThrough => {
-            let next = bid + 1;
-            if next < blocks.len() {
-                if !blocks[next].emitted && in_degree[next] <= 1 {
-                    // Single-entry successor: follow inline
-                    linearize_blocks(blocks, stmts, in_degree, predecessors, next, output);
-                } else {
-                    // Multi-entry or already emitted: insert a synthetic forward
-                    // jump so detect_else_branch can find the true-branch exit
-                    let target_offset = stmts[blocks[next].stmt_range.start].mem_offset;
-                    output.push(BcStatement::new(0, format!("jump 0x{target_offset:x}")));
-                }
-            }
-        }
-
-        BlockExit::Jump(target) => {
-            // Follow single-entry targets inline; leave multi-entry convergence
-            // blocks in place (their jump becomes a goto in structure_bytecode)
-            if target < blocks.len() && in_degree[target] <= 1 && !blocks[target].emitted {
-                linearize_blocks(blocks, stmts, in_degree, predecessors, target, output);
-            }
-        }
-
-        BlockExit::CondJump {
-            fall_through,
-            target,
-        } => {
-            if fall_through < blocks.len()
-                && in_degree[fall_through] > 1
-                && target < blocks.len()
-                && in_degree[target] <= 1
-            {
-                // The fall-through is a multi-entry convergence block. Emit the
-                // single-entry false body first, then the convergence. This
-                // creates a guard: `if !(cond) { false-body } convergence`.
-                // Negate the if-jump so structure_bytecode sees the guard with
-                // the correct condition: `if (cond) { false-body }`.
-                negate_last_if_jump(stmts, &blocks[bid].stmt_range, output);
-                linearize_blocks(blocks, stmts, in_degree, predecessors, target, output);
-                linearize_blocks(blocks, stmts, in_degree, predecessors, fall_through, output);
-            } else {
-                // Standard case: emit true body (fall-through) first, then
-                // false body (target).
-                linearize_blocks(blocks, stmts, in_degree, predecessors, fall_through, output);
-                if target < blocks.len() && in_degree[target] <= 1 {
-                    linearize_blocks(blocks, stmts, in_degree, predecessors, target, output);
-                }
-                // If the target was deferred (in_degree > 1), try emitting it now
-                // that the fall-through has been emitted. This handles the common
-                // case where both branches of an inner if/else converge to a block
-                // that should stay within the current scope.
-                if target < blocks.len()
-                    && !blocks[target].emitted
-                    && all_predecessors_emitted(blocks, predecessors, target)
-                {
-                    linearize_blocks(blocks, stmts, in_degree, predecessors, target, output);
-                }
-            }
-
-            // After both branches, find their common convergence point and
-            // emit it if all its predecessors have been emitted.
-            if let Some(conv) = find_convergence_target(blocks, fall_through, target) {
-                if !blocks[conv].emitted && all_predecessors_emitted(blocks, predecessors, conv) {
-                    linearize_blocks(blocks, stmts, in_degree, predecessors, conv, output);
-                }
-            }
-        }
-    }
-}
-
-/// Negate the last if-jump in the output.
-///
-/// When the guard pattern swaps true/false body order, the if-jump condition
-/// needs to be inverted. We wrap the condition in an extra `!()` so the
-/// structurer (which strips the outer `!`) gets the negated condition.
-/// Double-negation is cleaned up by `cleanup_structured_output`.
-fn negate_last_if_jump(
-    stmts: &[BcStatement],
-    block_range: &std::ops::Range<usize>,
-    output: &mut [BcStatement],
-) {
-    if block_range.is_empty() {
-        return;
-    }
-    let last_idx = block_range.end - 1;
-    let last_text = &stmts[last_idx].text;
-    if let Some((cond, target)) = parse_if_jump(last_text) {
-        // Find this statement in the output (it was just emitted)
-        if let Some(out_stmt) = output.last_mut() {
-            if out_stmt.text == *last_text {
-                out_stmt.text = format!("if !(!{cond}) jump 0x{target:x}");
-            }
-        }
-    }
-}
-
-/// Check if all blocks that jump to `target` have been emitted.
-fn all_predecessors_emitted(
-    blocks: &[BasicBlock],
-    predecessors: &[Vec<BlockId>],
-    target: BlockId,
-) -> bool {
-    if target >= predecessors.len() {
-        return true;
-    }
-    predecessors[target]
-        .iter()
-        .all(|&pred| blocks[pred].emitted)
-}
-
-/// Find the convergence target of two branches: the block that both paths
-/// eventually jump to. Walks through nested branches recursively to collect
-/// all exit targets, then returns the shared target (lowest block ID if multiple).
-fn find_convergence_target(
-    blocks: &[BasicBlock],
-    branch_a: BlockId,
-    branch_b: BlockId,
-) -> Option<BlockId> {
-    let mut targets_a: HashSet<BlockId> = HashSet::new();
-    let mut visited_a: HashSet<BlockId> = HashSet::new();
-    collect_branch_exits(blocks, branch_a, &mut targets_a, &mut visited_a);
-
-    let mut targets_b: HashSet<BlockId> = HashSet::new();
-    let mut visited_b: HashSet<BlockId> = HashSet::new();
-    collect_branch_exits(blocks, branch_b, &mut targets_b, &mut visited_b);
-
-    // The convergence point is the lowest-numbered block that both branches exit to
-    targets_a.intersection(&targets_b).copied().min()
-}
-
-/// Recursively collect all Jump targets reachable from a block, following
-/// all edge types transitively. The `visited` set prevents infinite loops
-/// from backward edges.
-fn collect_branch_exits(
-    blocks: &[BasicBlock],
-    bid: BlockId,
-    targets: &mut HashSet<BlockId>,
-    visited: &mut HashSet<BlockId>,
-) {
-    if bid >= blocks.len() || !visited.insert(bid) {
-        return;
-    }
-    match &blocks[bid].exit {
-        BlockExit::Terminal => {}
-        BlockExit::Jump(target) => {
-            targets.insert(*target);
-            // Follow through to collect the target's own exits, enabling
-            // convergence detection across multi-entry blocks.
-            collect_branch_exits(blocks, *target, targets, visited);
-        }
-        BlockExit::FallThrough => {
-            collect_branch_exits(blocks, bid + 1, targets, visited);
-        }
-        BlockExit::CondJump {
-            fall_through,
-            target,
-        } => {
-            collect_branch_exits(blocks, *fall_through, targets, visited);
-            collect_branch_exits(blocks, *target, targets, visited);
-        }
-    }
 }
 
 /// Resolve degenerate back-edge loops: `$var = false; jump backward to if !($var)`.

@@ -3,18 +3,18 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
+use crate::bytecode::block_graph::{linearize_blocks, BlockCfg};
+use crate::bytecode::cfg::{build_stmt_cfg, extract_partition_stmts, partition_by_reachability};
 use crate::bytecode::flow::{
-    find_first_unmatched_pop, parse_jump, reorder_convergence, reorder_flow_patterns,
-    strip_latch_boilerplate,
+    parse_if_jump, parse_jump, parse_push_flow, reorder_convergence, reorder_flow_patterns,
 };
+use crate::bytecode::latch::{precompute_flipflop_names, transform_latch_patterns};
 use crate::bytecode::pipeline::structure_segment;
 use crate::bytecode::structure::apply_indentation;
 use crate::bytecode::transforms::{
     fold_switch_enum_cascade, strip_orphaned_blocks, strip_unmatched_braces,
 };
-use crate::bytecode::{
-    split_by_sequence_markers, BcStatement, OffsetMap, JUMP_OFFSET_TOLERANCE, POP_FLOW, RETURN_NOP,
-};
+use crate::bytecode::{split_by_sequence_markers, BcStatement, OffsetMap, POP_FLOW, RETURN_NOP};
 use crate::helpers::indent_of;
 use crate::prop_query::find_prop_str_items_any;
 use crate::types::{NodePinData, Property};
@@ -26,146 +26,13 @@ use super::comments::{
 use super::edgraph::EdGraphData;
 use super::{
     emit_comment, find_local_calls, section_sep, strip_resume_annotation, CommentBox, NodeInfo,
-    ResumeBlock, UbergraphSection, FUZZY_LABEL_WINDOW, LATENT_RESUME_SECTION,
+    ResumeBlock, UbergraphSection, LATENT_RESUME_SECTION,
 };
 
 /// Maximum number of events a comment box can contain and still be treated as
 /// an intentional multi-event group. Boxes containing more events are likely
 /// organizational section dividers placed for visual layout, not semantic groupings.
 const MAX_MULTI_EVENT_GROUP_SIZE: usize = 3;
-
-/// Relocate event body code that the compiler placed non-contiguously.
-///
-/// UE4 sometimes compiles an event entry point as a bare backward `jump 0xXXX`
-/// (a trampoline), with the actual body sitting physically within another event's
-/// offset range. Label-based splitting would misattribute the body to the wrong
-/// event. This pass detects those trampolines and moves the target block inline
-/// at the entry point so splitting works correctly.
-fn inline_event_trampolines(stmts: &mut Vec<BcStatement>, sorted_labels: &[(usize, &String)]) {
-    // Collect label entry offsets for the "no other label in the block" safety check.
-    let label_offsets: HashSet<usize> = sorted_labels.iter().map(|&(off, _)| off).collect();
-
-    // Process one trampoline per iteration because each relocation shifts indices.
-    loop {
-        let offset_map = OffsetMap::build(stmts);
-        let mut relocated = false;
-
-        for &(label_off, _) in sorted_labels {
-            // Find entry statement (same fuzzy matching as split_stmts_by_labels)
-            let entry_idx = match stmts.iter().position(|s| {
-                s.mem_offset >= label_off && s.mem_offset <= label_off + FUZZY_LABEL_WINDOW
-            }) {
-                Some(i) => i,
-                None => continue,
-            };
-
-            // Must be a bare unconditional jump
-            let target_off = match parse_jump(&stmts[entry_idx].text) {
-                Some(t) => t,
-                None => continue,
-            };
-
-            // Resolve target in current statement list
-            let target_idx = match offset_map.find_fuzzy(target_off, JUMP_OFFSET_TOLERANCE) {
-                Some(i) => i,
-                None => continue,
-            };
-
-            // Only backward jumps (body placed earlier than entry point)
-            if target_idx >= entry_idx {
-                continue;
-            }
-
-            // Block ends at the first pop_flow at depth 0 (inclusive),
-            // which exits the event back to the ubergraph's initial push_flow.
-            let Some(block_end) = find_first_unmatched_pop(stmts, target_idx, entry_idx) else {
-                continue;
-            };
-
-            // Safety: skip if another label entry falls within the block we'd move
-            let block_start_off = stmts[target_idx].mem_offset;
-            let block_end_off = stmts[block_end].mem_offset;
-            let other_label_in_block = label_offsets
-                .iter()
-                .any(|&off| off != label_off && off >= block_start_off && off <= block_end_off);
-            if other_label_in_block {
-                continue;
-            }
-
-            // Extract the block, then replace the trampoline jump with it.
-            // After drain, entry_idx shifts backward by block length.
-            let trampoline_off = stmts[entry_idx].mem_offset;
-            let block_len = block_end - target_idx + 1;
-            let mut block: Vec<BcStatement> =
-                stmts.drain(target_idx..target_idx + block_len).collect();
-
-            // Stamp the first relocated statement with the trampoline's offset so
-            // split_stmts_by_labels can still match the label to this event.
-            block[0].mem_offset = trampoline_off;
-
-            let new_entry_idx = entry_idx - block_len;
-            stmts.splice(new_entry_idx..new_entry_idx + 1, block);
-
-            relocated = true;
-            break; // Restart: indices have shifted
-        }
-
-        if !relocated {
-            break;
-        }
-    }
-}
-
-/// Split raw BcStatements into per-event segments using label offsets.
-/// Each segment gets its own name (from the label) and a slice of statements.
-/// Statements before the first label get an empty name (latent resume code).
-///
-/// Uses exact offset matching (not watermark) because flow reordering moves
-/// Sequence body blocks inline; those blocks retain their original (high)
-/// offsets which would trigger wrong segment splits with a >= comparison.
-fn split_stmts_by_labels(
-    stmts: &[BcStatement],
-    sorted_labels: &[(usize, &String)],
-) -> Vec<(String, Vec<BcStatement>)> {
-    // Pre-match each label to the first statement at or just after its offset.
-    // Exact matching fails because trace opcodes (filtered by the decoder) cause
-    // event entry points to land a few bytes before the first visible statement.
-    // We use a bounded window (8 bytes) instead of unbounded >= to prevent
-    // moved Sequence body blocks from triggering wrong splits.
-    let mut matched: HashMap<usize, String> = HashMap::new(); // stmt_idx -> label name
-    let mut used_labels: HashSet<usize> = HashSet::new();
-    for &(label_off, label_name) in sorted_labels {
-        for (i, stmt) in stmts.iter().enumerate() {
-            if matched.contains_key(&i) {
-                continue; // already claimed by another label
-            }
-            if stmt.mem_offset >= label_off && stmt.mem_offset <= label_off + FUZZY_LABEL_WINDOW {
-                matched.insert(i, label_name.clone());
-                used_labels.insert(label_off);
-                break;
-            }
-        }
-    }
-
-    let mut segments: Vec<(String, Vec<BcStatement>)> = Vec::new();
-    let mut current_name = String::new();
-    let mut current_stmts: Vec<BcStatement> = Vec::new();
-
-    for (i, stmt) in stmts.iter().enumerate() {
-        if let Some(name) = matched.get(&i) {
-            if !current_stmts.is_empty() || !current_name.is_empty() {
-                segments.push((current_name.clone(), current_stmts));
-                current_stmts = Vec::new();
-            }
-            current_name = name.clone();
-        }
-        current_stmts.push(stmt.clone());
-    }
-    if !current_stmts.is_empty() || !current_name.is_empty() {
-        segments.push((current_name, current_stmts));
-    }
-    segments
-}
 
 /// Split a latent resume segment at `return nop` or `pop_flow` boundaries.
 ///
@@ -244,10 +111,358 @@ pub(super) fn split_ubergraph_sections(
     (sections, resume_blocks)
 }
 
+/// Linearize a partition's statements in CFG-topological order starting from
+/// the event entry block.
+///
+/// Replaces the earlier offset-based rotation. The compiler places DoOnce /
+/// FlipFlop bodies at lower offsets than their gate check, so simple
+/// rotation leaves the body physically between the gate's if-jump and its
+/// else target. A full block-level CFG walk would place then-body /
+/// else-body / convergence in the correct order — but it would also split
+/// latch bodies (DoOnce(Name) { ... }) and Sequence chains that the
+/// structurer treats as atomic units.
+///
+/// For this phase, the function does exactly as much as is safe:
+///
+/// 1. Build a block-CFG, locate the entry block by offset.
+/// 2. Emit blocks via DFS from the entry (shared
+///    `block_graph::linearize_blocks`).
+/// 3. Sweep any unemitted blocks to preserve orphaned code.
+/// 4. [`renumber_offsets`] monotonically rewrites `mem_offset` and all
+///    jump/push_flow targets so emission-index order equals offset order,
+///    keeping `detect_for_loops` / `reorder_convergence` heuristics correct.
+///
+/// Skipped when:
+/// - The entry is already the first statement (natural order, further
+///   passes handle it correctly).
+///
+/// Sequence dispatch chains are preserved through the walk because
+/// `BlockCfg::build` collapses each Sequence into a single
+/// `SequenceSuperBlock` whose range is emitted verbatim. Downstream
+/// `detect_grouped_sequences` / `detect_interleaved_sequences` can then
+/// re-detect the raw `push_flow`/`jump` layout.
+fn linearize_from_entry(
+    stmts: &mut Vec<BcStatement>,
+    global_entry_idx: usize,
+    all_stmts: &[BcStatement],
+) {
+    if stmts.is_empty() {
+        return;
+    }
+
+    let entry_offset = all_stmts
+        .get(global_entry_idx)
+        .map(|s| s.mem_offset)
+        .unwrap_or(0);
+
+    // If the entry is already the first statement, the partition is in
+    // natural control-flow order. Linearizing here would lose context that
+    // `reorder_flow_patterns` / `reorder_convergence` rely on.
+    if stmts.first().is_some_and(|s| s.mem_offset == entry_offset) {
+        return;
+    }
+
+    let offset_map = OffsetMap::build(stmts);
+    let mut cfg = BlockCfg::build(stmts, &offset_map);
+    if cfg.blocks.is_empty() {
+        return;
+    }
+
+    // Locate the entry block by offset. The event's entry stub may be a few
+    // bytes away from any decoded statement because filtered wire_trace /
+    // tracepoint opcodes sit at the exact entry address.
+    let entry_block = offset_map
+        .find_fuzzy_forward(entry_offset, 8)
+        .and_then(|stmt_idx| cfg.stmt_to_block.get(&stmt_idx).copied())
+        .unwrap_or(0);
+
+    let in_degree = cfg.compute_in_degree();
+    let predecessors = cfg.compute_predecessors();
+    let blocks = &mut cfg.blocks;
+
+    let mut output: Vec<BcStatement> = Vec::with_capacity(stmts.len() + 4);
+
+    // Primary DFS from the event entry. Emits then-body, else-body, and
+    // convergence in the order the structurer expects.
+    linearize_blocks(
+        blocks,
+        stmts,
+        &in_degree,
+        &predecessors,
+        entry_block,
+        &mut output,
+    );
+
+    // Sweep pass: any blocks sitting before the entry in offset order that
+    // aren't reachable from the entry (shared code, orphaned trampolines)
+    // are emitted in their original block order so data isn't lost.
+    for bid in 0..blocks.len() {
+        linearize_blocks(blocks, stmts, &in_degree, &predecessors, bid, &mut output);
+    }
+
+    // Strip leading pop_flows (leftovers from adjacent event boundaries). The
+    // old rotation-based reorder also did this; with block-graph walking the
+    // same artifact can appear if the entry block sits after a pop_flow.
+    while output.first().is_some_and(|s| s.text.trim() == POP_FLOW) {
+        output.remove(0);
+    }
+
+    renumber_offsets(&mut output);
+
+    *stmts = output;
+}
+
+/// Reassign mem_offsets so that emission-index order equals offset order,
+/// then rewrite every jump/push_flow/conditional-jump target in text to
+/// match the new offsets.
+///
+/// After CFG linearization, backward jumps (in offset order) often sit in
+/// forward emission positions. Downstream passes that reason about offsets
+/// (for-loop detection, structurer goto handling) would misread these as
+/// loop back-edges. Monotonically-increasing offsets fix that.
+///
+/// Targets are resolved by building a pre-renumber [`OffsetMap`] and using
+/// fuzzy-forward lookup. Jumps can land a few bytes from the nearest
+/// statement (filtered wire_trace / tracepoint opcodes), and the latch
+/// transforms may leave gate-check offsets that no longer correspond to a
+/// visible statement but point just past one. Synthetic jumps inserted by
+/// `linearize_blocks` (mem_offset == 0) reference the target block's *old*
+/// offset, which we resolve the same way.
+fn renumber_offsets(stmts: &mut [BcStatement]) {
+    if stmts.is_empty() {
+        return;
+    }
+
+    // Strided offsets leave headroom so fuzzy-match tolerances stay within
+    // reasonable bounds and no pair of statements can collide.
+    const STRIDE: usize = 16;
+
+    let pre_map = OffsetMap::build(stmts);
+    let resolve = |target: usize| -> Option<usize> {
+        pre_map
+            .find_fuzzy_forward(target, 8)
+            .or_else(|| pre_map.find_fuzzy(target, 8))
+            .map(|stmt_idx| (stmt_idx + 1) * STRIDE)
+    };
+
+    for (idx, stmt) in stmts.iter_mut().enumerate() {
+        let new_offset = (idx + 1) * STRIDE;
+        let trimmed = stmt.text.trim().to_string();
+        if let Some((cond, target)) = parse_if_jump(&trimmed) {
+            if let Some(new_target) = resolve(target) {
+                stmt.text = format!("if !({}) jump 0x{:x}", cond, new_target);
+            }
+        } else if parse_push_flow(&trimmed).is_none() {
+            if let Some(target) = parse_jump(&trimmed) {
+                if let Some(new_target) = resolve(target) {
+                    stmt.text = format!("jump 0x{:x}", new_target);
+                }
+            }
+        }
+        if let Some(target) = parse_push_flow(&trimmed) {
+            if let Some(new_target) = resolve(target) {
+                stmt.text = format!("push_flow 0x{:x}", new_target);
+            }
+        }
+        stmt.mem_offset = new_offset;
+        stmt.offset_aliases.clear();
+    }
+}
+
+/// Rewrite jump/push_flow/conditional-jump targets to the exact `mem_offset`
+/// of the nearest statement within the fuzzy tolerance.
+///
+/// Cross-event jumps often land on aliased offsets 5+ bytes from the nearest
+/// statement, exceeding downstream tolerances. Running this before CFG
+/// construction keeps block boundaries stable without removing any
+/// statements.
+fn normalize_jump_targets(stmts: &mut [BcStatement]) {
+    if stmts.is_empty() {
+        return;
+    }
+    let offset_map = OffsetMap::build(stmts);
+    for idx in 0..stmts.len() {
+        let trimmed = stmts[idx].text.trim().to_string();
+        if let Some(target) = parse_jump(&trimmed) {
+            if parse_push_flow(&trimmed).is_some() {
+                continue;
+            }
+            if let Some(target_idx) = offset_map.find_fuzzy_forward(target, 8) {
+                let exact = stmts[target_idx].mem_offset;
+                if exact != target {
+                    stmts[idx].text = format!("jump 0x{:x}", exact);
+                }
+            }
+        } else if let Some((cond, target)) = parse_if_jump(&trimmed) {
+            if let Some(target_idx) = offset_map.find_fuzzy_forward(target, 8) {
+                let exact = stmts[target_idx].mem_offset;
+                if exact != target {
+                    stmts[idx].text = format!("if !({}) jump 0x{:x}", cond, exact);
+                }
+            }
+        } else if let Some(target) = parse_push_flow(&trimmed) {
+            if let Some(target_idx) = offset_map.find_fuzzy_forward(target, 8) {
+                let exact = stmts[target_idx].mem_offset;
+                if exact != target {
+                    stmts[idx].text = format!("push_flow 0x{:x}", exact);
+                }
+            }
+        }
+    }
+}
+
+/// Collapse bare jump chains so intermediate trampolines don't confuse structuring.
+///
+/// When event partitions include shared code at distant offsets, the jump path
+/// from the event's own code to the shared code may go through several bare jumps.
+/// This collapses `jump A -> jump B -> jump C -> actual_code` into `jump C`
+/// and removes dead trampoline statements that are no longer referenced.
+fn collapse_jump_chains(stmts: &mut Vec<BcStatement>) {
+    if stmts.len() < 3 {
+        return;
+    }
+
+    // Normalize jump targets to exact offsets first so the chain walk below
+    // sees consistent addresses.
+    normalize_jump_targets(stmts);
+
+    // Track offsets of intermediate trampoline jumps that this pass elides.
+    // Only these should be removed in the dead-code filter below; any other
+    // bare jumps represent legitimate control-flow edges (e.g. backward edges
+    // out of latch bodies) that later passes rely on.
+    let mut elided_offsets: HashSet<usize> = HashSet::new();
+
+    // Collapse bare jump chains: jump A -> jump B -> actual_code becomes jump B
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let chain_map = OffsetMap::build(stmts);
+        for idx in 0..stmts.len() {
+            let trimmed = stmts[idx].text.trim().to_string();
+
+            if let Some(target) = parse_jump(&trimmed) {
+                if parse_push_flow(&trimmed).is_some() {
+                    continue;
+                }
+                let Some(target_idx) = chain_map.find_fuzzy_forward(target, 8) else {
+                    continue;
+                };
+                let target_text = stmts[target_idx].text.trim().to_string();
+                if parse_push_flow(&target_text).is_some() {
+                    continue;
+                }
+                if let Some(final_target) = parse_jump(&target_text) {
+                    elided_offsets.insert(stmts[target_idx].mem_offset);
+                    stmts[idx].text = format!("jump 0x{:x}", final_target);
+                    changed = true;
+                }
+                continue;
+            }
+
+            if let Some((cond, target)) = parse_if_jump(&trimmed) {
+                let Some(target_idx) = chain_map.find_fuzzy_forward(target, 8) else {
+                    continue;
+                };
+                let target_text = stmts[target_idx].text.trim().to_string();
+                if parse_push_flow(&target_text).is_some() {
+                    continue;
+                }
+                if let Some(final_target) = parse_jump(&target_text) {
+                    elided_offsets.insert(stmts[target_idx].mem_offset);
+                    stmts[idx].text = format!("if !({}) jump 0x{:x}", cond, final_target);
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    // Remove bare jump trampolines that are unreferenced and not part of
+    // a push_flow/jump sequence pair. Sequence pin markers look like:
+    //   push_flow RESUME_ADDR
+    //   jump BODY_ADDR          <- reached by fallthrough, must be preserved
+    let final_offset_map = OffsetMap::build(stmts);
+    let mut referenced_offsets: HashSet<usize> = HashSet::new();
+    for stmt in stmts.iter() {
+        let trimmed = stmt.text.trim();
+        if let Some(target) = parse_jump(trimmed) {
+            if let Some(idx) = final_offset_map.find_fuzzy_forward(target, 8) {
+                referenced_offsets.insert(stmts[idx].mem_offset);
+            }
+        }
+        if let Some((_, target)) = parse_if_jump(trimmed) {
+            if let Some(idx) = final_offset_map.find_fuzzy_forward(target, 8) {
+                referenced_offsets.insert(stmts[idx].mem_offset);
+            }
+        }
+        if let Some(target) = parse_push_flow(trimmed) {
+            if let Some(idx) = final_offset_map.find_fuzzy_forward(target, 8) {
+                referenced_offsets.insert(stmts[idx].mem_offset);
+            }
+        }
+    }
+
+    // Also protect jumps that follow push_flow (sequence pin bodies)
+    // or follow if-jumps (branch targets reached by fallthrough).
+    let mut fallthrough_offsets: HashSet<usize> = HashSet::new();
+    // Track jumps whose predecessor is itself a flow terminator. These cannot
+    // be reached by fallthrough and so are only live if something jumps to
+    // them directly. Covers leftover trampolines the compiler emits after a
+    // `}` (latch close), a preceding unconditional jump, or a pop_flow.
+    let mut after_terminator_offsets: HashSet<usize> = HashSet::new();
+    for window in stmts.windows(2) {
+        let prev_text = window[0].text.trim();
+        if parse_push_flow(prev_text).is_some() || parse_if_jump(prev_text).is_some() {
+            fallthrough_offsets.insert(window[1].mem_offset);
+        } else if is_flow_terminator(prev_text) {
+            after_terminator_offsets.insert(window[1].mem_offset);
+        }
+    }
+
+    stmts.retain(|stmt| {
+        let trimmed = stmt.text.trim();
+        if parse_jump(trimmed).is_none() || parse_push_flow(trimmed).is_some() {
+            return true;
+        }
+        // Jumps immediately following a flow terminator (`}`, `pop_flow`,
+        // another bare jump, or `return`) are unreachable by fallthrough.
+        // They survive only if some other jump targets them.
+        if after_terminator_offsets.contains(&stmt.mem_offset) {
+            return referenced_offsets.contains(&stmt.mem_offset);
+        }
+        // Only strip jumps that were rewritten as elided trampolines.
+        // Preserve legitimate backward/forward jumps that the chain walk
+        // left alone; they carry real control-flow information.
+        if !elided_offsets.contains(&stmt.mem_offset) {
+            return true;
+        }
+        referenced_offsets.contains(&stmt.mem_offset)
+            || fallthrough_offsets.contains(&stmt.mem_offset)
+    });
+}
+
+/// Return true if a statement ends control flow such that the next
+/// sequential statement is unreachable by fallthrough.
+fn is_flow_terminator(text: &str) -> bool {
+    let trimmed = text.trim();
+    // An unconditional jump terminates fallthrough.
+    if parse_jump(trimmed).is_some() && parse_push_flow(trimmed).is_none() {
+        return true;
+    }
+    if trimmed == POP_FLOW || trimmed == RETURN_NOP || trimmed == "return" {
+        return true;
+    }
+    // A closing brace from latch/loop/if block emission.
+    if trimmed == "}" {
+        return true;
+    }
+    false
+}
+
 /// Build structured ubergraph output from raw bytecode statements and event labels.
 ///
-/// Flow-reorders the entire ubergraph, splits into per-event segments, structures
-/// each independently, and produces the final line output.
+/// Pipeline: build CFG on raw bytecode, partition events by reachability,
+/// then run latch transforms and structuring per-event. This avoids cross-event
+/// contamination from running latch transforms on interleaved events.
 pub(super) fn build_ubergraph_structured(
     stmts: Vec<BcStatement>,
     ubergraph_labels: &HashMap<usize, String>,
@@ -256,44 +471,51 @@ pub(super) fn build_ubergraph_structured(
         return None;
     }
 
-    // Strip FlipFlop/DoOnce latch boilerplate before flow reordering,
-    // so their pop_flow boundaries don't fragment event bodies.
-    let mut cleaned = stmts;
-    strip_latch_boilerplate(&mut cleaned);
-    // Flow reorder the entire UberGraph; Sequence node body blocks are
-    // scattered across events and push_flow/pop_flow pairs need the
-    // whole function to resolve correctly.
-    let mut reordered = reorder_flow_patterns(&cleaned);
-    reorder_convergence(&mut reordered);
+    let cleaned = stmts;
 
-    // Now split into per-event segments and process each through
-    // inline/structure/cleanup independently. This produces much
-    // cleaner pseudocode because the structurer and inliner aren't
-    // confused by cross-event jumps and shared temp variables.
-    let mut sorted_labels: Vec<(usize, &String)> =
-        ubergraph_labels.iter().map(|(k, v)| (*k, v)).collect();
-    sorted_labels.sort_by_key(|(offset, _)| *offset);
+    // Pre-compute FlipFlop names from the full UberGraph before partitioning.
+    // derive_flipflop_name scans all statements for `self.X = toggle_var`
+    // assignments, which may be in a different event than the toggle pattern.
+    let flipflop_names = precompute_flipflop_names(&cleaned);
 
-    // Relocate event bodies that the compiler placed as backward trampolines.
-    inline_event_trampolines(&mut reordered, &sorted_labels);
+    // Build a lightweight CFG on raw bytecode and partition statements by
+    // reachability from each event entry point. Latch patterns are still
+    // intact, but push_flow edges bridge past their internal pop_flows.
+    // Event boundary pop_flows have no such bypass, so BFS stops correctly.
+    let sorted_labels: Vec<(usize, &String)> = {
+        let mut labels: Vec<(usize, &String)> =
+            ubergraph_labels.iter().map(|(k, v)| (*k, v)).collect();
+        labels.sort_by_key(|(offset, _)| *offset);
+        labels
+    };
 
-    let segments = split_stmts_by_labels(&reordered, &sorted_labels);
+    let offset_map = OffsetMap::build(&cleaned);
+    let cfg = build_stmt_cfg(&cleaned, &offset_map);
+    let partitions = partition_by_reachability(&cfg, &cleaned, &sorted_labels, &offset_map);
+
     let mut all_lines: Vec<String> = Vec::new();
-    for (name, segment_stmts) in &segments {
-        if !name.is_empty() {
-            all_lines.push(format!("--- {} ---", name));
-        } else if !segment_stmts.is_empty() {
+    for partition in &partitions {
+        if !partition.name.is_empty() {
+            all_lines.push(format!("--- {} ---", partition.name));
+        } else if !partition.indices.is_empty() {
             all_lines.push(format!("--- {} ---", LATENT_RESUME_SECTION));
         }
-        if segment_stmts.is_empty() {
+        if partition.indices.is_empty() {
             continue;
         }
+
+        let mut event_stmts = extract_partition_stmts(&cleaned, &partition.indices);
+
+        // Transform DoOnce/FlipFlop latch patterns per-event.
+        // Each event's bytecode is small and self-contained, so the latch
+        // transform operates in isolation without cross-event interference.
+        transform_latch_patterns(&mut event_stmts, Some(&flipflop_names));
 
         // Latent resume segments contain multiple independent blocks separated
         // by `return nop`. Split and structure each block independently so that
         // dead-code elimination doesn't kill all blocks after the first return.
-        if name.is_empty() {
-            let resume_blocks = split_at_return_nop(segment_stmts);
+        if partition.name.is_empty() {
+            let resume_blocks = split_at_return_nop(&event_stmts);
             for (bi, block) in resume_blocks.iter().enumerate() {
                 if bi > 0 {
                     all_lines.push("return".to_string());
@@ -305,16 +527,34 @@ pub(super) fn build_ubergraph_structured(
             continue;
         }
 
-        let sub_segments = split_by_sequence_markers(segment_stmts);
+        // Normalize jump targets first so the block-CFG built by
+        // `linearize_from_entry` sees clean boundaries. Full
+        // `collapse_jump_chains` runs later, once any entry trampolines the
+        // block-CFG needed have already been processed.
+        normalize_jump_targets(&mut event_stmts);
+
+        // When the entry point is not the first statement (body code at lower
+        // offsets than the entry trampoline), walk the block-level CFG so the
+        // entry block comes first and then/else/convergence order matches
+        // control flow instead of offset order.
+        if let Some(global_entry) = partition.entry_idx {
+            linearize_from_entry(&mut event_stmts, global_entry, &cleaned);
+        }
+
+        collapse_jump_chains(&mut event_stmts);
+
+        // Flow reorder and convergence fix per-event, so Sequence body blocks
+        // and backward jumps are resolved within each event's scope.
+        let mut reordered = reorder_flow_patterns(&event_stmts);
+        reorder_convergence(&mut reordered);
+
+        let sub_segments = split_by_sequence_markers(&reordered);
         if sub_segments.len() <= 1 {
-            all_lines.extend(structure_segment(segment_stmts));
+            all_lines.extend(structure_segment(&reordered));
         } else {
-            // Process each sequence body independently so that
-            // cross-body jumps don't cause if-blocks to span
-            // across sequence boundaries.
             for (marker, body) in &sub_segments {
-                if let Some(m) = marker {
-                    all_lines.push(m.clone());
+                if let Some(marker_text) = marker {
+                    all_lines.push(marker_text.clone());
                 }
                 if !body.is_empty() {
                     all_lines.extend(structure_segment(body));
@@ -322,9 +562,7 @@ pub(super) fn build_ubergraph_structured(
             }
         }
     }
-    // Final cleanup: strip cross-body orphaned braces left
-    // over from per-body processing, then remove any empty
-    // if-blocks or else-blocks that the brace removal exposed.
+
     strip_unmatched_braces(&mut all_lines);
     strip_orphaned_blocks(&mut all_lines);
     fold_switch_enum_cascade(&mut all_lines);
@@ -343,6 +581,67 @@ fn extract_input_action_name(section_name: &str) -> Option<&str> {
     let rest = section_name.strip_prefix("InpActEvt_")?;
     let end = rest.find("_K2Node_InputActionEvent_")?;
     Some(&rest[..end])
+}
+
+/// Extract the trailing numeric suffix from an InputAction or InputAxis event.
+fn extract_event_suffix_number(section_name: &str) -> Option<u32> {
+    let last_underscore = section_name.rfind('_')?;
+    section_name[last_underscore + 1..].parse().ok()
+}
+
+/// Extract the axis name from an InputAxis event stub.
+///
+/// `InpAxisEvt_MouseX_K2Node_InputAxisEvent_0` returns `Some("MouseX")`.
+fn extract_input_axis_name(section_name: &str) -> Option<&str> {
+    let rest = section_name.strip_prefix("InpAxisEvt_")?;
+    let end = rest.find("_K2Node_InputAxisEvent_")?;
+    Some(&rest[..end])
+}
+
+/// Pre-compute Pressed/Released labels for InputAction events.
+///
+/// Groups events by action name. When an action has two events, the lower
+/// suffix number is Pressed, the higher is Released. Single events are Pressed.
+fn compute_action_key_events(section_names: &[&str]) -> HashMap<String, String> {
+    let mut by_action: HashMap<&str, Vec<(&str, u32)>> = HashMap::new();
+    for &name in section_names {
+        if let Some(action) = extract_input_action_name(name) {
+            let num = extract_event_suffix_number(name).unwrap_or(0);
+            by_action.entry(action).or_default().push((name, num));
+        }
+    }
+    let mut result = HashMap::new();
+    for (_, mut events) in by_action {
+        events.sort_by_key(|&(_, num)| num);
+        if events.len() == 1 {
+            result.insert(events[0].0.to_string(), "Pressed".to_string());
+        } else {
+            result.insert(events[0].0.to_string(), "Pressed".to_string());
+            for &(name, _) in &events[1..] {
+                result.insert(name.to_string(), "Released".to_string());
+            }
+        }
+    }
+    result
+}
+
+/// Convert a raw UberGraph section name to a clean display name with signature.
+///
+/// `InpActEvt_Jump_K2Node_InputActionEvent_13` with Pressed -> `InputAction_Jump_Pressed()`
+/// `InpAxisEvt_MouseX_K2Node_InputAxisEvent_0` -> `InputAxis_MouseX(AxisValue: float)`
+/// Custom events pass through unchanged with `()` appended.
+fn clean_event_header(raw_name: &str, action_key_events: &HashMap<String, String>) -> String {
+    if let Some(action) = extract_input_action_name(raw_name) {
+        let key_event = action_key_events
+            .get(raw_name)
+            .map(|s| s.as_str())
+            .unwrap_or("Pressed");
+        return format!("InputAction_{}_{}", action, key_event);
+    }
+    if let Some(axis) = extract_input_axis_name(raw_name) {
+        return format!("InputAxis_{}(AxisValue: float)", axis);
+    }
+    raw_name.to_string()
 }
 
 /// Resolve an event's graph node position by section name.
@@ -756,6 +1055,9 @@ pub(super) fn emit_ubergraph_events(
         section_resume_map.entry(si).or_default().push(ri);
     }
 
+    let section_names: Vec<&str> = sections.iter().map(|s| s.name.as_str()).collect();
+    let action_key_events = compute_action_key_events(&section_names);
+
     let mut emitted_group_comments: HashSet<usize> = HashSet::new();
     let mut emitted_event_count = 0usize;
 
@@ -815,7 +1117,12 @@ pub(super) fn emit_ubergraph_events(
             for cb in top_level {
                 emit_comment(buf, &cb.text, sig_indent);
             }
-            writeln!(buf, "{}{}():", sig_indent, section.name).unwrap();
+            let display_name = clean_event_header(&section.name, &action_key_events);
+            if display_name.contains('(') {
+                writeln!(buf, "{}{}:", sig_indent, display_name).unwrap();
+            } else {
+                writeln!(buf, "{}{}():", sig_indent, display_name).unwrap();
+            }
         }
 
         let section_resumes = section_resume_map
@@ -929,79 +1236,6 @@ mod tests {
     }
 
     #[test]
-    fn split_exact_match_ignores_high_offsets() {
-        // Simulate flow-reordered UberGraph: Event A at offset 100 has a Sequence
-        // body moved inline from offset 5000. Event B starts at offset 1000.
-        // The old watermark approach would split at offset 5000 >= 1000.
-        let stmts = vec![
-            stmt(100, "// sequence [0]:"),
-            stmt(5000, "body_stmt_1"),
-            stmt(5010, "body_stmt_2"),
-            stmt(100, "// sequence [1]:"),
-            stmt(150, "inline_stmt"),
-            stmt(1000, "event_b_start"),
-            stmt(1020, "event_b_stmt"),
-        ];
-        let event_a = "EventA".to_string();
-        let event_b = "EventB".to_string();
-        let labels: Vec<(usize, &String)> = vec![(100, &event_a), (1000, &event_b)];
-
-        let segments = split_stmts_by_labels(&stmts, &labels);
-
-        assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].0, "EventA");
-        assert_eq!(segments[0].1.len(), 5); // all stmts before EventB
-        assert_eq!(segments[1].0, "EventB");
-        assert_eq!(segments[1].1.len(), 2);
-    }
-
-    #[test]
-    fn split_latent_resume_before_first_label() {
-        let stmts = vec![
-            stmt(50, "latent_code"),
-            stmt(100, "event_start"),
-            stmt(120, "event_stmt"),
-        ];
-        let event_a = "EventA".to_string();
-        let labels: Vec<(usize, &String)> = vec![(100, &event_a)];
-
-        let segments = split_stmts_by_labels(&stmts, &labels);
-
-        assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].0, ""); // unnamed latent resume
-        assert_eq!(segments[0].1.len(), 1);
-        assert_eq!(segments[1].0, "EventA");
-        assert_eq!(segments[1].1.len(), 2);
-    }
-
-    #[test]
-    fn split_fuzzy_match_within_8_bytes() {
-        // Label offset 97 matches first stmt at offset 100 (3 bytes off, within 8-byte window)
-        let stmts = vec![stmt(100, "event_start"), stmt(120, "event_stmt")];
-        let event_a = "EventA".to_string();
-        let labels: Vec<(usize, &String)> = vec![(97, &event_a)];
-
-        let segments = split_stmts_by_labels(&stmts, &labels);
-
-        assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].0, "EventA");
-        assert_eq!(segments[0].1.len(), 2);
-    }
-
-    #[test]
-    fn split_rejects_match_beyond_8_bytes() {
-        // Label offset 90 does NOT match stmt at offset 100 (10 bytes off, beyond window)
-        let stmts = vec![stmt(100, "event_start"), stmt(120, "event_stmt")];
-        let event_a = "EventA".to_string();
-        let labels: Vec<(usize, &String)> = vec![(90, &event_a)];
-
-        let segments = split_stmts_by_labels(&stmts, &labels);
-
-        assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].0, ""); // unmatched, no label found
-    }
-
-    #[test]
     fn cross_segment_jump_past_end_not_rewritten() {
         // jump 0x2000 is past max offset (120) -> find_target_idx_or_end resolves
         // this as jump-to-end, so resolve_cross_segment_jumps leaves it alone
@@ -1092,6 +1326,9 @@ mod tests {
 
     #[test]
     fn strip_orphaned_empty_if_else() {
+        // An `if (cond) { } else { body }` pattern with an empty then-branch
+        // should become `if (!cond) { body }`, preserving the guard rather
+        // than unconditionally emitting the else body.
         let mut lines = vec![
             "if (cond) {".to_string(),
             "} else {".to_string(),
@@ -1099,7 +1336,14 @@ mod tests {
             "}".to_string(),
         ];
         strip_orphaned_blocks(&mut lines);
-        assert_eq!(lines, vec!["    DoThing()"]);
+        assert_eq!(
+            lines,
+            vec![
+                "if (!cond) {".to_string(),
+                "    DoThing()".to_string(),
+                "}".to_string(),
+            ]
+        );
     }
 
     #[test]
