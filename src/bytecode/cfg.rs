@@ -10,12 +10,7 @@ use super::decode::BcStatement;
 use super::flow::{
     parse_if_jump, parse_jump, parse_jump_computed, parse_pop_flow_if_not, parse_push_flow,
 };
-use super::{OffsetMap, POP_FLOW, RETURN_NOP};
-
-/// Tolerance for resolving bytecode offsets to statement indices.
-/// Jump targets and entry points may land on filtered trace opcodes, creating
-/// gaps of up to 8 bytes between the raw offset and the first decoded statement.
-const CFG_OFFSET_TOLERANCE: usize = 8;
+use super::{OffsetMap, BARE_RETURN, POP_FLOW, RETURN_NOP, STRUCTURE_OFFSET_TOLERANCE};
 
 /// Control flow graph mapping each statement index to its successor indices.
 pub struct StmtCfg {
@@ -42,7 +37,7 @@ pub fn build_stmt_cfg(stmts: &[BcStatement], offset_map: &OffsetMap) -> StmtCfg 
             }
 
             // Terminal: return ends execution
-            if text == RETURN_NOP || text == "return" || text.starts_with("return ") {
+            if text == RETURN_NOP || text == BARE_RETURN || text.starts_with("return ") {
                 return Vec::new();
             }
 
@@ -54,7 +49,7 @@ pub fn build_stmt_cfg(stmts: &[BcStatement], offset_map: &OffsetMap) -> StmtCfg 
             // Unconditional jump: single successor at the target
             if let Some(target_offset) = parse_jump(text) {
                 if let Some(target_idx) =
-                    offset_map.find_fuzzy_forward(target_offset, CFG_OFFSET_TOLERANCE)
+                    offset_map.find_fuzzy_forward(target_offset, STRUCTURE_OFFSET_TOLERANCE)
                 {
                     return vec![target_idx];
                 }
@@ -69,7 +64,7 @@ pub fn build_stmt_cfg(stmts: &[BcStatement], offset_map: &OffsetMap) -> StmtCfg 
                     succs.push(fallthrough);
                 }
                 if let Some(target_idx) =
-                    offset_map.find_fuzzy_forward(target_offset, CFG_OFFSET_TOLERANCE)
+                    offset_map.find_fuzzy_forward(target_offset, STRUCTURE_OFFSET_TOLERANCE)
                 {
                     if !succs.contains(&target_idx) {
                         succs.push(target_idx);
@@ -86,7 +81,7 @@ pub fn build_stmt_cfg(stmts: &[BcStatement], offset_map: &OffsetMap) -> StmtCfg 
                     succs.push(fallthrough);
                 }
                 if let Some(resume_idx) =
-                    offset_map.find_fuzzy_forward(resume_offset, CFG_OFFSET_TOLERANCE)
+                    offset_map.find_fuzzy_forward(resume_offset, STRUCTURE_OFFSET_TOLERANCE)
                 {
                     if !succs.contains(&resume_idx) {
                         succs.push(resume_idx);
@@ -146,7 +141,7 @@ pub fn partition_by_reachability(
         .iter()
         .filter_map(|&(offset, name)| {
             offset_map
-                .find_fuzzy_forward(offset, CFG_OFFSET_TOLERANCE)
+                .find_fuzzy_forward(offset, STRUCTURE_OFFSET_TOLERANCE)
                 .map(|idx| (idx, name.as_str()))
         })
         .collect();

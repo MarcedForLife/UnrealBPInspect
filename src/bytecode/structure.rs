@@ -11,17 +11,12 @@ use super::flow::{
     find_first_unmatched_pop, flow_depth, parse_continue_if_not, parse_if_jump, parse_jump,
     parse_jump_computed, parse_pop_flow_if_not, parse_push_flow,
 };
-use super::{POP_FLOW, RETURN_NOP};
+use super::{BARE_RETURN, BLOCK_CLOSE, POP_FLOW, RETURN_NOP, STRUCTURE_OFFSET_TOLERANCE};
 use crate::helpers::{closes_block, is_loop_header, opens_block, SECTION_SEPARATOR};
 use std::collections::{HashMap, HashSet};
 
 /// Indentation string per nesting level (4 spaces).
 const INDENT: &str = "    ";
-
-/// Fuzzy offset tolerance for jump target resolution. Wider than the base
-/// JUMP_OFFSET_TOLERANCE (4) because structure runs after flow reordering,
-/// where two adjacent FName adjustments can compound.
-const STRUCTURE_OFFSET_TOLERANCE: usize = 8;
 
 /// Negate a condition string for if/else inversion.
 ///
@@ -475,7 +470,7 @@ fn collect_label_targets(
 
 /// Whether a statement unconditionally exits the current scope.
 fn is_block_exit(text: &str) -> bool {
-    text == POP_FLOW || text == RETURN_NOP || text == "return"
+    text == POP_FLOW || text == RETURN_NOP || text == BARE_RETURN
 }
 
 /// Find the exclusive end index of a block starting at `start`.
@@ -494,7 +489,7 @@ fn find_block_end(stmts: &[BcStatement], start: usize) -> usize {
                 return idx + 1;
             }
         }
-        if depth == 0 && (stmt.text == RETURN_NOP || stmt.text == "return") {
+        if depth == 0 && (stmt.text == RETURN_NOP || stmt.text == BARE_RETURN) {
             return idx + 1;
         }
     }
@@ -801,7 +796,8 @@ fn detect_else_branch(
             }
         }
         // Diverging return: both branches exit independently.
-        else if (stmt.text == RETURN_NOP || stmt.text == "return") && target_idx < stmts.len() {
+        else if (stmt.text == RETURN_NOP || stmt.text == BARE_RETURN) && target_idx < stmts.len()
+        {
             return (Some(check_idx), Some(stmts.len()));
         }
         // Diverging pop_flow: the true branch exits via pop_flow back to the
@@ -820,7 +816,7 @@ fn detect_else_branch(
         // Latch close brace: DoOnce/FlipFlop transforms replace body-end
         // pop_flow with `}`. This is a scope exit when the matching opener
         // is a latch block within the true branch.
-        else if trimmed == "}" && target_idx < stmts.len() {
+        else if trimmed == BLOCK_CLOSE && target_idx < stmts.len() {
             let has_latch_opener = (if_idx + 1..check_idx).any(|j| {
                 let opener = stmts[j].text.trim();
                 (opener.starts_with("DoOnce(") || opener.starts_with("FlipFlop("))
@@ -885,7 +881,7 @@ fn truncate_false_blocks(
             }
             // Return at depth 0 terminates the else block (the branch
             // diverges, so nothing after it belongs to this else).
-            if if_depth == 0 && (stmt.text == RETURN_NOP || stmt.text == "return") {
+            if if_depth == 0 && (stmt.text == RETURN_NOP || stmt.text == BARE_RETURN) {
                 blk.else_close_idx = Some(j + 1);
                 break;
             }
@@ -903,14 +899,14 @@ fn suppress_flow_opcodes(stmts: &[BcStatement], skip: &mut HashSet<usize>) {
 }
 
 /// Detect brace-delimited blocks (while/for loops from flow.rs) by matching
-/// `ends_with(" {")` / `== "}"` pairs with a simple stack.
+/// `ends_with(" {")` / `== BLOCK_CLOSE` pairs with a simple stack.
 fn detect_brace_blocks(stmts: &[BcStatement]) -> Vec<(usize, usize)> {
     let mut stack: Vec<usize> = Vec::new();
     let mut blocks: Vec<(usize, usize)> = Vec::new();
     for (idx, stmt) in stmts.iter().enumerate() {
         if stmt.text.ends_with(" {") {
             stack.push(idx);
-        } else if stmt.text == "}" {
+        } else if stmt.text == BLOCK_CLOSE {
             if let Some(open_idx) = stack.pop() {
                 blocks.push((open_idx, idx));
             }
@@ -1129,10 +1125,10 @@ fn find_break_labels(output: &[String]) -> HashSet<String> {
             .iter()
             .rev()
             .find(|l| !l.trim().is_empty())
-            .is_some_and(|l| l.trim() == "}");
+            .is_some_and(|l| l.trim() == BLOCK_CLOSE);
         let near_end = output[i + 1..].iter().all(|l| {
             let trimmed = l.trim();
-            trimmed.is_empty() || trimmed == "return" || trimmed == "}"
+            trimmed.is_empty() || trimmed == BARE_RETURN || trimmed == BLOCK_CLOSE
         });
         if after_brace || near_end {
             labels.insert(label.to_string());
@@ -1338,16 +1334,16 @@ fn strip_dead_backward_gotos(output: &mut Vec<String>) {
                 if t.is_empty() {
                     None
                 } else {
-                    Some(t == "}")
+                    Some(t == BLOCK_CLOSE)
                 }
             });
             if prev_is_close != Some(true) {
                 continue;
             }
-            // Everything after the goto must be dead (blank, `}`, `return`).
+            // Everything after the goto must be dead (blank, BLOCK_CLOSE, BARE_RETURN).
             let tail_is_dead = output[goto_idx + 1..].iter().all(|line| {
                 let t = line.trim();
-                t.is_empty() || t == "}" || t == "return"
+                t.is_empty() || t == BLOCK_CLOSE || t == BARE_RETURN
             });
             if !tail_is_dead {
                 continue;
@@ -1461,7 +1457,7 @@ fn has_boundary_between(output: &[String], label_name: &str, goto_idx: usize) ->
     };
     output[lo + 1..hi].iter().any(|l| {
         let trimmed = l.trim();
-        trimmed == "}" || trimmed.starts_with("} else")
+        trimmed == BLOCK_CLOSE || trimmed.starts_with("} else")
     })
 }
 
@@ -1479,7 +1475,7 @@ fn collapse_double_else(output: &mut Vec<String>) {
                 continue;
             }
 
-            if trimmed == "} else {" && next_trimmed == "}" {
+            if trimmed == "} else {" && next_trimmed == BLOCK_CLOSE {
                 output.remove(i);
                 output.remove(i);
                 changed = true;

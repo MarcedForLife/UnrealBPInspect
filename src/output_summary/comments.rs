@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::{CommentBox, NodeInfo, BRANCH_IDENTIFIER, MAX_BUBBLE_DISTANCE_SQ};
+use crate::bytecode::{ANY_SEQUENCE_MARKER_PREFIX, ANY_SUB_SEQUENCE_MARKER_PREFIX, BLOCK_CLOSE};
 use crate::helpers::is_comment_or_empty;
 use crate::helpers::{indent_of, is_ident_char};
 use crate::types::{NodePinData, PIN_DIRECTION_INPUT, PIN_TYPE_EXEC};
@@ -621,13 +622,13 @@ fn find_enclosing_structure(bytecode_lines: &[String], line_idx: usize) -> usize
             return best;
         }
         if indent == target_indent {
-            if trimmed.starts_with("// sequence")
-                || trimmed.starts_with("// sub-sequence")
+            if trimmed.starts_with(ANY_SEQUENCE_MARKER_PREFIX)
+                || trimmed.starts_with(ANY_SUB_SEQUENCE_MARKER_PREFIX)
                 || trimmed.starts_with("if (")
                 || trimmed.starts_with("} else")
             {
                 best = i;
-            } else if trimmed == "}" {
+            } else if trimmed == BLOCK_CLOSE {
                 // Closing brace of a preceding block at the same indent,
                 // continue walking to find the block's opening `if`
                 continue;
