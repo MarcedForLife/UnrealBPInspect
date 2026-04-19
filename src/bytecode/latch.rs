@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::decode::BcStatement;
 use super::flow::{parse_if_jump, parse_jump, parse_pop_flow_if_not, parse_push_flow};
-use super::POP_FLOW;
+use super::{BLOCK_CLOSE, POP_FLOW, STRUCTURE_OFFSET_TOLERANCE};
 
 const GATE_PREFIX: &str = "Temp_bool_IsClosed_Variable";
 const INIT_PREFIX: &str = "Temp_bool_Has_Been_Initd_Variable";
@@ -261,7 +261,9 @@ fn derive_doonce_name(
             break;
         }
         if let Some(target) = parse_jump(trimmed) {
-            if let Some(target_idx) = offset_map.find_fuzzy_forward(target, 8) {
+            if let Some(target_idx) =
+                offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
+            {
                 scan_start = target_idx;
                 continue;
             }
@@ -373,7 +375,7 @@ fn resolve_body_entry(
             return Some(pos);
         }
         if let Some(target) = parse_jump(text) {
-            if let Some(next) = offset_map.find_fuzzy_forward(target, 8) {
+            if let Some(next) = offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE) {
                 pos = next;
                 continue;
             }
@@ -560,7 +562,9 @@ fn transform_latches(stmts: &mut Vec<BcStatement>) {
 
                     if parse_push_flow(&body_text).is_none() {
                         if let Some(target) = parse_jump(&body_text) {
-                            if let Some(target_pos) = offset_map.find_fuzzy_forward(target, 8) {
+                            if let Some(target_pos) =
+                                offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
+                            {
                                 pos = target_pos;
                                 continue;
                             }
@@ -581,7 +585,7 @@ fn transform_latches(stmts: &mut Vec<BcStatement>) {
                             pos += 1;
                             continue;
                         }
-                        replacements.insert(pos, "}".to_string());
+                        replacements.insert(pos, BLOCK_CLOSE.to_string());
                         body_end_indices.insert(pos);
                         site.body_end = Some(pos);
                         break;
@@ -899,7 +903,8 @@ fn collapse_converged_flipflops(stmts: &mut Vec<BcStatement>, flipflop_names: &[
         };
 
         // B-path: the branch's jump target, should also be a bare jump
-        let Some(b_idx) = offset_map.find_fuzzy_forward(branch_target, 8) else {
+        let Some(b_idx) = offset_map.find_fuzzy_forward(branch_target, STRUCTURE_OFFSET_TOLERANCE)
+        else {
             continue;
         };
         let Some(b_target) = parse_jump(stmts[b_idx].text.trim()) else {
@@ -932,7 +937,9 @@ fn collapse_converged_flipflops(stmts: &mut Vec<BcStatement>, flipflop_names: &[
 
         // Find the body-end pop_flow and replace directly with closing braces.
         // FlipFlop needs two: `}` for `A|B: {` and `}` for `FlipFlop(name) {`.
-        if let Some(body_start_idx) = offset_map.find_fuzzy_forward(a_target, 8) {
+        if let Some(body_start_idx) =
+            offset_map.find_fuzzy_forward(a_target, STRUCTURE_OFFSET_TOLERANCE)
+        {
             let mut depth = 0i32;
             for body_idx in body_start_idx..stmts.len() {
                 if remove[body_idx] {
@@ -945,7 +952,7 @@ fn collapse_converged_flipflops(stmts: &mut Vec<BcStatement>, flipflop_names: &[
                     if depth > 0 {
                         depth -= 1;
                     } else {
-                        body_end_replacements.push((body_idx, "}".to_string()));
+                        body_end_replacements.push((body_idx, BLOCK_CLOSE.to_string()));
                         break;
                     }
                 }
@@ -976,7 +983,7 @@ fn collapse_converged_flipflops(stmts: &mut Vec<BcStatement>, flipflop_names: &[
         }
         new_stmts.push(stmt.clone());
         if body_end_set.contains(&idx) {
-            new_stmts.push(BcStatement::new(stmt.mem_offset, "}".to_string()));
+            new_stmts.push(BcStatement::new(stmt.mem_offset, BLOCK_CLOSE.to_string()));
         }
     }
     *stmts = new_stmts;
