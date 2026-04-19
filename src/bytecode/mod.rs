@@ -6,9 +6,12 @@
 //! - [`transforms`] - temp inlining, cleanup, summary pattern folding
 //! - [`pipeline`] - orchestration (wires the above stages together)
 
+pub mod block_graph;
+pub mod cfg;
 pub mod decode;
 pub mod flow;
 mod format;
+pub mod latch;
 pub mod names;
 pub mod opcodes;
 pub mod pipeline;
@@ -146,6 +149,41 @@ impl OffsetMap {
             Some((dist, idx)) if dist <= tolerance => Some(idx),
             _ => None,
         }
+    }
+
+    /// Fuzzy lookup preferring the first statement at or after `target`.
+    ///
+    /// Event entry labels land on the start of an instruction that may have been
+    /// filtered (wire_trace, tracepoint), so the first decoded statement is always
+    /// forward. Falls back to the nearest below-target statement if no forward
+    /// match exists within `tolerance`.
+    pub fn find_fuzzy_forward(&self, target: usize, tolerance: usize) -> Option<usize> {
+        if let Some(&idx) = self.exact.get(&target) {
+            return Some(idx);
+        }
+        let pos = self.sorted.partition_point(|&(off, _)| off <= target);
+        let above = if pos < self.sorted.len() {
+            let (off, idx) = self.sorted[pos];
+            let dist = off.saturating_sub(target);
+            if dist <= tolerance {
+                Some(idx)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if above.is_some() {
+            return above;
+        }
+        if pos > 0 {
+            let (off, idx) = self.sorted[pos - 1];
+            let dist = target.saturating_sub(off);
+            if dist <= tolerance {
+                return Some(idx);
+            }
+        }
+        None
     }
 
     /// Fuzzy lookup that also resolves targets past the last statement to `stmts.len()`.
