@@ -11,7 +11,8 @@ mod temps;
 
 pub use cleanup::{
     cleanup_structured_output, eliminate_constant_condition_branches, rename_loop_temp_vars,
-    strip_inlined_break_calls, strip_orphaned_blocks, strip_unmatched_braces,
+    strip_implicit_returns, strip_inlined_break_calls, strip_orphaned_blocks,
+    strip_unmatched_braces,
 };
 pub use fold::fold_long_lines;
 pub use pipeline::fold_summary_patterns;

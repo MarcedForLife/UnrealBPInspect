@@ -474,6 +474,133 @@ fn collect_label_targets(
     (label_targets, pending_labels)
 }
 
+/// Whether a statement unconditionally exits the current scope.
+fn is_block_exit(text: &str) -> bool {
+    text == POP_FLOW || text == RETURN_NOP || text == "return"
+}
+
+/// Find the exclusive end index of a block starting at `start`.
+///
+/// Scans for the first unmatched `pop_flow` or depth-0 `return nop` /
+/// `return`, and returns the index after it.
+fn find_block_end(stmts: &[BcStatement], start: usize) -> usize {
+    let mut depth: i32 = 0;
+    for (idx, stmt) in stmts.iter().enumerate().skip(start) {
+        if parse_push_flow(&stmt.text).is_some() {
+            depth += 1;
+        } else if stmt.text == POP_FLOW {
+            if depth > 0 {
+                depth -= 1;
+            } else {
+                return idx + 1;
+            }
+        }
+        if depth == 0 && (stmt.text == RETURN_NOP || stmt.text == "return") {
+            return idx + 1;
+        }
+    }
+    stmts.len()
+}
+
+/// Collect `(if_idx, target_idx)` pairs from if-jump statements, resolving
+/// targets through the offset map and skipping pop_flow landing targets.
+fn collect_if_jumps(
+    stmts: &[BcStatement],
+    find: &dyn Fn(usize) -> Option<usize>,
+) -> Vec<(usize, usize)> {
+    stmts
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, stmt)| {
+            let (_, target) = parse_if_jump(&stmt.text)?;
+            let mut target_idx = find(target)?;
+            if target_idx < stmts.len() && stmts[target_idx].text == POP_FLOW {
+                target_idx += 1;
+            }
+            Some((idx, target_idx))
+        })
+        .collect()
+}
+
+/// Reorder displaced else blocks so nested if/else containment is clean.
+///
+/// UE bytecode interleaves else blocks when a nested if's false branch gets
+/// displaced past the outer if's false branch:
+///
+/// ```text
+///   if !A jump X           (outer if)
+///     if !B jump Y         (inner if, nested in A's true body)
+///       B-true body
+///       pop_flow
+///   X: A-false body        (outer else)
+///     pop_flow
+///   Y: B-false body        (displaced inner else)
+/// ```
+///
+/// Moves the B-false block before the A-false block, restoring proper
+/// containment for the region tree. Returns `None` when no reordering
+/// is needed.
+fn reorder_displaced_else(stmts: &[BcStatement]) -> Option<Vec<BcStatement>> {
+    if stmts.len() < 4 {
+        return None;
+    }
+
+    let tolerance = STRUCTURE_OFFSET_TOLERANCE;
+    let mut result: Option<Vec<BcStatement>> = None;
+
+    // One displacement per iteration; repeat until stable.
+    loop {
+        let working = result.as_deref().unwrap_or(stmts);
+        let omap = super::OffsetMap::build(working);
+        let wlen = working.len();
+        let find =
+            |target: usize| -> Option<usize> { omap.find_fuzzy_or_end(target, tolerance, wlen) };
+        let jumps = collect_if_jumps(working, &find);
+
+        let mut moved = false;
+        'search: for (oi, &(outer_if, outer_target)) in jumps.iter().enumerate() {
+            for (ii, &(inner_if, inner_target)) in jumps.iter().enumerate() {
+                if oi == ii {
+                    continue;
+                }
+                // Inner if must be inside outer's true body, with its else
+                // displaced past the outer's else.
+                if inner_if <= outer_if || inner_if >= outer_target || inner_target <= outer_target
+                {
+                    continue;
+                }
+                // The inner true body must exit before the outer else
+                // (pop_flow or return nop after flow reordering).
+                let has_exit = (inner_if + 1..outer_target)
+                    .rev()
+                    .any(|si| is_block_exit(&working[si].text));
+                if !has_exit {
+                    continue;
+                }
+                let inner_else_end = find_block_end(working, inner_target);
+                if inner_else_end <= inner_target {
+                    continue;
+                }
+
+                // Extract the inner else and splice it before the outer else.
+                // outer_target < inner_target, so the drain doesn't shift it.
+                let mut reordered = working.to_vec();
+                let block: Vec<BcStatement> =
+                    reordered.drain(inner_target..inner_else_end).collect();
+                reordered.splice(outer_target..outer_target, block);
+                result = Some(reordered);
+                moved = true;
+                break 'search;
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+
+    result
+}
+
 /// Convert flat bytecode statements into structured pseudo-code lines (unindented).
 ///
 /// `labels` maps memory offsets to display names (e.g. `--- EventName ---` markers).
@@ -487,6 +614,15 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
     if stmts.is_empty() {
         return Vec::new();
     }
+
+    // Fix interleaved else blocks before if-detection (see reorder_displaced_else).
+    let owned;
+    let stmts = if let Some(reordered) = reorder_displaced_else(stmts) {
+        owned = reordered;
+        &owned[..]
+    } else {
+        stmts
+    };
 
     let offset_map = super::OffsetMap::build(stmts);
     let find_target = |target: usize| -> Option<usize> {
@@ -731,6 +867,12 @@ fn truncate_false_blocks(
                         break;
                     }
                 }
+            }
+            // Return at depth 0 terminates the else block (the branch
+            // diverges, so nothing after it belongs to this else).
+            if if_depth == 0 && (stmt.text == RETURN_NOP || stmt.text == "return") {
+                blk.else_close_idx = Some(j + 1);
+                break;
             }
         }
     }

@@ -16,8 +16,8 @@ use super::transforms::{
     discard_unused_assignments_text, eliminate_constant_condition_branches,
     fold_cascade_across_sequences, fold_summary_patterns, fold_switch_enum_cascade,
     inline_constant_temps, inline_constant_temps_text, inline_single_use_temps,
-    rename_loop_temp_vars, strip_inlined_break_calls, strip_orphaned_blocks,
-    strip_unmatched_braces,
+    rename_loop_temp_vars, strip_implicit_returns, strip_inlined_break_calls,
+    strip_orphaned_blocks, strip_unmatched_braces,
 };
 use super::{
     split_by_sequence_markers, OffsetMap, JUMP_OFFSET_TOLERANCE, RETURN_NOP, SEQUENCE_MARKER_PREFIX,
@@ -132,6 +132,7 @@ fn post_structure_cleanup(lines: &mut Vec<String>) {
     // sentinels that were hidden inside the cascade's brace nesting.
     cleanup_structured_output(lines);
     strip_unmatched_braces(lines);
+    strip_implicit_returns(lines);
     apply_indentation(lines);
     // Strip bare "// on loop complete:" markers (used internally by dedup_completion_paths
     // but redundant in output since the closing brace already shows the loop ended).
