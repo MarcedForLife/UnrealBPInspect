@@ -303,8 +303,12 @@ The hard part is making bytecode *readable*. bp-inspect:
 - Splits ubergraph functions into labelled event handlers
 - Inlines latent resume blocks after their corresponding Delay() calls
 - Places Blueprint comment boxes and bubble comments inline near the code they annotate (via 2D spatial matching between graph nodes and bytecode)
+- Detects DoOnce and FlipFlop macro patterns and emits them as structured pseudocode
 
 The goal is output that reads like hand-written pseudocode, not a bytecode dump.
+
+> [!NOTE]
+> DoOnce and FlipFlop macro instances carry no user-set label in the compiled asset, so their names in output are derived heuristically from the first meaningful call in the body (e.g. `DoOnce(AttemptGrip)`). These names are stable per gate but won't match the node titles you might remember from the editor.
 
 **How it compares to existing tools:**
 

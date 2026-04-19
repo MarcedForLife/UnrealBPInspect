@@ -32,8 +32,7 @@ const STRUCTURE_OFFSET_TOLERANCE: usize = 8;
 ///
 /// The wrapping is critical: `!A && B` means `(!A) && B`, not `!(A && B)`,
 /// so compound conditions must get `!()` not just `!` prefix.
-#[cfg(test)]
-fn negate_cond(cond: &str) -> String {
+pub(crate) fn negate_cond(cond: &str) -> String {
     // Already negated simple expr: !X -> X
     if cond.starts_with('!') && !cond.starts_with("!(") {
         let rest = &cond[1..];
@@ -664,7 +663,9 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
     emit_region_tree(&region_tree, &ctx, &mut block_stack, &mut output);
 
     convert_gotos_to_breaks(&mut output);
+    strip_dead_backward_gotos(&mut output);
     extract_convergence(&mut output);
+    strip_dead_backward_gotos(&mut output);
     collapse_double_else(&mut output);
 
     output
@@ -815,6 +816,20 @@ fn detect_else_branch(
         {
             let end_idx = find_else_end_by_pop_flow(stmts, target_idx);
             return (None, Some(end_idx));
+        }
+        // Latch close brace: DoOnce/FlipFlop transforms replace body-end
+        // pop_flow with `}`. This is a scope exit when the matching opener
+        // is a latch block within the true branch.
+        else if trimmed == "}" && target_idx < stmts.len() {
+            let has_latch_opener = (if_idx + 1..check_idx).any(|j| {
+                let opener = stmts[j].text.trim();
+                (opener.starts_with("DoOnce(") || opener.starts_with("FlipFlop("))
+                    && opener.ends_with(" {")
+            });
+            if has_latch_opener {
+                let end_idx = find_else_end_by_pop_flow(stmts, target_idx);
+                return (None, Some(end_idx));
+            }
         }
 
         // Any other executable statement means no else detected
@@ -1271,6 +1286,84 @@ fn splice_convergence(
     }
 }
 
+/// Remove dead backward gotos that point to a latch-body header.
+///
+/// Linearization sometimes leaves a trailing `goto L_X` that targets a label
+/// sitting on a `DoOnce(...)` / `FlipFlop(...)` header whose body has just
+/// finished emitting. Re-entering the latch is a no-op (the latch self-gates)
+/// so the goto adds nothing except an unresolved forward reference, and the
+/// label itself has no other referrers. Drop both.
+///
+/// The check is intentionally narrow: the label must be directly on a latch
+/// opener, the goto must be the only reference, the goto must sit after the
+/// latch body's closing `}`, and everything following the goto must be
+/// structural close-braces or trailing returns (no live code). This covers
+/// the post-latch trampoline left over from UberGraph push_flow/pop_flow
+/// chains without touching ordinary backward loops.
+fn strip_dead_backward_gotos(output: &mut Vec<String>) {
+    loop {
+        let goto_map = build_goto_map(output);
+        let mut target: Option<(usize, usize)> = None;
+        for (label_name, gotos) in &goto_map {
+            if gotos.len() != 1 {
+                continue;
+            }
+            let goto_idx = gotos[0];
+            let label_text = format!("{}:", label_name);
+            let Some(label_idx) = output.iter().position(|l| l.trim() == label_text) else {
+                continue;
+            };
+            // Only backward gotos (label precedes goto).
+            if label_idx >= goto_idx {
+                continue;
+            }
+            // The label must sit on a latch opener: the next non-empty line
+            // starts with `DoOnce(` or `FlipFlop(`.
+            let label_on_latch = output[label_idx + 1..].iter().find_map(|line| {
+                let t = line.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t.starts_with("DoOnce(") || t.starts_with("FlipFlop("))
+                }
+            });
+            if label_on_latch != Some(true) {
+                continue;
+            }
+            // The goto must immediately follow the latch body's closing `}`
+            // (possibly after blank lines). This pins the pattern to
+            // "post-latch trampoline" rather than arbitrary backward jumps.
+            let prev_is_close = output[..goto_idx].iter().rev().find_map(|line| {
+                let t = line.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t == "}")
+                }
+            });
+            if prev_is_close != Some(true) {
+                continue;
+            }
+            // Everything after the goto must be dead (blank, `}`, `return`).
+            let tail_is_dead = output[goto_idx + 1..].iter().all(|line| {
+                let t = line.trim();
+                t.is_empty() || t == "}" || t == "return"
+            });
+            if !tail_is_dead {
+                continue;
+            }
+            target = Some((label_idx, goto_idx));
+            break;
+        }
+        let Some((label_idx, goto_idx)) = target else {
+            break;
+        };
+        // Strip the goto first so removing the label doesn't shift its index.
+        output.remove(goto_idx);
+        output.remove(label_idx);
+    }
+}
+
 /// Extract convergence code (shared by multiple branches) and relocate it
 /// after the outermost closing brace. Repeats until no candidates remain,
 /// since each splice shifts indices.
@@ -1428,6 +1521,62 @@ mod tests {
     #[test]
     fn negate_self_member() {
         assert_eq!(negate_cond("!self.GrippingActor"), "self.GrippingActor");
+    }
+
+    #[test]
+    fn strip_dead_goto_removes_post_latch_trampoline() {
+        // Pattern produced by UberGraph linearization when a DoOnce body
+        // sits at a lower offset than the gate check. The backward goto
+        // to the DoOnce header is dead after the body has already run.
+        let mut lines = vec![
+            "if (cond) {".to_string(),
+            "    stuff()".to_string(),
+            "}".to_string(),
+            "L_0050:".to_string(),
+            "DoOnce(Foo) {".to_string(),
+            "    call()".to_string(),
+            "}".to_string(),
+            "goto L_0050".to_string(),
+            "return".to_string(),
+        ];
+        strip_dead_backward_gotos(&mut lines);
+        // Both the label and the goto are gone; the latch body stays.
+        assert!(!lines.iter().any(|l| l.trim() == "L_0050:"));
+        assert!(!lines.iter().any(|l| l.trim() == "goto L_0050"));
+        assert!(lines.iter().any(|l| l.trim() == "DoOnce(Foo) {"));
+    }
+
+    #[test]
+    fn strip_dead_goto_keeps_loop_backward_jumps() {
+        // Plain backward gotos that form real loops must survive; this
+        // pass is limited to post-latch trampolines.
+        let mut lines = vec![
+            "L_0020:".to_string(),
+            "i = i + 1".to_string(),
+            "if (i < 10) {".to_string(),
+            "    continue()".to_string(),
+            "}".to_string(),
+            "goto L_0020".to_string(),
+        ];
+        let before = lines.clone();
+        strip_dead_backward_gotos(&mut lines);
+        assert_eq!(lines, before);
+    }
+
+    #[test]
+    fn strip_dead_goto_ignores_forward_gotos() {
+        // Forward gotos are handled by `extract_convergence`.
+        let mut lines = vec![
+            "goto L_0050".to_string(),
+            "other_stuff()".to_string(),
+            "L_0050:".to_string(),
+            "DoOnce(Foo) {".to_string(),
+            "    call()".to_string(),
+            "}".to_string(),
+        ];
+        let before = lines.clone();
+        strip_dead_backward_gotos(&mut lines);
+        assert_eq!(lines, before);
     }
 
     fn make_stmt(offset: usize, text: &str) -> BcStatement {
