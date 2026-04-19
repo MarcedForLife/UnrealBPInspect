@@ -78,7 +78,6 @@ const LATENT_RESUME_SECTION: &str = "(latent resume)";
 
 const COMMENT_WRAP_WIDTH: usize = 100;
 const MAX_BUBBLE_DISTANCE_SQ: i64 = 640_000; // 800px squared
-const FUZZY_LABEL_WINDOW: usize = 8;
 const OFFSET_PREFIX_LEN: usize = "0000: ".len();
 
 /// Strip the hex offset prefix from a bytecode line (e.g. `0012: expr` -> `expr`).

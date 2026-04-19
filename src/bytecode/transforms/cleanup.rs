@@ -193,9 +193,25 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
     }
 }
 
-/// Classify a constant condition: returns `Some(true)` for always-taken branches
-/// (`true`, `!false`), `Some(false)` for dead branches (`false`, `!true`),
-/// or `None` if the condition isn't a constant.
+/// Pull the condition out of an `if (COND) {` or `if (COND) STMT` line.
+/// Returns the raw condition text with one layer of outer parens stripped,
+/// so the caller can feed the result straight into `negate_cond` without
+/// double-wrapping.
+fn extract_if_condition(if_line: &str) -> Option<String> {
+    let trimmed = if_line.trim();
+    let after_if = trimmed.strip_prefix("if ")?;
+    if !after_if.starts_with('(') {
+        return None;
+    }
+    let close = find_matching_paren(after_if)?;
+    let inner = after_if[1..close].trim().to_string();
+    let stripped = strip_outer_parens(&inner);
+    Some(stripped.to_string())
+}
+
+/// Classify a constant condition: returns `Some(true)` for always-taken
+/// branches (`true`, `!false`), `Some(false)` for dead branches
+/// (`false`, `!true`), or `None` if the condition isn't a constant.
 fn classify_constant_condition(if_line: &str) -> Option<bool> {
     let trimmed = if_line.trim();
     // Match "if (COND) STMT" or "if (COND) {"
@@ -707,11 +723,34 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
             let trimmed = lines[i].trim();
             let next_trimmed = lines[i + 1].trim();
 
-            // Pattern: "if (...) {" followed by "} else {"
-            // Remove the if line and the } else {, keep else body
+            // Pattern: "if (COND) {" followed by "} else {"
+            // The then-body is empty. Invert the condition and drop the else
+            // wrapper so `if (!COND) { body }` preserves the guard. Previously
+            // this stripped the if entirely, unguarding the else body.
             if trimmed.starts_with("if ") && trimmed.ends_with(" {") && next_trimmed == "} else {" {
+                if let Some(inner) = extract_if_condition(trimmed) {
+                    // Skip switch-enum scaffolding: `$SwitchEnum_CmpSuccess_*`
+                    // temps drive `fold_switch_enum_cascade`, which relies on
+                    // the exact `if (...) {} else { body }` shape. Inverting
+                    // here would hide the cascade from the folder and leave
+                    // nested switch cases in the wrong scope.
+                    if inner.contains("SwitchEnum_CmpSuccess") {
+                        // fall through to legacy strip below
+                    } else {
+                        let indent = lines[i].len() - lines[i].trim_start().len();
+                        let pad = &lines[i][..indent];
+                        let negated = crate::bytecode::structure::negate_cond(&inner);
+                        lines[i] = format!("{pad}if ({negated}) {{");
+                        lines.remove(i + 1);
+                        changed = true;
+                        continue;
+                    }
+                }
+                // Legacy strip: remove the if line and the `} else {`. Reached
+                // only for switch-enum temps (see above) so the cascade folder
+                // can still pattern-match the intermediate layout.
                 lines.remove(i);
-                lines.remove(i); // was i+1, now shifted
+                lines.remove(i);
                 changed = true;
                 continue;
             }
