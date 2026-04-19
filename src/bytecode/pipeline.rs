@@ -20,7 +20,8 @@ use super::transforms::{
     strip_orphaned_blocks, strip_unmatched_braces,
 };
 use super::{
-    split_by_sequence_markers, OffsetMap, JUMP_OFFSET_TOLERANCE, RETURN_NOP, SEQUENCE_MARKER_PREFIX,
+    split_by_sequence_markers, OffsetMap, JUMP_OFFSET_TOLERANCE, LOOP_COMPLETE_MARKER, RETURN_NOP,
+    SEQUENCE_MARKER_PREFIX,
 };
 
 /// Run the full statement structuring pipeline: flow reordering, temp inlining,
@@ -134,10 +135,11 @@ fn post_structure_cleanup(lines: &mut Vec<String>) {
     strip_unmatched_braces(lines);
     strip_implicit_returns(lines);
     apply_indentation(lines);
-    // Strip bare "// on loop complete:" markers (used internally by dedup_completion_paths
+    // Strip bare LOOP_COMPLETE_MARKER lines (used internally by dedup_completion_paths
     // but redundant in output since the closing brace already shows the loop ended).
-    // Annotated variants like "// on loop complete: (same as pre-loop setup)" are kept.
-    lines.retain(|line| line.trim() != "// on loop complete:");
+    // Annotated variants like LOOP_COMPLETE_SAME_AS_PRELOOP are kept because those
+    // carry content the reader needs.
+    lines.retain(|line| line.trim() != LOOP_COMPLETE_MARKER);
 }
 
 /// Rewrite jumps targeting offsets outside or unresolvable within the current segment.

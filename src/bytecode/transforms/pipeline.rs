@@ -10,6 +10,9 @@ use super::{
     count_var_refs, find_matching_paren, is_loop_header, is_trivial_expr, parse_temp_assignment,
     split_args, strip_outer_parens, substitute_var,
 };
+use crate::bytecode::{
+    LOOP_COMPLETE_MARKER, LOOP_COMPLETE_REPEATS_PRELOOP, LOOP_COMPLETE_SAME_AS_PRELOOP,
+};
 use crate::helpers::{is_section_separator, opens_block, SECTION_SEPARATOR};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -670,7 +673,7 @@ fn fold_section_temps(lines: &mut Vec<String>) {
     }
 }
 
-/// Find the completion block extent (lines after "// on loop complete:" until the next
+/// Find the completion block extent (lines after LOOP_COMPLETE_MARKER until the next
 /// scope exit or section boundary). Uses brace counting.
 fn find_completion_block(lines: &[String], marker_idx: usize) -> Option<(usize, usize)> {
     let comp_start = marker_idx + 1;
@@ -733,7 +736,7 @@ fn find_pre_loop_setup(lines: &[String], marker_idx: usize) -> Option<(usize, us
 fn dedup_completion_paths(lines: &mut Vec<String>) {
     let mut i = 0;
     while i < lines.len() {
-        if lines[i].trim() != "// on loop complete:" {
+        if lines[i].trim() != LOOP_COMPLETE_MARKER {
             i += 1;
             continue;
         }
@@ -778,9 +781,9 @@ fn dedup_completion_paths(lines: &mut Vec<String>) {
         if matched_count >= 3 && matched_count * 2 >= total_count {
             let mut replacement: Vec<String> = Vec::new();
             if unique_indices.is_empty() {
-                replacement.push("// on loop complete: (same as pre-loop setup)".to_string());
+                replacement.push(LOOP_COMPLETE_SAME_AS_PRELOOP.to_string());
             } else {
-                replacement.push("// on loop complete: (repeats pre-loop setup)".to_string());
+                replacement.push(LOOP_COMPLETE_REPEATS_PRELOOP.to_string());
                 for &j in &unique_indices {
                     replacement.push(lines[j].clone());
                 }

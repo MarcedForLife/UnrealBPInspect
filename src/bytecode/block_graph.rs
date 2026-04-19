@@ -11,7 +11,7 @@
 //! Phase 1 extracted the CFG construction from `flow.rs`. Phase 2 added
 //! recognition of post-latch artifacts: `}` (body-end from
 //! `transform_latch_patterns`) ends a block and produces a
-//! [`BlockExit::Terminal`], and blocks opening with a `DoOnce(name)` /
+//! [`BlockExit::LatchTerminal`], and blocks opening with a `DoOnce(name)` /
 //! `FlipFlop(name)` header are tagged with [`BlockMetadata::LatchBody`].
 //! Phase 3 moved the linearization DFS here so both call sites share one
 //! implementation. Phase 4 collapses Sequence dispatch chains (grouped and
@@ -56,7 +56,7 @@ use std::ops::Range;
 
 use super::decode::BcStatement;
 use super::flow::{detect_sequence_spans, parse_if_jump, parse_jump, parse_jump_computed};
-use super::{OffsetMap, JUMP_OFFSET_TOLERANCE, POP_FLOW, RETURN_NOP};
+use super::{OffsetMap, BARE_RETURN, BLOCK_CLOSE, JUMP_OFFSET_TOLERANCE, POP_FLOW, RETURN_NOP};
 
 pub(crate) type BlockId = usize;
 
@@ -118,8 +118,33 @@ pub(crate) enum BlockExit {
         fall_through: BlockId,
         target: BlockId,
     },
-    /// Terminal statement (return, pop_flow, jump_computed). No successor.
-    Terminal,
+    /// Block ends by exiting the function (return, pop_flow, jump_computed).
+    /// No local convergence is possible because execution leaves the current
+    /// scope entirely.
+    ReturnTerminal,
+    /// Block ends with `}` (the latch body-close emitted by
+    /// `transform_latch_patterns`). Structurally a block end with no
+    /// fall-through edge, but shared post-latch code CAN still be the
+    /// convergence target of a sibling branch.
+    LatchTerminal,
+}
+
+impl BlockExit {
+    /// True for any non-fall-through, non-jump exit (return, pop_flow,
+    /// jump_computed, latch `}`). Both terminal variants contribute no
+    /// outgoing edges to the CFG.
+    #[allow(dead_code)]
+    fn is_terminal(&self) -> bool {
+        matches!(self, BlockExit::ReturnTerminal | BlockExit::LatchTerminal)
+    }
+
+    /// True only for exits that leave the function. Used by
+    /// `find_convergence_target` to distinguish true function-exits (no
+    /// local convergence possible) from latch body-ends (convergence still
+    /// possible via the sibling branch).
+    fn is_return(&self) -> bool {
+        matches!(self, BlockExit::ReturnTerminal)
+    }
 }
 
 /// Block-level CFG built from a flat statement stream.
@@ -247,9 +272,9 @@ fn build_basic_blocks(
 
     let is_block_end = |stmt: &BcStatement| -> bool {
         stmt.text == RETURN_NOP
-            || stmt.text == "return"
+            || stmt.text == BARE_RETURN
             || stmt.text == POP_FLOW
-            || stmt.text.trim() == "}"
+            || stmt.text.trim() == BLOCK_CLOSE
             || parse_jump(&stmt.text).is_some()
             || parse_if_jump(&stmt.text).is_some()
             || parse_jump_computed(&stmt.text)
@@ -321,12 +346,10 @@ fn wire_block_edges(
         let last_text = &stmts[last_idx].text;
         let next_block = bid + 1;
 
-        if last_text == RETURN_NOP
-            || last_text == "return"
-            || last_text == POP_FLOW
-            || last_text.trim() == "}"
-        {
-            blocks[bid].exit = BlockExit::Terminal;
+        if last_text == RETURN_NOP || last_text == BARE_RETURN || last_text == POP_FLOW {
+            blocks[bid].exit = BlockExit::ReturnTerminal;
+        } else if last_text.trim() == BLOCK_CLOSE {
+            blocks[bid].exit = BlockExit::LatchTerminal;
         } else if let Some((_, target)) = parse_if_jump(last_text) {
             let ft = if next_block < blocks.len() {
                 next_block
@@ -346,7 +369,7 @@ fn wire_block_edges(
                 None => BlockExit::FallThrough,
             };
         } else if parse_jump_computed(last_text) {
-            blocks[bid].exit = BlockExit::Terminal;
+            blocks[bid].exit = BlockExit::ReturnTerminal;
         }
         // else: FallThrough (default)
     }
@@ -511,10 +534,11 @@ fn apply_super_block_collapse(cfg: &mut BlockCfg, super_ranges: &[(Range<usize>,
         }
 
         let new_exit = match &block.exit {
-            BlockExit::Terminal => BlockExit::Terminal,
+            BlockExit::ReturnTerminal => BlockExit::ReturnTerminal,
+            BlockExit::LatchTerminal => BlockExit::LatchTerminal,
             BlockExit::FallThrough => BlockExit::FallThrough,
             BlockExit::Jump(target) => match translate(*target) {
-                Some(t) if t == new_id => BlockExit::Terminal,
+                Some(t) if t == new_id => BlockExit::ReturnTerminal,
                 Some(t) => BlockExit::Jump(t),
                 None => BlockExit::FallThrough,
             },
@@ -562,7 +586,7 @@ fn compute_in_degree(blocks: &[Block]) -> Vec<usize> {
                 deg[*fall_through] += 1;
                 deg[*target] += 1;
             }
-            BlockExit::Terminal => {}
+            BlockExit::ReturnTerminal | BlockExit::LatchTerminal => {}
         }
     }
     deg
@@ -588,7 +612,7 @@ fn compute_predecessors(blocks: &[Block]) -> Vec<Vec<BlockId>> {
                 preds[*fall_through].push(bid);
                 preds[*target].push(bid);
             }
-            BlockExit::Terminal => {}
+            BlockExit::ReturnTerminal | BlockExit::LatchTerminal => {}
         }
     }
     preds
@@ -619,11 +643,14 @@ pub(crate) fn all_predecessors_emitted(
 /// by explicit jump edges are candidates), with one additional defensive
 /// filter:
 ///
-/// - **Terminal-branch guard.** If either branch's entry block is
-///   immediately terminal (the branch returns or pops flow without any
-///   non-terminal successor), there's no local convergence to emit,
-///   return `None`. Prevents pulling post-return code into a region
-///   where execution has already exited.
+/// - **Return-branch guard.** If either branch's entry block is
+///   immediately `ReturnTerminal` (the branch returns, pops flow, or runs
+///   a computed jump without any non-terminal successor), there's no
+///   local convergence to emit, return `None`. Prevents pulling
+///   post-return code into a region where execution has already exited.
+///   `LatchTerminal` (`}` body-close) is NOT guarded here: a latch body
+///   ends the block structurally but shared post-latch code can still
+///   be the convergence target of the sibling branch.
 ///
 /// Among qualifying candidates, returns the one with the lowest block ID
 /// (earliest in original layout -- matches the previous heuristic).
@@ -646,9 +673,7 @@ pub(crate) fn find_convergence_target(
     if branch_a >= blocks.len() || branch_b >= blocks.len() {
         return None;
     }
-    if matches!(blocks[branch_a].exit, BlockExit::Terminal)
-        || matches!(blocks[branch_b].exit, BlockExit::Terminal)
-    {
+    if blocks[branch_a].exit.is_return() || blocks[branch_b].exit.is_return() {
         return None;
     }
 
@@ -676,7 +701,7 @@ fn collect_branch_exits(
         return;
     }
     match &blocks[bid].exit {
-        BlockExit::Terminal => {}
+        BlockExit::ReturnTerminal | BlockExit::LatchTerminal => {}
         BlockExit::Jump(target) => {
             targets.insert(*target);
             collect_branch_exits(blocks, *target, targets, visited);
@@ -727,7 +752,7 @@ pub(crate) fn linearize_blocks(
 
     let exit = blocks[bid].exit.clone();
     match exit {
-        BlockExit::Terminal => {}
+        BlockExit::ReturnTerminal | BlockExit::LatchTerminal => {}
 
         BlockExit::FallThrough => {
             let next = bid + 1;
@@ -874,7 +899,7 @@ mod tests {
             (0x18, "b = 2"), // unreachable but still a block
         ]);
         assert_eq!(cfg.blocks.len(), 2);
-        assert!(matches!(cfg.blocks[0].exit, BlockExit::Terminal));
+        assert!(matches!(cfg.blocks[0].exit, BlockExit::ReturnTerminal));
     }
 
     #[test]
@@ -980,6 +1005,99 @@ mod tests {
     }
 
     #[test]
+    fn block_exit_helpers_distinguish_return_from_latch() {
+        // The helpers underpin the terminal-branch guard split: both variants
+        // contribute no outgoing edges, but only ReturnTerminal blocks the
+        // find_convergence_target early-return.
+        assert!(BlockExit::ReturnTerminal.is_terminal());
+        assert!(BlockExit::LatchTerminal.is_terminal());
+        assert!(!BlockExit::FallThrough.is_terminal());
+
+        assert!(BlockExit::ReturnTerminal.is_return());
+        assert!(!BlockExit::LatchTerminal.is_return());
+        assert!(!BlockExit::FallThrough.is_return());
+    }
+
+    /// Build a minimal [`Block`] with explicit `exit`, stmt_range 0..0
+    /// (unused by edge-only analyses), and default metadata.
+    fn synthetic_block(exit: BlockExit) -> Block {
+        Block {
+            stmt_range: 0..0,
+            exit,
+            metadata: BlockMetadata::Normal,
+            emitted: false,
+        }
+    }
+
+    #[test]
+    fn find_convergence_target_allows_latch_terminal_branches() {
+        // Construct a CFG manually so one branch's entry block exits via
+        // LatchTerminal while a sibling pathway still Jumps into a shared
+        // block. Old code guarded both Terminal variants together and
+        // returned `None` here; the split lets the convergence through.
+        //
+        //   block0: CondJump ft=1, target=2
+        //   block1: Jump(3)              (non-terminal branch entry)
+        //   block2: Jump(3)              (also reaches block3)
+        //   block3: LatchTerminal        (shared convergence candidate)
+        //
+        // Both branches contribute block3 to their Jump-target sets, so
+        // the intersection picks block3. A latch-body `}` ending the
+        // convergence block itself is fine: downstream passes still emit
+        // the body correctly.
+        let blocks = vec![
+            synthetic_block(BlockExit::CondJump {
+                fall_through: 1,
+                target: 2,
+            }),
+            synthetic_block(BlockExit::Jump(3)),
+            synthetic_block(BlockExit::Jump(3)),
+            synthetic_block(BlockExit::LatchTerminal),
+        ];
+
+        let conv = find_convergence_target(&blocks, 1, 2);
+        assert_eq!(
+            conv,
+            Some(3),
+            "LatchTerminal convergence target must be detected"
+        );
+
+        // Sanity check: if block3 were ReturnTerminal, that wouldn't change
+        // the convergence outcome on its own (the guard checks the branch
+        // entries, not the convergence block itself).
+        let mut with_return_conv = blocks.clone();
+        with_return_conv[3].exit = BlockExit::ReturnTerminal;
+        let conv = find_convergence_target(&with_return_conv, 1, 2);
+        assert_eq!(
+            conv,
+            Some(3),
+            "convergence block's own exit variant doesn't affect the guard"
+        );
+
+        // But if one BRANCH ENTRY is ReturnTerminal, the guard fires and
+        // returns None. The old code would also fire for LatchTerminal here.
+        let mut with_return_branch = blocks.clone();
+        with_return_branch[1].exit = BlockExit::ReturnTerminal;
+        let conv = find_convergence_target(&with_return_branch, 1, 2);
+        assert_eq!(
+            conv, None,
+            "ReturnTerminal branch entry blocks convergence detection"
+        );
+
+        // Swap in LatchTerminal on the branch entry and the guard no longer
+        // fires. The entry has no outgoing edges so the intersection is
+        // empty and we still get None, but for the different structural
+        // reason (no reachable convergence, not a hard-coded guard).
+        let mut with_latch_branch = blocks;
+        with_latch_branch[1].exit = BlockExit::LatchTerminal;
+        let conv = find_convergence_target(&with_latch_branch, 1, 2);
+        assert_eq!(
+            conv, None,
+            "LatchTerminal branch contributes no successors so intersection is empty"
+        );
+    }
+
+    #[test]
     fn find_convergence_target_handles_nested_convergence() {
         // Nested if/else whose branches both jump to a shared exit. The
         // non-terminal guard should NOT reject this case -- both branches
@@ -1016,7 +1134,7 @@ mod tests {
         // Two blocks: the DoOnce body (0..3) and the trailing statement (3..4).
         assert_eq!(cfg.blocks.len(), 2);
         assert_eq!(cfg.blocks[0].stmt_range, 0..3);
-        assert!(matches!(cfg.blocks[0].exit, BlockExit::Terminal));
+        assert!(matches!(cfg.blocks[0].exit, BlockExit::LatchTerminal));
         assert_eq!(
             cfg.blocks[0].metadata,
             BlockMetadata::LatchBody {
@@ -1033,7 +1151,7 @@ mod tests {
             (0x18, "}"),
         ]);
         assert_eq!(cfg.blocks.len(), 1);
-        assert!(matches!(cfg.blocks[0].exit, BlockExit::Terminal));
+        assert!(matches!(cfg.blocks[0].exit, BlockExit::LatchTerminal));
         assert_eq!(
             cfg.blocks[0].metadata,
             BlockMetadata::LatchBody {
@@ -1044,13 +1162,13 @@ mod tests {
 
     #[test]
     fn bare_brace_close_is_terminal_but_not_latch_body() {
-        // Defensive: treat any `}` as Terminal, even when not preceded by a
-        // recognized DoOnce/FlipFlop header. Metadata stays Normal.
+        // Defensive: treat any `}` as LatchTerminal, even when not preceded by
+        // a recognized DoOnce/FlipFlop header. Metadata stays Normal.
         let (_stmts, cfg) =
             cfg_from(&[(0x10, "do_something()"), (0x14, "}"), (0x18, "unrelated()")]);
         assert_eq!(cfg.blocks.len(), 2);
         assert_eq!(cfg.blocks[0].stmt_range, 0..2);
-        assert!(matches!(cfg.blocks[0].exit, BlockExit::Terminal));
+        assert!(matches!(cfg.blocks[0].exit, BlockExit::LatchTerminal));
         assert_eq!(cfg.blocks[0].metadata, BlockMetadata::Normal);
     }
 
@@ -1094,8 +1212,8 @@ mod tests {
         // push_flow through the last pin's terminator.
         assert_eq!(super_block.stmt_range.start, 0);
         assert_eq!(super_block.stmt_range.end, 11);
-        // Super-block ends with a pin terminator (pop_flow) so its exit is Terminal.
-        assert!(matches!(super_block.exit, BlockExit::Terminal));
+        // Super-block ends with a pin terminator (pop_flow) so its exit is ReturnTerminal.
+        assert!(matches!(super_block.exit, BlockExit::ReturnTerminal));
     }
 
     #[test]
@@ -1115,7 +1233,7 @@ mod tests {
         // The next block starts on `AfterCall()`, confirming the `}` ended
         // its predecessor cleanly.
         assert_eq!(stmts[cfg.blocks[1].stmt_range.start].text, "AfterCall()");
-        assert!(matches!(cfg.blocks[1].exit, BlockExit::Terminal));
+        assert!(matches!(cfg.blocks[1].exit, BlockExit::ReturnTerminal));
         assert_eq!(
             cfg.blocks[0].metadata,
             BlockMetadata::LatchBody {
