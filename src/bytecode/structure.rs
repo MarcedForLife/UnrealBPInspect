@@ -6,6 +6,7 @@
 //! tree. Post-processing converts remaining `goto` to `break` where applicable and
 //! extracts convergence code shared by multiple branches.
 
+use super::block_graph::{BlockCfg, BlockExit, BlockId};
 use super::decode::BcStatement;
 use super::flow::{
     find_first_unmatched_pop, flow_depth, parse_continue_if_not, parse_if_jump, parse_jump,
@@ -468,11 +469,6 @@ fn collect_label_targets(
     (label_targets, pending_labels)
 }
 
-/// Whether a statement unconditionally exits the current scope.
-fn is_block_exit(text: &str) -> bool {
-    text == POP_FLOW || text == RETURN_NOP || text == BARE_RETURN
-}
-
 /// Find the exclusive end index of a block starting at `start`.
 ///
 /// Scans for the first unmatched `pop_flow` or depth-0 `return nop` /
@@ -494,26 +490,6 @@ fn find_block_end(stmts: &[BcStatement], start: usize) -> usize {
         }
     }
     stmts.len()
-}
-
-/// Collect `(if_idx, target_idx)` pairs from if-jump statements, resolving
-/// targets through the offset map and skipping pop_flow landing targets.
-fn collect_if_jumps(
-    stmts: &[BcStatement],
-    find: &dyn Fn(usize) -> Option<usize>,
-) -> Vec<(usize, usize)> {
-    stmts
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, stmt)| {
-            let (_, target) = parse_if_jump(&stmt.text)?;
-            let mut target_idx = find(target)?;
-            if target_idx < stmts.len() && stmts[target_idx].text == POP_FLOW {
-                target_idx += 1;
-            }
-            Some((idx, target_idx))
-        })
-        .collect()
 }
 
 /// Reorder displaced else blocks so nested if/else containment is clean.
@@ -539,60 +515,96 @@ fn reorder_displaced_else(stmts: &[BcStatement]) -> Option<Vec<BcStatement>> {
         return None;
     }
 
-    let tolerance = STRUCTURE_OFFSET_TOLERANCE;
     let mut result: Option<Vec<BcStatement>> = None;
 
     // One displacement per iteration; repeat until stable.
     loop {
         let working = result.as_deref().unwrap_or(stmts);
-        let omap = super::OffsetMap::build(working);
-        let wlen = working.len();
-        let find =
-            |target: usize| -> Option<usize> { omap.find_fuzzy_or_end(target, tolerance, wlen) };
-        let jumps = collect_if_jumps(working, &find);
-
-        let mut moved = false;
-        'search: for (oi, &(outer_if, outer_target)) in jumps.iter().enumerate() {
-            for (ii, &(inner_if, inner_target)) in jumps.iter().enumerate() {
-                if oi == ii {
-                    continue;
-                }
-                // Inner if must be inside outer's true body, with its else
-                // displaced past the outer's else.
-                if inner_if <= outer_if || inner_if >= outer_target || inner_target <= outer_target
-                {
-                    continue;
-                }
-                // The inner true body must exit before the outer else
-                // (pop_flow or return nop after flow reordering).
-                let has_exit = (inner_if + 1..outer_target)
-                    .rev()
-                    .any(|si| is_block_exit(&working[si].text));
-                if !has_exit {
-                    continue;
-                }
-                let inner_else_end = find_block_end(working, inner_target);
-                if inner_else_end <= inner_target {
-                    continue;
-                }
-
-                // Extract the inner else and splice it before the outer else.
-                // outer_target < inner_target, so the drain doesn't shift it.
-                let mut reordered = working.to_vec();
-                let block: Vec<BcStatement> =
-                    reordered.drain(inner_target..inner_else_end).collect();
-                reordered.splice(outer_target..outer_target, block);
-                result = Some(reordered);
-                moved = true;
-                break 'search;
-            }
-        }
-        if !moved {
+        let Some((outer_target, inner_target, inner_else_end)) =
+            find_displaced_else_splice(working)
+        else {
             break;
-        }
+        };
+        // `outer_target < inner_target`, so draining first keeps the
+        // insertion point stable.
+        let mut reordered = working.to_vec();
+        let block: Vec<BcStatement> = reordered.drain(inner_target..inner_else_end).collect();
+        reordered.splice(outer_target..outer_target, block);
+        result = Some(reordered);
     }
 
     result
+}
+
+/// CFG-driven search for a displaced-else splice.
+///
+/// Returns `(outer_target, inner_target, inner_else_end)`: drain
+/// `[inner_target..inner_else_end)` and insert at `outer_target` to restore
+/// nested containment. Returns `None` when no candidate exists.
+fn find_displaced_else_splice(stmts: &[BcStatement]) -> Option<(usize, usize, usize)> {
+    let omap = super::OffsetMap::build(stmts);
+    let cfg = BlockCfg::build_for_structurer(stmts, &omap);
+
+    let cond_blocks: Vec<(BlockId, usize, usize)> = (0..cfg.blocks.len())
+        .filter_map(|bid| cond_jump_info(&cfg, stmts, bid).map(|(i, t)| (bid, i, t)))
+        .collect();
+
+    for (oi, &(_, outer_if, outer_target)) in cond_blocks.iter().enumerate() {
+        for (ii, &(_, inner_if, inner_target)) in cond_blocks.iter().enumerate() {
+            if oi == ii {
+                continue;
+            }
+            if inner_if <= outer_if || inner_if >= outer_target || inner_target <= outer_target {
+                continue;
+            }
+            if !range_has_exit_via_cfg(&cfg, inner_if + 1, outer_target) {
+                continue;
+            }
+            let inner_else_end = find_block_end(stmts, inner_target);
+            if inner_else_end <= inner_target {
+                continue;
+            }
+            return Some((outer_target, inner_target, inner_else_end));
+        }
+    }
+    None
+}
+
+/// Extract `(if_stmt_idx, target_stmt_idx)` for a CondJump block.
+///
+/// The if-jump is the block's last statement. The target index is the
+/// false-branch entry, advanced past a leading `pop_flow` when fuzzy offset
+/// resolution landed on one (the real target is the next statement after a
+/// filtered wire_trace). Returns `None` if `bid` does not end in a CondJump.
+fn cond_jump_info(cfg: &BlockCfg, stmts: &[BcStatement], bid: BlockId) -> Option<(usize, usize)> {
+    let block = &cfg.blocks[bid];
+    let BlockExit::CondJump { target, .. } = block.exit else {
+        return None;
+    };
+    if block.stmt_range.is_empty() {
+        return None;
+    }
+    let if_idx = block.stmt_range.end - 1;
+    let mut target_idx = cfg.blocks[target].stmt_range.start;
+    if target_idx < stmts.len() && stmts[target_idx].text == POP_FLOW {
+        target_idx += 1;
+    }
+    Some((if_idx, target_idx))
+}
+
+/// True when any block fully contained in `[start, end)` exits via
+/// [`BlockExit::ReturnTerminal`].
+fn range_has_exit_via_cfg(cfg: &BlockCfg, start: usize, end: usize) -> bool {
+    if start >= end {
+        return false;
+    }
+    // Blocks are sorted by `stmt_range.start`, so skip past those that start
+    // before `start` and stop once we pass `end`.
+    let first = cfg.blocks.partition_point(|b| b.stmt_range.start < start);
+    cfg.blocks[first..]
+        .iter()
+        .take_while(|b| b.stmt_range.start < end)
+        .any(|b| b.stmt_range.end <= end && matches!(b.exit, BlockExit::ReturnTerminal))
 }
 
 /// Convert flat bytecode statements into structured pseudo-code lines (unindented).
@@ -623,6 +635,11 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         offset_map.find_fuzzy_or_end(target, STRUCTURE_OFFSET_TOLERANCE, stmts.len())
     };
 
+    // Use the structurer-specific CFG so jump tolerance matches `find_target`
+    // and Sequence dispatch chains stay as individual blocks; the else-branch
+    // detector needs to see each `if !(cond) jump` block independently.
+    let cfg = BlockCfg::build_for_structurer(stmts, &offset_map);
+
     let label_at: HashMap<usize, &String> = labels
         .iter()
         .filter_map(|(offset, name)| {
@@ -634,7 +651,7 @@ pub fn structure_bytecode(stmts: &[BcStatement], labels: &HashMap<usize, String>
         .collect();
 
     let mut skip: HashSet<usize> = HashSet::new();
-    let if_blocks = detect_if_blocks(stmts, &find_target);
+    let if_blocks = detect_if_blocks(stmts, &find_target, &cfg);
     suppress_flow_opcodes(stmts, &mut skip);
     let mut region_tree = build_region_tree(stmts.len(), &if_blocks, &mut skip);
     insert_brace_blocks(&mut region_tree, stmts, &mut skip);
@@ -701,6 +718,7 @@ pub fn apply_indentation(lines: &mut [String]) {
 fn detect_if_blocks(
     stmts: &[BcStatement],
     find_target: &dyn Fn(usize) -> Option<usize>,
+    cfg: &BlockCfg,
 ) -> Vec<IfBlock> {
     let mut if_blocks: Vec<IfBlock> = Vec::new();
 
@@ -722,7 +740,7 @@ fn detect_if_blocks(
 
         // Check for an else branch: search backward from the false-branch start
         // for the true-branch's terminating jump or return
-        let (jump_idx, end_idx) = detect_else_branch(stmts, i, target_idx, find_target);
+        let (jump_idx, end_idx) = detect_else_branch_via_cfg(cfg, stmts, i, target_idx);
 
         if_blocks.push(IfBlock {
             if_idx: i,
@@ -759,80 +777,108 @@ fn find_else_end_by_pop_flow(stmts: &[BcStatement], start: usize) -> usize {
         .unwrap_or(stmts.len())
 }
 
-/// Check if the true-branch ends with an unconditional jump (else) or return (diverging).
-///
-/// Searches backward from `target_idx`, skipping only comment/marker lines, to find
-/// the true-branch terminator (a jump past the false-branch, or a return).
-/// The search is bounded by `if_idx` to avoid crossing into unrelated code.
-fn detect_else_branch(
+/// Map a CondJump true-branch's tail exit to `(jump_idx, end_idx)` for
+/// [`detect_if_blocks`]. Returns `(None, None)` when the CFG shape doesn't
+/// match a recognised else-branch terminator.
+fn detect_else_branch_via_cfg(
+    cfg: &BlockCfg,
     stmts: &[BcStatement],
     if_idx: usize,
     target_idx: usize,
-    find_target: &dyn Fn(usize) -> Option<usize>,
 ) -> (Option<usize>, Option<usize>) {
     if target_idx == 0 || target_idx > stmts.len() || if_idx >= target_idx {
         return (None, None);
     }
 
-    // Search backward from the false-branch start, skipping only
-    // non-executable lines (comments, markers). Stop at the first
-    // executable statement.
-    let search_start = if_idx + 1;
-    for check_idx in (search_start..target_idx).rev() {
-        let stmt = &stmts[check_idx];
-        let trimmed = stmt.text.trim();
+    let Some(if_bid) = cfg.block_of(if_idx) else {
+        return (None, None);
+    };
+    let BlockExit::CondJump { fall_through, .. } = cfg.blocks[if_bid].exit else {
+        return (None, None);
+    };
 
-        // Skip comments and markers
-        if trimmed.starts_with("//") || trimmed.is_empty() {
-            continue;
+    let Some(last_bid) = last_block_before_target(cfg, fall_through, target_idx) else {
+        return (None, None);
+    };
+
+    let last_block = &cfg.blocks[last_bid];
+    let last_stmt_idx = last_block.stmt_range.end.saturating_sub(1);
+
+    match &last_block.exit {
+        BlockExit::Jump(conv_bid) => {
+            let conv_start = cfg.blocks[*conv_bid].stmt_range.start;
+            if conv_start >= target_idx {
+                (Some(last_stmt_idx), Some(conv_start))
+            } else {
+                (None, None)
+            }
         }
-
-        // Unconditional jump past the false-branch: classic if/else skip
-        if let Some(end_target) = parse_jump(&stmt.text) {
-            if let Some(end_idx) = find_target(end_target) {
-                if end_idx >= target_idx {
-                    return (Some(check_idx), Some(end_idx));
+        BlockExit::ReturnTerminal => {
+            let last_text = &stmts[last_stmt_idx].text;
+            if last_text == RETURN_NOP || last_text == BARE_RETURN {
+                if target_idx < stmts.len() {
+                    (Some(last_stmt_idx), Some(stmts.len()))
+                } else {
+                    (None, None)
                 }
-            }
-        }
-        // Diverging return: both branches exit independently.
-        else if (stmt.text == RETURN_NOP || stmt.text == BARE_RETURN) && target_idx < stmts.len()
-        {
-            return (Some(check_idx), Some(stmts.len()));
-        }
-        // Diverging pop_flow: the true branch exits via pop_flow back to the
-        // enclosing push_flow. Safe only when the pop_flow is unmatched (not
-        // from a nested push/pop pair within the true body). The else end is
-        // found by scanning forward for the false branch's own balanced pop_flow.
-        // Unlike the return case, jump_idx stays None so the pop_flow remains
-        // visible and emits as return/break in the true branch.
-        else if stmt.text == POP_FLOW
-            && target_idx < stmts.len()
-            && is_unmatched_pop_flow(stmts, if_idx + 1, check_idx)
-        {
-            let end_idx = find_else_end_by_pop_flow(stmts, target_idx);
-            return (None, Some(end_idx));
-        }
-        // Latch close brace: DoOnce/FlipFlop transforms replace body-end
-        // pop_flow with `}`. This is a scope exit when the matching opener
-        // is a latch block within the true branch.
-        else if trimmed == BLOCK_CLOSE && target_idx < stmts.len() {
-            let has_latch_opener = (if_idx + 1..check_idx).any(|j| {
-                let opener = stmts[j].text.trim();
-                (opener.starts_with("DoOnce(") || opener.starts_with("FlipFlop("))
-                    && opener.ends_with(" {")
-            });
-            if has_latch_opener {
+            } else if last_text == POP_FLOW
+                && target_idx < stmts.len()
+                && is_unmatched_pop_flow(stmts, if_idx + 1, last_stmt_idx)
+            {
                 let end_idx = find_else_end_by_pop_flow(stmts, target_idx);
-                return (None, Some(end_idx));
+                (None, Some(end_idx))
+            } else {
+                (None, None)
             }
         }
-
-        // Any other executable statement means no else detected
-        break;
+        BlockExit::LatchTerminal => {
+            if target_idx < stmts.len()
+                && has_latch_opener_in_range(stmts, if_idx + 1, last_stmt_idx)
+            {
+                let end_idx = find_else_end_by_pop_flow(stmts, target_idx);
+                (None, Some(end_idx))
+            } else {
+                (None, None)
+            }
+        }
+        BlockExit::FallThrough | BlockExit::CondJump { .. } => (None, None),
     }
+}
 
-    (None, None)
+/// Last block at or before `target_idx` reachable by physical layout from
+/// `entry`. CFG blocks are built in physical order, so scanning forward and
+/// keeping the rightmost block whose range ends at or before `target_idx`
+/// matches a backward-from-`target_idx` scan's landing point.
+fn last_block_before_target(cfg: &BlockCfg, entry: BlockId, target_idx: usize) -> Option<BlockId> {
+    if entry >= cfg.blocks.len() {
+        return None;
+    }
+    if cfg.blocks[entry].stmt_range.start >= target_idx {
+        return None;
+    }
+    let mut last = None;
+    for bid in entry..cfg.blocks.len() {
+        let range = &cfg.blocks[bid].stmt_range;
+        if range.start >= target_idx {
+            break;
+        }
+        if range.end <= target_idx {
+            last = Some(bid);
+        } else {
+            // Defensive: build_basic_blocks splits on jump targets so
+            // straddling shouldn't happen.
+            break;
+        }
+    }
+    last
+}
+
+/// True if any statement in `[start, end)` is a DoOnce/FlipFlop opener.
+fn has_latch_opener_in_range(stmts: &[BcStatement], start: usize, end: usize) -> bool {
+    (start..end).any(|j| {
+        let opener = stmts[j].text.trim();
+        (opener.starts_with("DoOnce(") || opener.starts_with("FlipFlop(")) && opener.ends_with(" {")
+    })
 }
 
 /// Scan each else block for an unconditional jump targeting end_idx.
