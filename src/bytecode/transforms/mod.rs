@@ -20,6 +20,7 @@ pub use switch::{fold_cascade_across_sequences, fold_switch_enum_cascade};
 pub use temps::{
     collect_jump_targets, discard_unused_assignments, discard_unused_assignments_text,
     inline_constant_temps, inline_constant_temps_text, inline_single_use_temps,
+    inline_single_use_temps_text,
 };
 
 // UE compiler-generated variable/function prefixes shared across transforms.

@@ -245,6 +245,165 @@ pub fn inline_constant_temps_text(lines: &mut Vec<String>) {
     });
 }
 
+/// Text-based single-use temp inlining for post-structure pipelines.
+///
+/// Operates on structured text lines (`Vec<String>`) after `structure_bytecode`.
+/// Mirrors `inline_single_use_temps` but respects brace scoping: an assignment
+/// only inlines into a consumer that sits in the same logical block or a
+/// nested child block, never across an `if` / `else` boundary that would
+/// change semantics.
+pub fn inline_single_use_temps_text(lines: &mut Vec<String>) {
+    use crate::bytecode::MAX_LINE_WIDTH;
+    const MAX_PASSES: usize = 6;
+
+    for _ in 0..MAX_PASSES {
+        let assignments: Vec<(usize, String, String)> = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, line)| {
+                let trimmed = line.trim();
+                let (var, expr) = parse_temp_assignment(trimmed)?;
+                Some((i, var.to_string(), expr.to_string()))
+            })
+            .collect();
+
+        let mut assign_counts: HashMap<&str, usize> = HashMap::new();
+        for (_, var, _) in &assignments {
+            *assign_counts.entry(var.as_str()).or_default() += 1;
+        }
+
+        let mut to_inline: Vec<(usize, String, String)> = Vec::new();
+        for (assign_idx, var, expr) in &assignments {
+            if assign_counts.get(var.as_str()).copied().unwrap_or(0) != 1 {
+                continue;
+            }
+            let mut ref_count = 0usize;
+            for (i, line) in lines.iter().enumerate() {
+                if i == *assign_idx {
+                    continue;
+                }
+                ref_count += count_var_refs(line.trim(), var);
+            }
+            if ref_count == 1 {
+                to_inline.push((*assign_idx, var.clone(), expr.clone()));
+            }
+        }
+
+        let mut removed: HashSet<usize> = HashSet::new();
+        let mut inlined_any = false;
+        for (assign_idx, var_name, _) in &to_inline {
+            if removed.contains(assign_idx) {
+                continue;
+            }
+            let current_expr = match parse_temp_assignment(lines[*assign_idx].trim()) {
+                Some((v, e)) if v == var_name => e.to_string(),
+                _ => continue,
+            };
+
+            let Some(target_idx) =
+                find_single_use_target_in_scope(lines, *assign_idx, var_name, &removed)
+            else {
+                continue;
+            };
+
+            let replacement = substitute_var(lines[target_idx].trim(), var_name, &current_expr);
+            let shortens = current_expr.len() + 2 <= var_name.len();
+            let trivial = is_trivial_expr(&current_expr);
+            if !shortens && !trivial && replacement.len() > MAX_LINE_WIDTH {
+                continue;
+            }
+
+            // Preserve the consumer's indentation.
+            let consumer_indent = &lines[target_idx]
+                [..lines[target_idx].len() - lines[target_idx].trim_start().len()];
+            lines[target_idx] = format!("{}{}", consumer_indent, replacement);
+            removed.insert(*assign_idx);
+            inlined_any = true;
+        }
+
+        let mut idx = 0;
+        lines.retain(|_| {
+            let keep = !removed.contains(&idx);
+            idx += 1;
+            keep
+        });
+        if !inlined_any {
+            break;
+        }
+    }
+}
+
+/// Find the consumer line for `var_name` in the same block or a nested child
+/// block as the assignment. Returns `None` when the var is referenced more
+/// than once in scope, zero times, or only in a sibling block.
+fn find_single_use_target_in_scope(
+    lines: &[String],
+    assign_idx: usize,
+    var_name: &str,
+    removed: &HashSet<usize>,
+) -> Option<usize> {
+    let assign_depth = indent_depth(&lines[assign_idx]);
+
+    let mut depth = assign_depth;
+    let mut target = None;
+    let mut refs = 0usize;
+
+    for (i, line) in lines.iter().enumerate().skip(assign_idx + 1) {
+        if removed.contains(&i) {
+            continue;
+        }
+        let trimmed = line.trim();
+
+        // A closing brace that returns us below the assignment's depth
+        // means we've left the scope the assignment lives in.
+        if trimmed.starts_with('}') && indent_depth(line) < assign_depth {
+            break;
+        }
+
+        let count = count_var_refs(trimmed, var_name);
+        if count > 0 {
+            refs += count;
+            if refs > 1 {
+                return None;
+            }
+            if target.is_none() {
+                target = Some(i);
+            }
+        }
+
+        // Track depth transitions so a `} else {` on one line still counts as
+        // leaving the original branch.
+        if trimmed.starts_with('}') {
+            depth = depth.saturating_sub(1);
+            if depth < assign_depth {
+                break;
+            }
+        }
+        if trimmed.ends_with('{') {
+            depth += 1;
+        }
+    }
+
+    if refs == 1 {
+        target
+    } else {
+        None
+    }
+}
+
+fn indent_depth(line: &str) -> usize {
+    // Treat each 4-space stride as one depth level; tabs count as one each.
+    let mut spaces = 0usize;
+    for b in line.as_bytes() {
+        match b {
+            b' ' => spaces += 1,
+            b'\t' => spaces += 4,
+            _ => break,
+        }
+    }
+    spaces / 4
+}
+
 /// Text-based dead-assignment removal for post-structure pipelines.
 ///
 /// Removes `$temp = expr` lines with zero external references.

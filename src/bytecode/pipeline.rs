@@ -16,8 +16,8 @@ use super::transforms::{
     discard_unused_assignments_text, eliminate_constant_condition_branches,
     fold_cascade_across_sequences, fold_summary_patterns, fold_switch_enum_cascade,
     inline_constant_temps, inline_constant_temps_text, inline_single_use_temps,
-    rename_loop_temp_vars, strip_implicit_returns, strip_inlined_break_calls,
-    strip_orphaned_blocks, strip_unmatched_braces,
+    inline_single_use_temps_text, rename_loop_temp_vars, strip_implicit_returns,
+    strip_inlined_break_calls, strip_orphaned_blocks, strip_unmatched_braces,
 };
 use super::{
     split_by_sequence_markers, OffsetMap, JUMP_OFFSET_TOLERANCE, LOOP_COMPLETE_MARKER, RETURN_NOP,
@@ -117,6 +117,7 @@ fn post_structure_cleanup(lines: &mut Vec<String>) {
     // Temp inlining runs post-structure so that structure detection has the
     // full statement array with intact mem_offsets for jump target resolution.
     inline_constant_temps_text(lines);
+    inline_single_use_temps_text(lines);
     discard_unused_assignments_text(lines);
     fold_summary_patterns(lines);
     // Remove Break* calls left orphaned by fold_break_patterns: when out params
