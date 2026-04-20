@@ -361,6 +361,93 @@ fn inline_constant_temps_dollar_single_assign_skipped() {
     assert_eq!(stmts.len(), 3); // unchanged
 }
 
+// inline_single_use_temps_text
+#[test]
+fn single_use_text_basic() {
+    let mut lines = vec!["$Temp_1 = foo()".to_string(), "bar($Temp_1)".to_string()];
+    inline_single_use_temps_text(&mut lines);
+    assert_eq!(lines, vec!["bar(foo())"]);
+}
+
+#[test]
+fn single_use_text_preserves_indent() {
+    let mut lines = vec![
+        "    $Temp_1 = foo()".to_string(),
+        "    bar($Temp_1)".to_string(),
+    ];
+    inline_single_use_temps_text(&mut lines);
+    assert_eq!(lines, vec!["    bar(foo())"]);
+}
+
+#[test]
+fn single_use_text_inlines_into_nested_block() {
+    let mut lines = vec![
+        "$Temp_1 = foo()".to_string(),
+        "if (cond) {".to_string(),
+        "    bar($Temp_1)".to_string(),
+        "}".to_string(),
+    ];
+    inline_single_use_temps_text(&mut lines);
+    assert_eq!(
+        lines,
+        vec![
+            "if (cond) {".to_string(),
+            "    bar(foo())".to_string(),
+            "}".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn single_use_text_skips_across_closing_brace() {
+    // Assignment sits inside an if-body; consumer is outside the block.
+    // The closing brace that exits the if ends the assignment's scope.
+    let mut lines = vec![
+        "if (cond) {".to_string(),
+        "    $Temp_1 = foo()".to_string(),
+        "}".to_string(),
+        "bar($Temp_1)".to_string(),
+    ];
+    let before = lines.clone();
+    inline_single_use_temps_text(&mut lines);
+    assert_eq!(lines, before);
+}
+
+#[test]
+fn single_use_text_skips_multi_use() {
+    let mut lines = vec![
+        "$Temp_1 = foo()".to_string(),
+        "bar($Temp_1)".to_string(),
+        "baz($Temp_1)".to_string(),
+    ];
+    let before = lines.clone();
+    inline_single_use_temps_text(&mut lines);
+    assert_eq!(lines, before);
+}
+
+#[test]
+fn single_use_text_skips_multi_assign() {
+    let mut lines = vec![
+        "$Temp_1 = foo()".to_string(),
+        "$Temp_1 = bar()".to_string(),
+        "baz($Temp_1)".to_string(),
+    ];
+    let before = lines.clone();
+    inline_single_use_temps_text(&mut lines);
+    assert_eq!(lines, before);
+}
+
+#[test]
+fn single_use_text_chain_substitution() {
+    let mut lines = vec![
+        "$Temp_1 = foo()".to_string(),
+        "$Temp_2 = bar($Temp_1)".to_string(),
+        "baz($Temp_2)".to_string(),
+    ];
+    inline_single_use_temps_text(&mut lines);
+    assert_eq!(lines, vec!["baz(bar(foo()))"]);
+}
+
 // discard_unused_assignments: pure expression removal
 #[test]
 fn discard_removes_pure_unused_assignment() {
