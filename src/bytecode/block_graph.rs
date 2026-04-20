@@ -772,6 +772,53 @@ pub(crate) fn find_convergence_target(
     targets_a.intersection(&targets_b).copied().min()
 }
 
+/// Collect every block reachable from `entry` without ever entering `avoid`,
+/// including `entry` itself (when `entry != avoid`).
+///
+/// Used by convergence-aware nesting: compute the set for each branch of a
+/// CondJump while avoiding the sibling branch to find blocks that only one
+/// side can reach. Set differences then classify each successor as
+/// fall-through-only, target-only, or convergent.
+///
+/// The walk follows every non-terminal edge (Jump, FallThrough, CondJump
+/// fall_through + target) transitively. Terminal exits (Return / Latch) do
+/// not propagate.
+#[allow(dead_code)]
+pub(crate) fn blocks_reachable_avoiding(
+    blocks: &[Block],
+    entry: BlockId,
+    avoid: BlockId,
+) -> HashSet<BlockId> {
+    let mut reached: HashSet<BlockId> = HashSet::new();
+    if entry >= blocks.len() || entry == avoid {
+        return reached;
+    }
+    walk_reachable(blocks, entry, avoid, &mut reached);
+    reached
+}
+
+fn walk_reachable(blocks: &[Block], bid: BlockId, avoid: BlockId, reached: &mut HashSet<BlockId>) {
+    if bid >= blocks.len() || bid == avoid || !reached.insert(bid) {
+        return;
+    }
+    match &blocks[bid].exit {
+        BlockExit::ReturnTerminal | BlockExit::LatchTerminal => {}
+        BlockExit::Jump(target) => {
+            walk_reachable(blocks, *target, avoid, reached);
+        }
+        BlockExit::FallThrough => {
+            walk_reachable(blocks, bid + 1, avoid, reached);
+        }
+        BlockExit::CondJump {
+            fall_through,
+            target,
+        } => {
+            walk_reachable(blocks, *fall_through, avoid, reached);
+            walk_reachable(blocks, *target, avoid, reached);
+        }
+    }
+}
+
 /// Recursively collect all Jump targets reachable from a block, following
 /// all edge types transitively. The `visited` set prevents infinite loops
 /// from backward edges.
@@ -1325,5 +1372,118 @@ mod tests {
                 latch_name: "Bar".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn reachable_avoiding_excludes_sibling_branch() {
+        // Classic if/else with shared convergence:
+        //   b0: CondJump ft=b1, target=b2
+        //   b1: Jump(b3)
+        //   b2: Jump(b3)
+        //   b3: shared convergence (ReturnTerminal to terminate)
+        // From b1, avoiding b2: should reach {b1, b3}.
+        // From b2, avoiding b1: should reach {b2, b3}.
+        // Intersection gives b3 as the convergence, symmetric-difference is
+        // empty here (nothing branch-exclusive beyond the entries).
+        let blocks = vec![
+            synthetic_block(BlockExit::CondJump {
+                fall_through: 1,
+                target: 2,
+            }),
+            synthetic_block(BlockExit::Jump(3)),
+            synthetic_block(BlockExit::Jump(3)),
+            synthetic_block(BlockExit::ReturnTerminal),
+        ];
+        let from_ft = blocks_reachable_avoiding(&blocks, 1, 2);
+        let from_tgt = blocks_reachable_avoiding(&blocks, 2, 1);
+        assert_eq!(from_ft, [1, 3].into_iter().collect::<HashSet<_>>());
+        assert_eq!(from_tgt, [2, 3].into_iter().collect::<HashSet<_>>());
+        let convergent: HashSet<_> = from_ft.intersection(&from_tgt).copied().collect();
+        assert_eq!(convergent, [3].into_iter().collect::<HashSet<_>>());
+    }
+
+    #[test]
+    fn reachable_avoiding_identifies_branch_exclusive_blocks() {
+        // Asymmetric shape: the target branch passes through an extra block
+        // before converging.
+        //   b0: CondJump ft=b1, target=b2
+        //   b1: Jump(b4)                    <- fall-through goes straight to b4
+        //   b2: FallThrough                 <- target passes through b3
+        //   b3: Jump(b4)
+        //   b4: ReturnTerminal
+        // From b1 avoiding b2: {b1, b4}
+        // From b2 avoiding b1: {b2, b3, b4}
+        // b3 is target-exclusive (reachable only via the target branch).
+        let blocks = vec![
+            synthetic_block(BlockExit::CondJump {
+                fall_through: 1,
+                target: 2,
+            }),
+            synthetic_block(BlockExit::Jump(4)),
+            synthetic_block(BlockExit::FallThrough),
+            synthetic_block(BlockExit::Jump(4)),
+            synthetic_block(BlockExit::ReturnTerminal),
+        ];
+        let from_ft = blocks_reachable_avoiding(&blocks, 1, 2);
+        let from_tgt = blocks_reachable_avoiding(&blocks, 2, 1);
+        let ft_only: HashSet<_> = from_ft.difference(&from_tgt).copied().collect();
+        let tgt_only: HashSet<_> = from_tgt.difference(&from_ft).copied().collect();
+        assert_eq!(ft_only, [1].into_iter().collect::<HashSet<_>>());
+        assert_eq!(
+            tgt_only,
+            [2, 3].into_iter().collect::<HashSet<_>>(),
+            "b3 is reachable only via the target branch"
+        );
+    }
+
+    #[test]
+    fn reachable_avoiding_stops_at_avoid_and_terminals() {
+        // Ensures the walk does not enter `avoid` and does not propagate
+        // through terminal exits.
+        //   b0: Jump(b1)
+        //   b1: CondJump ft=b2, target=b3
+        //   b2: ReturnTerminal
+        //   b3: LatchTerminal
+        let blocks = vec![
+            synthetic_block(BlockExit::Jump(1)),
+            synthetic_block(BlockExit::CondJump {
+                fall_through: 2,
+                target: 3,
+            }),
+            synthetic_block(BlockExit::ReturnTerminal),
+            synthetic_block(BlockExit::LatchTerminal),
+        ];
+        // Avoid b1 entirely: we only see b0.
+        let reached = blocks_reachable_avoiding(&blocks, 0, 1);
+        assert_eq!(reached, [0].into_iter().collect::<HashSet<_>>());
+        // No avoid (use an out-of-range id): terminals stop the walk but we
+        // still see b0..b3.
+        let all = blocks_reachable_avoiding(&blocks, 0, usize::MAX);
+        assert_eq!(all, [0, 1, 2, 3].into_iter().collect::<HashSet<_>>());
+    }
+
+    #[test]
+    fn reachable_avoiding_handles_cycles() {
+        // A backward edge in the CFG must not cause infinite recursion.
+        //   b0: Jump(b1)
+        //   b1: CondJump ft=b2, target=b0  (loop back)
+        //   b2: ReturnTerminal
+        let blocks = vec![
+            synthetic_block(BlockExit::Jump(1)),
+            synthetic_block(BlockExit::CondJump {
+                fall_through: 2,
+                target: 0,
+            }),
+            synthetic_block(BlockExit::ReturnTerminal),
+        ];
+        let reached = blocks_reachable_avoiding(&blocks, 0, usize::MAX);
+        assert_eq!(reached, [0, 1, 2].into_iter().collect::<HashSet<_>>());
+    }
+
+    #[test]
+    fn reachable_avoiding_returns_empty_when_entry_is_avoid() {
+        let blocks = vec![synthetic_block(BlockExit::ReturnTerminal)];
+        let reached = blocks_reachable_avoiding(&blocks, 0, 0);
+        assert!(reached.is_empty());
     }
 }
