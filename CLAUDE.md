@@ -17,6 +17,15 @@ src/
   helpers.rs           Shared text utilities (indent_of, find_matching_paren, split_args, is_loop_header)
   parser.rs            Asset parser orchestrator (parse_asset, ParseCtx)
   pins.rs              EdGraph pin parsing (K2Node pin connections, LinkedTo, SubPins)
+  prop_query.rs        Typed property lookup helpers (find_prop, find_struct_field_str, etc.)
+  pin_hints/
+    mod.rs             Module declarations + public re-exports
+    types.rs           BranchSide, BranchInfo, BranchHints
+    collect.rs         BFS over pins to build BranchHints from entry points
+    routing.rs         Per-class exec-successor rules (Branch, Sequence, DoOnce)
+    bytecode_map.rs    Map bytecode if-offsets to K2Node_IfThenElse exports
+    detect.rs          Pin-aware else-branch classifier (scoped + explicit variants)
+  pin_hints_scope.rs   Thread-local scope holding current BranchHints + BytecodeBranchMap
   output_text.rs       Dump output mode (--dump)
   output_json.rs       JSON output mode (--json)
   output_summary/
@@ -27,6 +36,11 @@ src/
     ubergraph.rs       Ubergraph event splitting, resume block matching, cross-segment jumps
     format.rs          Summary formatting: component tree, variables, functions, inline comments
     filter.rs          Post-processing filter for summary output (--filter)
+    relocate/
+      mod.rs           Entry point + orchestration for orphan DoOnce relocation via pin hints
+      if_block.rs      IfBlock struct, find/parse if-blocks in the flat line list
+      matching.rs      Match block body against BranchInfo pin-only sets
+      rewrite.rs       Splice captured orphans into the matched branch, un-invert if needed
   output_diff.rs       Diff output mode (--diff: unified diff of two summaries)
   bytecode/
     mod.rs             OffsetMap, sub-module re-exports

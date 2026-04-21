@@ -12,6 +12,8 @@ pub mod output_json;
 pub mod output_summary;
 pub mod output_text;
 pub mod parser;
+pub mod pin_hints;
+pub mod pin_hints_scope;
 pub mod pins;
 pub mod prop_query;
 pub mod properties;

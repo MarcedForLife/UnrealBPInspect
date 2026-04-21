@@ -103,6 +103,17 @@ pub const PIN_DIRECTION_INPUT: u8 = 0;
 pub const PIN_DIRECTION_OUTPUT: u8 = 1;
 pub const PIN_TYPE_EXEC: &str = "exec";
 
+/// A reference from one pin to another pin on a target node. Produced
+/// directly from `UEdGraphPin::LinkedTo` on disk, which serializes each
+/// entry as (OwningNode, PinId).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LinkedPin {
+    /// 1-based export index of the node owning the target pin.
+    pub node: usize,
+    /// FGuid of the target pin on that node.
+    pub pin_id: [u8; 16],
+}
+
 /// A single pin on an EdGraph node.
 #[derive(Debug, Clone)]
 pub struct EdGraphPin {
@@ -112,8 +123,12 @@ pub struct EdGraphPin {
     /// Pin category from FEdGraphPinType (e.g. "exec", "bool", "object").
     pub pin_type: String,
     pub direction: u8,
-    /// 1-based export indices of nodes connected to this pin via LinkedTo.
-    pub linked_to: Vec<usize>,
+    /// FGuid of this pin, used to match incoming links on other nodes that
+    /// target this pin via `LinkedPin::pin_id`.
+    pub pin_id: [u8; 16],
+    /// Links to target pins on connected nodes, in on-disk order
+    /// (deduplicated by (node, pin_id)).
+    pub linked_to: Vec<LinkedPin>,
 }
 
 impl EdGraphPin {
