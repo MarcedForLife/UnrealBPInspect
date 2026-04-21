@@ -21,7 +21,10 @@ use super::call_graph::{
 };
 use super::comments::classify_comments;
 use super::edgraph::{collect_edgraph_data, merge_event_graph_data, EdGraphData};
-use super::ubergraph::{emit_ubergraph_events, is_ubergraph_stub};
+use super::ubergraph::{
+    compute_action_key_events, display_event_name, emit_ubergraph_events, is_ubergraph_stub,
+    split_ubergraph_sections,
+};
 use super::{emit_comment, section_sep, strip_offset_prefix};
 
 const COMP_SKIP_PROPS: &[&str] = &[
@@ -481,7 +484,7 @@ pub fn format_summary(asset: &ParsedAsset) -> String {
     let edgraph = collect_edgraph_data(asset, &export_names);
     let local_functions = collect_local_functions(asset, &export_names, ubergraph_ctx.as_ref());
 
-    let (mut callees_map, callers_map) = build_call_graph(
+    let (mut callees_map, mut callers_map) = build_call_graph(
         asset,
         &export_names,
         &local_functions,
@@ -489,7 +492,25 @@ pub fn format_summary(asset: &ParsedAsset) -> String {
         ubergraph_ctx.as_ref().map(|c| c.structured.as_slice()),
     );
 
-    format_call_graph(&mut buf, &mut callees_map);
+    let action_key_events = ubergraph_ctx
+        .as_ref()
+        .map(|ctx| {
+            let (sections, _) = split_ubergraph_sections(&ctx.structured);
+            let names: Vec<&str> = sections.iter().map(|s| s.name.as_str()).collect();
+            compute_action_key_events(&names)
+        })
+        .unwrap_or_default();
+
+    // Rewrite mangled InpActEvt_*/InpAxisEvt_* names to their clean display
+    // form in the callers map so `// called by:` trailers match event headers.
+    // The callees map is remapped by `format_call_graph` directly.
+    for callers in callers_map.values_mut() {
+        for caller in callers.iter_mut() {
+            *caller = display_event_name(caller, &action_key_events);
+        }
+    }
+
+    format_call_graph(&mut buf, &mut callees_map, &action_key_events);
     format_functions(
         &mut buf,
         asset,

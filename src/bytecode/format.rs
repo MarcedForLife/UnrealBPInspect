@@ -51,11 +51,16 @@ fn try_inline_operator(name: &str, args: &[String]) -> Option<String> {
         }
     })?;
     if args.len() >= 2 {
+        let mut lhs = args[0].clone();
+        let mut rhs = args[1].clone();
+        if matches!(operator, "==" | "!=") {
+            crate::enums::resolve_enum_comparison(&mut lhs, &mut rhs);
+        }
         Some(format!(
             "{} {} {}",
-            maybe_paren(&args[0]),
+            maybe_paren(&lhs),
             operator,
-            maybe_paren(&args[1])
+            maybe_paren(&rhs)
         ))
     } else {
         None
