@@ -6,6 +6,8 @@ use std::fmt::Write;
 
 use crate::bytecode::transforms::fold_long_lines;
 use crate::helpers::indent_of;
+use crate::pin_hints::{build_branch_hints, build_bytecode_branch_map};
+use crate::pin_hints_scope;
 use crate::prop_query::{
     find_prop, find_prop_object, find_prop_object_array, find_prop_str, find_prop_str_items,
     prop_value_short,
@@ -82,8 +84,8 @@ fn fmt_prop_list(
 }
 
 fn fmt_comp_props(buf: &mut String, name: &str, class: &str, depth: usize, ctx: &SummaryCtx) {
-    let indent = "  ".repeat(depth + 1);
-    let prop_indent = "  ".repeat(depth + 2);
+    let indent = " ".repeat(super::INDENT_WIDTH * (depth + 1));
+    let prop_indent = " ".repeat(super::INDENT_WIDTH * (depth + 2));
     writeln!(buf, "{}{} ({})", indent, name, class).unwrap();
     if let Some(props) = ctx.comp_props.get(name) {
         let skip = &[
@@ -337,7 +339,7 @@ fn emit_function_body(
         let mut sorted_top = top_level;
         sorted_top.sort_by(|a, b| a.x.cmp(&b.x).then(a.y.cmp(&b.y)).then(a.text.cmp(&b.text)));
         for cb in &sorted_top {
-            emit_comment(buf, &cb.text, "    ");
+            emit_comment(buf, &cb.text, super::BODY_INDENT);
         }
     }
 
@@ -462,6 +464,14 @@ pub fn format_summary(asset: &ParsedAsset) -> String {
         .iter()
         .map(|(h, _)| h.object_name.clone())
         .collect();
+
+    // Install pin-derived branch hints in a thread-local scope for the
+    // duration of structuring, so the else-branch detector and post-structure
+    // relocation pass can consult them without threading through every
+    // intermediate signature.
+    let hints = build_branch_hints(asset);
+    let map = build_bytecode_branch_map(asset, &hints);
+    let _pin_hints_guard = pin_hints_scope::Guard::new(hints, map);
 
     let (_bp_name, _bp_parent) = format_header(&mut buf, asset, &export_names);
     let components = format_component_tree(&mut buf, asset, &export_names);
