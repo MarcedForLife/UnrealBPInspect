@@ -712,7 +712,7 @@ fn extract_input_axis_name(section_name: &str) -> Option<&str> {
 ///
 /// Groups events by action name. When an action has two events, the lower
 /// suffix number is Pressed, the higher is Released. Single events are Pressed.
-fn compute_action_key_events(section_names: &[&str]) -> HashMap<String, String> {
+pub(super) fn compute_action_key_events(section_names: &[&str]) -> HashMap<String, String> {
     let mut by_action: HashMap<&str, Vec<(&str, u32)>> = HashMap::new();
     for &name in section_names {
         if let Some(action) = extract_input_action_name(name) {
@@ -735,12 +735,18 @@ fn compute_action_key_events(section_names: &[&str]) -> HashMap<String, String> 
     result
 }
 
-/// Convert a raw UberGraph section name to a clean display name with signature.
+/// Convert a raw UberGraph section name to a bare display name (no signature).
 ///
-/// `InpActEvt_Jump_K2Node_InputActionEvent_13` with Pressed -> `InputAction_Jump_Pressed()`
-/// `InpAxisEvt_MouseX_K2Node_InputAxisEvent_0` -> `InputAxis_MouseX(AxisValue: float)`
-/// Custom events pass through unchanged with `()` appended.
-fn clean_event_header(raw_name: &str, action_key_events: &HashMap<String, String>) -> String {
+/// `InpActEvt_Jump_K2Node_InputActionEvent_13` with Pressed -> `InputAction_Jump_Pressed`
+/// `InpAxisEvt_MouseX_K2Node_InputAxisEvent_0` -> `InputAxis_MouseX`
+/// Non-input events (custom events, regular functions) pass through unchanged.
+///
+/// Used by call graph and `// called by:` trailers; for event headers with a
+/// signature, use [`clean_event_header`].
+pub(super) fn display_event_name(
+    raw_name: &str,
+    action_key_events: &HashMap<String, String>,
+) -> String {
     if let Some(action) = extract_input_action_name(raw_name) {
         let key_event = action_key_events
             .get(raw_name)
@@ -749,9 +755,22 @@ fn clean_event_header(raw_name: &str, action_key_events: &HashMap<String, String
         return format!("InputAction_{}_{}", action, key_event);
     }
     if let Some(axis) = extract_input_axis_name(raw_name) {
-        return format!("InputAxis_{}(AxisValue: float)", axis);
+        return format!("InputAxis_{}", axis);
     }
     raw_name.to_string()
+}
+
+/// Convert a raw UberGraph section name to a clean display name with signature.
+///
+/// `InpActEvt_Jump_K2Node_InputActionEvent_13` with Pressed -> `InputAction_Jump_Pressed`
+/// `InpAxisEvt_MouseX_K2Node_InputAxisEvent_0` -> `InputAxis_MouseX(AxisValue: float)`
+/// Custom events pass through unchanged; the caller appends `()` as needed.
+fn clean_event_header(raw_name: &str, action_key_events: &HashMap<String, String>) -> String {
+    if extract_input_axis_name(raw_name).is_some() {
+        let bare = display_event_name(raw_name, action_key_events);
+        return format!("{}(AxisValue: float)", bare);
+    }
+    display_event_name(raw_name, action_key_events)
 }
 
 /// Resolve an event's graph node position by section name.

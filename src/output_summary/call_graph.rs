@@ -8,7 +8,9 @@ use crate::prop_query::{find_prop_str_items, find_prop_str_items_any};
 use crate::resolve::resolve_index;
 use crate::types::ParsedAsset;
 
-use super::ubergraph::{build_ubergraph_structured, is_ubergraph_stub, scan_structured_calls};
+use super::ubergraph::{
+    build_ubergraph_structured, display_event_name, is_ubergraph_stub, scan_structured_calls,
+};
 use super::{find_local_calls, strip_offset_prefix};
 
 /// Parse a stored bytecode line (`"XXXX: text"`) into a `BcStatement`.
@@ -119,7 +121,11 @@ pub(super) fn build_call_graph(
     (callees_map, callers_map)
 }
 
-pub(super) fn format_call_graph(buf: &mut String, callees_map: &mut HashMap<String, Vec<String>>) {
+pub(super) fn format_call_graph(
+    buf: &mut String,
+    callees_map: &mut HashMap<String, Vec<String>>,
+    action_key_events: &HashMap<String, String>,
+) {
     if callees_map.is_empty() {
         return;
     }
@@ -128,7 +134,18 @@ pub(super) fn format_call_graph(buf: &mut String, callees_map: &mut HashMap<Stri
     writeln!(buf, "Call graph:").unwrap();
     for (caller, callees) in &mut entries {
         callees.sort();
-        writeln!(buf, "  {} \u{2192} {}", caller, callees.join(", ")).unwrap();
+        let caller_display = display_event_name(caller, action_key_events);
+        let callees_display: Vec<String> = callees
+            .iter()
+            .map(|c| display_event_name(c, action_key_events))
+            .collect();
+        writeln!(
+            buf,
+            "  {} \u{2192} {}",
+            caller_display,
+            callees_display.join(", ")
+        )
+        .unwrap();
     }
     writeln!(buf).unwrap();
 }
