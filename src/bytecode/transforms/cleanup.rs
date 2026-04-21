@@ -144,6 +144,13 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
                 if dead_depth.is_some_and(|dd| depth < dd) {
                     dead_depth = None;
                 }
+                // `} else {`, `} else if (...) {`, `} finally {`, etc. close and
+                // re-open on one line. Re-increment so the body that follows
+                // is tracked at the correct depth; otherwise a `return` inside
+                // the else body can be mis-detected as depth-0 dead-code.
+                if opens_block(trimmed) {
+                    depth += 1;
+                }
                 return true; // always keep structural braces
             }
 

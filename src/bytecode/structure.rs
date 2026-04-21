@@ -738,9 +738,36 @@ fn detect_if_blocks(
             target_idx += 1;
         }
 
-        // Check for an else branch: search backward from the false-branch start
-        // for the true-branch's terminating jump or return
-        let (jump_idx, end_idx) = detect_else_branch_via_cfg(cfg, stmts, i, target_idx);
+        let (mut jump_idx, mut end_idx) = detect_else_branch_via_cfg(cfg, stmts, i, target_idx);
+
+        // Pin-aware tiebreaker. When pin-only-callee sets classify the
+        // physical then/else split, trust the pin split and bound the else
+        // block by the first unmatched pop_flow (same convention as the
+        // LatchTerminal/POP_FLOW CFG paths).
+        if target_idx > i + 1 && target_idx <= stmts.len() {
+            if let Some(key) = crate::pin_hints_scope::current_function_key() {
+                let pop_flow_end = find_else_end_by_pop_flow(stmts, target_idx);
+                let bytecode_offset = stmts[i].mem_offset as u32;
+                let then_side_text: Vec<&str> = stmts[i + 1..target_idx]
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect();
+                let else_side_text: Vec<&str> = stmts[target_idx..pop_flow_end]
+                    .iter()
+                    .map(|s| s.text.as_str())
+                    .collect();
+                let pin_answer = crate::pin_hints::detect_else_branch_via_pins_scoped(
+                    bytecode_offset,
+                    &key,
+                    &then_side_text,
+                    &else_side_text,
+                );
+                if pin_answer == (Some(0), Some(0)) {
+                    jump_idx = None;
+                    end_idx = Some(pop_flow_end);
+                }
+            }
+        }
 
         if_blocks.push(IfBlock {
             if_idx: i,

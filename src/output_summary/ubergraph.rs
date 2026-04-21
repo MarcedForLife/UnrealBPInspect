@@ -285,6 +285,62 @@ fn renumber_offsets(stmts: &mut [BcStatement]) {
 /// statement, exceeding downstream tolerances. Running this before CFG
 /// construction keeps block boundaries stable without removing any
 /// statements.
+/// Renumber mem_offsets to match vec order so offset-sorted and vec-sorted
+/// views agree. Reorder passes can leave stmts in an order where higher-vec-index
+/// stmts have lower mem_offsets than predecessors, which causes the structurer
+/// to drop "lexically mid-range" blocks as dead code. Rewrites jump / if-jump /
+/// push_flow text to point at the new offsets.
+/// Spacing between synthetic mem_offsets when renumbering to vec order.
+/// Arbitrary; only needs to be nonzero so offsets stay distinct and fuzzy
+/// lookups remain bounded.
+const RENUMBER_STRIDE: usize = 0x10;
+
+fn renumber_to_vec_order(stmts: &mut [BcStatement]) {
+    if stmts.len() < 2 {
+        return;
+    }
+    let base = stmts[0].mem_offset;
+    let old_to_new: Vec<(usize, usize)> = stmts
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.mem_offset, base + i * RENUMBER_STRIDE))
+        .collect();
+    if old_to_new.iter().all(|(o, n)| o == n) {
+        return;
+    }
+    let old_map: std::collections::HashMap<usize, usize> = old_to_new.iter().copied().collect();
+    let old_offset_map = OffsetMap::build(stmts);
+    // Exact match; otherwise fuzzy-forward resolution to the nearest stmt
+    // whose old offset has a known mapping. `None` when the target falls
+    // outside this event's partition.
+    let map_target = |target: usize| -> Option<usize> {
+        if let Some(&new_t) = old_map.get(&target) {
+            return Some(new_t);
+        }
+        let target_idx = old_offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)?;
+        old_map.get(&old_to_new[target_idx].0).copied()
+    };
+    for stmt in stmts.iter_mut() {
+        let trimmed = stmt.text.trim();
+        if let Some(target) = parse_push_flow(trimmed) {
+            if let Some(new_t) = map_target(target) {
+                stmt.text = format!("push_flow 0x{:x}", new_t);
+            }
+        } else if let Some(target) = parse_jump(trimmed) {
+            if let Some(new_t) = map_target(target) {
+                stmt.text = format!("jump 0x{:x}", new_t);
+            }
+        } else if let Some((cond, target)) = parse_if_jump(trimmed) {
+            if let Some(new_t) = map_target(target) {
+                stmt.text = format!("if !({}) jump 0x{:x}", cond, new_t);
+            }
+        }
+    }
+    for (i, stmt) in stmts.iter_mut().enumerate() {
+        stmt.mem_offset = base + i * RENUMBER_STRIDE;
+    }
+}
+
 fn normalize_jump_targets(stmts: &mut [BcStatement]) {
     if stmts.is_empty() {
         return;
@@ -578,19 +634,43 @@ pub(super) fn build_ubergraph_structured(
         let mut reordered = reorder_flow_patterns(&event_stmts);
         reorder_convergence(&mut reordered);
 
+        // After reorder, renumber mem_offsets to match vec order. Some reorder
+        // paths leave stmts where a later vec index has a lower mem_offset than
+        // its predecessor (e.g. a shared DoOnce body whose original offset
+        // sits below the else-body that reaches it via push_flow/pop_flow).
+        // structure_segment walks by vec index but bounds regions by offset, so
+        // such "lexically mid-range" blocks get dropped as dead code. Renumbering
+        // flattens offset-order onto vec-order.
+        renumber_to_vec_order(&mut reordered);
+
         let sub_segments = split_by_sequence_markers(&reordered);
-        if sub_segments.len() <= 1 {
-            all_lines.extend(structure_segment(&reordered));
-        } else {
-            for (marker, body) in &sub_segments {
-                if let Some(marker_text) = marker {
-                    all_lines.push(marker_text.clone());
-                }
-                if !body.is_empty() {
-                    all_lines.extend(structure_segment(body));
+        // Scope the current event's function key so the structurer's pin-aware
+        // else-branch fallback can consult branch hints keyed by
+        // `(function_key, bytecode_offset)`.
+        let event_start = all_lines.len();
+        crate::pin_hints_scope::with_function_key(&partition.name, || {
+            if sub_segments.len() <= 1 {
+                all_lines.extend(structure_segment(&reordered));
+            } else {
+                for (marker, body) in &sub_segments {
+                    if let Some(marker_text) = marker {
+                        all_lines.push(marker_text.clone());
+                    }
+                    if !body.is_empty() {
+                        all_lines.extend(structure_segment(body));
+                    }
                 }
             }
-        }
+
+            // Pin-aware post-structure relocation: move orphan
+            // `DoOnce(X) { ... }` blocks into the branch of the adjacent
+            // if-block indicated by this event's branch hints. Operates
+            // only on lines appended during this event so earlier events
+            // are not disturbed.
+            let mut event_slice: Vec<String> = all_lines.split_off(event_start);
+            super::relocate::relocate_orphan_doonces_via_hints(&mut event_slice);
+            all_lines.extend(event_slice);
+        });
     }
 
     strip_unmatched_braces(&mut all_lines);
@@ -975,37 +1055,6 @@ fn build_section_boundaries(lines: &[String]) -> Vec<(usize, String)> {
         .collect()
 }
 
-/// Resolve indentation for an event section based on group membership.
-fn event_indentation(
-    section_name: &str,
-    ctx: &UbergraphCommentCtx,
-    comments: Option<&[CommentBox]>,
-    edgraph: &EdGraphData,
-) -> (&'static str, &'static str) {
-    let event_pos = if !section_name.is_empty() {
-        resolve_event_position(
-            section_name,
-            &edgraph.event_positions,
-            &edgraph.input_action_positions,
-        )
-    } else {
-        None
-    };
-    let in_group = match (comments, &event_pos) {
-        (Some(cbs), Some((ex, ey, page))) => cbs.iter().enumerate().any(|(i, cb)| {
-            ctx.small_group_idxs.contains(&i)
-                && cb.graph_page == *page
-                && cb.contains_point(*ex, *ey)
-        }),
-        _ => false,
-    };
-    if in_group {
-        ("    ", "        ")
-    } else {
-        ("  ", "    ")
-    }
-}
-
 /// Emit bytecode lines with interleaved inline comments and resume blocks.
 fn emit_section_body(
     buf: &mut String,
@@ -1107,7 +1156,7 @@ pub(super) fn emit_ubergraph_events(
 
         section_sep(buf, &mut emitted_event_count);
 
-        let (sig_indent, body_indent) = event_indentation(&section.name, &ctx, comments, edgraph);
+        let (sig_indent, body_indent) = (super::INDENT, super::BODY_INDENT);
 
         let empty_wrapping: Vec<&CommentBox> = Vec::new();
         let empty_inline: Vec<(usize, &CommentBox)> = Vec::new();
@@ -1135,7 +1184,7 @@ pub(super) fn emit_ubergraph_events(
                             && cb.graph_page == *page
                             && cb.contains_point(ex, ey)
                         {
-                            emit_comment(buf, &cb.text, "  ");
+                            emit_comment(buf, &cb.text, super::INDENT);
                             emitted_group_comments.insert(i);
                         }
                     }

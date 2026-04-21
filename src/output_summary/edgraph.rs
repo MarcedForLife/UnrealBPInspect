@@ -239,7 +239,8 @@ fn build_event_node_sets(
                 if !pin.is_exec_output() {
                     continue;
                 }
-                for &target_idx in &pin.linked_to {
+                for link in &pin.linked_to {
+                    let target_idx = link.node;
                     if visited.insert(target_idx) {
                         queue.push_back(target_idx);
                     }
