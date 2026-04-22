@@ -33,7 +33,13 @@ src/
     comments.rs        EdGraph comment/bubble matching: rank-based, cluster-based, classification
     edgraph.rs         EdGraph data collection: comments, node positions, event positions, pin-based ownership BFS
     call_graph.rs      Call graph construction, ubergraph context, local function collection
-    ubergraph.rs       Ubergraph event splitting, resume block matching, cross-segment jumps
+    ubergraph/
+      mod.rs           Public entry: emit_ubergraph_events, scan_structured_calls, is_ubergraph_stub, helpers
+      linearize.rs     Event-stream linearization (split, linearize-from-entry, offset renumbering, jump-chain collapse)
+      events.rs        Event-name and section-name resolution (InpAxisEvt_*, InpActEvt_* normalization)
+      comment_placement.rs  Pin-classified + fallback comment placement within ubergraph sections
+      emit.rs          Section-boundary build, delay-resume map, section-body emission
+      tests.rs         Unit tests
     format.rs          Summary formatting: component tree, variables, functions, inline comments
     filter.rs          Post-processing filter for summary output (--filter)
     relocate/
@@ -48,9 +54,49 @@ src/
     readers.rs         Bytecode binary stream readers (read_bc_*)
     names.rs           GUID stripping, name cleanup
     resolve.rs         Bytecode reference resolution (obj refs, field paths)
-    decode.rs          Expression decoder (~85 opcodes), BcStatement, DecodeCtx, decode_bytecode
-    flow.rs            Flow pattern detection (sequences, for-loops, ForEach, convergence reorder, latch stripping)
-    structure.rs       Region tree (if/else/loop/guard blocks), apply_indentation post-pass
+    decode/
+      mod.rs           Re-exports decode_bytecode, decode_expr, BcStatement, DecodeCtx
+      types.rs         BcStatement + DecodeCtx
+      helpers.rs       Constant/list/delegate/container/table_op decode subroutines
+      expr.rs          decode_expr top-level dispatcher (~20 arms)
+      match_op.rs      decode_match_op (Switch/MatchOp handler, monolithic)
+      funcs.rs         decode_func_args, primitive_cast_name
+      entry.rs         decode_bytecode (public entry, drives the decode loop)
+      tests.rs         Unit tests (34)
+    cfg/
+      mod.rs           Re-exports StmtCfg + BlockCfg public API
+      stmt.rs          Statement-level CFG (StmtCfg) for event partitioning by reachability
+      block/
+        mod.rs         Re-exports BlockCfg, BlockExit, BlockId, ReturnKind, linearize_blocks
+        types.rs       Block-level CFG types (BlockCfg, Block, BlockExit, BlockMetadata, ReturnKind, BlockCfgConfig)
+        build.rs       Basic-block construction, edge wiring, latch-body range detection
+        collapse.rs    Latch-body annotation and Sequence super-block collapse
+        analysis.rs    In-degree, predecessors, convergence detection, reachability helpers
+        linearize.rs   DFS linearization of the block CFG
+        tests.rs       Unit tests
+    flow/
+      mod.rs           Re-exports parsers, reorder_flow_patterns, reorder_convergence, strip_latch_boilerplate, detect_sequence_spans
+      parsers.rs       Statement-text parsers (parse_push_flow, parse_jump, etc.) + flow depth helpers
+      sequence.rs      SequenceSpan + detect_sequence_spans
+      loops.rs         ForLoop / ForEach detection (grouped and interleaved Sequence variants)
+      emit.rs          SequenceEmitter, loop body emission
+      latch_strip.rs   Pre-structuring latch boilerplate removal (distinct from latch/ which does the final rewrite)
+      reorder.rs       Top-level reorder_flow_patterns + reorder_convergence pipeline
+      tests.rs         Unit tests
+    latch/
+      mod.rs           Public entry: transform_latch_patterns, precompute_flipflop_names; shared gate/init var prefixes
+      doonce.rs        DoOnce init-block detection, name derivation, library-function prefix list
+      flipflop.rs      FlipFlop toggle detection, name derivation, convergence collapse
+      transform.rs     Shared body-entry resolution and the monolithic transform_latches pass
+      tests.rs         Unit tests
+    structure/
+      mod.rs           Public entry: structure_bytecode + apply_indentation; negate_cond helper
+      region.rs        Region / RegionKind / IfBlock / BlockType types + tree mutation primitives
+      detect.rs        if-block / else-branch / displaced-else detection
+      build.rs         Region tree construction (build_region_tree, insert_* helpers)
+      emit.rs          Region-tree to pseudocode emission
+      postprocess.rs   Goto->break conversion, convergence extraction, double-else collapse
+      tests.rs         Unit tests
     transforms/
       mod.rs           Shared helpers (parse_temp_assignment, substitute_var, etc.), re-exports
       temps.rs         Temp variable inlining, constant folding, dead assignment removal
