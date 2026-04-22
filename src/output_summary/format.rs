@@ -6,6 +6,8 @@ use std::fmt::Write;
 
 use crate::bytecode::transforms::fold_long_lines;
 use crate::helpers::indent_of;
+use crate::pin_hints::{build_branch_hints, build_bytecode_branch_map};
+use crate::pin_hints_scope;
 use crate::prop_query::{
     find_prop, find_prop_object, find_prop_object_array, find_prop_str, find_prop_str_items,
     prop_value_short,
@@ -19,7 +21,10 @@ use super::call_graph::{
 };
 use super::comments::classify_comments;
 use super::edgraph::{collect_edgraph_data, merge_event_graph_data, EdGraphData};
-use super::ubergraph::{emit_ubergraph_events, is_ubergraph_stub};
+use super::ubergraph::{
+    compute_action_key_events, display_event_name, emit_ubergraph_events, is_ubergraph_stub,
+    split_ubergraph_sections,
+};
 use super::{emit_comment, section_sep, strip_offset_prefix};
 
 const COMP_SKIP_PROPS: &[&str] = &[
@@ -82,8 +87,8 @@ fn fmt_prop_list(
 }
 
 fn fmt_comp_props(buf: &mut String, name: &str, class: &str, depth: usize, ctx: &SummaryCtx) {
-    let indent = "  ".repeat(depth + 1);
-    let prop_indent = "  ".repeat(depth + 2);
+    let indent = " ".repeat(super::INDENT_WIDTH * (depth + 1));
+    let prop_indent = " ".repeat(super::INDENT_WIDTH * (depth + 2));
     writeln!(buf, "{}{} ({})", indent, name, class).unwrap();
     if let Some(props) = ctx.comp_props.get(name) {
         let skip = &[
@@ -337,7 +342,7 @@ fn emit_function_body(
         let mut sorted_top = top_level;
         sorted_top.sort_by(|a, b| a.x.cmp(&b.x).then(a.y.cmp(&b.y)).then(a.text.cmp(&b.text)));
         for cb in &sorted_top {
-            emit_comment(buf, &cb.text, "    ");
+            emit_comment(buf, &cb.text, super::BODY_INDENT);
         }
     }
 
@@ -463,6 +468,14 @@ pub fn format_summary(asset: &ParsedAsset) -> String {
         .map(|(h, _)| h.object_name.clone())
         .collect();
 
+    // Install pin-derived branch hints in a thread-local scope for the
+    // duration of structuring, so the else-branch detector and post-structure
+    // relocation pass can consult them without threading through every
+    // intermediate signature.
+    let hints = build_branch_hints(asset);
+    let map = build_bytecode_branch_map(asset, &hints);
+    let _pin_hints_guard = pin_hints_scope::Guard::new(hints, map);
+
     let (_bp_name, _bp_parent) = format_header(&mut buf, asset, &export_names);
     let components = format_component_tree(&mut buf, asset, &export_names);
     format_variables(&mut buf, asset, &export_names, &components);
@@ -471,7 +484,7 @@ pub fn format_summary(asset: &ParsedAsset) -> String {
     let edgraph = collect_edgraph_data(asset, &export_names);
     let local_functions = collect_local_functions(asset, &export_names, ubergraph_ctx.as_ref());
 
-    let (mut callees_map, callers_map) = build_call_graph(
+    let (mut callees_map, mut callers_map) = build_call_graph(
         asset,
         &export_names,
         &local_functions,
@@ -479,7 +492,25 @@ pub fn format_summary(asset: &ParsedAsset) -> String {
         ubergraph_ctx.as_ref().map(|c| c.structured.as_slice()),
     );
 
-    format_call_graph(&mut buf, &mut callees_map);
+    let action_key_events = ubergraph_ctx
+        .as_ref()
+        .map(|ctx| {
+            let (sections, _) = split_ubergraph_sections(&ctx.structured);
+            let names: Vec<&str> = sections.iter().map(|s| s.name.as_str()).collect();
+            compute_action_key_events(&names)
+        })
+        .unwrap_or_default();
+
+    // Rewrite mangled InpActEvt_*/InpAxisEvt_* names to their clean display
+    // form in the callers map so `// called by:` trailers match event headers.
+    // The callees map is remapped by `format_call_graph` directly.
+    for callers in callers_map.values_mut() {
+        for caller in callers.iter_mut() {
+            *caller = display_event_name(caller, &action_key_events);
+        }
+    }
+
+    format_call_graph(&mut buf, &mut callees_map, &action_key_events);
     format_functions(
         &mut buf,
         asset,

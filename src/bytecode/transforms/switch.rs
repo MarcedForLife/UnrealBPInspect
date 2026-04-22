@@ -12,7 +12,7 @@ use super::SWITCH_ENUM_PREFIX;
 use crate::bytecode::decode::BcStatement;
 use crate::bytecode::flow::{find_last_unmatched_pop, parse_if_jump, parse_jump, parse_push_flow};
 use crate::bytecode::{JUMP_OFFSET_TOLERANCE, POP_FLOW, RETURN_NOP};
-use crate::helpers::opens_block;
+use crate::helpers::{closes_block, is_comment_or_empty, opens_block};
 
 /// Fold `$SwitchEnum_CmpSuccess` cascades into `switch (VAR) { case: ... }`.
 ///
@@ -59,6 +59,13 @@ pub fn fold_switch_enum_cascade(lines: &mut Vec<String>) {
 /// Scan the cascade scaffold: consecutive `$SwitchEnum_CmpSuccess = VAR != N`
 /// assignments followed by if-checks and braces that reference the switch var.
 /// Returns (case_values, next_line_index, brace_depth).
+///
+/// Subsequent case-value assignments are only accepted when the preceding
+/// meaningful line is not a bare block closer. This rejects detached cascade
+/// assignments that sit after a closed if-block at cascade depth (the shape
+/// produced by sibling-flat `if (!$SwitchEnum_CmpSuccess) { body }` patterns
+/// when the structurer sees un-inlined scaffolding), which would otherwise be
+/// mis-attributed as additional cases without bodies.
 fn scan_cascade_scaffold(
     lines: &[String],
     start: usize,
@@ -73,11 +80,12 @@ fn scan_cascade_scaffold(
     while j < lines.len() {
         let trimmed = lines[j].trim();
         if let Some((sv, cv, val)) = parse_switch_enum_assign(trimmed) {
-            if sv == switch_var && cv == compared_var {
+            if sv == switch_var && cv == compared_var && prior_accepts_cascade_assign(lines, j) {
                 case_values.push(val);
                 j += 1;
                 continue;
             }
+            break;
         }
         if trimmed.contains(switch_var) {
             if opens_block(trimmed) {
@@ -95,6 +103,30 @@ fn scan_cascade_scaffold(
     }
 
     (case_values, j, brace_depth)
+}
+
+/// True if the line immediately before `idx` is compatible with another
+/// cascade assignment: either an open-block header (or `} else {` chain) or
+/// another cascade assign. Blank lines and comments are skipped when looking
+/// backward. Reject bare `}` and compacted `if ... { body }` closers, which
+/// indicate the prior case body has already closed.
+fn prior_accepts_cascade_assign(lines: &[String], idx: usize) -> bool {
+    let mut k = idx;
+    while k > 0 {
+        k -= 1;
+        let trimmed = lines[k].trim();
+        if is_comment_or_empty(trimmed) {
+            continue;
+        }
+        if opens_block(trimmed) {
+            return true;
+        }
+        if parse_switch_enum_assign(trimmed).is_some() {
+            return true;
+        }
+        return !closes_block(trimmed) && !trimmed.ends_with('}');
+    }
+    true
 }
 
 /// Collect case bodies from the nested if/else structure after the scaffold.

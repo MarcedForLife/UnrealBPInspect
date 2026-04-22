@@ -8,6 +8,7 @@ mod comments;
 mod edgraph;
 mod filter;
 mod format;
+mod relocate;
 mod ubergraph;
 
 pub use filter::filter_summary;
@@ -15,6 +16,16 @@ pub use format::format_summary;
 
 use std::collections::HashSet;
 use std::fmt::Write;
+
+/// Width (in spaces) of one indent level in summary output.
+pub(crate) const INDENT_WIDTH: usize = 2;
+/// One indent level (`INDENT_WIDTH` spaces) as a string literal for cheap prefixing.
+pub(crate) const INDENT: &str = "  ";
+/// Two indent levels (used for event bodies under an event signature).
+pub(crate) const BODY_INDENT: &str = "    ";
+// Keep the string literals and width constant in sync.
+const _: () = assert!(INDENT.len() == INDENT_WIDTH);
+const _: () = assert!(BODY_INDENT.len() == INDENT_WIDTH * 2);
 
 #[derive(Clone)]
 struct CommentBox {
@@ -78,7 +89,6 @@ const LATENT_RESUME_SECTION: &str = "(latent resume)";
 
 const COMMENT_WRAP_WIDTH: usize = 100;
 const MAX_BUBBLE_DISTANCE_SQ: i64 = 640_000; // 800px squared
-const FUZZY_LABEL_WINDOW: usize = 8;
 const OFFSET_PREFIX_LEN: usize = "0000: ".len();
 
 /// Strip the hex offset prefix from a bytecode line (e.g. `0012: expr` -> `expr`).

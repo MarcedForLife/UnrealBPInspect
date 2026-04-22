@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::{CommentBox, NodeInfo, BRANCH_IDENTIFIER, MAX_BUBBLE_DISTANCE_SQ};
+use crate::bytecode::{ANY_SEQUENCE_MARKER_PREFIX, ANY_SUB_SEQUENCE_MARKER_PREFIX, BLOCK_CLOSE};
 use crate::helpers::is_comment_or_empty;
 use crate::helpers::{indent_of, is_ident_char};
 use crate::types::{NodePinData, PIN_DIRECTION_INPUT, PIN_TYPE_EXEC};
@@ -78,7 +79,10 @@ fn find_exec_entry_points(
         let is_entry = pd.pins.iter().any(|pin| {
             pin.pin_type == PIN_TYPE_EXEC
                 && pin.direction == PIN_DIRECTION_INPUT
-                && pin.linked_to.iter().any(|src| !contained.contains(src))
+                && pin
+                    .linked_to
+                    .iter()
+                    .any(|link| !contained.contains(&link.node))
         });
         if is_entry {
             entries.push(exp_idx);
@@ -252,7 +256,8 @@ pub(super) fn map_export_to_line(
             if !pin.is_exec_output() {
                 continue;
             }
-            for &target in &pin.linked_to {
+            for link in &pin.linked_to {
+                let target = link.node;
                 if !visited.insert(target) {
                     continue;
                 }
@@ -290,7 +295,7 @@ fn match_branch_by_true_body(
     let mut then_targets: Vec<usize> = Vec::new();
     for pin in &pd.pins {
         if pin.is_exec_output() && pin.name.contains(THEN_PIN) {
-            then_targets.extend(&pin.linked_to);
+            then_targets.extend(pin.linked_to.iter().map(|link| link.node));
         }
     }
     if then_targets.is_empty() {
@@ -318,8 +323,8 @@ fn match_branch_by_true_body(
         if let Some(next_pd) = pin_data.get(&current) {
             for pin in &next_pd.pins {
                 if pin.is_exec_output() {
-                    for &target in &pin.linked_to {
-                        queue.push_back(target);
+                    for link in &pin.linked_to {
+                        queue.push_back(link.node);
                     }
                 }
             }
@@ -343,7 +348,7 @@ fn match_branch_by_condition(
     let mut condition_sources: Vec<usize> = Vec::new();
     for pin in &pd.pins {
         if pin.is_data_input() {
-            condition_sources.extend(&pin.linked_to);
+            condition_sources.extend(pin.linked_to.iter().map(|link| link.node));
         }
     }
     if condition_sources.is_empty() {
@@ -374,8 +379,8 @@ fn match_branch_by_condition(
             }
             for pin in &source_pd.pins {
                 if pin.is_data_input() {
-                    for &src in &pin.linked_to {
-                        queue.push_back(src);
+                    for link in &pin.linked_to {
+                        queue.push_back(link.node);
                     }
                 }
             }
@@ -485,8 +490,8 @@ fn match_by_input_operands(
         if !pin.is_data_input() {
             continue;
         }
-        for &source in &pin.linked_to {
-            if let Some(source_node) = node_index.get(&source) {
+        for link in &pin.linked_to {
+            if let Some(source_node) = node_index.get(&link.node) {
                 if source_node.identifier != BRANCH_IDENTIFIER {
                     input_ids.push(&source_node.identifier);
                 }
@@ -539,7 +544,8 @@ fn find_data_consumer_line(
     let pd = pin_data.get(&source_export)?;
     for pin in &pd.pins {
         if pin.is_data_output() {
-            for &target in &pin.linked_to {
+            for link in &pin.linked_to {
+                let target = link.node;
                 if let Some(node) = node_index.get(&target) {
                     if !node.is_pure {
                         return map_node_to_line(node, nodes, bytecode_lines);
@@ -621,13 +627,13 @@ fn find_enclosing_structure(bytecode_lines: &[String], line_idx: usize) -> usize
             return best;
         }
         if indent == target_indent {
-            if trimmed.starts_with("// sequence")
-                || trimmed.starts_with("// sub-sequence")
+            if trimmed.starts_with(ANY_SEQUENCE_MARKER_PREFIX)
+                || trimmed.starts_with(ANY_SUB_SEQUENCE_MARKER_PREFIX)
                 || trimmed.starts_with("if (")
                 || trimmed.starts_with("} else")
             {
                 best = i;
-            } else if trimmed == "}" {
+            } else if trimmed == BLOCK_CLOSE {
                 // Closing brace of a preceding block at the same indent,
                 // continue walking to find the block's opening `if`
                 continue;
