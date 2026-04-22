@@ -32,7 +32,7 @@ pub fn fold_long_lines(lines: &mut Vec<String>) {
 
         if let Some(folded) = fold_line(&lines[idx], base_indent, cont_indent) {
             let count = folded.len();
-            lines.splice(idx..=idx, folded.into_iter());
+            lines.splice(idx..=idx, folded);
             idx += count;
         } else {
             idx += 1;

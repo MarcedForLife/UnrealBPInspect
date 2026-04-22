@@ -130,7 +130,7 @@ pub(super) fn format_call_graph(
         return;
     }
     let mut entries: Vec<(&String, &mut Vec<String>)> = callees_map.iter_mut().collect();
-    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+    entries.sort_by_key(|(name, _)| (*name).clone());
     writeln!(buf, "Call graph:").unwrap();
     for (caller, callees) in &mut entries {
         callees.sort();
