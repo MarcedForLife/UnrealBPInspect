@@ -5,7 +5,7 @@ use super::{
     is_loop_header, opens_block, strip_outer_parens, ARRAY_INDEX_VAR, BREAK_HIT_VAR,
     LOOP_COUNTER_VAR,
 };
-use crate::bytecode::SEQUENCE_MARKER_PREFIX;
+use crate::bytecode::{SEQUENCE_MARKER_PREFIX, SUB_SEQUENCE_MARKER_PREFIX};
 use crate::helpers::{is_section_separator, SECTION_SEPARATOR};
 use std::collections::{HashMap, HashSet};
 
@@ -96,7 +96,7 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
         let next = lines[i + 1].trim();
         if lines[i].trim() == "return"
             && (next.starts_with(SEQUENCE_MARKER_PREFIX)
-                || next.starts_with("// sub-sequence [")
+                || next.starts_with(SUB_SEQUENCE_MARKER_PREFIX)
                 || next.starts_with("case ")
                 || next.starts_with("switch ("))
         {
@@ -132,7 +132,7 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
             // Sequence markers reset dead state but NOT depth (they can
             // appear inside switch/case or other brace-nested structures)
             if trimmed.starts_with(SEQUENCE_MARKER_PREFIX)
-                || trimmed.starts_with("// sub-sequence [")
+                || trimmed.starts_with(SUB_SEQUENCE_MARKER_PREFIX)
             {
                 dead_depth = None;
                 return true;
@@ -143,6 +143,13 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
                 depth -= 1;
                 if dead_depth.is_some_and(|dd| depth < dd) {
                     dead_depth = None;
+                }
+                // `} else {`, `} else if (...) {`, `} finally {`, etc. close and
+                // re-open on one line. Re-increment so the body that follows
+                // is tracked at the correct depth; otherwise a `return` inside
+                // the else body can be mis-detected as depth-0 dead-code.
+                if opens_block(trimmed) {
+                    depth += 1;
                 }
                 return true; // always keep structural braces
             }
@@ -193,9 +200,25 @@ pub fn cleanup_structured_output(lines: &mut Vec<String>) {
     }
 }
 
-/// Classify a constant condition: returns `Some(true)` for always-taken branches
-/// (`true`, `!false`), `Some(false)` for dead branches (`false`, `!true`),
-/// or `None` if the condition isn't a constant.
+/// Pull the condition out of an `if (COND) {` or `if (COND) STMT` line.
+/// Returns the raw condition text with one layer of outer parens stripped,
+/// so the caller can feed the result straight into `negate_cond` without
+/// double-wrapping.
+fn extract_if_condition(if_line: &str) -> Option<String> {
+    let trimmed = if_line.trim();
+    let after_if = trimmed.strip_prefix("if ")?;
+    if !after_if.starts_with('(') {
+        return None;
+    }
+    let close = find_matching_paren(after_if)?;
+    let inner = after_if[1..close].trim().to_string();
+    let stripped = strip_outer_parens(&inner);
+    Some(stripped.to_string())
+}
+
+/// Classify a constant condition: returns `Some(true)` for always-taken
+/// branches (`true`, `!false`), `Some(false)` for dead branches
+/// (`false`, `!true`), or `None` if the condition isn't a constant.
 fn classify_constant_condition(if_line: &str) -> Option<bool> {
     let trimmed = if_line.trim();
     // Match "if (COND) STMT" or "if (COND) {"
@@ -354,11 +377,7 @@ pub(super) fn clean_line(text: &str) -> String {
 /// Rewrite `switch(COND) { false: F, true: T }` to ternary form.
 pub(super) fn rewrite_bool_switches(line: &str) -> String {
     let mut s = line.to_string();
-    // Loop to handle multiple switches per line (process left-to-right)
-    loop {
-        let Some(result) = rewrite_one_bool_switch(&s) else {
-            break;
-        };
+    while let Some(result) = rewrite_one_bool_switch(&s) {
         s = result;
     }
     s
@@ -707,11 +726,34 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
             let trimmed = lines[i].trim();
             let next_trimmed = lines[i + 1].trim();
 
-            // Pattern: "if (...) {" followed by "} else {"
-            // Remove the if line and the } else {, keep else body
+            // Pattern: "if (COND) {" followed by "} else {"
+            // The then-body is empty. Invert the condition and drop the else
+            // wrapper so `if (!COND) { body }` preserves the guard. Previously
+            // this stripped the if entirely, unguarding the else body.
             if trimmed.starts_with("if ") && trimmed.ends_with(" {") && next_trimmed == "} else {" {
+                if let Some(inner) = extract_if_condition(trimmed) {
+                    // Skip switch-enum scaffolding: `$SwitchEnum_CmpSuccess_*`
+                    // temps drive `fold_switch_enum_cascade`, which relies on
+                    // the exact `if (...) {} else { body }` shape. Inverting
+                    // here would hide the cascade from the folder and leave
+                    // nested switch cases in the wrong scope.
+                    if inner.contains("SwitchEnum_CmpSuccess") {
+                        // fall through to legacy strip below
+                    } else {
+                        let indent = lines[i].len() - lines[i].trim_start().len();
+                        let pad = &lines[i][..indent];
+                        let negated = crate::bytecode::structure::negate_cond(&inner);
+                        lines[i] = format!("{pad}if ({negated}) {{");
+                        lines.remove(i + 1);
+                        changed = true;
+                        continue;
+                    }
+                }
+                // Legacy strip: remove the if line and the `} else {`. Reached
+                // only for switch-enum temps (see above) so the cascade folder
+                // can still pattern-match the intermediate layout.
                 lines.remove(i);
-                lines.remove(i); // was i+1, now shifted
+                lines.remove(i);
                 changed = true;
                 continue;
             }

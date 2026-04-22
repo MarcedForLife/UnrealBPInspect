@@ -10,6 +10,9 @@ use super::{
     count_var_refs, find_matching_paren, is_loop_header, is_trivial_expr, parse_temp_assignment,
     split_args, strip_outer_parens, substitute_var,
 };
+use crate::bytecode::{
+    LOOP_COMPLETE_MARKER, LOOP_COMPLETE_REPEATS_PRELOOP, LOOP_COMPLETE_SAME_AS_PRELOOP,
+};
 use crate::helpers::{is_section_separator, opens_block, SECTION_SEPARATOR};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -157,7 +160,7 @@ pub(super) fn hoist_repeated_ternaries(lines: &mut Vec<String>) {
             to_hoist.push((ternary.clone(), var_name));
         }
     }
-    to_hoist.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    to_hoist.sort_by_key(|entry| std::cmp::Reverse(entry.0.len()));
 
     // Insert assignment before first use and replace all occurrences
     for (ternary, var_name) in &to_hoist {
@@ -211,15 +214,22 @@ fn has_ternary_at_depth_zero(input: &str) -> bool {
         match b {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth -= 1,
-            b'?' if depth == 0 => {
-                if i > 0 && i + 1 < len && bytes[i - 1] == b' ' && bytes[i + 1] == b' ' {
-                    has_question = true;
-                }
+            b'?' if depth == 0
+                && i > 0
+                && i + 1 < len
+                && bytes[i - 1] == b' '
+                && bytes[i + 1] == b' ' =>
+            {
+                has_question = true;
             }
-            b':' if depth == 0 && has_question => {
-                if i > 0 && i + 1 < len && bytes[i - 1] == b' ' && bytes[i + 1] == b' ' {
-                    return true;
-                }
+            b':' if depth == 0
+                && has_question
+                && i > 0
+                && i + 1 < len
+                && bytes[i - 1] == b' '
+                && bytes[i + 1] == b' ' =>
+            {
+                return true;
             }
             _ => {}
         }
@@ -242,15 +252,24 @@ fn generate_ternary_var_name(ternary: &str, index: usize) -> String {
         match b {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth -= 1,
-            b'?' if depth == 0 && q_pos.is_none() => {
-                if i > 0 && i + 1 < len && bytes[i - 1] == b' ' && bytes[i + 1] == b' ' {
-                    q_pos = Some(i);
-                }
+            b'?' if depth == 0
+                && q_pos.is_none()
+                && i > 0
+                && i + 1 < len
+                && bytes[i - 1] == b' '
+                && bytes[i + 1] == b' ' =>
+            {
+                q_pos = Some(i);
             }
-            b':' if depth == 0 && q_pos.is_some() && c_pos.is_none() => {
-                if i > 0 && i + 1 < len && bytes[i - 1] == b' ' && bytes[i + 1] == b' ' {
-                    c_pos = Some(i);
-                }
+            b':' if depth == 0
+                && q_pos.is_some()
+                && c_pos.is_none()
+                && i > 0
+                && i + 1 < len
+                && bytes[i - 1] == b' '
+                && bytes[i + 1] == b' ' =>
+            {
+                c_pos = Some(i);
             }
             _ => {}
         }
@@ -670,7 +689,7 @@ fn fold_section_temps(lines: &mut Vec<String>) {
     }
 }
 
-/// Find the completion block extent (lines after "// on loop complete:" until the next
+/// Find the completion block extent (lines after LOOP_COMPLETE_MARKER until the next
 /// scope exit or section boundary). Uses brace counting.
 fn find_completion_block(lines: &[String], marker_idx: usize) -> Option<(usize, usize)> {
     let comp_start = marker_idx + 1;
@@ -733,7 +752,7 @@ fn find_pre_loop_setup(lines: &[String], marker_idx: usize) -> Option<(usize, us
 fn dedup_completion_paths(lines: &mut Vec<String>) {
     let mut i = 0;
     while i < lines.len() {
-        if lines[i].trim() != "// on loop complete:" {
+        if lines[i].trim() != LOOP_COMPLETE_MARKER {
             i += 1;
             continue;
         }
@@ -778,9 +797,9 @@ fn dedup_completion_paths(lines: &mut Vec<String>) {
         if matched_count >= 3 && matched_count * 2 >= total_count {
             let mut replacement: Vec<String> = Vec::new();
             if unique_indices.is_empty() {
-                replacement.push("// on loop complete: (same as pre-loop setup)".to_string());
+                replacement.push(LOOP_COMPLETE_SAME_AS_PRELOOP.to_string());
             } else {
-                replacement.push("// on loop complete: (repeats pre-loop setup)".to_string());
+                replacement.push(LOOP_COMPLETE_REPEATS_PRELOOP.to_string());
                 for &j in &unique_indices {
                     replacement.push(lines[j].clone());
                 }

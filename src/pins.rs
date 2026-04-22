@@ -8,7 +8,7 @@ use anyhow::{ensure, Result};
 use std::io::{Seek, SeekFrom};
 
 use crate::binary::*;
-use crate::types::{AssetVersion, EdGraphPin};
+use crate::types::{AssetVersion, EdGraphPin, LinkedPin};
 
 /// Sanity cap on pin count per node (most nodes have < 50 pins).
 const MAX_PIN_COUNT: i32 = 500;
@@ -196,7 +196,7 @@ fn read_one_pin(
 
     // UEdGraphPin::Serialize: OwningNode + PinId (repeated from wrapper)
     let _owning_node = read_i32(reader)?;
-    let _pin_id = read_guid(reader)?;
+    let pin_id = read_guid(reader)?;
     let pin_name = name_table.fname(reader)?;
 
     skip_ftext(reader, name_table)?; // PinFriendlyName
@@ -231,29 +231,33 @@ fn read_one_pin(
         name: pin_name,
         pin_type: type_name,
         direction,
+        pin_id,
         linked_to,
     }];
     result.extend(sub_pins);
     Ok(result)
 }
 
-/// Read the LinkedTo array: export indices of nodes connected to this pin.
-fn read_linked_to(reader: &mut Reader) -> Result<Vec<usize>> {
+/// Read the LinkedTo array: (owning node export index, target pin FGuid) pairs.
+fn read_linked_to(reader: &mut Reader) -> Result<Vec<LinkedPin>> {
     let count = read_i32(reader)?;
     ensure!(
         (0..MAX_LINKED_COUNT).contains(&count),
         "linked_count={count}"
     );
-    let mut linked_to: Vec<usize> = Vec::new();
+    let mut linked_to: Vec<LinkedPin> = Vec::new();
     for _ in 0..count {
         let is_null = read_i32(reader)?;
         if is_null == 0 {
             let owner_idx = read_i32(reader)?;
-            let _pin_guid = read_guid(reader)?;
+            let pin_guid = read_guid(reader)?;
             if owner_idx > 0 {
-                let idx = owner_idx as usize;
-                if !linked_to.contains(&idx) {
-                    linked_to.push(idx);
+                let link = LinkedPin {
+                    node: owner_idx as usize,
+                    pin_id: pin_guid,
+                };
+                if !linked_to.contains(&link) {
+                    linked_to.push(link);
                 }
             }
         }
