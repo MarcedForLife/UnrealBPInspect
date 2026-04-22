@@ -1,27 +1,21 @@
-//! Lightweight control flow graph over BcStatement indices.
-//!
-//! Used by ubergraph event splitting to determine which statements are
-//! reachable from each event entry point, replacing the old fuzzy
-//! offset-based splitting with precise CFG-based reachability.
+//! Statement-level CFG for ubergraph event splitting: reachability from each
+//! entry point, replacing older fuzzy-offset-based splitting.
 
 use std::collections::{HashSet, VecDeque};
 
-use super::decode::BcStatement;
-use super::flow::{
+use crate::bytecode::decode::BcStatement;
+use crate::bytecode::flow::{
     parse_if_jump, parse_jump, parse_jump_computed, parse_pop_flow_if_not, parse_push_flow,
 };
-use super::{OffsetMap, BARE_RETURN, POP_FLOW, RETURN_NOP, STRUCTURE_OFFSET_TOLERANCE};
+use crate::bytecode::{OffsetMap, BARE_RETURN, POP_FLOW, RETURN_NOP, STRUCTURE_OFFSET_TOLERANCE};
 
 /// Control flow graph mapping each statement index to its successor indices.
 pub struct StmtCfg {
     pub successors: Vec<Vec<usize>>,
 }
 
-/// Build a control flow graph from decoded bytecode statements.
-///
-/// Each statement gets a list of successor indices based on its control flow
-/// semantics. Terminal statements (pop_flow, return, computed jumps) have no
-/// successors, which is the key property that stops reachability walks at
+/// Build a statement-level CFG. Terminal statements (pop_flow, return,
+/// computed jumps) have no successors, which stops reachability walks at
 /// event boundaries.
 pub fn build_stmt_cfg(stmts: &[BcStatement], offset_map: &OffsetMap) -> StmtCfg {
     let stmt_count = stmts.len();
@@ -31,22 +25,16 @@ pub fn build_stmt_cfg(stmts: &[BcStatement], offset_map: &OffsetMap) -> StmtCfg 
         .map(|(idx, stmt)| {
             let text = stmt.text.as_str();
 
-            // Terminal: pop_flow returns to the caller's pushed address
             if text == POP_FLOW {
                 return Vec::new();
             }
-
-            // Terminal: return ends execution
             if text == RETURN_NOP || text == BARE_RETURN || text.starts_with("return ") {
                 return Vec::new();
             }
-
-            // Terminal: computed jump has a dynamic target
             if parse_jump_computed(text) {
                 return Vec::new();
             }
 
-            // Unconditional jump: single successor at the target
             if let Some(target_offset) = parse_jump(text) {
                 if let Some(target_idx) =
                     offset_map.find_fuzzy_forward(target_offset, STRUCTURE_OFFSET_TOLERANCE)
@@ -56,7 +44,6 @@ pub fn build_stmt_cfg(stmts: &[BcStatement], offset_map: &OffsetMap) -> StmtCfg 
                 return Vec::new();
             }
 
-            // Conditional jump: fallthrough + jump target
             if let Some((_cond, target_offset)) = parse_if_jump(text) {
                 let mut succs = Vec::with_capacity(2);
                 let fallthrough = idx + 1;
@@ -73,7 +60,7 @@ pub fn build_stmt_cfg(stmts: &[BcStatement], offset_map: &OffsetMap) -> StmtCfg 
                 return succs;
             }
 
-            // push_flow: fallthrough + the pushed resume address (eventually reached via pop_flow)
+            // push_flow: fallthrough + pushed resume address (reached later via pop_flow).
             if let Some(resume_offset) = parse_push_flow(text) {
                 let mut succs = Vec::with_capacity(2);
                 let fallthrough = idx + 1;
@@ -90,7 +77,7 @@ pub fn build_stmt_cfg(stmts: &[BcStatement], offset_map: &OffsetMap) -> StmtCfg 
                 return succs;
             }
 
-            // pop_flow_if_not: fallthrough only (the pop side returns to caller, not statically resolvable)
+            // pop_flow_if_not: fallthrough only (pop side isn't statically resolvable).
             if parse_pop_flow_if_not(text).is_some() {
                 let fallthrough = idx + 1;
                 if fallthrough < stmt_count {
@@ -99,7 +86,6 @@ pub fn build_stmt_cfg(stmts: &[BcStatement], offset_map: &OffsetMap) -> StmtCfg 
                 return Vec::new();
             }
 
-            // Default: sequential fallthrough
             let fallthrough = idx + 1;
             if fallthrough < stmt_count {
                 vec![fallthrough]
@@ -112,17 +98,14 @@ pub fn build_stmt_cfg(stmts: &[BcStatement], offset_map: &OffsetMap) -> StmtCfg 
     StmtCfg { successors }
 }
 
-/// Partition statements into per-event groups by walking the CFG from each entry point.
+/// One event's statements: name, entry index, and owned indices.
 ///
-/// Each event gets the set of statement indices reachable from its entry offset.
-/// Statements reachable from multiple events are assigned to the event with the
-/// lowest entry offset (first in sorted order). Unreachable statements (latent
-/// resume code that only runs via pop_flow from a pushed address) are collected
-/// into an unnamed group returned first.
-/// An event partition: name, entry statement index (global), and owned statement indices.
+/// Unreachable statements (latent resume code that only runs via pop_flow
+/// from a pushed address) are collected into an unnamed partition returned
+/// first.
 pub struct EventPartition {
     pub name: String,
-    /// Global statement index of the event entry point. `None` for latent resume groups.
+    /// Global entry-statement index. `None` for latent-resume groups.
     pub entry_idx: Option<usize>,
     pub indices: Vec<usize>,
 }
@@ -136,7 +119,6 @@ pub fn partition_by_reachability(
     let mut sorted_labels: Vec<(usize, &String)> = labels.to_vec();
     sorted_labels.sort_by_key(|(offset, _)| *offset);
 
-    // Resolve each label offset to a statement index
     let entry_points: Vec<(usize, &str)> = sorted_labels
         .iter()
         .filter_map(|&(offset, name)| {
@@ -146,9 +128,8 @@ pub fn partition_by_reachability(
         })
         .collect();
 
-    // Independent BFS per event: each event gets ALL reachable statements,
-    // allowing shared code (DoOnce bodies, trampolines) to appear in multiple
-    // partitions so every event's output is self-contained.
+    // Independent BFS per event: shared code (DoOnce bodies, trampolines)
+    // appears in every partition that reaches it so each event is self-contained.
     let mut event_reachable: Vec<HashSet<usize>> = Vec::with_capacity(entry_points.len());
 
     for &(entry_idx, _name) in &entry_points {
@@ -169,7 +150,6 @@ pub fn partition_by_reachability(
         event_reachable.push(visited);
     }
 
-    // Unreachable statements: not reached by any event
     let any_reached: HashSet<usize> = event_reachable
         .iter()
         .flat_map(|s| s.iter().copied())
@@ -180,7 +160,7 @@ pub fn partition_by_reachability(
 
     let mut result: Vec<EventPartition> = Vec::new();
 
-    // Unreachable statements first (latent resume code)
+    // Latent-resume (unreachable) statements come first.
     if !unreachable_indices.is_empty() {
         result.push(EventPartition {
             name: String::new(),
@@ -189,7 +169,6 @@ pub fn partition_by_reachability(
         });
     }
 
-    // Each event gets its full reachable set, sorted by original statement order
     for (event_idx, &(entry_idx, name)) in entry_points.iter().enumerate() {
         let mut indices: Vec<usize> = event_reachable[event_idx].iter().copied().collect();
         indices.sort();
