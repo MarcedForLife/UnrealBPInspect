@@ -6,7 +6,6 @@
 //! - [`transforms`] - temp inlining, cleanup, summary pattern folding
 //! - [`pipeline`] - orchestration (wires the above stages together)
 
-pub mod block_graph;
 pub mod cfg;
 pub mod decode;
 pub mod flow;
