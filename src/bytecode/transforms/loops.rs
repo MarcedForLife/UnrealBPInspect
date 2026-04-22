@@ -64,13 +64,10 @@ fn strip_break_hit_from_while(lines: &mut [String]) {
 fn rewrite_confirmed_foreach(lines: &mut Vec<String>) {
     // Process innermost loops first (last occurrence) so outer loop cleanup
     // doesn't remove body lines that inner loops need (e.g. .Length() calls).
-    loop {
-        let Some(i) = lines
-            .iter()
-            .rposition(|l| l.trim().starts_with(FOREACH_PREFIX))
-        else {
-            break;
-        };
+    while let Some(i) = lines
+        .iter()
+        .rposition(|l| l.trim().starts_with(FOREACH_PREFIX))
+    {
         let Some(close_idx) = find_loop_close(lines, i) else {
             lines[i] = lines[i].replace(FOREACH_PREFIX, WHILE_PREFIX);
             continue;
@@ -642,10 +639,7 @@ fn remove_redundant_gets(
 /// Remove dead `$`-prefixed temp assignments immediately before a `for` header.
 /// Iterates to handle chains where removing one makes another dead.
 fn remove_dead_preamble(lines: &mut Vec<String>, mut for_idx: usize) {
-    loop {
-        let Some(j) = (0..for_idx).rev().find(|&j| !lines[j].trim().is_empty()) else {
-            break;
-        };
+    while let Some(j) = (0..for_idx).rev().find(|&j| !lines[j].trim().is_empty()) {
         let trimmed = lines[j].trim();
         let Some((var, _)) = parse_temp_assignment(trimmed) else {
             break;

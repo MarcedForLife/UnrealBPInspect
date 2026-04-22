@@ -58,10 +58,7 @@ fn relocate_with_hints(lines: &mut Vec<String>, function_key: &str, hints: &Bran
     let Some(branches) = hints.by_function.get(function_key) else {
         return;
     };
-    loop {
-        let Some(if_block) = find_first_actionable_if(lines, branches) else {
-            break;
-        };
+    while let Some(if_block) = find_first_actionable_if(lines, branches) {
         if !try_relocate_one(lines, &if_block, branches) {
             // Matching was ambiguous or no orphans; exit to avoid looping.
             break;
