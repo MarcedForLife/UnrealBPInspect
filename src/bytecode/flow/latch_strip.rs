@@ -8,9 +8,7 @@
 
 use std::collections::HashSet;
 
-use super::super::decode::BcStatement;
-use super::super::POP_FLOW;
-use super::parsers::{parse_if_jump, parse_jump, parse_push_flow};
+use super::super::decode::{BcStatement, StmtKind};
 
 /// Strip FlipFlop/DoOnce latch boilerplate from raw bytecode.
 ///
@@ -66,10 +64,10 @@ fn mark_latch_stmts(stmts: &[BcStatement], latch_vars: &HashSet<String>, remove:
             }
         }
 
-        if let Some((cond, _)) = parse_if_jump(trimmed) {
+        if let Some((cond, _)) = stmt.if_jump() {
             if latch_vars.contains(cond) {
                 remove[idx] = true;
-                if idx + 1 < stmts.len() && stmts[idx + 1].text == POP_FLOW {
+                if idx + 1 < stmts.len() && stmts[idx + 1].kind == StmtKind::PopFlow {
                     remove[idx + 1] = true;
                 }
                 continue;
@@ -86,10 +84,10 @@ fn mark_latch_stmts(stmts: &[BcStatement], latch_vars: &HashSet<String>, remove:
 /// wrapper belonged to the stripped latch node).
 fn mark_latch_wrappers(stmts: &[BcStatement], remove: &mut [bool]) {
     for idx in 0..stmts.len().saturating_sub(1) {
-        if remove[idx] || parse_push_flow(&stmts[idx].text).is_none() {
+        if remove[idx] || stmts[idx].push_flow_target().is_none() {
             continue;
         }
-        let Some(jump_target) = parse_jump(&stmts[idx + 1].text) else {
+        let Some(jump_target) = stmts[idx + 1].jump_target() else {
             continue;
         };
         let targets_removed = stmts
@@ -108,12 +106,12 @@ fn mark_latch_wrappers(stmts: &[BcStatement], remove: &mut [bool]) {
 /// or nothing precedes).
 fn mark_orphaned_pop_flows(stmts: &[BcStatement], remove: &mut [bool]) {
     for idx in 0..stmts.len() {
-        if remove[idx] || stmts[idx].text != POP_FLOW {
+        if remove[idx] || stmts[idx].kind != StmtKind::PopFlow {
             continue;
         }
         let prev_kept = (0..idx).rev().find(|&j| !remove[j]);
         let orphaned = match prev_kept {
-            Some(prev) => stmts[prev].text == POP_FLOW,
+            Some(prev) => stmts[prev].kind == StmtKind::PopFlow,
             None => true,
         };
         if orphaned {

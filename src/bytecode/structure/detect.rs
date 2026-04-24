@@ -1,7 +1,6 @@
 use super::super::cfg::{BlockCfg, BlockExit, BlockId, ReturnKind};
-use super::super::decode::BcStatement;
-use super::super::flow::{find_first_unmatched_pop, flow_depth, parse_if_jump, parse_jump};
-use super::super::{BARE_RETURN, POP_FLOW, RETURN_NOP};
+use super::super::decode::{BcStatement, StmtKind};
+use super::super::flow::{find_first_unmatched_pop, flow_depth};
 use super::region::IfBlock;
 use std::collections::{HashMap, HashSet};
 
@@ -15,17 +14,19 @@ pub(super) fn detect_if_blocks(
     let mut if_blocks: Vec<IfBlock> = Vec::new();
 
     for (i, stmt) in stmts.iter().enumerate() {
-        let Some((cond, target)) = parse_if_jump(&stmt.text) else {
+        let Some((cond, target)) = stmt.if_jump() else {
             continue;
         };
         let Some(mut target_idx) = find_target(target) else {
             continue;
         };
 
-        // Fuzzy offset resolution can land on a pop_flow when the real target
-        // is a filtered opcode (wire_trace) between it and the next statement;
-        // advance past it since pop_flow can't start a false branch.
-        if target_idx < stmts.len() && stmts[target_idx].text == POP_FLOW {
+        // Fuzzy offset resolution can land on a pop_flow or phantom
+        // (inlined-away temp) when the real target is a filtered opcode or a
+        // temp anchor; advance past both since neither can start a false branch.
+        while target_idx < stmts.len()
+            && (stmts[target_idx].kind == StmtKind::PopFlow || stmts[target_idx].inlined_away)
+        {
             target_idx += 1;
         }
 
@@ -126,14 +127,14 @@ fn detect_else_branch_via_cfg(
             }
         }
         BlockExit::ReturnTerminal => {
-            let last_text = &stmts[last_stmt_idx].text;
-            if last_text == RETURN_NOP || last_text == BARE_RETURN {
+            let last_kind = stmts[last_stmt_idx].kind;
+            if matches!(last_kind, StmtKind::ReturnNop | StmtKind::BareReturn) {
                 if target_idx < stmts.len() {
                     (Some(last_stmt_idx), Some(stmts.len()))
                 } else {
                     (None, None)
                 }
-            } else if last_text == POP_FLOW
+            } else if last_kind == StmtKind::PopFlow
                 && target_idx < stmts.len()
                 && is_unmatched_pop_flow(stmts, if_idx + 1, last_stmt_idx)
             {
@@ -210,11 +211,11 @@ fn truncate_false_blocks(
         // unconditional jump (its else-exit) before the next if_jump or body.
         let mut if_depth = 0usize;
         for (j, stmt) in stmts.iter().enumerate().take(end_idx).skip(blk.target_idx) {
-            if parse_if_jump(&stmt.text).is_some() {
+            if stmt.if_jump().is_some() {
                 if_depth += 1;
                 continue;
             }
-            if let Some(jt) = parse_jump(&stmt.text) {
+            if let Some(jt) = stmt.jump_target() {
                 if if_depth > 0 {
                     if_depth -= 1;
                     continue;
@@ -233,7 +234,7 @@ fn truncate_false_blocks(
                 }
             }
             // Return at depth 0 terminates the else (branch diverges).
-            if if_depth == 0 && (stmt.text == RETURN_NOP || stmt.text == BARE_RETURN) {
+            if if_depth == 0 && matches!(stmt.kind, StmtKind::ReturnNop | StmtKind::BareReturn) {
                 blk.else_close_idx = Some(j + 1);
                 break;
             }
@@ -257,10 +258,17 @@ pub(super) fn collect_label_targets(
         if skip.contains(&i) {
             continue;
         }
-        if let Some(target) = parse_jump(&stmt.text) {
-            if let Some(target_idx) = find_target_idx_or_end(target) {
+        if let Some(target) = stmt.jump_target() {
+            if let Some(mut target_idx) = find_target_idx_or_end(target) {
+                // Pin labels to a live statement: phantoms carry no text and
+                // emit_stmts_range would bury the label at an index that falls
+                // inside a skipped region.
+                while target_idx < stmts.len() && stmts[target_idx].inlined_away {
+                    target_idx += 1;
+                }
                 let is_jump_to_end_label = target_idx >= stmts.len()
-                    || (target_idx == stmts.len() - 1 && stmts[target_idx].text == RETURN_NOP);
+                    || (target_idx == stmts.len() - 1
+                        && stmts[target_idx].kind == StmtKind::ReturnNop);
                 if is_jump_to_end_label {
                     // Will become `break` or be omitted.
                 } else if let Some(lbl) = label_at.get(&target_idx) {
@@ -386,7 +394,7 @@ fn cond_jump_info(cfg: &BlockCfg, stmts: &[BcStatement], bid: BlockId) -> Option
     }
     let if_idx = block.stmt_range.end - 1;
     let mut target_idx = cfg.blocks[target].stmt_range.start;
-    if target_idx < stmts.len() && stmts[target_idx].text == POP_FLOW {
+    if target_idx < stmts.len() && stmts[target_idx].kind == StmtKind::PopFlow {
         target_idx += 1;
     }
     Some((if_idx, target_idx))

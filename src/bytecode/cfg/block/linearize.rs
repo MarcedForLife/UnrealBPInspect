@@ -1,7 +1,6 @@
 //! DFS linearization, emits blocks so conditional jumps point forward.
 
 use crate::bytecode::decode::BcStatement;
-use crate::bytecode::flow::parse_if_jump;
 
 use super::analysis::{all_predecessors_emitted, find_convergence_target};
 use super::types::{Block, BlockExit, BlockId};
@@ -112,11 +111,11 @@ fn negate_last_if_jump(
         return;
     }
     let last_idx = block_range.end - 1;
-    let last_text = &stmts[last_idx].text;
-    if let Some((cond, target)) = parse_if_jump(last_text) {
+    let last_stmt = &stmts[last_idx];
+    if let Some((cond, target)) = last_stmt.if_jump() {
         if let Some(out_stmt) = output.last_mut() {
-            if out_stmt.text == *last_text {
-                out_stmt.text = format!("if !(!{cond}) jump 0x{target:x}");
+            if out_stmt.text == last_stmt.text {
+                out_stmt.set_text(format!("if !(!{cond}) jump 0x{target:x}"));
             }
         }
     }

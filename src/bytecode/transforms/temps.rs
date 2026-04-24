@@ -3,23 +3,227 @@
 use super::{
     count_var_refs, expr_has_call, is_trivial_expr, parse_temp_assignment, substitute_var,
 };
-use crate::bytecode::decode::BcStatement;
-use crate::bytecode::flow::{parse_if_jump, parse_jump};
+use crate::bytecode::decode::{
+    fmt_expr, fmt_stmt, parse_expr, parse_stmt, top_level_eq_split, BcStatement, Expr, Stmt,
+    StmtKind,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
+
+/// Recursively substitute every `Expr::Var(var_name)` occurrence in `expr`
+/// with `replacement`. Consumes `replacement` only when needed; callers
+/// typically clone once up front and rely on `Expr::Clone` for each hit.
+fn substitute_in_expr(expr: &mut Expr, var_name: &str, replacement: &Expr) {
+    match expr {
+        Expr::Var(name) => {
+            if name == var_name {
+                *expr = replacement.clone();
+            }
+        }
+        Expr::Literal(_) | Expr::Unknown(_) => {}
+        Expr::Call { args, .. } => {
+            for arg in args {
+                substitute_in_expr(arg, var_name, replacement);
+            }
+        }
+        Expr::MethodCall { recv, args, .. } => {
+            substitute_in_expr(recv, var_name, replacement);
+            for arg in args {
+                substitute_in_expr(arg, var_name, replacement);
+            }
+        }
+        Expr::FieldAccess { recv, .. } => {
+            substitute_in_expr(recv, var_name, replacement);
+        }
+        Expr::Index { recv, idx } => {
+            substitute_in_expr(recv, var_name, replacement);
+            substitute_in_expr(idx, var_name, replacement);
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            substitute_in_expr(lhs, var_name, replacement);
+            substitute_in_expr(rhs, var_name, replacement);
+        }
+        Expr::Unary { operand, .. } => {
+            substitute_in_expr(operand, var_name, replacement);
+        }
+        Expr::Cast { inner, .. } => {
+            substitute_in_expr(inner, var_name, replacement);
+        }
+        Expr::StructConstruct { fields, .. } => {
+            for (_, value) in fields {
+                substitute_in_expr(value, var_name, replacement);
+            }
+        }
+        Expr::Select {
+            cond,
+            then_expr,
+            else_expr,
+        }
+        | Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            substitute_in_expr(cond, var_name, replacement);
+            substitute_in_expr(then_expr, var_name, replacement);
+            substitute_in_expr(else_expr, var_name, replacement);
+        }
+        Expr::Switch {
+            scrut,
+            arms,
+            default,
+        } => {
+            substitute_in_expr(scrut, var_name, replacement);
+            for arm in arms {
+                substitute_in_expr(&mut arm.pat, var_name, replacement);
+                substitute_in_expr(&mut arm.body, var_name, replacement);
+            }
+            if let Some(default_expr) = default {
+                substitute_in_expr(default_expr, var_name, replacement);
+            }
+        }
+        Expr::Trailer { inner, .. } => {
+            substitute_in_expr(inner, var_name, replacement);
+        }
+        Expr::Out(inner) => {
+            substitute_in_expr(inner, var_name, replacement);
+        }
+        Expr::ArrayLit(items) => {
+            for item in items {
+                substitute_in_expr(item, var_name, replacement);
+            }
+        }
+    }
+}
+
+/// True if any node in `expr` is `Expr::Unknown`. Used to fall back to text
+/// substitution when the 5d.2 parser hasn't modelled a shape yet.
+fn expr_contains_unknown(expr: &Expr) -> bool {
+    let mut found = false;
+    expr.walk(&mut |node| {
+        if matches!(node, Expr::Unknown(_)) {
+            found = true;
+        }
+    });
+    found
+}
+
+/// Visit every `Expr` immediately embedded in `stmt` with `f`. `WithTrailer`
+/// recurses into its inner `Stmt`; `Stmt::Unknown` and the expression-free
+/// control-flow markers (PopFlow, BlockClose, Break, Else, ...) are
+/// skipped. New `Stmt` variants that carry an `Expr` must be added here
+/// — it's the single source of truth for "which statements carry
+/// substitutable expressions."
+pub(crate) fn visit_exprs_mut(stmt: &mut Stmt, f: &mut impl FnMut(&mut Expr)) {
+    match stmt {
+        Stmt::Assignment { lhs, rhs } | Stmt::CompoundAssign { lhs, rhs, .. } => {
+            f(lhs);
+            f(rhs);
+        }
+        Stmt::Call { expr }
+        | Stmt::PopFlowIfNot { cond: expr }
+        | Stmt::ContinueIfNot { cond: expr }
+        | Stmt::IfJump { cond: expr, .. }
+        | Stmt::JumpComputed { expr } => f(expr),
+        Stmt::IfOpen { cond } => f(cond),
+        Stmt::WithTrailer { inner, .. } => visit_exprs_mut(inner, f),
+        Stmt::PopFlow
+        | Stmt::PushFlow { .. }
+        | Stmt::Jump { .. }
+        | Stmt::ReturnNop
+        | Stmt::BareReturn
+        | Stmt::Comment(_)
+        | Stmt::BlockClose
+        | Stmt::Break
+        | Stmt::Else
+        | Stmt::Unknown(_) => {}
+    }
+}
+
+/// Immutable version of [`visit_exprs_mut`] used by contains-predicate
+/// walkers. Keeps the variant list in lockstep by dispatching through the
+/// same match shape.
+pub(crate) fn visit_exprs(stmt: &Stmt, f: &mut impl FnMut(&Expr)) {
+    match stmt {
+        Stmt::Assignment { lhs, rhs } | Stmt::CompoundAssign { lhs, rhs, .. } => {
+            f(lhs);
+            f(rhs);
+        }
+        Stmt::Call { expr }
+        | Stmt::PopFlowIfNot { cond: expr }
+        | Stmt::ContinueIfNot { cond: expr }
+        | Stmt::IfJump { cond: expr, .. }
+        | Stmt::JumpComputed { expr } => f(expr),
+        Stmt::IfOpen { cond } => f(cond),
+        Stmt::WithTrailer { inner, .. } => visit_exprs(inner, f),
+        Stmt::PopFlow
+        | Stmt::PushFlow { .. }
+        | Stmt::Jump { .. }
+        | Stmt::ReturnNop
+        | Stmt::BareReturn
+        | Stmt::Comment(_)
+        | Stmt::BlockClose
+        | Stmt::Break
+        | Stmt::Else
+        | Stmt::Unknown(_) => {}
+    }
+}
+
+/// Walk every `Expr` inside `stmt` and substitute `Expr::Var(var_name)`
+/// nodes with `replacement`. No-op for `Stmt::Unknown` (the raw text has
+/// no typed tree to rewrite).
+fn substitute_in_stmt(stmt: &mut Stmt, var_name: &str, replacement: &Expr) {
+    visit_exprs_mut(stmt, &mut |expr| {
+        substitute_in_expr(expr, var_name, replacement)
+    });
+}
+
+/// True if any `Expr` inside `stmt` contains an `Unknown` node, or the
+/// whole statement is `Stmt::Unknown`. Used to gate tree rewrite on
+/// parser coverage before attempting a substitution.
+///
+/// `Stmt::IfOpen` reports `true` even when its cond is clean. This is an
+/// architectural limit: `inline_single_use_temps_text` uses this
+/// predicate as an "is this line safe to inline a temp into?" gate, and
+/// flipping it inlines a temp's RHS into the guard cond while the
+/// original assignment stays downstream (ordering inversion that breaks
+/// `ApplyClimbingMovement` across all three VRPlayer UE versions). See
+/// `docs/remaining-work.md`, "Architectural limits" section.
+fn stmt_contains_unknown(stmt: &Stmt) -> bool {
+    if matches!(stmt, Stmt::Unknown(_) | Stmt::IfOpen { .. }) {
+        return true;
+    }
+    let mut found = false;
+    visit_exprs(stmt, &mut |expr| {
+        if expr_contains_unknown(expr) {
+            found = true;
+        }
+    });
+    found
+}
 
 /// Collect all bytecode offsets that are jump targets (conditional and unconditional).
 /// Used to protect these offsets from being lost when inline passes remove statements.
 pub fn collect_jump_targets(stmts: &[BcStatement]) -> HashSet<usize> {
     let mut targets = HashSet::new();
     for stmt in stmts {
-        if let Some((_, target)) = parse_if_jump(&stmt.text) {
+        if let Some((_, target)) = stmt.if_jump() {
             targets.insert(target);
         }
-        if let Some(target) = parse_jump(&stmt.text) {
+        if let Some(target) = stmt.jump_target() {
             targets.insert(target);
         }
     }
     targets
+}
+
+/// Rename every `Expr::Var(old_name)` reference inside `stmt` to `new_name`.
+/// Pure identifier rewrite, does NOT move expressions around. Safe to run on
+/// `Stmt::IfOpen` conds despite the `stmt_contains_unknown` gate because a
+/// rename can't trigger the assignment-reordering class of regressions that
+/// gate exists for.
+pub(super) fn rename_var_in_stmt(stmt: &mut Stmt, old_name: &str, new_name: &str) {
+    let replacement = Expr::Var(new_name.to_owned());
+    substitute_in_stmt(stmt, old_name, &replacement);
 }
 
 /// Substitute ALL occurrences of `var` in `text`, repeating until stable.
@@ -51,11 +255,47 @@ pub fn inline_constant_temps(stmts: &mut Vec<BcStatement>, jump_targets: &HashSe
         return;
     };
 
+    // Preparse RHS expressions once per var so the inner loop stays cheap.
+    // `None` means the RHS didn't model cleanly through the 5d.2 parser and
+    // the site must fall back to text substitution for that var.
+    let rhs_exprs: BTreeMap<String, Option<Expr>> = constant_vars
+        .iter()
+        .map(|(var, expr)| {
+            let parsed = parse_expr(expr);
+            let usable = (!expr_contains_unknown(&parsed)).then_some(parsed);
+            (var.clone(), usable)
+        })
+        .collect();
+
     for s in stmts.iter_mut() {
+        let mut rewrote = false;
+        let original_text = s.text.clone();
+        let mut parsed_stmt = parse_stmt(&original_text);
+        let stmt_parse_ok = !stmt_contains_unknown(&parsed_stmt);
+
         for (var, expr) in &constant_vars {
-            if count_var_refs(&s.text, var) > 0 {
-                s.text = substitute_var_all(&s.text, var, expr);
+            if count_var_refs(&s.text, var) == 0 {
+                continue;
             }
+            match (stmt_parse_ok, rhs_exprs.get(var).and_then(|e| e.as_ref())) {
+                (true, Some(rhs_expr)) => {
+                    substitute_in_stmt(&mut parsed_stmt, var, rhs_expr);
+                    s.text = fmt_stmt(&parsed_stmt);
+                    rewrote = true;
+                }
+                _ => {
+                    // Fall back to text substitution for shapes the 5d.2
+                    // parser doesn't yet model.
+                    s.text = substitute_var_all(&s.text, var, expr);
+                    // Rehydrate the typed form so a later var in the same
+                    // loop iteration still sees the mutated state.
+                    parsed_stmt = parse_stmt(&s.text);
+                    rewrote = true;
+                }
+            }
+        }
+        if rewrote {
+            s.reclassify();
         }
     }
 
@@ -78,8 +318,18 @@ pub fn inline_constant_temps(stmts: &mut Vec<BcStatement>, jump_targets: &HashSe
 /// - Are assigned exactly once (`$X = expr`)
 /// - Are referenced exactly once in a later statement
 /// - Would not produce a line longer than MAX_LINE_WIDTH chars
-pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
+///
+/// Tree rewrite: the RHS and the consumer are parsed into `Expr` trees,
+/// the consumer tree has matching `Var` nodes replaced with the RHS tree,
+/// and the result is reprinted via `fmt_expr`. The text `substitute_var`
+/// path is kept as a fallback for shapes the 5d.2 parser doesn't model.
+pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>, jump_targets: &HashSet<usize>) {
     const MAX_PASSES: usize = 6;
+    // A temp whose offset is the explicit target of a jump must survive as a
+    // phantom so the structurer can still resolve the jump. Non-anchor temps
+    // are simply removed (baseline behavior). Using exact-match here, not
+    // fuzzy, so we only anchor offsets that are actually jumped to.
+    let is_jump_anchor = |off: usize| off > 0 && jump_targets.contains(&off);
 
     for _ in 0..MAX_PASSES {
         let assignments: Vec<(usize, String, String)> = stmts
@@ -114,6 +364,7 @@ pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
         }
 
         let mut removed: HashSet<usize> = HashSet::new();
+        let mut removed_consumers: HashMap<usize, usize> = HashMap::new();
         let mut inlined_any = false;
         for (assign_idx, var_name, _) in &to_inline {
             if removed.contains(assign_idx) {
@@ -141,20 +392,61 @@ pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
             let Some(target_idx) = target_idx else {
                 continue;
             };
-            let replacement = substitute_var(&stmts[target_idx].text, var_name, &current_expr);
+
+            let Some(new_text) = rewrite_consumer_tree(&stmts[target_idx], var_name, &current_expr)
+            else {
+                // Fall back to text substitution for shapes the 5d.2 parser
+                // doesn't yet model.
+                let replacement = substitute_var(&stmts[target_idx].text, var_name, &current_expr);
+                let shortens = current_expr.len() + 2 <= var_name.len();
+                let trivial = is_trivial_expr(&current_expr);
+                if !shortens && !trivial && replacement.len() > crate::bytecode::MAX_LINE_WIDTH {
+                    continue;
+                }
+                stmts[target_idx].set_text(replacement);
+                removed.insert(*assign_idx);
+                removed_consumers.insert(*assign_idx, target_idx);
+                inlined_any = true;
+                continue;
+            };
+
             let shortens = current_expr.len() + 2 <= var_name.len();
             let trivial = is_trivial_expr(&current_expr);
-            if !shortens && !trivial && replacement.len() > crate::bytecode::MAX_LINE_WIDTH {
+            if !shortens && !trivial && new_text.len() > crate::bytecode::MAX_LINE_WIDTH {
                 continue;
             }
-            stmts[target_idx].text = replacement;
+            stmts[target_idx].set_text(new_text);
             removed.insert(*assign_idx);
+            removed_consumers.insert(*assign_idx, target_idx);
             inlined_any = true;
         }
 
+        // Phantom-mark offsets that are explicit jump targets so the
+        // structurer can still resolve those jumps. Skip phantoms whose
+        // consumer is a flow opcode: those temps are condition variables
+        // and keeping them as anchor entries perturbs region/CFG slicing
+        // in ways the structurer wasn't designed to tolerate (the walking
+        // block in VRPlayer Evaluate Movement Sounds is the canary). The
+        // 5d.6 hypothesis that tree rewrite would eliminate this need was
+        // disproven empirically, the exclusion is structural, not a
+        // tooling artefact. Non-anchor temps remove outright.
+        for &assign_idx in &removed {
+            if !is_jump_anchor(stmts[assign_idx].mem_offset) {
+                continue;
+            }
+            let consumer_is_flow = removed_consumers
+                .get(&assign_idx)
+                .is_some_and(|&c_idx| stmts[c_idx].kind.is_flow_opcode_consumer());
+            if consumer_is_flow {
+                continue;
+            }
+            stmts[assign_idx].text.clear();
+            stmts[assign_idx].inlined_away = true;
+            stmts[assign_idx].reclassify();
+        }
         let mut idx = 0;
-        stmts.retain(|_| {
-            let keep = !removed.contains(&idx);
+        stmts.retain(|s| {
+            let keep = !removed.contains(&idx) || s.inlined_away;
             idx += 1;
             keep
         });
@@ -162,6 +454,99 @@ pub fn inline_single_use_temps(stmts: &mut Vec<BcStatement>) {
             break;
         }
     }
+}
+
+/// Rewrite the consumer statement's parsed tree by substituting `var_name`
+/// with `rhs_text` (itself parsed). Returns `None` when either side hits
+/// `Expr::Unknown` at a load-bearing position, or when the consumer shape
+/// isn't one the tree rewrite supports. The outer caller is expected to
+/// fall back to text substitution in that case.
+fn rewrite_consumer_tree(consumer: &BcStatement, var_name: &str, rhs_text: &str) -> Option<String> {
+    let rhs_expr = parse_expr(rhs_text);
+    if expr_contains_unknown(&rhs_expr) {
+        // TODO(5d.2): parser gap hit by inliner RHS, falling back to text
+        return None;
+    }
+
+    match consumer.kind {
+        StmtKind::IfJump { cond, target } => {
+            let (cond_start, cond_end) = cond;
+            let cond_expr = consumer.cond_expr()?;
+            if expr_contains_unknown(cond_expr) {
+                return None;
+            }
+            let mut rewritten = cond_expr.clone();
+            substitute_in_expr(&mut rewritten, var_name, &rhs_expr);
+            let prefix = &consumer.text[..cond_start];
+            let suffix = &consumer.text[cond_end..];
+            // Sanity check: suffix should look like `) jump 0x...`.
+            let _ = target;
+            Some(format!("{}{}{}", prefix, fmt_expr(&rewritten), suffix))
+        }
+        StmtKind::PopFlowIfNot { cond } | StmtKind::ContinueIfNot { cond } => {
+            let (cond_start, cond_end) = cond;
+            let cond_expr = consumer.cond_expr()?;
+            if expr_contains_unknown(cond_expr) {
+                return None;
+            }
+            let mut rewritten = cond_expr.clone();
+            substitute_in_expr(&mut rewritten, var_name, &rhs_expr);
+            let prefix = &consumer.text[..cond_start];
+            let suffix = &consumer.text[cond_end..];
+            Some(format!("{}{}{}", prefix, fmt_expr(&rewritten), suffix))
+        }
+        StmtKind::Other => {
+            // Try assignment shape first, then bare-expression.
+            if let Some((lhs, rhs)) = consumer.assignment() {
+                if expr_contains_unknown(lhs) || expr_contains_unknown(rhs) {
+                    return None;
+                }
+                let mut new_lhs = lhs.clone();
+                let mut new_rhs = rhs.clone();
+                substitute_in_expr(&mut new_lhs, var_name, &rhs_expr);
+                substitute_in_expr(&mut new_rhs, var_name, &rhs_expr);
+                return Some(format!("{} = {}", fmt_expr(&new_lhs), fmt_expr(&new_rhs)));
+            }
+            // Bare-expression (call-as-statement). Parse directly.
+            if top_level_eq_split(&consumer.text).is_some() {
+                // Assignment shape the accessor refused — don't invent a tree.
+                return None;
+            }
+            let parsed = parse_expr(&consumer.text);
+            if expr_contains_unknown(&parsed) {
+                return None;
+            }
+            let mut rewritten = parsed;
+            substitute_in_expr(&mut rewritten, var_name, &rhs_expr);
+            Some(fmt_expr(&rewritten))
+        }
+        // Flow opcodes without a cond slice shouldn't be consumers of named
+        // temps, fall back defensively rather than speculate on the shape.
+        _ => None,
+    }
+}
+
+/// Rewrite a post-structure text line by parsing it into a `Stmt`,
+/// substituting `var_name` with `rhs_text` (itself parsed into an `Expr`),
+/// and printing the result. Returns `None` when either side's parse hits
+/// `Expr::Unknown` or when the line itself parses as `Stmt::Unknown` (a
+/// block delimiter, comment, label, or other non-statement shape). The
+/// outer caller is expected to fall back to text substitution in that case.
+fn rewrite_consumer_text_tree(
+    consumer_trimmed: &str,
+    var_name: &str,
+    rhs_text: &str,
+) -> Option<String> {
+    let rhs_expr = parse_expr(rhs_text);
+    if expr_contains_unknown(&rhs_expr) {
+        return None;
+    }
+    let mut parsed = parse_stmt(consumer_trimmed);
+    if stmt_contains_unknown(&parsed) {
+        return None;
+    }
+    substitute_in_stmt(&mut parsed, var_name, &rhs_expr);
+    Some(fmt_stmt(&parsed))
 }
 
 /// Transfer mem_offsets from removed statements to the next surviving statement
@@ -205,18 +590,24 @@ pub fn discard_unused_assignments(stmts: &mut Vec<BcStatement>) {
     let ref_counts = count_unused_assignments(&texts);
 
     for s in stmts.iter_mut() {
+        if s.inlined_away {
+            continue;
+        }
         if let Some((var, expr)) = parse_temp_assignment(&s.text) {
             if ref_counts.get(var).copied() == Some(0) {
                 if expr_has_call(expr) {
-                    s.text = expr.to_string();
+                    s.set_text(expr.to_string());
                 } else {
                     s.text.clear();
+                    s.kind = StmtKind::Other;
                 }
             }
         }
     }
 
-    stmts.retain(|s| !s.text.is_empty());
+    // Preserve phantom (inlined-away) statements so their mem_offset still
+    // anchors jump resolution. Only drop truly empty non-phantom lines.
+    stmts.retain(|s| !s.text.is_empty() || s.inlined_away);
 }
 
 /// Text-based constant temp inlining for post-structure pipelines.
@@ -229,11 +620,48 @@ pub fn inline_constant_temps_text(lines: &mut Vec<String>) {
         return;
     };
 
+    // Preparse each RHS once. `None` marks vars whose RHS doesn't round-trip
+    // through the 5d.2 parser, those force a text-substitution fallback.
+    let rhs_exprs: BTreeMap<String, Option<Expr>> = constant_vars
+        .iter()
+        .map(|(var, expr)| {
+            let parsed = parse_expr(expr);
+            let usable = (!expr_contains_unknown(&parsed)).then_some(parsed);
+            (var.clone(), usable)
+        })
+        .collect();
+
     for line in lines.iter_mut() {
+        let trimmed = line.trim();
+        let indent_len = line.len() - trimmed.len();
+        let indent = line[..indent_len].to_owned();
+        let mut current = trimmed.to_owned();
+        let mut parsed_stmt = parse_stmt(&current);
+        let mut stmt_parse_ok = !stmt_contains_unknown(&parsed_stmt);
+        let mut rewrote = false;
+
         for (var, expr) in &constant_vars {
-            if count_var_refs(line.trim(), var) > 0 {
-                *line = substitute_var_all(line.trim(), var, expr);
+            if count_var_refs(&current, var) == 0 {
+                continue;
             }
+            match (stmt_parse_ok, rhs_exprs.get(var).and_then(|e| e.as_ref())) {
+                (true, Some(rhs_expr)) => {
+                    substitute_in_stmt(&mut parsed_stmt, var, rhs_expr);
+                    current = fmt_stmt(&parsed_stmt);
+                    rewrote = true;
+                }
+                _ => {
+                    // Fall back to text substitution for shapes the 5d.2
+                    // parser doesn't yet model.
+                    current = substitute_var_all(&current, var, expr);
+                    parsed_stmt = parse_stmt(&current);
+                    stmt_parse_ok = !stmt_contains_unknown(&parsed_stmt);
+                    rewrote = true;
+                }
+            }
+        }
+        if rewrote {
+            *line = format!("{indent}{current}");
         }
     }
 
@@ -306,7 +734,16 @@ pub fn inline_single_use_temps_text(lines: &mut Vec<String>) {
                 continue;
             };
 
-            let replacement = substitute_var(lines[target_idx].trim(), var_name, &current_expr);
+            let consumer_trimmed = lines[target_idx].trim();
+            let replacement =
+                match rewrite_consumer_text_tree(consumer_trimmed, var_name, &current_expr) {
+                    Some(text) => text,
+                    None => {
+                        // Fall back to text substitution for shapes the 5d.2
+                        // parser doesn't yet model.
+                        substitute_var(consumer_trimmed, var_name, &current_expr)
+                    }
+                };
             let shortens = current_expr.len() + 2 <= var_name.len();
             let trivial = is_trivial_expr(&current_expr);
             if !shortens && !trivial && replacement.len() > MAX_LINE_WIDTH {
@@ -314,8 +751,7 @@ pub fn inline_single_use_temps_text(lines: &mut Vec<String>) {
             }
 
             // Preserve the consumer's indentation.
-            let consumer_indent = &lines[target_idx]
-                [..lines[target_idx].len() - lines[target_idx].trim_start().len()];
+            let consumer_indent = super::indent_prefix(&lines[target_idx]);
             lines[target_idx] = format!("{}{}", consumer_indent, replacement);
             removed.insert(*assign_idx);
             inlined_any = true;

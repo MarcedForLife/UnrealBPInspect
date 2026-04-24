@@ -145,6 +145,7 @@ CI enforces `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` 
 - `tests/integration.rs` — snapshot and structural tests using committed fixtures
 - `tests/snapshots/` — expected output for regression detection
 - `tests/common/mod.rs` — test utilities (fixture loading, snapshot comparison)
+- `tests/bytecode_ir_roundtrip.rs`, `tests/bytecode_ir_stmt_roundtrip.rs` — typed IR parse-print-parse harnesses
 
 JSON mode should always produce valid JSON. When validating, redirect stderr so cargo build output doesn't pollute stdout:
 

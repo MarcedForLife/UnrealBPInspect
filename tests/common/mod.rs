@@ -1,6 +1,8 @@
 // Each test binary only uses a subset of these shared utilities.
 #![allow(dead_code)]
 
+pub mod pattern;
+
 use std::path::PathBuf;
 
 pub fn load_fixture(name: &str) -> Vec<u8> {
