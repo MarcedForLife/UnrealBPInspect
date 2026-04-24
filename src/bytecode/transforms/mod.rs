@@ -8,12 +8,14 @@ mod inline_scoped;
 mod loops;
 mod pipeline;
 mod region_tree;
+mod rename_outparam;
 mod structs;
 mod switch;
 mod temps;
 
 pub(crate) use cse_pure::cse_pure_calls;
 pub(crate) use inline_scoped::inline_single_use_temps_scoped;
+pub(crate) use rename_outparam::rename_outparam_temps_text;
 
 pub use cleanup::{
     cleanup_structured_output, eliminate_constant_condition_branches, rename_loop_temp_vars,
