@@ -387,10 +387,7 @@ pub(super) fn clean_line(text: &str) -> String {
 pub(super) fn rewrite_bool_switches(line: &str) -> String {
     let mut s = line.to_string();
     // Loop to handle multiple switches per line (process left-to-right)
-    loop {
-        let Some(result) = rewrite_one_bool_switch(&s) else {
-            break;
-        };
+    while let Some(result) = rewrite_one_bool_switch(&s) {
         s = result;
     }
     s
