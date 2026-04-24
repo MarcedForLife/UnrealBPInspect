@@ -29,8 +29,8 @@ pub fn clean_bc_name(name: &str) -> String {
     let name = strip_guid_suffix(name);
     let name = normalize_lwc_name(name);
     if let Some(rest) = name.strip_prefix("CallFunc_") {
-        let rest = rest.strip_suffix("_ReturnValue").unwrap_or(rest);
-        let rest = rest.strip_prefix("K2_").unwrap_or(rest);
+        let rest = strip_return_value_suffix(rest);
+        let rest = rest.strip_prefix("K2_").unwrap_or(&rest).to_string();
         return format!("${}", rest);
     }
     if let Some(rest) = name.strip_prefix("K2Node_DynamicCast_") {
@@ -38,6 +38,24 @@ pub fn clean_bc_name(name: &str) -> String {
     }
     if let Some(rest) = name.strip_prefix("K2Node_") {
         return format!("${}", rest);
+    }
+    name.to_string()
+}
+
+/// Strip `_ReturnValue` or `_ReturnValue_<digits>` from the tail of `name`.
+/// Preserves the numeric disambiguator so `Foo_ReturnValue_1` becomes
+/// `Foo_1`, matching the decoder's `_<N>` suffix convention for
+/// disambiguating duplicate out-params.
+fn strip_return_value_suffix(name: &str) -> String {
+    const RETURN_VALUE_MARKER: &str = "_ReturnValue";
+    if let Some(base) = name.strip_suffix(RETURN_VALUE_MARKER) {
+        return base.to_string();
+    }
+    if let Some(pos) = name.rfind(&format!("{}_", RETURN_VALUE_MARKER)) {
+        let suffix = &name[pos + RETURN_VALUE_MARKER.len() + 1..];
+        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+            return format!("{}_{}", &name[..pos], suffix);
+        }
     }
     name.to_string()
 }
@@ -100,6 +118,30 @@ mod tests {
     #[test]
     fn clean_callfunc_no_retval() {
         assert_eq!(clean_bc_name("CallFunc_Bar"), "$Bar");
+    }
+
+    #[test]
+    fn clean_callfunc_numbered_retval() {
+        // `_ReturnValue_<N>` is the decoder's disambiguator for duplicate
+        // out-params; strip `_ReturnValue` but keep the `_<N>` suffix.
+        assert_eq!(
+            clean_bc_name("CallFunc_IsValid_ReturnValue_1"),
+            "$IsValid_1"
+        );
+        assert_eq!(
+            clean_bc_name("CallFunc_IsValid_ReturnValue_42"),
+            "$IsValid_42"
+        );
+    }
+
+    #[test]
+    fn clean_callfunc_retval_with_non_digit_suffix_untouched() {
+        // `_ReturnValue_X` where X isn't digits isn't the disambiguator
+        // shape; leave the trailing segment as part of the name.
+        assert_eq!(
+            clean_bc_name("CallFunc_IsValid_ReturnValue_Foo"),
+            "$IsValid_ReturnValue_Foo"
+        );
     }
 
     #[test]
