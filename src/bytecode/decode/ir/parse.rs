@@ -107,11 +107,9 @@ pub fn top_level_compound_assign_split(text: &str) -> Option<(usize, &'static st
             b'"' => in_double = true,
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth -= 1,
-            b'+' | b'-' if depth == 0 => {
-                if bytes.get(i + 1).copied() == Some(b'=') && i > 0 {
-                    let op: &'static str = if c == b'+' { "+=" } else { "-=" };
-                    return Some((i, op));
-                }
+            b'+' | b'-' if depth == 0 && bytes.get(i + 1).copied() == Some(b'=') && i > 0 => {
+                let op: &'static str = if c == b'+' { "+=" } else { "-=" };
+                return Some((i, op));
             }
             _ => {}
         }

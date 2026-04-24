@@ -143,7 +143,7 @@ fn apply_rename_map(text: &str, map: &HashMap<String, String>) -> String {
     // before `$Foo_ReturnValue` (if both were in the map, which is
     // rejected by the collision rule, but defensive ordering doesn't
     // hurt).
-    entries.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.0.len()));
 
     let mut current = text.to_string();
     for (full, short) in entries {
