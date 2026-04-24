@@ -2,12 +2,20 @@
 //! pattern folding, and line formatting.
 
 mod cleanup;
+mod cse_pure;
 mod fold;
+mod inline_scoped;
 mod loops;
 mod pipeline;
+mod region_tree;
+mod rename_outparam;
 mod structs;
 mod switch;
 mod temps;
+
+pub(crate) use cse_pure::cse_pure_calls;
+pub(crate) use inline_scoped::inline_single_use_temps_scoped;
+pub(crate) use rename_outparam::rename_outparam_temps_text;
 
 pub use cleanup::{
     cleanup_structured_output, eliminate_constant_condition_branches, rename_loop_temp_vars,
@@ -17,6 +25,7 @@ pub use cleanup::{
 pub use fold::fold_long_lines;
 pub use pipeline::fold_summary_patterns;
 pub use switch::{fold_cascade_across_sequences, fold_switch_enum_cascade};
+use temps::rename_var_in_stmt;
 pub use temps::{
     collect_jump_targets, discard_unused_assignments, discard_unused_assignments_text,
     inline_constant_temps, inline_constant_temps_text, inline_single_use_temps,
@@ -86,8 +95,9 @@ pub(super) fn count_var_refs(text: &str, var: &str) -> usize {
 }
 
 pub(super) use crate::helpers::{
-    closes_block, expr_is_compound, find_at_depth_zero, find_matching_paren, is_block_boundary,
-    is_ident_char, is_loop_header, opens_block, split_args, strip_outer_parens,
+    closes_block, expr_is_compound, find_at_depth_zero, find_matching_paren, indent_of,
+    indent_prefix, is_block_boundary, is_ident_char, is_loop_header, opens_block, split_args,
+    strip_outer_parens,
 };
 
 /// Check if `var` appears at a word boundary at position `pos` in `text`.

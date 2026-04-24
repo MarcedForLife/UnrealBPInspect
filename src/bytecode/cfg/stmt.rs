@@ -3,11 +3,8 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use crate::bytecode::decode::BcStatement;
-use crate::bytecode::flow::{
-    parse_if_jump, parse_jump, parse_jump_computed, parse_pop_flow_if_not, parse_push_flow,
-};
-use crate::bytecode::{OffsetMap, BARE_RETURN, POP_FLOW, RETURN_NOP, STRUCTURE_OFFSET_TOLERANCE};
+use crate::bytecode::decode::{BcStatement, StmtKind};
+use crate::bytecode::{OffsetMap, STRUCTURE_OFFSET_TOLERANCE};
 
 /// Control flow graph mapping each statement index to its successor indices.
 pub struct StmtCfg {
@@ -23,19 +20,18 @@ pub fn build_stmt_cfg(stmts: &[BcStatement], offset_map: &OffsetMap) -> StmtCfg 
         .iter()
         .enumerate()
         .map(|(idx, stmt)| {
-            let text = stmt.text.as_str();
+            match stmt.kind {
+                StmtKind::PopFlow
+                | StmtKind::ReturnNop
+                | StmtKind::BareReturn
+                | StmtKind::JumpComputed => return Vec::new(),
+                _ => {}
+            }
+            if stmt.text.starts_with("return ") {
+                return Vec::new();
+            }
 
-            if text == POP_FLOW {
-                return Vec::new();
-            }
-            if text == RETURN_NOP || text == BARE_RETURN || text.starts_with("return ") {
-                return Vec::new();
-            }
-            if parse_jump_computed(text) {
-                return Vec::new();
-            }
-
-            if let Some(target_offset) = parse_jump(text) {
+            if let Some(target_offset) = stmt.jump_target() {
                 if let Some(target_idx) =
                     offset_map.find_fuzzy_forward(target_offset, STRUCTURE_OFFSET_TOLERANCE)
                 {
@@ -44,7 +40,7 @@ pub fn build_stmt_cfg(stmts: &[BcStatement], offset_map: &OffsetMap) -> StmtCfg 
                 return Vec::new();
             }
 
-            if let Some((_cond, target_offset)) = parse_if_jump(text) {
+            if let Some((_cond, target_offset)) = stmt.if_jump() {
                 let mut succs = Vec::with_capacity(2);
                 let fallthrough = idx + 1;
                 if fallthrough < stmt_count {
@@ -61,7 +57,7 @@ pub fn build_stmt_cfg(stmts: &[BcStatement], offset_map: &OffsetMap) -> StmtCfg 
             }
 
             // push_flow: fallthrough + pushed resume address (reached later via pop_flow).
-            if let Some(resume_offset) = parse_push_flow(text) {
+            if let Some(resume_offset) = stmt.push_flow_target() {
                 let mut succs = Vec::with_capacity(2);
                 let fallthrough = idx + 1;
                 if fallthrough < stmt_count {
@@ -78,7 +74,7 @@ pub fn build_stmt_cfg(stmts: &[BcStatement], offset_map: &OffsetMap) -> StmtCfg 
             }
 
             // pop_flow_if_not: fallthrough only (pop side isn't statically resolvable).
-            if parse_pop_flow_if_not(text).is_some() {
+            if stmt.pop_flow_if_not_cond().is_some() {
                 let fallthrough = idx + 1;
                 if fallthrough < stmt_count {
                     return vec![fallthrough];

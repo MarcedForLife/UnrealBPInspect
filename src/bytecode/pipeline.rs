@@ -12,12 +12,13 @@ use super::decode::BcStatement;
 use super::flow::{reorder_convergence, reorder_flow_patterns, strip_latch_boilerplate};
 use super::structure::{apply_indentation, structure_bytecode};
 use super::transforms::{
-    cleanup_structured_output, collect_jump_targets, discard_unused_assignments,
+    cleanup_structured_output, collect_jump_targets, cse_pure_calls, discard_unused_assignments,
     discard_unused_assignments_text, eliminate_constant_condition_branches,
     fold_cascade_across_sequences, fold_summary_patterns, fold_switch_enum_cascade,
     inline_constant_temps, inline_constant_temps_text, inline_single_use_temps,
-    inline_single_use_temps_text, rename_loop_temp_vars, strip_implicit_returns,
-    strip_inlined_break_calls, strip_orphaned_blocks, strip_unmatched_braces,
+    inline_single_use_temps_scoped, rename_loop_temp_vars, rename_outparam_temps_text,
+    strip_implicit_returns, strip_inlined_break_calls, strip_orphaned_blocks,
+    strip_unmatched_braces,
 };
 use super::{
     split_by_sequence_markers, OffsetMap, JUMP_OFFSET_TOLERANCE, LOOP_COMPLETE_MARKER, RETURN_NOP,
@@ -37,7 +38,13 @@ pub fn structure_function(stmts: &[BcStatement]) -> Vec<String> {
     reorder_convergence(&mut reordered);
     let jump_targets = collect_jump_targets(&reordered);
     inline_constant_temps(&mut reordered, &jump_targets);
-    inline_single_use_temps(&mut reordered);
+    inline_single_use_temps(&mut reordered, &jump_targets);
+    // Dedup pure-node call outputs: identical pure calls (by text) are
+    // collapsed so each `$<Call>_<Param>` result gets emitted once. Runs
+    // after inline_single_use_temps (so anything truly single-use has
+    // already been consumed) and before discard_unused_assignments (which
+    // then collapses the chained-assignment temps this pass creates).
+    cse_pure_calls(&mut reordered);
     discard_unused_assignments(&mut reordered);
 
     let sub_segments = split_by_sequence_markers(&reordered);
@@ -93,7 +100,8 @@ pub fn structure_segment(stmts: &[BcStatement]) -> Vec<String> {
     resolve_cross_segment_jumps(&mut seg);
     let jump_targets = collect_jump_targets(&seg);
     inline_constant_temps(&mut seg, &jump_targets);
-    inline_single_use_temps(&mut seg);
+    inline_single_use_temps(&mut seg, &jump_targets);
+    cse_pure_calls(&mut seg);
     discard_unused_assignments(&mut seg);
     structure_and_cleanup(&seg)
 }
@@ -117,7 +125,12 @@ fn post_structure_cleanup(lines: &mut Vec<String>) {
     // Temp inlining runs post-structure so that structure detection has the
     // full statement array with intact mem_offsets for jump target resolution.
     inline_constant_temps_text(lines);
-    inline_single_use_temps_text(lines);
+
+    // 5d.13c cutover: scope-aware inlining is authoritative. Text
+    // pass and divergence-logging harness are dead code pending
+    // removal in 5d.13c-cleanup.
+    inline_single_use_temps_scoped(lines);
+
     discard_unused_assignments_text(lines);
     fold_summary_patterns(lines);
     // Remove Break* calls left orphaned by fold_break_patterns: when out params
@@ -135,6 +148,10 @@ fn post_structure_cleanup(lines: &mut Vec<String>) {
     cleanup_structured_output(lines);
     strip_unmatched_braces(lines);
     strip_implicit_returns(lines);
+    // Rewrite `$<Call>_<Param>` out-param temps to the short form
+    // `$<Param>` where unambiguous. Runs late so every temp the earlier
+    // passes decided to keep has its final name in place.
+    rename_outparam_temps_text(lines);
     apply_indentation(lines);
     // Strip bare LOOP_COMPLETE_MARKER lines (used internally by dedup_completion_paths
     // but redundant in output since the closing brace already shows the loop ended).
@@ -166,8 +183,8 @@ pub(crate) fn resolve_cross_segment_jumps(stmts: &mut Vec<BcStatement>) {
                 .unwrap_or(hex_str.len());
             if let Ok(t) = usize::from_str_radix(&hex_str[..hex_end], 16) {
                 if t <= max_offset && offset_map.find_fuzzy(t, JUMP_OFFSET_TOLERANCE).is_none() {
-                    stmt.text =
-                        format!("{}jump 0x{:x}", &stmt.text[..jump_pos + 2], sentinel_offset);
+                    let prefix = stmt.text[..jump_pos + 2].to_string();
+                    stmt.set_text(format!("{}jump 0x{:x}", prefix, sentinel_offset));
                 }
             }
         }
@@ -175,7 +192,7 @@ pub(crate) fn resolve_cross_segment_jumps(stmts: &mut Vec<BcStatement>) {
         else if let Some(hex_str) = stmt.text.strip_prefix("jump 0x") {
             if let Ok(t) = usize::from_str_radix(hex_str, 16) {
                 if t <= max_offset && offset_map.find_fuzzy(t, JUMP_OFFSET_TOLERANCE).is_none() {
-                    stmt.text = format!("jump 0x{:x}", sentinel_offset);
+                    stmt.set_text(format!("jump 0x{:x}", sentinel_offset));
                 }
             }
         }

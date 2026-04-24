@@ -4,7 +4,7 @@
 //! bytecode, then reorders so downstream structuring sees natural control flow.
 //!
 //! Split by concern:
-//! - `parsers`     — statement-text parse helpers + depth/unmatched-pop helpers
+//! - `parsers`     — push/pop depth + unmatched-pop helpers over BcStatement
 //! - `sequence`    — Sequence-span detection entry + public span type
 //! - `loops`       — ForLoop/ForEach detection
 //! - `emit`        — Sequence/loop body emission
@@ -27,13 +27,8 @@ mod loops;
 mod parsers;
 mod reorder;
 mod sequence;
-#[cfg(test)]
-mod tests;
 
 pub use latch_strip::strip_latch_boilerplate;
-pub use parsers::{
-    find_first_unmatched_pop, find_last_unmatched_pop, flow_depth, parse_continue_if_not,
-    parse_if_jump, parse_jump, parse_jump_computed, parse_pop_flow_if_not, parse_push_flow,
-};
+pub use parsers::{find_first_unmatched_pop, find_last_unmatched_pop, flow_depth};
 pub use reorder::{reorder_convergence, reorder_flow_patterns};
 pub(crate) use sequence::detect_sequence_spans;

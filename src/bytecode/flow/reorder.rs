@@ -6,7 +6,6 @@ use super::super::decode::BcStatement;
 use super::super::{OffsetMap, JUMP_OFFSET_TOLERANCE, SEQUENCE_MARKER_PREFIX};
 use super::emit::emit_reordered;
 use super::loops::{detect_for_loops, detect_grouped_sequences, detect_interleaved_sequences};
-use super::parsers::{parse_if_jump, parse_jump};
 
 /// Reorder bytecode statements to place sequence/loop bodies in logical execution order.
 pub fn reorder_flow_patterns(stmts: &[BcStatement]) -> Vec<BcStatement> {
@@ -55,7 +54,7 @@ pub fn reorder_convergence(stmts: &mut Vec<BcStatement>) {
 
     let offset_map = OffsetMap::build(stmts);
     let has_backward = stmts.iter().enumerate().any(|(i, stmt)| {
-        parse_jump(&stmt.text)
+        stmt.jump_target()
             .and_then(|t| offset_map.find_fuzzy(t, JUMP_OFFSET_TOLERANCE))
             .is_some_and(|ti| ti < i)
     });
@@ -104,7 +103,7 @@ fn resolve_degenerate_backedge(stmts: &mut Vec<BcStatement>, offset_map: &Offset
         |target: usize| -> Option<usize> { offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) };
 
     for (bj_idx, stmt) in stmts.iter().enumerate() {
-        let Some(target) = parse_jump(&stmt.text) else {
+        let Some(target) = stmt.jump_target() else {
             continue;
         };
         let Some(target_idx) = find_idx(target) else {
@@ -115,7 +114,7 @@ fn resolve_degenerate_backedge(stmts: &mut Vec<BcStatement>, offset_map: &Offset
         }
 
         // Target must be `if !(VAR) jump ELSE_TARGET`.
-        let Some((cond, else_target)) = parse_if_jump(&stmts[target_idx].text) else {
+        let Some((cond, else_target)) = stmts[target_idx].if_jump() else {
             continue;
         };
 
@@ -131,7 +130,7 @@ fn resolve_degenerate_backedge(stmts: &mut Vec<BcStatement>, offset_map: &Offset
         }
 
         // Replace assignment + backward jump with a single forward jump.
-        stmts[bj_idx - 1].text = format!("jump 0x{:x}", else_target);
+        stmts[bj_idx - 1].set_text(format!("jump 0x{:x}", else_target));
         stmts.remove(bj_idx);
         return true;
     }

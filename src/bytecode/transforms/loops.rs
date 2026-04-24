@@ -8,8 +8,9 @@
 
 use super::{
     closes_block, count_var_refs, is_block_boundary, opens_block, parse_temp_assignment,
-    strip_outer_parens, substitute_var, BREAK_HIT_VAR, TEMP_INT_PREFIX,
+    rename_var_in_stmt, strip_outer_parens, substitute_var, BREAK_HIT_VAR, TEMP_INT_PREFIX,
 };
+use crate::bytecode::decode::{fmt_stmt, parse_stmt, Stmt};
 use crate::helpers::{is_comment_or_empty, is_section_separator, FOREACH_PREFIX, WHILE_PREFIX};
 
 /// Run all loop rewriting passes in order.
@@ -105,6 +106,41 @@ fn resolve_foreach_array(
         .or_else(|| find_array_access_in_body(lines, header_idx + 1, close_idx))
 }
 
+/// Rename `old_name` to `new_name` in a single text `line`, preserving its
+/// leading indentation. Parses the trimmed line via `parse_stmt` and uses the
+/// typed `rename_var_in_stmt` rewrite when the parse succeeds; `Stmt::Unknown`
+/// lines (block delimiters, comments, labels) fall back to the text
+/// `substitute_var` path so unparseable shapes still get renamed.
+///
+/// Pure identifier rewrite, safe to run on IfOpen conds despite the
+/// stmt_contains_unknown gate (see `rename_var_in_stmt` for rationale).
+fn rename_line_var(line: &mut String, old_name: &str, new_name: &str) {
+    if count_var_refs(line, old_name) == 0 {
+        return;
+    }
+    let trimmed = line.trim();
+    let indent_len = line.len() - trimmed.len();
+    let indent = line[..indent_len].to_owned();
+    let mut parsed = parse_stmt(trimmed);
+    if matches!(parsed, Stmt::Unknown(_)) {
+        // Text-path fallback: the line isn't a modelled statement shape
+        // (e.g. block delimiter, label, comment). Preserve existing idempotent
+        // while-loop semantics.
+        let mut current = line.clone();
+        while count_var_refs(&current, old_name) > 0 {
+            let next = substitute_var(&current, old_name, new_name);
+            if next == current {
+                break;
+            }
+            current = next;
+        }
+        *line = current;
+        return;
+    }
+    rename_var_in_stmt(&mut parsed, old_name, new_name);
+    *line = format!("{}{}", indent, fmt_stmt(&parsed));
+}
+
 /// Determine the item variable name for a foreach loop. If the first body line
 /// is `ITEM = ARRAY[INDEX]` (explicit get), use that name and mark the line for
 /// removal. Otherwise generate a synthetic name and substitute `ARRAY[INDEX]`
@@ -125,9 +161,7 @@ fn resolve_item(
         let item = if item.starts_with('$') {
             let derived = derive_item_name(array, lines, header_idx, close_idx);
             for line in &mut lines[header_idx + 1..close_idx] {
-                while count_var_refs(line, &item) > 0 {
-                    *line = substitute_var(line, &item, &derived);
-                }
+                rename_line_var(line, &item, &derived);
             }
             derived
         } else {
@@ -475,9 +509,7 @@ fn rewrite_forloop_with_break(lines: &mut Vec<String>) {
 
         if short_name != counter {
             for line in &mut lines[i + 1..close_idx] {
-                while count_var_refs(line, &counter) > 0 {
-                    *line = substitute_var(line, &counter, &short_name);
-                }
+                rename_line_var(line, &counter, &short_name);
             }
         }
 

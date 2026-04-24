@@ -27,7 +27,7 @@ pub fn fold_long_lines(lines: &mut Vec<String>) {
             continue;
         }
 
-        let base_indent = lines[idx].len() - lines[idx].trim_start().len();
+        let base_indent = super::indent_of(&lines[idx]);
         let cont_indent = base_indent + 4;
 
         if let Some(folded) = fold_line(&lines[idx], base_indent, cont_indent) {

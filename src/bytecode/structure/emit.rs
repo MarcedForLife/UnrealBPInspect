@@ -1,5 +1,4 @@
-use super::super::flow::{parse_continue_if_not, parse_if_jump, parse_jump, parse_pop_flow_if_not};
-use super::super::{POP_FLOW, RETURN_NOP};
+use super::super::decode::StmtKind;
 use super::region::{in_loop, BlockType, Region, RegionKind};
 use crate::helpers::SECTION_SEPARATOR;
 
@@ -14,7 +13,8 @@ fn resolve_jump_line(
 ) -> Option<String> {
     if let Some(target_idx) = (ctx.find_target_idx_or_end)(target) {
         let is_jump_to_end = target_idx >= ctx.stmts.len()
-            || (target_idx == ctx.stmts.len() - 1 && ctx.stmts[target_idx].text == RETURN_NOP);
+            || (target_idx == ctx.stmts.len() - 1
+                && ctx.stmts[target_idx].kind == StmtKind::ReturnNop);
         if is_jump_to_end {
             if in_loop {
                 Some("break".to_string())
@@ -72,7 +72,13 @@ fn emit_stmts_range(
 
         let stmt = &ctx.stmts[i];
 
-        if stmt.text == POP_FLOW {
+        // Phantoms (inlined-away temps) only carry mem_offset for jump
+        // resolution; their text is blank and emits nothing.
+        if stmt.inlined_away {
+            continue;
+        }
+
+        if stmt.kind == StmtKind::PopFlow {
             let keyword = if in_loop(block_stack) {
                 "break"
             } else {
@@ -84,18 +90,18 @@ fn emit_stmts_range(
             if !already_breaking {
                 output.push(keyword.to_string());
             }
-        } else if parse_continue_if_not(&stmt.text).is_some()
-            || parse_pop_flow_if_not(&stmt.text).is_some()
-            || parse_if_jump(&stmt.text).is_some()
+        } else if stmt.continue_if_not_cond().is_some()
+            || stmt.pop_flow_if_not_cond().is_some()
+            || stmt.if_jump().is_some()
         {
             // Residual guard at end of scope: insert_guard_regions already
             // consumed mid-scope guards; nothing left to wrap here.
-        } else if let Some(target) = parse_jump(&stmt.text) {
+        } else if let Some(target) = stmt.jump_target() {
             if let Some(text) = resolve_jump_line(ctx, i, target, in_loop(block_stack)) {
                 output.push(text);
             }
         } else {
-            let text = if stmt.text == RETURN_NOP {
+            let text = if stmt.kind == StmtKind::ReturnNop {
                 "return"
             } else {
                 &stmt.text

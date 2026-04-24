@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use super::super::decode::BcStatement;
-use super::super::flow::{parse_if_jump, parse_jump, parse_push_flow};
 use super::super::{BLOCK_CLOSE, POP_FLOW, STRUCTURE_OFFSET_TOLERANCE};
 use super::doonce::{derive_doonce_name, detect_init_blocks};
 use super::{GATE_PREFIX, INIT_PREFIX};
@@ -17,11 +16,10 @@ pub(super) fn resolve_body_entry(
     let mut pos = body_start;
     let mut visited: HashSet<usize> = HashSet::new();
     while pos < stmts.len() && visited.insert(pos) {
-        let text = stmts[pos].text.trim();
-        if parse_push_flow(text).is_some() {
+        if stmts[pos].push_flow_target().is_some() {
             return Some(pos);
         }
-        if let Some(target) = parse_jump(text) {
+        if let Some(target) = stmts[pos].jump_target() {
             if let Some(next) = offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE) {
                 pos = next;
                 continue;
@@ -98,7 +96,7 @@ pub(super) fn transform_latches(stmts: &mut Vec<BcStatement>) {
 
     for (&idx, text) in &replacements {
         if idx < stmts.len() {
-            stmts[idx].text = text.clone();
+            stmts[idx].set_text(text.clone());
             remove[idx] = false;
         }
     }
@@ -147,8 +145,7 @@ fn find_gate_sites(
         let mut sites = Vec::new();
 
         for (idx, stmt) in stmts.iter().enumerate() {
-            let trimmed = stmt.text.trim();
-            let Some((cond, _target)) = parse_if_jump(trimmed) else {
+            let Some((cond, _target)) = stmt.if_jump() else {
                 continue;
             };
             if cond != gate_var.as_str() {
@@ -285,9 +282,10 @@ fn transform_gate_sites_to_doonce(
                     continue;
                 }
                 let body_text = stmts[pos].text.trim().to_string();
+                let is_push_flow = stmts[pos].push_flow_target().is_some();
 
-                if parse_push_flow(&body_text).is_none() {
-                    if let Some(target) = parse_jump(&body_text) {
+                if !is_push_flow {
+                    if let Some(target) = stmts[pos].jump_target() {
                         if let Some(target_pos) =
                             offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
                         {
@@ -298,7 +296,7 @@ fn transform_gate_sites_to_doonce(
                     }
                 }
 
-                if parse_push_flow(&body_text).is_some() {
+                if is_push_flow {
                     body_path.push(pos);
                     depth += 1;
                     pos += 1;
@@ -376,7 +374,7 @@ fn remove_residual_latch_stmts(
                 remove[idx] = true;
             }
         }
-        if let Some((cond, _)) = parse_if_jump(trimmed) {
+        if let Some((cond, _)) = stmt.if_jump() {
             if (cond.starts_with(GATE_PREFIX) || cond.starts_with(INIT_PREFIX))
                 && !replacements.contains_key(&idx)
             {
@@ -424,8 +422,8 @@ fn plan_doonce_relocations(
                     relocations.push((site.if_idx, indices));
                 }
                 if site.body_start < stmts.len() {
-                    let trimmed = stmts[site.body_start].text.trim();
-                    if parse_jump(trimmed).is_some() && parse_push_flow(trimmed).is_none() {
+                    let body_stmt = &stmts[site.body_start];
+                    if body_stmt.jump_target().is_some() && body_stmt.push_flow_target().is_none() {
                         remove[site.body_start] = true;
                     }
                 }
@@ -523,10 +521,10 @@ pub(super) fn alias_removed_offsets(stmts: &mut [BcStatement], remove: &[bool]) 
 /// Mark push_flow/jump wrapper pairs whose jump target lands on a removed statement.
 pub(super) fn mark_latch_wrappers(stmts: &[BcStatement], remove: &mut [bool]) {
     for idx in 0..stmts.len().saturating_sub(1) {
-        if remove[idx] || parse_push_flow(stmts[idx].text.trim()).is_none() {
+        if remove[idx] || stmts[idx].push_flow_target().is_none() {
             continue;
         }
-        let Some(jump_target) = parse_jump(stmts[idx + 1].text.trim()) else {
+        let Some(jump_target) = stmts[idx + 1].jump_target() else {
             continue;
         };
         let targets_removed = stmts
@@ -553,11 +551,10 @@ pub(super) fn mark_orphaned_pop_flows(
         .enumerate()
         .filter(|(idx, _)| !remove[*idx])
         .filter_map(|(_, stmt)| {
-            let trimmed = stmt.text.trim();
-            if let Some((_, target)) = parse_if_jump(trimmed) {
+            if let Some((_, target)) = stmt.if_jump() {
                 return Some(target);
             }
-            parse_jump(trimmed)
+            stmt.jump_target()
         })
         .collect();
 

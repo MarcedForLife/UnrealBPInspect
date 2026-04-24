@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
 use super::super::decode::BcStatement;
-use super::super::flow::{parse_if_jump, parse_jump, parse_pop_flow_if_not, parse_push_flow};
 use super::super::{POP_FLOW, STRUCTURE_OFFSET_TOLERANCE};
 use super::{GATE_PREFIX, INIT_PREFIX};
 
@@ -32,8 +31,7 @@ pub(super) fn detect_init_blocks(stmts: &[BcStatement]) -> Vec<InitBlock> {
     let mut blocks = Vec::new();
 
     for (idx, stmt) in stmts.iter().enumerate() {
-        let trimmed = stmt.text.trim();
-        let Some((cond, _target)) = parse_if_jump(trimmed) else {
+        let Some((cond, _target)) = stmt.if_jump() else {
             continue;
         };
         if !cond.starts_with(INIT_PREFIX) {
@@ -55,7 +53,7 @@ pub(super) fn detect_init_blocks(stmts: &[BcStatement]) -> Vec<InitBlock> {
             .flatten()
             .find(|&candidate| {
                 let pfn = candidate + 1;
-                pfn < stmts.len() && parse_pop_flow_if_not(stmts[pfn].text.trim()).is_some()
+                pfn < stmts.len() && stmts[pfn].pop_flow_if_not_cond().is_some()
             });
         let Some(init_assign) = init_assign else {
             continue;
@@ -65,7 +63,7 @@ pub(super) fn detect_init_blocks(stmts: &[BcStatement]) -> Vec<InitBlock> {
         if pfn_idx >= stmts.len() {
             continue;
         }
-        if parse_pop_flow_if_not(stmts[pfn_idx].text.trim()).is_none() {
+        if stmts[pfn_idx].pop_flow_if_not_cond().is_none() {
             continue;
         }
 
@@ -96,8 +94,8 @@ pub(super) fn detect_init_blocks(stmts: &[BcStatement]) -> Vec<InitBlock> {
 
             let wrapper_start = after_if_pop + 1;
             if wrapper_start + 1 < stmts.len()
-                && parse_push_flow(stmts[wrapper_start].text.trim()).is_some()
-                && parse_jump(stmts[wrapper_start + 1].text.trim()).is_some()
+                && stmts[wrapper_start].push_flow_target().is_some()
+                && stmts[wrapper_start + 1].jump_target().is_some()
             {
                 stmt_indices.push(wrapper_start);
                 stmt_indices.push(wrapper_start + 1);
@@ -156,11 +154,10 @@ pub(super) fn derive_doonce_name(
     let mut scan_start = body_start;
     let mut jump_visited: HashSet<usize> = HashSet::new();
     while scan_start < stmts.len() && jump_visited.insert(scan_start) {
-        let trimmed = stmts[scan_start].text.trim();
-        if parse_push_flow(trimmed).is_some() {
+        if stmts[scan_start].push_flow_target().is_some() {
             break;
         }
-        if let Some(target) = parse_jump(trimmed) {
+        if let Some(target) = stmts[scan_start].jump_target() {
             if let Some(target_idx) =
                 offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
             {
@@ -185,7 +182,7 @@ pub(super) fn derive_doonce_name(
         if (trimmed.starts_with('$') || trimmed.starts_with("self.")) && !trimmed.contains('(') {
             continue; // non-call assignment
         }
-        if parse_jump(trimmed).is_some() || parse_push_flow(trimmed).is_some() {
+        if stmt.jump_target().is_some() || stmt.push_flow_target().is_some() {
             break;
         }
         if let Some(paren_pos) = trimmed.find('(') {
