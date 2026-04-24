@@ -5,9 +5,8 @@ use std::collections::{HashMap, HashSet};
 use crate::bytecode::cfg::{
     build_stmt_cfg, extract_partition_stmts, linearize_blocks, partition_by_reachability, BlockCfg,
 };
-use crate::bytecode::flow::{
-    parse_if_jump, parse_jump, parse_push_flow, reorder_convergence, reorder_flow_patterns,
-};
+use crate::bytecode::decode::StmtKind;
+use crate::bytecode::flow::{reorder_convergence, reorder_flow_patterns};
 use crate::bytecode::latch::{precompute_flipflop_names, transform_latch_patterns};
 use crate::bytecode::pipeline::structure_segment;
 use crate::bytecode::structure::apply_indentation;
@@ -15,8 +14,8 @@ use crate::bytecode::transforms::{
     fold_switch_enum_cascade, strip_orphaned_blocks, strip_unmatched_braces,
 };
 use crate::bytecode::{
-    split_by_sequence_markers, BcStatement, OffsetMap, BARE_RETURN, BLOCK_CLOSE, POP_FLOW,
-    RETURN_NOP, STRUCTURE_OFFSET_TOLERANCE,
+    split_by_sequence_markers, BcStatement, OffsetMap, BARE_RETURN, BLOCK_CLOSE,
+    STRUCTURE_OFFSET_TOLERANCE,
 };
 
 use super::super::{ResumeBlock, UbergraphSection, LATENT_RESUME_SECTION};
@@ -28,7 +27,7 @@ pub(super) fn split_at_return_nop(stmts: &[BcStatement]) -> Vec<Vec<BcStatement>
     let mut blocks: Vec<Vec<BcStatement>> = Vec::new();
     let mut current: Vec<BcStatement> = Vec::new();
     for stmt in stmts {
-        if stmt.text == RETURN_NOP || stmt.text == POP_FLOW {
+        if matches!(stmt.kind, StmtKind::ReturnNop | StmtKind::PopFlow) {
             if !current.is_empty() {
                 blocks.push(std::mem::take(&mut current));
             }
@@ -167,7 +166,7 @@ pub(super) fn linearize_from_entry(
     }
 
     // Strip leading pop_flows (leftovers from adjacent event boundaries).
-    while output.first().is_some_and(|s| s.text.trim() == POP_FLOW) {
+    while output.first().is_some_and(|s| s.kind == StmtKind::PopFlow) {
         output.remove(0);
     }
 
@@ -205,26 +204,24 @@ fn renumber_offsets(stmts: &mut [BcStatement]) {
 
     for (idx, stmt) in stmts.iter_mut().enumerate() {
         let new_offset = (idx + 1) * STRIDE;
-        let trimmed = stmt.text.trim().to_string();
-        if let Some((cond, target)) = parse_if_jump(&trimmed) {
+        if let Some(target) = current_target(stmt) {
             if let Some(new_target) = resolve(target) {
-                stmt.text = format!("if !({}) jump 0x{:x}", cond, new_target);
-            }
-        } else if parse_push_flow(&trimmed).is_none() {
-            if let Some(target) = parse_jump(&trimmed) {
-                if let Some(new_target) = resolve(target) {
-                    stmt.text = format!("jump 0x{:x}", new_target);
-                }
-            }
-        }
-        if let Some(target) = parse_push_flow(&trimmed) {
-            if let Some(new_target) = resolve(target) {
-                stmt.text = format!("push_flow 0x{:x}", new_target);
+                stmt.rewrite_target(new_target);
             }
         }
         stmt.mem_offset = new_offset;
         stmt.offset_aliases.clear();
     }
+}
+
+/// Current target offset of a target-carrying statement (`Jump` /
+/// `IfJump` / `PushFlow`). `None` for other kinds. Used by the renumber
+/// / normalize / chain-collapse passes to pair with
+/// `BcStatement::rewrite_target`.
+fn current_target(stmt: &BcStatement) -> Option<usize> {
+    stmt.jump_target()
+        .or_else(|| stmt.if_jump().map(|(_, t)| t))
+        .or_else(|| stmt.push_flow_target())
 }
 
 /// Renumber mem_offsets to match vec order (offset-sorted equals vec-sorted)
@@ -259,18 +256,9 @@ pub(super) fn renumber_to_vec_order(stmts: &mut [BcStatement]) {
         old_map.get(&old_to_new[target_idx].0).copied()
     };
     for stmt in stmts.iter_mut() {
-        let trimmed = stmt.text.trim();
-        if let Some(target) = parse_push_flow(trimmed) {
+        if let Some(target) = current_target(stmt) {
             if let Some(new_t) = map_target(target) {
-                stmt.text = format!("push_flow 0x{:x}", new_t);
-            }
-        } else if let Some(target) = parse_jump(trimmed) {
-            if let Some(new_t) = map_target(target) {
-                stmt.text = format!("jump 0x{:x}", new_t);
-            }
-        } else if let Some((cond, target)) = parse_if_jump(trimmed) {
-            if let Some(new_t) = map_target(target) {
-                stmt.text = format!("if !({}) jump 0x{:x}", cond, new_t);
+                stmt.rewrite_target(new_t);
             }
         }
     }
@@ -285,37 +273,16 @@ pub(super) fn normalize_jump_targets(stmts: &mut [BcStatement]) {
     }
     let offset_map = OffsetMap::build(stmts);
     for idx in 0..stmts.len() {
-        let trimmed = stmts[idx].text.trim().to_string();
-        if let Some(target) = parse_jump(&trimmed) {
-            if parse_push_flow(&trimmed).is_some() {
-                continue;
-            }
-            if let Some(target_idx) =
-                offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
-            {
-                let exact = stmts[target_idx].mem_offset;
-                if exact != target {
-                    stmts[idx].text = format!("jump 0x{:x}", exact);
-                }
-            }
-        } else if let Some((cond, target)) = parse_if_jump(&trimmed) {
-            if let Some(target_idx) =
-                offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
-            {
-                let exact = stmts[target_idx].mem_offset;
-                if exact != target {
-                    stmts[idx].text = format!("if !({}) jump 0x{:x}", cond, exact);
-                }
-            }
-        } else if let Some(target) = parse_push_flow(&trimmed) {
-            if let Some(target_idx) =
-                offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
-            {
-                let exact = stmts[target_idx].mem_offset;
-                if exact != target {
-                    stmts[idx].text = format!("push_flow 0x{:x}", exact);
-                }
-            }
+        let Some(target) = current_target(&stmts[idx]) else {
+            continue;
+        };
+        let Some(target_idx) = offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
+        else {
+            continue;
+        };
+        let exact = stmts[target_idx].mem_offset;
+        if exact != target {
+            stmts[idx].rewrite_target(exact);
         }
     }
 }
@@ -343,42 +310,36 @@ pub(super) fn collapse_jump_chains(stmts: &mut Vec<BcStatement>) {
         changed = false;
         let chain_map = OffsetMap::build(stmts);
         for idx in 0..stmts.len() {
-            let trimmed = stmts[idx].text.trim().to_string();
-
-            if let Some(target) = parse_jump(&trimmed) {
-                if parse_push_flow(&trimmed).is_some() {
-                    continue;
-                }
+            if let Some(target) = stmts[idx].jump_target() {
                 let Some(target_idx) =
                     chain_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
                 else {
                     continue;
                 };
-                let target_text = stmts[target_idx].text.trim().to_string();
-                if parse_push_flow(&target_text).is_some() {
+                if stmts[target_idx].push_flow_target().is_some() {
                     continue;
                 }
-                if let Some(final_target) = parse_jump(&target_text) {
+                if let Some(final_target) = stmts[target_idx].jump_target() {
                     elided_offsets.insert(stmts[target_idx].mem_offset);
-                    stmts[idx].text = format!("jump 0x{:x}", final_target);
+                    stmts[idx].set_text(format!("jump 0x{:x}", final_target));
                     changed = true;
                 }
                 continue;
             }
 
-            if let Some((cond, target)) = parse_if_jump(&trimmed) {
+            if let Some((cond, target)) = stmts[idx].if_jump() {
+                let cond = cond.to_string();
                 let Some(target_idx) =
                     chain_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
                 else {
                     continue;
                 };
-                let target_text = stmts[target_idx].text.trim().to_string();
-                if parse_push_flow(&target_text).is_some() {
+                if stmts[target_idx].push_flow_target().is_some() {
                     continue;
                 }
-                if let Some(final_target) = parse_jump(&target_text) {
+                if let Some(final_target) = stmts[target_idx].jump_target() {
                     elided_offsets.insert(stmts[target_idx].mem_offset);
-                    stmts[idx].text = format!("if !({}) jump 0x{:x}", cond, final_target);
+                    stmts[idx].set_text(format!("if !({}) jump 0x{:x}", cond, final_target));
                     changed = true;
                 }
             }
@@ -390,22 +351,21 @@ pub(super) fn collapse_jump_chains(stmts: &mut Vec<BcStatement>) {
     let final_offset_map = OffsetMap::build(stmts);
     let mut referenced_offsets: HashSet<usize> = HashSet::new();
     for stmt in stmts.iter() {
-        let trimmed = stmt.text.trim();
-        if let Some(target) = parse_jump(trimmed) {
+        if let Some(target) = stmt.jump_target() {
             if let Some(idx) =
                 final_offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
             {
                 referenced_offsets.insert(stmts[idx].mem_offset);
             }
         }
-        if let Some((_, target)) = parse_if_jump(trimmed) {
+        if let Some((_, target)) = stmt.if_jump() {
             if let Some(idx) =
                 final_offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
             {
                 referenced_offsets.insert(stmts[idx].mem_offset);
             }
         }
-        if let Some(target) = parse_push_flow(trimmed) {
+        if let Some(target) = stmt.push_flow_target() {
             if let Some(idx) =
                 final_offset_map.find_fuzzy_forward(target, STRUCTURE_OFFSET_TOLERANCE)
             {
@@ -421,17 +381,16 @@ pub(super) fn collapse_jump_chains(stmts: &mut Vec<BcStatement>) {
     // a `}` (latch close), a prior bare jump, or pop_flow.
     let mut after_terminator_offsets: HashSet<usize> = HashSet::new();
     for window in stmts.windows(2) {
-        let prev_text = window[0].text.trim();
-        if parse_push_flow(prev_text).is_some() || parse_if_jump(prev_text).is_some() {
+        let prev = &window[0];
+        if prev.push_flow_target().is_some() || prev.if_jump().is_some() {
             fallthrough_offsets.insert(window[1].mem_offset);
-        } else if is_flow_terminator(prev_text) {
+        } else if is_flow_terminator(prev) {
             after_terminator_offsets.insert(window[1].mem_offset);
         }
     }
 
     stmts.retain(|stmt| {
-        let trimmed = stmt.text.trim();
-        if parse_jump(trimmed).is_none() || parse_push_flow(trimmed).is_some() {
+        if stmt.jump_target().is_none() {
             return true;
         }
         // After-terminator jumps survive only if directly targeted.
@@ -448,12 +407,14 @@ pub(super) fn collapse_jump_chains(stmts: &mut Vec<BcStatement>) {
 }
 
 /// True if a statement ends control flow (next sequential stmt unreachable).
-fn is_flow_terminator(text: &str) -> bool {
-    let trimmed = text.trim();
-    if parse_jump(trimmed).is_some() && parse_push_flow(trimmed).is_none() {
+fn is_flow_terminator(stmt: &BcStatement) -> bool {
+    if stmt.jump_target().is_some() {
         return true;
     }
-    matches!(trimmed, POP_FLOW | RETURN_NOP | BARE_RETURN | BLOCK_CLOSE)
+    matches!(
+        stmt.kind,
+        StmtKind::PopFlow | StmtKind::ReturnNop | StmtKind::BareReturn
+    ) || stmt.text.trim() == BLOCK_CLOSE
 }
 
 /// Build structured ubergraph output from raw bytecode statements and event labels.

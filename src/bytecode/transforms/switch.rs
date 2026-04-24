@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 
 use super::SWITCH_ENUM_PREFIX;
-use crate::bytecode::decode::BcStatement;
-use crate::bytecode::flow::{find_last_unmatched_pop, parse_if_jump, parse_jump, parse_push_flow};
+use crate::bytecode::decode::{parse_stmt, BcStatement, Expr, Stmt};
+use crate::bytecode::flow::find_last_unmatched_pop;
 use crate::bytecode::{JUMP_OFFSET_TOLERANCE, POP_FLOW, RETURN_NOP};
 use crate::helpers::{closes_block, is_comment_or_empty, opens_block};
 
@@ -227,10 +227,52 @@ fn build_switch_replacement(
 }
 
 /// Parse `$SwitchEnum_CmpSuccess... = VAR != VALUE` from a trimmed line.
+///
+/// Uses `parse_stmt` to extract the cascade-start shape from the typed IR,
+/// then falls back to the legacy substring split if the parser couldn't
+/// classify either side (TODO(5d.2): extend `parse_expr` to cover any
+/// cascade RHS shape the decoder emits but the parser currently rejects).
 fn parse_switch_enum_assign(trimmed: &str) -> Option<(String, String, String)> {
     if !trimmed.starts_with(SWITCH_ENUM_PREFIX) {
         return None;
     }
+    if let Some(parts) = parse_switch_enum_assign_typed(trimmed) {
+        return Some(parts);
+    }
+    parse_switch_enum_assign_substring(trimmed)
+}
+
+/// Typed classifier: match `Stmt::Assignment` with an `Expr::Binary("!=", ...)`
+/// RHS whose LHS is a bare `Var`. Returns `None` on any other shape.
+fn parse_switch_enum_assign_typed(trimmed: &str) -> Option<(String, String, String)> {
+    let Stmt::Assignment { lhs, rhs } = parse_stmt(trimmed) else {
+        return None;
+    };
+    let Expr::Var(switch_var) = lhs else {
+        return None;
+    };
+    if !switch_var.starts_with(SWITCH_ENUM_PREFIX) {
+        return None;
+    }
+    let Expr::Binary {
+        op,
+        lhs: cmp_lhs,
+        rhs: cmp_rhs,
+    } = rhs
+    else {
+        return None;
+    };
+    if op != "!=" {
+        return None;
+    }
+    let compared_var = expr_to_source(*cmp_lhs)?;
+    let value = expr_to_source(*cmp_rhs)?;
+    Some((switch_var, compared_var, value))
+}
+
+/// Legacy substring fallback, kept verbatim for shapes `parse_expr` returns
+/// `Unknown` on (tracked by TODO(5d.2)).
+fn parse_switch_enum_assign_substring(trimmed: &str) -> Option<(String, String, String)> {
     let (switch_var, rhs) = trimmed.split_once(" = ")?;
     let (compared_var, value) = rhs.split_once(" != ")?;
     Some((
@@ -238,6 +280,21 @@ fn parse_switch_enum_assign(trimmed: &str) -> Option<(String, String, String)> {
         compared_var.to_string(),
         value.to_string(),
     ))
+}
+
+/// Render a typed `Expr` back to its source text for the narrow shapes the
+/// cascade scaffold produces: bare vars, literals, and simple dotted field
+/// accesses. Anything else returns `None` so the caller drops back to the
+/// substring path.
+fn expr_to_source(expr: Expr) -> Option<String> {
+    match expr {
+        Expr::Var(name) | Expr::Literal(name) => Some(name),
+        Expr::FieldAccess { recv, field } => {
+            let recv_text = expr_to_source(*recv)?;
+            Some(format!("{recv_text}.{field}"))
+        }
+        _ => None,
+    }
 }
 
 // BcStatement-level cascade fold (pre-split)
@@ -301,7 +358,7 @@ pub fn fold_cascade_across_sequences(
 
     // The alternate group should start at a push_flow (sequence dispatch
     // infrastructure for the case-specific code).
-    parse_push_flow(stmts[alt_start].text.trim())?;
+    stmts[alt_start].push_flow_target()?;
 
     // Detect the push_flow/jump block at the alternate target and extract
     // the exclusive body range (the jump target body, e.g. landing sounds).
@@ -350,7 +407,7 @@ fn extract_push_jump_bodies(
     if push_idx + 1 >= max_idx {
         return None;
     }
-    let jump_target = parse_jump(stmts[push_idx + 1].text.trim())?;
+    let jump_target = stmts[push_idx + 1].jump_target()?;
 
     // Inline body: between jump and first pop_flow after it.
     let inline_start = push_idx + 2;
@@ -384,7 +441,7 @@ fn find_shared_boundary(
     // Collect if-jump targets from the main case body.
     let mut targets: Vec<usize> = Vec::new();
     for stmt in stmts[main_start..alt_start].iter() {
-        if let Some((_, target)) = parse_if_jump(stmt.text.trim()) {
+        if let Some((_, target)) = stmt.if_jump() {
             targets.push(target);
         }
     }
@@ -479,8 +536,7 @@ fn detect_cascade_in_prefix(
 
             // The if-jump should follow immediately.
             if idx + 1 < first_marker_idx {
-                let next_trimmed = stmts[idx + 1].text.trim();
-                if let Some((cond, target)) = parse_if_jump(next_trimmed) {
+                if let Some((cond, target)) = stmts[idx + 1].if_jump() {
                     if cond.contains(switch_var.as_deref().unwrap_or("")) {
                         cases.push(CascadeCase {
                             value: val,
@@ -553,4 +609,59 @@ fn resolve_target_after(
 /// sequence emission that would create spurious `return` in the output.
 fn should_strip_from_case_body(text: &str) -> bool {
     text.trim() == RETURN_NOP
+}
+
+#[cfg(test)]
+mod switch_typed_tests {
+    use super::{parse_switch_enum_assign, parse_switch_enum_assign_typed};
+
+    #[test]
+    fn typed_matches_simple_cascade_start() {
+        let line = "$SwitchEnum_CmpSuccess = EnumVar != 0";
+        let parsed = parse_switch_enum_assign_typed(line);
+        assert_eq!(
+            parsed,
+            Some((
+                "$SwitchEnum_CmpSuccess".to_string(),
+                "EnumVar".to_string(),
+                "0".to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn typed_matches_dotted_compared_var() {
+        let line = "$SwitchEnum_CmpSuccess_1 = self.State != 3";
+        let parsed = parse_switch_enum_assign_typed(line);
+        assert_eq!(
+            parsed,
+            Some((
+                "$SwitchEnum_CmpSuccess_1".to_string(),
+                "self.State".to_string(),
+                "3".to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_non_cascade_line() {
+        // An `==` comparison (not `!=`) is not a cascade start.
+        assert_eq!(
+            parse_switch_enum_assign("$SwitchEnum_CmpSuccess = EnumVar == 0"),
+            None,
+        );
+        // An assignment whose LHS does not start with the cascade prefix.
+        assert_eq!(parse_switch_enum_assign("Other = EnumVar != 0"), None);
+        // A bare line that isn't an assignment.
+        assert_eq!(parse_switch_enum_assign("return"), None);
+    }
+
+    #[test]
+    fn public_entry_matches_same_shape_as_typed() {
+        let line = "$SwitchEnum_CmpSuccess_2 = MyVar != 7";
+        assert_eq!(
+            parse_switch_enum_assign(line),
+            parse_switch_enum_assign_typed(line),
+        );
+    }
 }

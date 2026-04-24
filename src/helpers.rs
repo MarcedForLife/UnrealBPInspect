@@ -5,6 +5,11 @@ pub fn indent_of(line: &str) -> usize {
     line.len() - line.trim_start().len()
 }
 
+/// Leading whitespace of a line as a borrowed slice.
+pub fn indent_prefix(line: &str) -> &str {
+    &line[..indent_of(line)]
+}
+
 /// True if the byte is an ASCII identifier character (alphanumeric or `_`).
 pub fn is_ident_char(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'

@@ -4,9 +4,8 @@
 
 use std::collections::HashSet;
 
-use super::super::decode::BcStatement;
-use super::super::{OffsetMap, JUMP_OFFSET_TOLERANCE, POP_FLOW, RETURN_NOP};
-use super::parsers::{parse_if_jump, parse_jump, parse_push_flow};
+use super::super::decode::{BcStatement, StmtKind};
+use super::super::{OffsetMap, JUMP_OFFSET_TOLERANCE};
 use super::sequence::{SequenceNode, SequencePin};
 use super::{FORLOOP_OFFSET_TOLERANCE, FORLOOP_PUSHFLOW_WINDOW};
 
@@ -48,7 +47,7 @@ fn expand_body_end(
         let mut expanded = false;
         let mut idx = scan_from;
         while idx <= be {
-            if let Some((_, jump_target)) = parse_if_jump(&stmts[idx].text) {
+            if let Some((_, jump_target)) = stmts[idx].if_jump() {
                 if let Some(target_idx) = offset_map.find_fuzzy(jump_target, JUMP_OFFSET_TOLERANCE)
                 {
                     let in_other_pin = existing_pins
@@ -57,7 +56,7 @@ fn expand_body_end(
                     if target_idx > be && !in_other_pin {
                         if let Some(displaced_end) = stmts[target_idx..]
                             .iter()
-                            .position(|s| s.text == POP_FLOW)
+                            .position(|s| s.kind == StmtKind::PopFlow)
                             .map(|p| p + target_idx)
                         {
                             if displaced_end > be {
@@ -88,7 +87,7 @@ pub(super) fn find_displaced_blocks(
 ) -> Vec<(usize, usize)> {
     let mut blocks = Vec::new();
     for idx in body_start..body_end {
-        let Some((_, jump_target)) = parse_if_jump(&stmts[idx].text) else {
+        let Some((_, jump_target)) = stmts[idx].if_jump() else {
             continue;
         };
         let Some(target_idx) = offset_map.find_fuzzy(jump_target, JUMP_OFFSET_TOLERANCE) else {
@@ -99,7 +98,7 @@ pub(super) fn find_displaced_blocks(
         }
         let Some(displaced_end) = stmts[target_idx..]
             .iter()
-            .position(|s| s.text == POP_FLOW)
+            .position(|s| s.kind == StmtKind::PopFlow)
             .map(|p| p + target_idx)
         else {
             continue;
@@ -119,7 +118,7 @@ pub(super) fn detect_grouped_sequences(
 
     let mut i = 0;
     while i < stmts.len() {
-        let Some(_end_offset) = parse_push_flow(&stmts[i].text) else {
+        let Some(_end_offset) = stmts[i].push_flow_target() else {
             i += 1;
             continue;
         };
@@ -127,10 +126,10 @@ pub(super) fn detect_grouped_sequences(
         let mut pairs: Vec<(usize, usize)> = Vec::new();
         let mut scan_idx = i + 1;
         while scan_idx + 1 < stmts.len() {
-            let Some(_cont) = parse_push_flow(&stmts[scan_idx].text) else {
+            let Some(_cont) = stmts[scan_idx].push_flow_target() else {
                 break;
             };
-            let Some(body) = parse_jump(&stmts[scan_idx + 1].text) else {
+            let Some(body) = stmts[scan_idx + 1].jump_target() else {
                 break;
             };
             pairs.push((_cont, body));
@@ -145,7 +144,7 @@ pub(super) fn detect_grouped_sequences(
         let inline_start = scan_idx;
         let inline_end = stmts[inline_start..]
             .iter()
-            .position(|s| s.text == POP_FLOW)
+            .position(|s| s.kind == StmtKind::PopFlow)
             .map(|p| p + inline_start);
         let Some(inline_end) = inline_end else {
             i += 1;
@@ -161,7 +160,7 @@ pub(super) fn detect_grouped_sequences(
             let body_start = body_scan;
             let Some(initial_end) = stmts[body_start..]
                 .iter()
-                .position(|s| s.text == POP_FLOW)
+                .position(|s| s.kind == StmtKind::PopFlow)
                 .map(|p| p + body_start)
             else {
                 break;
@@ -209,11 +208,11 @@ pub(super) fn detect_interleaved_sequences(
             i += 1;
             continue;
         }
-        let Some(_resume) = parse_push_flow(&stmts[i].text) else {
+        let Some(_resume) = stmts[i].push_flow_target() else {
             i += 1;
             continue;
         };
-        let Some(_body_off) = parse_jump(&stmts[i + 1].text) else {
+        let Some(_body_off) = stmts[i + 1].jump_target() else {
             i += 1;
             continue;
         };
@@ -227,13 +226,14 @@ pub(super) fn detect_interleaved_sequences(
                 return false;
             }
             let cond_idx = i - offset;
-            if parse_if_jump(&stmts[cond_idx].text).is_none() {
+            if stmts[cond_idx].if_jump().is_none() {
                 return false;
             }
             let incr_start = i + 2;
             let search_end = stmts.len().min(incr_start + BACK_JUMP_SEARCH_WINDOW);
             (incr_start..search_end).any(|scan_idx| {
-                parse_jump(&stmts[scan_idx].text)
+                stmts[scan_idx]
+                    .jump_target()
                     .is_some_and(|back_target| back_target <= stmts[cond_idx].mem_offset)
             })
         });
@@ -246,10 +246,10 @@ pub(super) fn detect_interleaved_sequences(
         let mut jump_targets: Vec<usize> = Vec::new(); // body offsets
         let mut scan_idx = i;
         while scan_idx + 1 < stmts.len() && !used[scan_idx] {
-            let Some(_resume) = parse_push_flow(&stmts[scan_idx].text) else {
+            let Some(_resume) = stmts[scan_idx].push_flow_target() else {
                 break;
             };
-            let Some(body_off) = parse_jump(&stmts[scan_idx + 1].text) else {
+            let Some(body_off) = stmts[scan_idx + 1].jump_target() else {
                 break;
             };
             jump_targets.push(body_off);
@@ -265,7 +265,7 @@ pub(super) fn detect_interleaved_sequences(
         let inline_start = scan_idx;
         let inline_end = stmts[inline_start..]
             .iter()
-            .position(|s| s.text == POP_FLOW)
+            .position(|s| s.kind == StmtKind::PopFlow)
             .map(|p| p + inline_start);
         let Some(inline_end) = inline_end else {
             i += 1;
@@ -283,7 +283,7 @@ pub(super) fn detect_interleaved_sequences(
             // (switch case bodies, etc.).
             let Some(initial_end) = stmts[body_start..]
                 .iter()
-                .position(|s| s.text == POP_FLOW)
+                .position(|s| s.kind == StmtKind::PopFlow)
                 .map(|p| p + body_start)
             else {
                 all_found = false;
@@ -319,7 +319,7 @@ pub(super) fn detect_interleaved_sequences(
             let meaningful = stmts[inline_start..inline_end]
                 .iter()
                 .filter(|s| {
-                    s.text != POP_FLOW
+                    s.kind != StmtKind::PopFlow
                         && !s.text.starts_with("push_flow ")
                         && !s.text.starts_with("pop_flow_if_not(")
                 })
@@ -374,7 +374,10 @@ fn resolve_foreach_body(
             .map(|(idx, _)| idx)?;
         // Fuzzy matching can land on a preceding terminator; skip to real content.
         while body_idx < stmts.len()
-            && (stmts[body_idx].text == POP_FLOW || stmts[body_idx].text == RETURN_NOP)
+            && matches!(
+                stmts[body_idx].kind,
+                StmtKind::PopFlow | StmtKind::ReturnNop
+            )
         {
             body_idx += 1;
         }
@@ -461,7 +464,7 @@ pub(super) fn detect_for_loops(
     let mut loops: Vec<ForLoop> = Vec::new();
 
     for i in 0..stmts.len() {
-        let Some((_, _end_offset)) = parse_if_jump(&stmts[i].text) else {
+        let Some((_, _end_offset)) = stmts[i].if_jump() else {
             continue;
         };
 
@@ -470,8 +473,8 @@ pub(super) fn detect_for_loops(
             if i + window_offset + 1 >= stmts.len() {
                 break;
             }
-            if parse_push_flow(&stmts[i + window_offset].text).is_some()
-                && parse_jump(&stmts[i + window_offset + 1].text).is_some()
+            if stmts[i + window_offset].push_flow_target().is_some()
+                && stmts[i + window_offset + 1].jump_target().is_some()
             {
                 pf_idx = Some(i + window_offset);
                 break;
@@ -479,7 +482,7 @@ pub(super) fn detect_for_loops(
         }
         let Some(pf_idx) = pf_idx else { continue };
 
-        let Some(body_jump_target) = parse_jump(&stmts[pf_idx + 1].text) else {
+        let Some(body_jump_target) = stmts[pf_idx + 1].jump_target() else {
             continue;
         };
 
@@ -490,7 +493,7 @@ pub(super) fn detect_for_loops(
 
         let mut back_jump_idx = None;
         for scan_idx in incr_start..stmts.len() {
-            if let Some(back_target) = parse_jump(&stmts[scan_idx].text) {
+            if let Some(back_target) = stmts[scan_idx].jump_target() {
                 if back_target <= stmts[i].mem_offset {
                     back_jump_idx = Some(scan_idx);
                     break;
@@ -503,7 +506,7 @@ pub(super) fn detect_for_loops(
 
         let pop_idx = stmts[(back_jump_idx + 1)..stmts.len().min(back_jump_idx + 3)]
             .iter()
-            .position(|s| s.text == POP_FLOW)
+            .position(|s| s.kind == StmtKind::PopFlow)
             .map(|p| p + back_jump_idx + 1);
 
         // ForEach bodies are displaced AFTER the completion path; detected by
@@ -581,13 +584,13 @@ pub(super) fn find_child_sequence_starts(
 
         for (scan_start, scan_end) in ranges {
             for idx in scan_start..scan_end.min(stmts.len()) {
-                let Some(target) = parse_jump(&stmts[idx].text) else {
+                let Some(target) = stmts[idx].jump_target() else {
                     continue;
                 };
                 let Some(target_idx) = offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) else {
                     continue;
                 };
-                if target_idx >= stmts.len() || parse_push_flow(&stmts[target_idx].text).is_none() {
+                if target_idx >= stmts.len() || stmts[target_idx].push_flow_target().is_none() {
                     continue;
                 }
                 for other in sequences {

@@ -160,7 +160,7 @@ pub(super) fn hoist_repeated_ternaries(lines: &mut Vec<String>) {
             to_hoist.push((ternary.clone(), var_name));
         }
     }
-    to_hoist.sort_by_key(|entry| std::cmp::Reverse(entry.0.len()));
+    to_hoist.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
 
     // Insert assignment before first use and replace all occurrences
     for (ternary, var_name) in &to_hoist {
@@ -214,22 +214,15 @@ fn has_ternary_at_depth_zero(input: &str) -> bool {
         match b {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth -= 1,
-            b'?' if depth == 0
-                && i > 0
-                && i + 1 < len
-                && bytes[i - 1] == b' '
-                && bytes[i + 1] == b' ' =>
-            {
-                has_question = true;
+            b'?' if depth == 0 => {
+                if i > 0 && i + 1 < len && bytes[i - 1] == b' ' && bytes[i + 1] == b' ' {
+                    has_question = true;
+                }
             }
-            b':' if depth == 0
-                && has_question
-                && i > 0
-                && i + 1 < len
-                && bytes[i - 1] == b' '
-                && bytes[i + 1] == b' ' =>
-            {
-                return true;
+            b':' if depth == 0 && has_question => {
+                if i > 0 && i + 1 < len && bytes[i - 1] == b' ' && bytes[i + 1] == b' ' {
+                    return true;
+                }
             }
             _ => {}
         }
@@ -252,24 +245,15 @@ fn generate_ternary_var_name(ternary: &str, index: usize) -> String {
         match b {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth -= 1,
-            b'?' if depth == 0
-                && q_pos.is_none()
-                && i > 0
-                && i + 1 < len
-                && bytes[i - 1] == b' '
-                && bytes[i + 1] == b' ' =>
-            {
-                q_pos = Some(i);
+            b'?' if depth == 0 && q_pos.is_none() => {
+                if i > 0 && i + 1 < len && bytes[i - 1] == b' ' && bytes[i + 1] == b' ' {
+                    q_pos = Some(i);
+                }
             }
-            b':' if depth == 0
-                && q_pos.is_some()
-                && c_pos.is_none()
-                && i > 0
-                && i + 1 < len
-                && bytes[i - 1] == b' '
-                && bytes[i + 1] == b' ' =>
-            {
-                c_pos = Some(i);
+            b':' if depth == 0 && q_pos.is_some() && c_pos.is_none() => {
+                if i > 0 && i + 1 < len && bytes[i - 1] == b' ' && bytes[i + 1] == b' ' {
+                    c_pos = Some(i);
+                }
             }
             _ => {}
         }

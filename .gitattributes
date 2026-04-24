@@ -1,1 +1,2 @@
 tests/snapshots/*.txt text eol=lf
+tests/snapshots/private/*.txt text eol=lf

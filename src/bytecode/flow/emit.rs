@@ -3,13 +3,12 @@
 
 use std::collections::HashSet;
 
-use super::super::decode::BcStatement;
+use super::super::decode::{BcStatement, StmtKind};
 use super::super::{
     sequence_marker, sub_sequence_marker, OffsetMap, BLOCK_CLOSE, JUMP_OFFSET_TOLERANCE,
-    LOOP_COMPLETE_MARKER, POP_FLOW, RETURN_NOP,
+    LOOP_COMPLETE_MARKER, RETURN_NOP,
 };
 use super::loops::{find_child_sequence_starts, find_displaced_blocks, ForLoop};
-use super::parsers::{parse_jump, parse_pop_flow_if_not, parse_push_flow};
 use super::sequence::SequenceNode;
 
 /// Shared state for Sequence emission. Tracks emitted chains so child
@@ -69,7 +68,7 @@ impl<'a> SequenceEmitter<'a> {
         output: &mut Vec<BcStatement>,
     ) {
         for idx in scan_start..scan_end.min(self.stmts.len()) {
-            let Some(target) = parse_jump(&self.stmts[idx].text) else {
+            let Some(target) = self.stmts[idx].jump_target() else {
                 continue;
             };
             let Some(target_idx) = self.offset_map.find_fuzzy(target, JUMP_OFFSET_TOLERANCE) else {
@@ -117,7 +116,7 @@ fn emit_single_loop(
     emitted.insert(lp.if_idx);
     let lp_offset = stmts[lp.if_idx].mem_offset;
     let marker = |text: &str| BcStatement::new(lp_offset, text.to_string());
-    let body_end = if stmts[lp.body_end_idx].text == RETURN_NOP {
+    let body_end = if stmts[lp.body_end_idx].kind == StmtKind::ReturnNop {
         lp.body_end_idx
     } else {
         lp.body_end_idx + 1
@@ -138,8 +137,8 @@ fn emit_single_loop(
     // rewrite to a marker the structurer handles differently.
     if lp.foreach.is_some() {
         for stmt in &mut output[body_output_start..] {
-            if let Some(cond) = parse_pop_flow_if_not(&stmt.text) {
-                stmt.text = format!("continue_if_not({})", cond);
+            if let Some(cond) = stmt.pop_flow_if_not_cond().map(str::to_string) {
+                stmt.set_text(format!("continue_if_not({})", cond));
             }
         }
     }
@@ -157,10 +156,10 @@ fn emit_single_loop(
         let end_offset = stmts[lp.body_end_idx].mem_offset;
         let completion = &stmts[cs..=ce];
         for (rel, stmt) in completion.iter().enumerate() {
-            if parse_push_flow(&stmt.text).is_some() || parse_jump(&stmt.text).is_some() {
+            if stmt.push_flow_target().is_some() || stmt.jump_target().is_some() {
                 continue;
             }
-            if stmt.text == POP_FLOW {
+            if stmt.kind == StmtKind::PopFlow {
                 output.push(BcStatement::new(
                     stmt.mem_offset,
                     format!("jump 0x{:x}", end_offset),
@@ -180,7 +179,7 @@ fn emit_single_loop(
     // Only top-level loops emit the trailing return nop. Nested loops share
     // the same body_end_idx (inflated to stmts.len()-1); emitting it inside
     // the parent would let dead-code elimination strip the parent's completion.
-    if !nested && stmts[lp.body_end_idx].text == RETURN_NOP {
+    if !nested && stmts[lp.body_end_idx].kind == StmtKind::ReturnNop {
         output.push(stmts[lp.body_end_idx].clone());
     }
 }
