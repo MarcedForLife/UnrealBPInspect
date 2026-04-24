@@ -402,7 +402,7 @@
       [3]: "0084: out SteeringAngle = $Subtract_FloatFloat"
       [4]: "00a0: return nop"
     BytecodeSummary: [StrProperty; 1 items]
-      [0]: "out SteeringAngle = (self.WinchConstraintInstance.GetRotationAlpha() * 2.0000) - 1.0000"
+      [0]: "out SteeringAngle = self.WinchConstraintInstance.GetRotationAlpha() * 2.0000 - 1.0000"
     FunctionFlags: "Public|HasOutParms|BlueprintPure|Const"
 
   [15] UserConstructionScript (class: /Script/CoreUObject.Function, parent: /Script/Engine.Actor.UserConstructionScript)

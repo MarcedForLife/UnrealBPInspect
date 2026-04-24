@@ -1327,7 +1327,7 @@
           "value": {
             "inner_type": "StrProperty",
             "items": [
-              "out SteeringAngle = (self.WinchConstraintInstance.GetRotationAlpha() * 2.0000) - 1.0000"
+              "out SteeringAngle = self.WinchConstraintInstance.GetRotationAlpha() * 2.0000 - 1.0000"
             ]
           }
         },
@@ -2594,7 +2594,7 @@
   "functions": [
     {
       "bytecode": [
-        "out SteeringAngle = (self.WinchConstraintInstance.GetRotationAlpha() * 2.0000) - 1.0000"
+        "out SteeringAngle = self.WinchConstraintInstance.GetRotationAlpha() * 2.0000 - 1.0000"
       ],
       "export_index": 14,
       "flags": "Public|HasOutParms|BlueprintPure|Const",

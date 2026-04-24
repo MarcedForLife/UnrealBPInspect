@@ -3,9 +3,8 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
-use crate::bytecode::decode::BcStatement;
-use crate::bytecode::flow::{parse_if_jump, parse_jump, parse_jump_computed, parse_push_flow};
-use crate::bytecode::{OffsetMap, BARE_RETURN, BLOCK_CLOSE, POP_FLOW, RETURN_NOP};
+use crate::bytecode::decode::{BcStatement, StmtKind};
+use crate::bytecode::{OffsetMap, BLOCK_CLOSE};
 
 use super::collapse::{annotate_latch_bodies, collapse_sequence_super_blocks, parse_latch_header};
 use super::types::{
@@ -127,17 +126,17 @@ pub(super) fn build_basic_blocks(
 ) -> (Vec<Block>, HashMap<usize, BlockId>) {
     let mut target_indices: HashSet<usize> = HashSet::new();
     for stmt in stmts {
-        if let Some((_, target)) = parse_if_jump(&stmt.text) {
+        if let Some((_, target)) = stmt.if_jump() {
             if let Some(idx) = offset_map.find_fuzzy(target, jump_tolerance) {
                 target_indices.insert(idx);
             }
         }
-        if let Some(target) = parse_jump(&stmt.text) {
+        if let Some(target) = stmt.jump_target() {
             if let Some(idx) = offset_map.find_fuzzy(target, jump_tolerance) {
                 target_indices.insert(idx);
             }
         }
-        if let Some(target) = parse_push_flow(&stmt.text) {
+        if let Some(target) = stmt.push_flow_target() {
             if let Some(idx) = offset_map.find_fuzzy(target, jump_tolerance) {
                 target_indices.insert(idx);
             }
@@ -160,13 +159,13 @@ pub(super) fn build_basic_blocks(
     let mut push_flow_count: u32 = 0;
 
     let is_block_end = |stmt: &BcStatement| -> bool {
-        stmt.text == RETURN_NOP
-            || stmt.text == BARE_RETURN
-            || stmt.text == POP_FLOW
-            || stmt.text.trim() == BLOCK_CLOSE
-            || parse_jump(&stmt.text).is_some()
-            || parse_if_jump(&stmt.text).is_some()
-            || parse_jump_computed(&stmt.text)
+        matches!(
+            stmt.kind,
+            StmtKind::ReturnNop | StmtKind::BareReturn | StmtKind::PopFlow
+        ) || stmt.text.trim() == BLOCK_CLOSE
+            || stmt.jump_target().is_some()
+            || stmt.if_jump().is_some()
+            || matches!(stmt.kind, StmtKind::JumpComputed)
     };
 
     let new_block = |range: Range<usize>, push_flow_count: u32| Block {
@@ -185,7 +184,7 @@ pub(super) fn build_basic_blocks(
             current_start = i;
         }
 
-        if parse_push_flow(&stmt.text).is_some() {
+        if stmt.push_flow_target().is_some() {
             push_flow_count += 1;
         }
 
@@ -225,18 +224,20 @@ pub(super) fn wire_block_edges(
             continue;
         }
         let last_idx = range.end - 1;
-        let last_text = &stmts[last_idx].text;
+        let last_stmt = &stmts[last_idx];
+        let last_text = &last_stmt.text;
+        let last_kind = last_stmt.kind;
         let next_block = bid + 1;
 
-        if last_text == POP_FLOW {
+        if last_kind == StmtKind::PopFlow {
             blocks[bid].exit = BlockExit::ReturnTerminal;
             blocks[bid].return_kind = Some(ReturnKind::PopFlow);
-        } else if last_text == RETURN_NOP || last_text == BARE_RETURN {
+        } else if matches!(last_kind, StmtKind::ReturnNop | StmtKind::BareReturn) {
             blocks[bid].exit = BlockExit::ReturnTerminal;
             blocks[bid].return_kind = Some(ReturnKind::Return);
         } else if last_text.trim() == BLOCK_CLOSE {
             blocks[bid].exit = BlockExit::LatchTerminal;
-        } else if let Some((_, target)) = parse_if_jump(last_text) {
+        } else if let Some((_, target)) = last_stmt.if_jump() {
             let ft = if next_block < blocks.len() {
                 next_block
             } else {
@@ -249,12 +250,12 @@ pub(super) fn wire_block_edges(
                 },
                 None => BlockExit::FallThrough,
             };
-        } else if let Some(target) = parse_jump(last_text) {
+        } else if let Some(target) = last_stmt.jump_target() {
             blocks[bid].exit = match resolve_target(target) {
                 Some(tbid) => BlockExit::Jump(tbid),
                 None => BlockExit::FallThrough,
             };
-        } else if parse_jump_computed(last_text) {
+        } else if matches!(last_kind, StmtKind::JumpComputed) {
             blocks[bid].exit = BlockExit::ReturnTerminal;
             blocks[bid].return_kind = Some(ReturnKind::JumpComputed);
         }

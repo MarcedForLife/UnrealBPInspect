@@ -5,29 +5,38 @@ use super::{
     is_loop_header, opens_block, strip_outer_parens, ARRAY_INDEX_VAR, BREAK_HIT_VAR,
     LOOP_COUNTER_VAR,
 };
+use crate::bytecode::decode::{parse_stmt, Stmt};
 use crate::bytecode::{SEQUENCE_MARKER_PREFIX, SUB_SEQUENCE_MARKER_PREFIX};
 use crate::helpers::{is_section_separator, SECTION_SEPARATOR};
 use std::collections::{HashMap, HashSet};
 
-/// Find the closing brace that matches a block-opening line at `open_idx`.
-/// Tracks brace depth so nested blocks are correctly skipped.
-/// `} else {` is treated as a close at the current depth (stops the search
-/// if depth reaches 0) rather than a net-zero open+close.
-fn find_block_close(lines: &[String], open_idx: usize) -> usize {
-    let mut depth = 1i32;
-    let mut idx = open_idx + 1;
-    while idx < lines.len() && depth > 0 {
-        let inner = lines[idx].trim();
-        if closes_block(inner) {
-            depth -= 1;
-        } else if opens_block(inner) {
-            depth += 1;
+/// Walk a region tree and return the `If` region whose opener is at
+/// `idx`, along with an immediately following `Else` / `ElseIf`
+/// sibling if present. Returns `None` when no `If` opens at `idx`.
+///
+/// Used by `eliminate_constant_condition_branches` to find the full
+/// span of a constant-cond block and decide whether it carries an
+/// else branch that needs separate handling.
+fn find_if_with_else(
+    region: &super::region_tree::LineRegion,
+    idx: usize,
+) -> Option<(
+    &super::region_tree::LineRegion,
+    Option<&super::region_tree::LineRegion>,
+)> {
+    use super::region_tree::LineRegionKind;
+    for (i, child) in region.children.iter().enumerate() {
+        if child.stmt_range.start == idx && child.kind == LineRegionKind::If {
+            let sibling = region.children.get(i + 1);
+            let else_sibling =
+                sibling.filter(|s| matches!(s.kind, LineRegionKind::Else | LineRegionKind::ElseIf));
+            return Some((child, else_sibling));
         }
-        if depth > 0 {
-            idx += 1;
+        if child.stmt_range.contains(&idx) {
+            return find_if_with_else(child, idx);
         }
     }
-    idx
+    None
 }
 
 /// Try to simplify `!(!X)` to `X`. Returns `Some(simplified)` on success.
@@ -270,36 +279,36 @@ pub fn eliminate_constant_condition_branches(lines: &mut Vec<String>) {
         let is_block = opens_block(&trimmed);
 
         if is_block {
-            let close_idx = find_block_close(lines, idx);
+            let tree = super::region_tree::build_region_tree(lines);
+            let Some((if_region, else_region)) = find_if_with_else(&tree, idx) else {
+                // No matching If region (malformed input); fall back to
+                // skipping this line. Matches the old code's behaviour
+                // when the brace scan ran off the end of the buffer.
+                idx += 1;
+                continue;
+            };
+            let if_range = if_region.stmt_range.clone();
+            let else_range = else_region.map(|r| r.stmt_range.clone());
 
             if always_taken {
-                // Inline the body: remove if-line and closing brace (or else block)
-                if close_idx < lines.len() && lines[close_idx].trim().starts_with("} else {") {
-                    let else_end = find_block_close(lines, close_idx);
-                    if else_end < lines.len() {
-                        lines.drain(close_idx..=else_end);
-                    }
-                } else if close_idx < lines.len() {
-                    lines.remove(close_idx);
-                }
-                lines.remove(idx);
-            } else {
-                // Dead branch: remove the entire block
-                if close_idx < lines.len() && lines[close_idx].trim().starts_with("} else {") {
-                    // Remove if-line through "} else {", keep else body, remove else close
-                    lines.drain(idx..=close_idx);
-                    let else_close = find_block_close(lines, idx.saturating_sub(1));
-                    if else_close < lines.len() {
-                        lines.remove(else_close);
-                    }
+                // Inline the body: drop the if-opener, the closing
+                // boundary (a `}` with no else, or `} else {` + else
+                // block when one exists).
+                if let Some(else_r) = else_range {
+                    lines.drain(else_r.start..else_r.end);
                 } else {
-                    let end = if close_idx < lines.len() {
-                        close_idx + 1
-                    } else {
-                        close_idx
-                    };
-                    lines.drain(idx..end);
+                    lines.remove(if_range.end - 1);
                 }
+                lines.remove(if_range.start);
+            } else {
+                // Dead branch: drop the if opener + body. If an else
+                // exists, keep its body and drop its closing `}`. Process
+                // the higher index first so it stays valid across the
+                // lower drain.
+                if let Some(else_r) = else_range {
+                    lines.remove(else_r.end - 1);
+                }
+                lines.drain(if_range.start..if_range.end);
             }
         } else {
             // Single-line form: "if (COND) STMT"
@@ -377,7 +386,11 @@ pub(super) fn clean_line(text: &str) -> String {
 /// Rewrite `switch(COND) { false: F, true: T }` to ternary form.
 pub(super) fn rewrite_bool_switches(line: &str) -> String {
     let mut s = line.to_string();
-    while let Some(result) = rewrite_one_bool_switch(&s) {
+    // Loop to handle multiple switches per line (process left-to-right)
+    loop {
+        let Some(result) = rewrite_one_bool_switch(&s) else {
+            break;
+        };
         s = result;
     }
     s
@@ -740,8 +753,7 @@ pub fn strip_orphaned_blocks(lines: &mut Vec<String>) {
                     if inner.contains("SwitchEnum_CmpSuccess") {
                         // fall through to legacy strip below
                     } else {
-                        let indent = lines[i].len() - lines[i].trim_start().len();
-                        let pad = &lines[i][..indent];
+                        let pad = super::indent_prefix(&lines[i]);
                         let negated = crate::bytecode::structure::negate_cond(&inner);
                         lines[i] = format!("{pad}if ({negated}) {{");
                         lines.remove(i + 1);
@@ -963,12 +975,16 @@ fn strip_redundant_gotos(lines: &mut Vec<String>) {
 /// 1. `} else { return }` from unconnected branch pins, collapsed to `}`.
 /// 2. `return` as the last statement in any block at the end of a function.
 pub fn strip_implicit_returns(lines: &mut Vec<String>) {
+    // Closers, comments, and blanks stay text-classified: Stmt::Unknown treats
+    // them all as one bucket, so typed matching doesn't help here.
     let at_function_end = |lines: &[String], from: usize| -> bool {
         lines[from..].iter().all(|line| {
             let trimmed = line.trim();
             trimmed == "}" || trimmed.is_empty() || trimmed.starts_with("//")
         })
     };
+
+    let is_bare_return = |line: &str| matches!(parse_stmt(line), Stmt::BareReturn);
 
     // Work backwards so removals don't shift indices of earlier matches.
     let mut idx = lines.len();
@@ -979,7 +995,7 @@ pub fn strip_implicit_returns(lines: &mut Vec<String>) {
 
         // `} else { \n return \n }` -> `}`
         if trimmed == "}"
-            && lines[idx - 1].trim() == "return"
+            && is_bare_return(&lines[idx - 1])
             && lines[idx - 2].trim() == "} else {"
             && at_function_end(lines, idx + 1)
         {
@@ -990,7 +1006,7 @@ pub fn strip_implicit_returns(lines: &mut Vec<String>) {
         }
 
         // `return` before closing `}` at end of function
-        if trimmed == "return"
+        if is_bare_return(&lines[idx])
             && idx + 1 < lines.len()
             && lines[idx + 1].trim() == "}"
             && at_function_end(lines, idx + 1)
@@ -998,5 +1014,44 @@ pub fn strip_implicit_returns(lines: &mut Vec<String>) {
             lines.remove(idx);
             idx = idx.min(lines.len());
         }
+    }
+}
+
+#[cfg(test)]
+mod cleanup_typed_tests {
+    use super::strip_implicit_returns;
+
+    #[test]
+    fn strips_trailing_bare_return_before_closer() {
+        let mut lines = vec![
+            "void Foo() {".to_string(),
+            "    DoThing()".to_string(),
+            "    return".to_string(),
+            "}".to_string(),
+        ];
+        strip_implicit_returns(&mut lines);
+        assert_eq!(
+            lines,
+            vec![
+                "void Foo() {".to_string(),
+                "    DoThing()".to_string(),
+                "}".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn leaves_non_tail_return_untouched() {
+        let mut lines = vec![
+            "void Foo() {".to_string(),
+            "    if (cond) {".to_string(),
+            "        return".to_string(),
+            "    }".to_string(),
+            "    DoThing()".to_string(),
+            "}".to_string(),
+        ];
+        let before = lines.clone();
+        strip_implicit_returns(&mut lines);
+        assert_eq!(lines, before);
     }
 }

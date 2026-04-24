@@ -1,8 +1,4 @@
-use super::super::decode::BcStatement;
-use super::super::flow::{
-    parse_continue_if_not, parse_if_jump, parse_jump_computed, parse_pop_flow_if_not,
-    parse_push_flow,
-};
+use super::super::decode::{BcStatement, StmtKind};
 use super::super::BLOCK_CLOSE;
 use super::region::{adopt_children, insert_child_sorted, IfBlock, Region, RegionKind};
 use std::collections::HashSet;
@@ -257,11 +253,11 @@ pub(super) fn insert_guard_regions(
 
         // pop_flow_if_not / continue_if_not: exit or skip-iteration when
         // COND is false; body runs when true (matches Branch true-pin).
-        if let Some(cond) = parse_pop_flow_if_not(&stmts[idx].text) {
+        if let Some(cond) = stmts[idx].pop_flow_if_not_cond() {
             guards.push((idx, cond.to_string()));
-        } else if let Some(cond) = parse_continue_if_not(&stmts[idx].text) {
+        } else if let Some(cond) = stmts[idx].continue_if_not_cond() {
             guards.push((idx, cond.to_string()));
-        } else if let Some((cond, _)) = parse_if_jump(&stmts[idx].text) {
+        } else if let Some((cond, _)) = stmts[idx].if_jump() {
             // Unresolvable if_jump: same semantics.
             guards.push((idx, cond.to_string()));
         }
@@ -285,7 +281,7 @@ pub(super) fn insert_guard_regions(
 /// Mark push_flow and jump_computed statements for skipping during emission.
 pub(super) fn suppress_flow_opcodes(stmts: &[BcStatement], skip: &mut HashSet<usize>) {
     for (i, stmt) in stmts.iter().enumerate() {
-        if parse_push_flow(&stmt.text).is_some() || parse_jump_computed(&stmt.text) {
+        if stmt.push_flow_target().is_some() || matches!(stmt.kind, StmtKind::JumpComputed) {
             skip.insert(i);
         }
     }

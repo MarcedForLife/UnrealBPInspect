@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
 use super::super::decode::BcStatement;
-use super::super::flow::{parse_if_jump, parse_jump, parse_push_flow};
 use super::super::{BLOCK_CLOSE, POP_FLOW, STRUCTURE_OFFSET_TOLERANCE};
 use super::transform::alias_removed_offsets;
 
@@ -35,12 +34,12 @@ pub(super) fn detect_flipflop_toggle(stmts: &[BcStatement]) -> Vec<(String, Vec<
             continue;
         }
         let jump_idx = assign_idx + 1;
-        if jump_idx >= stmts.len() || parse_jump(stmts[jump_idx].text.trim()).is_none() {
+        if jump_idx >= stmts.len() || stmts[jump_idx].jump_target().is_none() {
             continue;
         }
 
         let branch_if_idx = stmts.iter().enumerate().find_map(|(si, ss)| {
-            if let Some((cond, _)) = parse_if_jump(ss.text.trim()) {
+            if let Some((cond, _)) = ss.if_jump() {
                 if cond == negated_var {
                     return Some(si);
                 }
@@ -87,7 +86,8 @@ pub(super) fn rename_flipflop_refs(stmts: &mut [BcStatement], toggle_var: &str, 
     let display_name = format!("$FlipFlop_{}_IsA", name);
     for stmt in stmts.iter_mut() {
         if stmt.text.contains(toggle_var) {
-            stmt.text = stmt.text.replace(toggle_var, &display_name);
+            let replaced = stmt.text.replace(toggle_var, &display_name);
+            stmt.set_text(replaced);
         }
     }
 }
@@ -110,20 +110,20 @@ pub(super) fn collapse_converged_flipflops(
 
     for (toggle_var, indices) in &toggles {
         let Some(branch_idx) = stmts.iter().enumerate().find_map(|(si, ss)| {
-            let (cond, _) = parse_if_jump(ss.text.trim())?;
+            let (cond, _) = ss.if_jump()?;
             (cond == toggle_var.as_str()).then_some(si)
         }) else {
             continue;
         };
 
-        let (_, branch_target) = parse_if_jump(stmts[branch_idx].text.trim()).unwrap();
+        let (_, branch_target) = stmts[branch_idx].if_jump().unwrap();
 
         // A-path: fallthrough from branch, expected to be a bare jump.
         let a_idx = branch_idx + 1;
         if a_idx >= stmts.len() {
             continue;
         }
-        let Some(a_target) = parse_jump(stmts[a_idx].text.trim()) else {
+        let Some(a_target) = stmts[a_idx].jump_target() else {
             continue;
         };
 
@@ -132,7 +132,7 @@ pub(super) fn collapse_converged_flipflops(
         else {
             continue;
         };
-        let Some(b_target) = parse_jump(stmts[b_idx].text.trim()) else {
+        let Some(b_target) = stmts[b_idx].jump_target() else {
             continue;
         };
 
@@ -150,9 +150,9 @@ pub(super) fn collapse_converged_flipflops(
             .map(|(_, name)| name.as_str())
             .unwrap_or("FlipFlop");
 
-        stmts[negate_idx].text = format!("FlipFlop({}) {{", display_name);
-        stmts[store_idx].text = "A|B: {".to_string();
-        stmts[jump_to_branch_idx].text = format!("jump 0x{:x}", a_target);
+        stmts[negate_idx].set_text(format!("FlipFlop({}) {{", display_name));
+        stmts[store_idx].set_text("A|B: {");
+        stmts[jump_to_branch_idx].set_text(format!("jump 0x{:x}", a_target));
         remove[branch_idx] = true;
         remove[a_idx] = true;
         remove[b_idx] = true;
@@ -167,7 +167,7 @@ pub(super) fn collapse_converged_flipflops(
                     continue;
                 }
                 let body_text = stmts[body_idx].text.trim();
-                if parse_push_flow(body_text).is_some() {
+                if stmts[body_idx].push_flow_target().is_some() {
                     depth += 1;
                 } else if body_text == POP_FLOW {
                     if depth > 0 {
@@ -183,7 +183,7 @@ pub(super) fn collapse_converged_flipflops(
 
     for (idx, text) in &body_end_replacements {
         if *idx < stmts.len() {
-            stmts[*idx].text = text.clone();
+            stmts[*idx].set_text(text.clone());
             remove[*idx] = false;
         }
     }
