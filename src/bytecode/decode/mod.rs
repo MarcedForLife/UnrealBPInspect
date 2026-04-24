@@ -7,6 +7,7 @@ mod entry;
 mod expr;
 mod funcs;
 mod helpers;
+mod ir;
 mod match_op;
 mod types;
 
@@ -15,4 +16,8 @@ mod tests;
 
 pub use entry::decode_bytecode;
 pub use expr::decode_expr;
-pub use types::{BcStatement, DecodeCtx};
+pub use ir::{
+    fmt_expr, fmt_stmt, parse_expr, parse_stmt, top_level_compound_assign_split,
+    top_level_eq_split, Expr, Stmt, SwitchArm,
+};
+pub use types::{BcStatement, BcStatementSliceExt, DecodeCtx, StmtKind};
