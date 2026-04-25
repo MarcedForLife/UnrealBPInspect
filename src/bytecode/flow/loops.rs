@@ -126,7 +126,7 @@ pub(super) fn find_displaced_blocks(
 
 /// Detect grouped push_flow chains: regular functions emit
 /// `push_flow E; push_flow C; jump body0; push_flow D; jump body1; ... inline; pop_flow`.
-pub(super) fn detect_grouped_sequences(
+pub(crate) fn detect_grouped_sequences(
     stmts: &[BcStatement],
     offset_map: &OffsetMap,
 ) -> Vec<SequenceNode> {
@@ -223,7 +223,7 @@ pub(super) fn detect_grouped_sequences(
 
 /// Detect alternating push_flow/jump chains (UberGraph pattern):
 /// `push_flow A; jump body0; push_flow B; jump body1; ... inline_code; pop_flow`.
-pub(super) fn detect_interleaved_sequences(
+pub(crate) fn detect_interleaved_sequences(
     stmts: &[BcStatement],
     used: &[bool],
     offset_map: &OffsetMap,
