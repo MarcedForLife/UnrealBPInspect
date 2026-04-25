@@ -4,9 +4,13 @@ use std::collections::{HashMap, HashSet};
 
 use crate::bytecode::cfg::{
     build_stmt_cfg, extract_partition_stmts, linearize_blocks, partition_by_reachability, BlockCfg,
+    EventPartition,
 };
 use crate::bytecode::decode::StmtKind;
-use crate::bytecode::flow::{reorder_convergence, reorder_flow_patterns};
+use crate::bytecode::flow::{
+    detect_grouped_sequences, detect_interleaved_sequences, reorder_convergence,
+    reorder_flow_patterns, SequenceNode,
+};
 use crate::bytecode::latch::{precompute_flipflop_names, transform_latch_patterns};
 use crate::bytecode::pipeline::structure_segment;
 use crate::bytecode::structure::apply_indentation;
@@ -419,9 +423,13 @@ fn is_flow_terminator(stmt: &BcStatement) -> bool {
 
 /// Build structured ubergraph output from raw bytecode statements and event labels.
 ///
-/// Pipeline: build CFG on raw bytecode, partition events by reachability,
-/// then run latch transforms and structuring per-event. This avoids cross-event
-/// contamination from running latch transforms on interleaved events.
+/// Pipeline: detect Sequences on the full ubergraph, partition events by
+/// reachability, splice each Sequence's pin body indices into the partition
+/// containing its `chain_start`, then run latch transforms and structuring
+/// per-event. The full-graph detection step ensures each event's partition
+/// contains every stmt that belongs to its Sequence chain, even pin bodies
+/// the raw stmt-CFG BFS would miss because their inbound edges live in
+/// shared/elsewhere code.
 pub(in crate::output_summary) fn build_ubergraph_structured(
     stmts: Vec<BcStatement>,
     ubergraph_labels: &HashMap<usize, String>,
@@ -450,7 +458,15 @@ pub(in crate::output_summary) fn build_ubergraph_structured(
 
     let offset_map = OffsetMap::build(&cleaned);
     let cfg = build_stmt_cfg(&cleaned, &offset_map);
-    let partitions = partition_by_reachability(&cfg, &cleaned, &sorted_labels, &offset_map);
+    let mut partitions = partition_by_reachability(&cfg, &cleaned, &sorted_labels, &offset_map);
+
+    // Pull every Sequence's pin body indices into the partition that owns
+    // its chain_start. The per-event `reorder_flow_patterns` then sees the
+    // full chain and emits markers for every pin, including those whose
+    // bodies were not naturally reachable from the event entry via the raw
+    // stmt CFG (e.g. shared code referenced via push_flow from another event).
+    let sequences = detect_full_sequences(&cleaned, &offset_map);
+    augment_partitions_with_sequence_bodies(&mut partitions, &sequences);
 
     let mut all_lines: Vec<String> = Vec::new();
     for partition in &partitions {
@@ -554,5 +570,42 @@ pub(in crate::output_summary) fn build_ubergraph_structured(
         None
     } else {
         Some(all_lines)
+    }
+}
+
+/// Run Sequence detection (grouped + interleaved) on the full ubergraph.
+///
+/// Used by the v2 path to splice each Sequence's pin body ranges into the
+/// partition containing its `chain_start`. Detection is pure, re-using the
+/// helpers from `reorder_flow_patterns` without doing any emission.
+fn detect_full_sequences(stmts: &[BcStatement], offset_map: &OffsetMap) -> Vec<SequenceNode> {
+    let mut sequences = detect_grouped_sequences(stmts, offset_map);
+    let used = vec![false; stmts.len()];
+    detect_interleaved_sequences(stmts, &used, offset_map, &mut sequences);
+    sequences
+}
+
+/// Splice every detected Sequence's pin body indices into the partition whose
+/// indices already contain the chain's `chain_start`. Pin bodies that the raw
+/// CFG BFS could not reach (because push_flow edges to them were outside the
+/// event's natural reachable set) are pulled in so the per-event Sequence
+/// detector inside `reorder_flow_patterns` sees the full chain.
+fn augment_partitions_with_sequence_bodies(
+    partitions: &mut [EventPartition],
+    sequences: &[SequenceNode],
+) {
+    for seq in sequences {
+        for partition in partitions.iter_mut() {
+            if partition.indices.binary_search(&seq.chain_start).is_err() {
+                continue;
+            }
+            for pin in &seq.pins {
+                for idx in pin.body_start_idx..=pin.body_end_idx {
+                    partition.indices.push(idx);
+                }
+            }
+            partition.indices.sort_unstable();
+            partition.indices.dedup();
+        }
     }
 }

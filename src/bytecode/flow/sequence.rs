@@ -6,12 +6,12 @@ use super::super::decode::BcStatement;
 use super::super::OffsetMap;
 use super::loops::{detect_grouped_sequences, detect_interleaved_sequences};
 
-pub(super) struct SequencePin {
+pub(crate) struct SequencePin {
     pub body_start_idx: usize,
     pub body_end_idx: usize,
 }
 
-pub(super) struct SequenceNode {
+pub(crate) struct SequenceNode {
     pub chain_start: usize,
     pub chain_end: usize,
     pub inline_end: usize,
