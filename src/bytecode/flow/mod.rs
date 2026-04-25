@@ -29,6 +29,7 @@ mod reorder;
 mod sequence;
 
 pub use latch_strip::strip_latch_boilerplate;
+pub(crate) use loops::{detect_grouped_sequences, detect_interleaved_sequences};
 pub use parsers::{find_first_unmatched_pop, find_last_unmatched_pop, flow_depth};
 pub use reorder::{reorder_convergence, reorder_flow_patterns};
-pub(crate) use sequence::detect_sequence_spans;
+pub(crate) use sequence::{detect_sequence_spans, SequenceNode};
