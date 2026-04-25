@@ -9,6 +9,22 @@ use super::super::{OffsetMap, JUMP_OFFSET_TOLERANCE};
 use super::sequence::{SequenceNode, SequencePin};
 use super::{FORLOOP_OFFSET_TOLERANCE, FORLOOP_PUSHFLOW_WINDOW};
 
+/// Set `BP_INSPECT_TRACE_SEQUENCES=1` to print per-candidate accept/reject
+/// decisions for Sequence detection. Useful when a parser change drops a
+/// Sequence and the structurer's downstream output looks scrambled.
+const SEQ_TRACE_ENV: &str = "BP_INSPECT_TRACE_SEQUENCES";
+
+fn seq_trace_enabled() -> bool {
+    std::env::var(SEQ_TRACE_ENV).is_ok()
+}
+
+fn format_pin_ranges(pins: &[SequencePin]) -> String {
+    pins.iter()
+        .map(|p| format!("{}..{}", p.body_start_idx, p.body_end_idx))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 pub(super) struct ForLoop {
     pub(super) cond_text: String,
     pub(super) if_idx: usize,
@@ -110,7 +126,7 @@ pub(super) fn find_displaced_blocks(
 
 /// Detect grouped push_flow chains: regular functions emit
 /// `push_flow E; push_flow C; jump body0; push_flow D; jump body1; ... inline; pop_flow`.
-pub(super) fn detect_grouped_sequences(
+pub(crate) fn detect_grouped_sequences(
     stmts: &[BcStatement],
     offset_map: &OffsetMap,
 ) -> Vec<SequenceNode> {
@@ -181,6 +197,17 @@ pub(super) fn detect_grouped_sequences(
             continue;
         }
 
+        if seq_trace_enabled() {
+            eprintln!(
+                "[seq:grouped] chain={}..{} pairs={} inline_end={} pins=[{}]",
+                i,
+                scan_idx,
+                pairs.len(),
+                inline_end,
+                format_pin_ranges(&pins),
+            );
+        }
+
         sequences.push(SequenceNode {
             chain_start: i,
             chain_end: inline_start,
@@ -196,7 +223,7 @@ pub(super) fn detect_grouped_sequences(
 
 /// Detect alternating push_flow/jump chains (UberGraph pattern):
 /// `push_flow A; jump body0; push_flow B; jump body1; ... inline_code; pop_flow`.
-pub(super) fn detect_interleaved_sequences(
+pub(crate) fn detect_interleaved_sequences(
     stmts: &[BcStatement],
     used: &[bool],
     offset_map: &OffsetMap,
@@ -304,11 +331,27 @@ pub(super) fn detect_interleaved_sequences(
             continue;
         }
 
-        // Pin bodies must come after the inline body in the stream. When a
-        // target lands inside or before the inline body (degenerate post-latch
-        // layout with scaffolding removed), treating it as a Sequence
-        // duplicates pin markers.
-        if pins.iter().any(|p| p.body_start_idx <= inline_end) {
+        // Reject pins whose RANGE overlaps our own chain or inline body
+        // (degenerate post-latch layout with scaffolding removed -- treating
+        // it as a Sequence duplicates pin markers). Pins lying entirely
+        // before `chain_start` are legal: the bytecode emitter places pin
+        // bodies wherever they fall in the stream, and a small content edit
+        // upstream can shift a pin from after-chain to before-chain. The
+        // detector must be stable across that shift.
+        let pin_overlaps_chain = pins
+            .iter()
+            .any(|p| !(p.body_end_idx < chain_start || p.body_start_idx > inline_end));
+        if pin_overlaps_chain {
+            if seq_trace_enabled() {
+                eprintln!(
+                    "[seq:reject] chain={}..{} pairs={} inline_end={} reason=pin-overlaps-chain pins=[{}]",
+                    chain_start,
+                    scan_idx,
+                    jump_targets.len(),
+                    inline_end,
+                    format_pin_ranges(&pins),
+                );
+            }
             i += 1;
             continue;
         }
@@ -328,6 +371,17 @@ pub(super) fn detect_interleaved_sequences(
                 i += 1;
                 continue;
             }
+        }
+
+        if seq_trace_enabled() {
+            eprintln!(
+                "[seq:accept] chain={}..{} pairs={} inline_end={} pins=[{}]",
+                chain_start,
+                scan_idx,
+                jump_targets.len(),
+                inline_end,
+                format_pin_ranges(&pins),
+            );
         }
 
         sequences.push(SequenceNode {

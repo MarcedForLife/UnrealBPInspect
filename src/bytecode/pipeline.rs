@@ -10,6 +10,46 @@ use std::collections::HashMap;
 
 use super::decode::BcStatement;
 use super::flow::{reorder_convergence, reorder_flow_patterns, strip_latch_boilerplate};
+
+fn trace_enabled() -> bool {
+    std::env::var("BP_INSPECT_TRACE_PIPELINE").is_ok()
+}
+
+fn trace_markers(stmts: &[BcStatement], stage: &str) {
+    if !trace_enabled() {
+        return;
+    }
+    let markers: Vec<String> = stmts
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| {
+            s.text.starts_with(SEQUENCE_MARKER_PREFIX) || s.text.starts_with("// sub-sequence [")
+        })
+        .map(|(i, s)| format!("  [{i}] {}", s.text))
+        .collect();
+    eprintln!(
+        "[pipeline:{stage}] {} stmts, {} markers:",
+        stmts.len(),
+        markers.len()
+    );
+    for m in &markers {
+        eprintln!("{m}");
+    }
+}
+
+fn trace_segments(segments: &[(Option<String>, Vec<BcStatement>)], stage: &str) {
+    if !trace_enabled() {
+        return;
+    }
+    eprintln!("[pipeline:{stage}] {} segments:", segments.len());
+    for (i, (marker, body)) in segments.iter().enumerate() {
+        eprintln!(
+            "  segment[{i}] marker={:?} body_len={}",
+            marker.as_deref().unwrap_or("(none)"),
+            body.len()
+        );
+    }
+}
 use super::structure::{apply_indentation, structure_bytecode};
 use super::transforms::{
     cleanup_structured_output, collect_jump_targets, cse_pure_calls, discard_unused_assignments,
@@ -35,19 +75,26 @@ pub fn structure_function(stmts: &[BcStatement]) -> Vec<String> {
     let mut cleaned = stmts.to_vec();
     strip_latch_boilerplate(&mut cleaned);
     let mut reordered = reorder_flow_patterns(&cleaned);
+    trace_markers(&reordered, "post-emit_reordered");
     reorder_convergence(&mut reordered);
+    trace_markers(&reordered, "post-reorder_convergence");
     let jump_targets = collect_jump_targets(&reordered);
     inline_constant_temps(&mut reordered, &jump_targets);
+    trace_markers(&reordered, "post-inline_constant_temps");
     inline_single_use_temps(&mut reordered, &jump_targets);
+    trace_markers(&reordered, "post-inline_single_use_temps");
     // Dedup pure-node call outputs: identical pure calls (by text) are
     // collapsed so each `$<Call>_<Param>` result gets emitted once. Runs
     // after inline_single_use_temps (so anything truly single-use has
     // already been consumed) and before discard_unused_assignments (which
     // then collapses the chained-assignment temps this pass creates).
     cse_pure_calls(&mut reordered);
+    trace_markers(&reordered, "post-cse_pure_calls");
     discard_unused_assignments(&mut reordered);
+    trace_markers(&reordered, "post-discard_unused_assignments");
 
     let sub_segments = split_by_sequence_markers(&reordered);
+    trace_segments(&sub_segments, "split_by_sequence_markers");
 
     // When a switch-enum cascade in the prefix targets sequence pin bodies,
     // fold it into switch/case text with each case body structured
@@ -87,8 +134,33 @@ pub fn structure_function(stmts: &[BcStatement]) -> Vec<String> {
             all_lines.extend(structured);
         }
     }
+    trace_lines(&all_lines, "pre-post_structure_cleanup");
     post_structure_cleanup(&mut all_lines);
+    trace_lines(&all_lines, "post-post_structure_cleanup");
     all_lines
+}
+
+fn trace_lines(lines: &[String], stage: &str) {
+    if !trace_enabled() {
+        return;
+    }
+    let markers: Vec<(usize, &str)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| {
+            l.trim().starts_with(SEQUENCE_MARKER_PREFIX)
+                || l.trim().starts_with("// sub-sequence [")
+        })
+        .map(|(i, l)| (i, l.trim()))
+        .collect();
+    eprintln!(
+        "[pipeline:{stage}] {} lines, {} markers:",
+        lines.len(),
+        markers.len()
+    );
+    for (i, t) in &markers {
+        eprintln!("  [{i}] {t}");
+    }
 }
 
 /// Structure a single segment of bytecode (no sequence splitting).
