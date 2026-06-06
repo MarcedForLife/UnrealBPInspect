@@ -1310,24 +1310,12 @@
           "value": "GetSteeringAngle(out SteeringAngle: float)"
         },
         {
-          "name": "Bytecode",
-          "value": {
-            "inner_type": "StrProperty",
-            "items": [
-              "0002: self.WinchConstraintInstance.GetRotationAlpha($GetRotationAlpha_RotationAlpha)",
-              "002f: $Multiply_FloatFloat = $GetRotationAlpha_RotationAlpha * 2.0000",
-              "0059: $Subtract_FloatFloat = $Multiply_FloatFloat - 1.0000",
-              "0084: out SteeringAngle = $Subtract_FloatFloat",
-              "00a0: return nop"
-            ]
-          }
-        },
-        {
           "name": "BytecodeSummary",
           "value": {
             "inner_type": "StrProperty",
             "items": [
-              "out SteeringAngle = self.WinchConstraintInstance.GetRotationAlpha() * 2.0000 - 1.0000"
+              "    self.WinchConstraintInstance.GetRotationAlpha($RotationAlpha)",
+              "    out SteeringAngle = (($RotationAlpha * 2.0000) - 1.0000)"
             ]
           }
         },
@@ -1352,27 +1340,14 @@
           "value": "UserConstructionScript()"
         },
         {
-          "name": "Bytecode",
-          "value": {
-            "inner_type": "StrProperty",
-            "items": [
-              "0003: $Cast_AsWinch_Constraint_BP = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)",
-              "003d: $Cast_bSuccess = bool($Cast_AsWinch_Constraint_BP)",
-              "005b: if !($Cast_bSuccess) jump 0x7f",
-              "006b: self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP",
-              "007f: return nop"
-            ]
-          }
-        },
-        {
           "name": "BytecodeSummary",
           "value": {
             "inner_type": "StrProperty",
             "items": [
-              "$Cast_AsWinch_Constraint_BP = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)",
-              "if ($Cast_AsWinch_Constraint_BP) {",
-              "    self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP",
-              "}"
+              "    $Cast_AsWinch_Constraint_BP = Cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)",
+              "    if ($Cast_AsWinch_Constraint_BP as bool) {",
+              "        self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP",
+              "    }"
             ]
           }
         },
@@ -2594,7 +2569,8 @@
   "functions": [
     {
       "bytecode": [
-        "out SteeringAngle = self.WinchConstraintInstance.GetRotationAlpha() * 2.0000 - 1.0000"
+        "    self.WinchConstraintInstance.GetRotationAlpha($RotationAlpha)",
+        "    out SteeringAngle = (($RotationAlpha * 2.0000) - 1.0000)"
       ],
       "export_index": 14,
       "flags": "Public|HasOutParms|BlueprintPure|Const",
@@ -2603,10 +2579,10 @@
     },
     {
       "bytecode": [
-        "$Cast_AsWinch_Constraint_BP = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)",
-        "if ($Cast_AsWinch_Constraint_BP) {",
-        "    self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP",
-        "}"
+        "    $Cast_AsWinch_Constraint_BP = Cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)",
+        "    if ($Cast_AsWinch_Constraint_BP as bool) {",
+        "        self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP",
+        "    }"
       ],
       "export_index": 15,
       "flags": "Event|Public|BlueprintPure",
