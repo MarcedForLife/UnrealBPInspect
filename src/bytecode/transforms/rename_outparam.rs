@@ -1,73 +1,179 @@
 //! Contextual rename of out-param temps from `$<Call>_<Param>` to `$<Param>`.
 //!
-//! The decoder names out-param temps as `$<CallName>_<OutParam>` (e.g.
-//! `$GetInteractableActor_InteractableActor`). That's unambiguous machine-
-//! readable output, but noisy for pseudocode. When the short form
+//! The decoder names pure-call out-param temps as `$<CallName>_<OutParam>`
+//! (e.g. `$GetActor_OutActor`). That's unambiguous
+//! machine-readable output, but noisy for pseudocode. When the short form
 //! `$<OutParam>` is unambiguous within the function scope, we prefer it.
 //!
-//! This pass runs late in the per-function pipeline, after CSE, so the
-//! surviving out-param temps are the ones consumers actually reference.
+//! This pass runs late in the per-function pipeline, after common-
+//! subexpression elimination (CSE), inlining, and dead-statement removal,
+//! so the surviving out-param temps are the ones consumers actually
+//! reference. It operates directly on
+//! the typed statement IR, so rename is inherently whole-token and there
+//! are no text-boundary concerns.
 //!
 //! ## Collection
 //!
-//! Per function:
-//! - `call_names`: every identifier that appears as a callable name in
-//!   `Expr::Call` or `Expr::MethodCall`.
-//! - `var_names`: every `$<...>` identifier that appears in `Expr::Var`,
-//!   both read and LHS.
+//! Over the whole statement tree:
+//! - `call_names`: every name appearing in `Expr::Call` or
+//!   `Expr::MethodCall`.
+//! - `var_names`: every `$<...>` name appearing in `Expr::Var`, on both
+//!   read and assignment-lhs positions.
 //!
 //! ## Rename rules
 //!
 //! For each `$<Call>_<Rest>` var whose `<Call>` matches a collected call
 //! name (longest prefix wins, since some call names contain underscores),
-//! the candidate short form is `$<Rest>`. A candidate is promoted to a
-//! rename only when:
+//! the candidate short form is `$<Rest>`. A candidate is promoted only
+//! when:
 //! - `$<Rest>` is not already in `var_names` (no shadowing), AND
-//! - No other `$<OtherCall>_<Rest>` produces the same `$<Rest>`.
+//! - no other `$<OtherCall>_<Rest>` produces the same `$<Rest>`.
 //!
-//! Collisions stay as their full form.
-//!
-//! ## Rewrite
-//!
-//! Rewrite happens on the text surface via whole-token replacement. The
-//! typed-IR is used strictly for collection, the text rewrite guarantees
-//! that pass output is byte-for-byte identical except for the renamed
-//! tokens.
+//! Pure-digit remainders (`$Foo_1`, a CSE dedup marker) are rejected, as
+//! is an empty remainder. Collisions stay as their full form.
 
-use super::super::decode::{parse_stmt, Expr, Stmt};
-use super::is_var_boundary;
-use super::temps::visit_exprs;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
-/// Operates on the post-structure line list. Parses each line through
-/// `parse_stmt` to collect call names and `$`-temps, then rewrites
-/// `$<Call>_<Rest>` -> `$<Rest>` wherever the short form is unambiguous.
-/// Structured lines such as `if (COND) {` or `} else {` surface their
-/// embedded expressions through `Stmt::IfOpen` / `Stmt::Else`. Shapes
-/// `parse_stmt` can't model fall through to `Stmt::Unknown`, which a
-/// text-level call/var extractor handles as a best-effort fallback.
-pub fn rename_outparam_temps_text(lines: &mut [String]) {
+use crate::bytecode::expr::Expr;
+use crate::bytecode::stmt::Stmt;
+
+use super::visit::{walk_body_exprs_mut_visit_lhs, walk_body_exprs_visit_lhs, Action};
+
+/// Rename unambiguous `$<Call>_<Param>` out-param temps to `$<Param>`
+/// across `body`. Collects call and var names from the whole tree, builds
+/// the `full -> short` map under the collision rules, then rewrites every
+/// matching `Expr::Var` (read or lhs) in place.
+pub fn rename_outparam_temps(body: &mut [Stmt]) {
     let mut call_names: BTreeSet<String> = BTreeSet::new();
     let mut var_names: BTreeSet<String> = BTreeSet::new();
-    for line in lines.iter() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let parsed = parse_stmt(trimmed);
-        collect_from_stmt(&parsed, &mut call_names, &mut var_names);
-    }
+    collect_names(body, &mut call_names, &mut var_names);
 
     let rename_map = build_rename_map(&call_names, &var_names);
     if rename_map.is_empty() {
         return;
     }
 
-    for line in lines.iter_mut() {
-        let new_line = apply_rename_map(line, &rename_map);
-        if new_line != *line {
-            *line = new_line;
+    walk_body_exprs_mut_visit_lhs(body, &mut |expr| {
+        if let Expr::Var(name) = expr {
+            if let Some(short) = rename_map.get(name) {
+                *name = short.clone();
+            }
         }
+        Action::Continue
+    });
+}
+
+/// Collect call names and `$`-prefixed var names across the whole tree.
+///
+/// Two sources feed `call_names`:
+/// - `Expr::Call` / `Expr::MethodCall` names (pure calls embedded in
+///   expressions), gathered through the shared expression walker.
+/// - The callee of a `Stmt::Call`. The IR models a standalone
+///   (void / out-param-only) call as `Stmt::Call { func, .. }` whose
+///   `func` is an `Expr::Var(name)` (free function) or
+///   `Expr::FieldAccess { field, .. }` (method). The producing call for
+///   most out-param temps (e.g. `Query(out $Query_Result)`) takes
+///   this shape, so its name must be harvested here, not just from
+///   `Expr::Call`.
+fn collect_names(
+    body: &[Stmt],
+    call_names: &mut BTreeSet<String>,
+    var_names: &mut BTreeSet<String>,
+) {
+    walk_body_exprs_visit_lhs(body, &mut |expr| match expr {
+        Expr::Var(name) if name.starts_with('$') => {
+            var_names.insert(name.clone());
+        }
+        Expr::Call { name, .. } | Expr::MethodCall { name, .. } => {
+            call_names.insert(name.clone());
+        }
+        _ => {}
+    });
+    collect_stmt_call_callees(body, call_names);
+}
+
+/// Recurse the statement tree, adding the callee name of every
+/// `Stmt::Call` to `call_names`. Children are reached through the same
+/// sub-body slots `walk_stmt_children_mut` knows about.
+fn collect_stmt_call_callees(body: &[Stmt], call_names: &mut BTreeSet<String>) {
+    for stmt in body {
+        if let Stmt::Call { func, .. } = stmt {
+            if let Some(name) = callee_name(func) {
+                call_names.insert(name);
+            }
+        }
+        for_each_child_body(stmt, &mut |child| {
+            collect_stmt_call_callees(child, call_names)
+        });
+    }
+}
+
+/// Extract the callable name from a `Stmt::Call` callee expression.
+/// Handles the free-function (`Expr::Var`), method
+/// (`Expr::FieldAccess`/`Expr::MethodCall`), and embedded
+/// (`Expr::Call`) shapes the decoder produces for the func slot.
+fn callee_name(func: &Expr) -> Option<String> {
+    match func {
+        Expr::Var(name) | Expr::Call { name, .. } | Expr::MethodCall { name, .. } => {
+            Some(name.clone())
+        }
+        Expr::FieldAccess { field, .. } => Some(field.clone()),
+        _ => None,
+    }
+}
+
+/// Apply `visit` to each direct sub-body of `stmt`. Read-only counterpart
+/// of `walk_stmt_children_mut`, kept local because no other module needs
+/// the immutable variant.
+fn for_each_child_body<F: FnMut(&[Stmt])>(stmt: &Stmt, visit: &mut F) {
+    use crate::bytecode::stmt::LoopKind;
+    match stmt {
+        Stmt::Branch {
+            then_body,
+            else_body,
+            ..
+        } => {
+            visit(then_body);
+            visit(else_body);
+        }
+        Stmt::Sequence { pins, .. } => {
+            for pin_body in pins.iter() {
+                visit(pin_body);
+            }
+        }
+        Stmt::Loop {
+            body,
+            completion,
+            kind,
+            ..
+        } => {
+            visit(body);
+            if let Some(comp) = completion {
+                visit(comp);
+            }
+            if let LoopKind::ForC { init, increment } = kind {
+                visit(init);
+                visit(increment);
+            }
+        }
+        Stmt::Switch { cases, default, .. } => {
+            for case in cases.iter() {
+                visit(&case.body);
+            }
+            if let Some(default_body) = default {
+                visit(default_body);
+            }
+        }
+        Stmt::Latch { init, body, .. } => {
+            visit(init);
+            visit(body);
+        }
+        Stmt::Assignment { .. }
+        | Stmt::Call { .. }
+        | Stmt::Return { .. }
+        | Stmt::Break { .. }
+        | Stmt::EventCall { .. }
+        | Stmt::Unknown { .. } => {}
     }
 }
 
@@ -76,10 +182,10 @@ pub fn rename_outparam_temps_text(lines: &mut [String]) {
 fn build_rename_map(
     call_names: &BTreeSet<String>,
     var_names: &BTreeSet<String>,
-) -> HashMap<String, String> {
-    // First pass: for every `$<Call>_<Rest>` var, compute its candidate
-    // short form `$<Rest>`. Use the longest matching call-name prefix.
-    // Group candidates by short form so we can detect collisions.
+) -> BTreeMap<String, String> {
+    // For every `$<Call>_<Rest>` var, compute its candidate short form
+    // `$<Rest>` using the longest matching call-name prefix. Group
+    // candidates by short form so collisions are detectable.
     let mut candidates: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for var in var_names {
         let Some(rest) = var.strip_prefix('$') else {
@@ -101,8 +207,7 @@ fn build_rename_map(
         candidates.entry(short).or_default().push(var.clone());
     }
 
-    // Promote unambiguous candidates to the rename map.
-    let mut map: HashMap<String, String> = HashMap::new();
+    let mut map: BTreeMap<String, String> = BTreeMap::new();
     for (short, sources) in candidates {
         if sources.len() != 1 {
             // Two full-form vars would collapse to the same short form.
@@ -119,8 +224,9 @@ fn build_rename_map(
 }
 
 /// Strip the longest call-name prefix of the form `Call_` from `rest`.
-/// Returns the remainder (the candidate short name) or `None` if no
-/// known call prefixes `rest`.
+/// Returns the remainder (the candidate short name) or `None` if no known
+/// call prefixes `rest`. Call names can contain underscores, so the
+/// longest match wins.
 fn longest_call_prefix_strip(rest: &str, call_names: &BTreeSet<String>) -> Option<String> {
     let best_call = call_names
         .iter()
@@ -130,239 +236,186 @@ fn longest_call_prefix_strip(rest: &str, call_names: &BTreeSet<String>) -> Optio
         .map(str::to_owned)
 }
 
-/// Apply every rename in `map` to `text` via whole-token substitution.
-/// Iterates the map entries in a stable order (longest full-form first)
-/// so a longer full-form var can't be partially matched by a shorter
-/// entry's short form inside another token.
-fn apply_rename_map(text: &str, map: &HashMap<String, String>) -> String {
-    if map.is_empty() {
-        return text.to_string();
-    }
-    let mut entries: Vec<(&String, &String)> = map.iter().collect();
-    // Longest full-form first so `$Foo_ReturnValue_1` is rewritten
-    // before `$Foo_ReturnValue` (if both were in the map, which is
-    // rejected by the collision rule, but defensive ordering doesn't
-    // hurt).
-    entries.sort_by_key(|entry| std::cmp::Reverse(entry.0.len()));
-
-    let mut current = text.to_string();
-    for (full, short) in entries {
-        current = replace_whole_token(&current, full, short);
-    }
-    current
-}
-
-/// Replace every whole-token occurrence of `needle` with `replacement`
-/// in `text`. Uses `is_var_boundary` so `$Foo_X` does not match inside
-/// `$Foo_X_Y`.
-fn replace_whole_token(text: &str, needle: &str, replacement: &str) -> String {
-    if !text.contains(needle) {
-        return text.to_string();
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut start = 0;
-    while let Some(rel) = text[start..].find(needle) {
-        let pos = start + rel;
-        if is_var_boundary(text, pos, needle) {
-            out.push_str(&text[start..pos]);
-            out.push_str(replacement);
-            start = pos + needle.len();
-        } else {
-            // No boundary: copy through the char we found and advance
-            // past it.
-            out.push_str(&text[start..pos + needle.len()]);
-            start = pos + needle.len();
-        }
-    }
-    out.push_str(&text[start..]);
-    out
-}
-
-/// Drive `collect_from_expr` over every `Expr` reachable from `stmt`, plus
-/// fall back to a text-level extractor for `Stmt::Unknown` and
-/// `Stmt::Comment` whose payloads `visit_exprs` skips.
-fn collect_from_stmt(stmt: &Stmt, calls: &mut BTreeSet<String>, vars: &mut BTreeSet<String>) {
-    match stmt {
-        Stmt::Unknown(raw) | Stmt::Comment(raw) => collect_from_text(raw, calls, vars),
-        _ => visit_exprs(stmt, &mut |expr| collect_from_expr(expr, calls, vars)),
-    }
-}
-
-fn collect_from_expr(expr: &Expr, calls: &mut BTreeSet<String>, vars: &mut BTreeSet<String>) {
-    expr.walk(&mut |node| match node {
-        Expr::Var(name) if name.starts_with('$') => {
-            vars.insert(name.clone());
-        }
-        Expr::Call { name, .. } | Expr::MethodCall { name, .. } => {
-            calls.insert(name.clone());
-        }
-        Expr::Unknown(raw) => collect_from_text(raw, calls, vars),
-        _ => {}
-    });
-}
-
-/// Extract `$Name` tokens and likely call names from a raw text payload.
-/// Used as a best-effort fallback for `Stmt::Unknown` / `Expr::Unknown`
-/// shapes the typed parser doesn't model.
-fn collect_from_text(text: &str, calls: &mut BTreeSet<String>, vars: &mut BTreeSet<String>) {
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let byte = bytes[i];
-        if byte == b'$' {
-            let start = i;
-            i += 1;
-            while i < bytes.len() && is_ident_byte(bytes[i]) {
-                i += 1;
-            }
-            if i > start + 1 {
-                vars.insert(text[start..i].to_string());
-            }
-            continue;
-        }
-        if is_ident_start(byte) {
-            let start = i;
-            while i < bytes.len() && is_ident_byte(bytes[i]) {
-                i += 1;
-            }
-            // Treat as call name only if followed by `(`.
-            if i < bytes.len() && bytes[i] == b'(' {
-                calls.insert(text[start..i].to_string());
-            }
-            continue;
-        }
-        i += 1;
-    }
-}
-
-#[inline]
-fn is_ident_start(byte: u8) -> bool {
-    byte.is_ascii_alphabetic() || byte == b'_'
-}
-
-#[inline]
-fn is_ident_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bytecode::transforms::test_fixtures::{assign, call, var};
+    use crate::bytecode::transforms::visit::walk_body_exprs_visit_lhs;
 
-    fn lines(texts: &[&str]) -> Vec<String> {
-        texts.iter().map(|text| text.to_string()).collect()
+    /// Build `Expr::Call { name, args }`.
+    fn call_expr(name: &str, args: Vec<Expr>) -> Expr {
+        Expr::Call {
+            name: name.to_string(),
+            args,
+        }
     }
 
-    #[test]
-    fn empty_is_noop() {
-        let mut list: Vec<String> = Vec::new();
-        rename_outparam_temps_text(&mut list);
-        assert!(list.is_empty());
+    /// Collect every `$`-prefixed `Expr::Var` name in document order. The
+    /// rename pass only mutates var-name strings, so comparing the
+    /// in-order list of `$`-vars precisely captures what the pass did
+    /// without needing `Stmt: PartialEq`.
+    fn dollar_vars(body: &[Stmt]) -> Vec<String> {
+        let mut names = Vec::new();
+        walk_body_exprs_visit_lhs(body, &mut |expr| {
+            if let Expr::Var(name) = expr {
+                if name.starts_with('$') {
+                    names.push(name.clone());
+                }
+            }
+        });
+        names
     }
 
+    /// Single-occurrence out-param temp collapses to the short form.
+    /// The producing pure call surfaces as `Expr::Call` in an assignment
+    /// rhs (the shape for embedded out-param calls).
     #[test]
     fn single_occurrence_is_renamed() {
-        let mut list = lines(&[
-            "GetInteractableActor(Hand, $GetInteractableActor_InteractableActor)",
-            "if (IsValid($GetInteractableActor_InteractableActor)) {",
-            "    self.X = $GetInteractableActor_InteractableActor",
-            "}",
-        ]);
-        rename_outparam_temps_text(&mut list);
+        let mut body = vec![
+            assign(
+                "discard",
+                call_expr(
+                    "GetInteractableActor",
+                    vec![
+                        var("Hand"),
+                        Expr::Out(Box::new(var("$GetInteractableActor_InteractableActor"))),
+                    ],
+                ),
+            ),
+            assign("self.X", var("$GetInteractableActor_InteractableActor")),
+        ];
+        rename_outparam_temps(&mut body);
         assert_eq!(
-            list,
-            lines(&[
-                "GetInteractableActor(Hand, $InteractableActor)",
-                "if (IsValid($InteractableActor)) {",
-                "    self.X = $InteractableActor",
-                "}",
-            ])
+            dollar_vars(&body),
+            vec!["$InteractableActor", "$InteractableActor"]
         );
     }
 
+    /// Short form already in use as a standalone var: keep the full form.
     #[test]
     fn short_form_collision_keeps_full_form() {
-        // `$InteractableActor` is already in use as a standalone var,
-        // so the short form is unavailable.
-        let mut list = lines(&[
-            "self.Y = $InteractableActor",
-            "GetInteractableActor(Hand, $GetInteractableActor_InteractableActor)",
-            "self.X = $GetInteractableActor_InteractableActor",
-        ]);
-        let before = list.clone();
-        rename_outparam_temps_text(&mut list);
-        assert_eq!(list, before);
+        let mut body = vec![
+            assign("self.Y", var("$InteractableActor")),
+            assign(
+                "discard",
+                call_expr(
+                    "GetInteractableActor",
+                    vec![Expr::Out(Box::new(var(
+                        "$GetInteractableActor_InteractableActor",
+                    )))],
+                ),
+            ),
+            assign("self.X", var("$GetInteractableActor_InteractableActor")),
+        ];
+        let before = dollar_vars(&body);
+        rename_outparam_temps(&mut body);
+        assert_eq!(dollar_vars(&body), before);
     }
 
+    /// Two different calls both producing `$Actor` collide: neither renames.
     #[test]
     fn two_call_prefix_collision_keeps_full_form() {
-        // Both `FooA_Actor` and `FooB_Actor` would rename to `$Actor`,
-        // so neither gets renamed.
-        let mut list = lines(&[
-            "FooA(out $FooA_Actor)",
-            "FooB(out $FooB_Actor)",
-            "self.X = $FooA_Actor",
-            "self.Y = $FooB_Actor",
-        ]);
-        let before = list.clone();
-        rename_outparam_temps_text(&mut list);
-        assert_eq!(list, before);
+        let mut body = vec![
+            assign(
+                "discardA",
+                call_expr("FooA", vec![Expr::Out(Box::new(var("$FooA_Actor")))]),
+            ),
+            assign(
+                "discardB",
+                call_expr("FooB", vec![Expr::Out(Box::new(var("$FooB_Actor")))]),
+            ),
+            assign("self.X", var("$FooA_Actor")),
+            assign("self.Y", var("$FooB_Actor")),
+        ];
+        let before = dollar_vars(&body);
+        rename_outparam_temps(&mut body);
+        assert_eq!(dollar_vars(&body), before);
     }
 
+    /// Pure-digit remainder (`$Foo_1`, a CSE marker) is rejected.
     #[test]
     fn short_form_digit_only_rejected() {
-        // `$Foo_1` shouldn't produce candidate `$1` — pure-digit
-        // remainders are CSE dedup markers, not meaningful names.
-        let mut list = lines(&["Foo(x)", "$Foo = Foo(a)", "$Foo_1 = Foo(b)"]);
-        let before = list.clone();
-        rename_outparam_temps_text(&mut list);
-        assert_eq!(list, before);
+        let mut body = vec![
+            call("Foo", vec![var("x")]),
+            assign("$Foo", call_expr("Foo", vec![var("a")])),
+            assign("$Foo_1", call_expr("Foo", vec![var("b")])),
+        ];
+        let before = dollar_vars(&body);
+        rename_outparam_temps(&mut body);
+        assert_eq!(dollar_vars(&body), before);
     }
 
+    /// `$Cast_AsActor` uses the dynamic-cast temp convention. With no
+    /// `Cast(...)` call in scope, `Cast` is not a collected call name and
+    /// the var is left untouched.
     #[test]
     fn dollar_cast_class_not_renamed() {
-        // `$Cast_ClassName` uses the dynamic-cast temp convention, not
-        // the out-param convention. The rename pass ignores it because
-        // `Cast` is not a collected call name (there is no `Cast(...)`
-        // call in this input).
-        let mut list = lines(&["$Cast_AsActor = icast<Actor>($Foo)"]);
-        let before = list.clone();
-        rename_outparam_temps_text(&mut list);
-        assert_eq!(list, before);
+        let mut body = vec![assign(
+            "$Cast_AsActor",
+            Expr::Cast {
+                kind: crate::bytecode::expr::CastKind::Class {
+                    target: "Actor".to_string(),
+                },
+                inner: Box::new(var("$Foo")),
+            },
+        )];
+        let before = dollar_vars(&body);
+        rename_outparam_temps(&mut body);
+        assert_eq!(dollar_vars(&body), before);
     }
 
+    /// Two distinct full forms produce two distinct short forms; both
+    /// rename and the Stmt-level rename is inherently whole-token, so
+    /// `$Foo_Bar` does not partially match inside `$Foo_Bar_Baz`.
     #[test]
     fn word_boundary_respected() {
-        // Two different full forms produce two different short forms,
-        // each unique; both rename without one partially matching inside
-        // the other's token.
-        let mut list = lines(&["Foo(out $Foo_Bar, out $Foo_Bar_Baz)"]);
-        rename_outparam_temps_text(&mut list);
-        assert_eq!(list, lines(&["Foo(out $Bar, out $Bar_Baz)"]));
+        let mut body = vec![assign(
+            "discard",
+            call_expr(
+                "Foo",
+                vec![
+                    Expr::Out(Box::new(var("$Foo_Bar"))),
+                    Expr::Out(Box::new(var("$Foo_Bar_Baz"))),
+                ],
+            ),
+        )];
+        rename_outparam_temps(&mut body);
+        assert_eq!(dollar_vars(&body), vec!["$Bar", "$Bar_Baz"]);
     }
 
+    /// Both `Do` and `DoThing` are call names; `$DoThing_Result` strips
+    /// the longer prefix, yielding `$Result` not `$Thing_Result`.
     #[test]
     fn longest_call_prefix_wins() {
-        // Both `Do` and `DoThing` are call names in scope. The var
-        // `$DoThing_Result` should strip the longer prefix so the
-        // short form is `$Result`, not `$Thing_Result`.
-        let mut list = lines(&[
-            "Do(x)",
-            "DoThing(y, out $DoThing_Result)",
-            "self.X = $DoThing_Result",
-        ]);
-        rename_outparam_temps_text(&mut list);
-        assert_eq!(
-            list,
-            lines(&["Do(x)", "DoThing(y, out $Result)", "self.X = $Result",])
-        );
+        let mut body = vec![
+            assign("discardDo", call_expr("Do", vec![var("x")])),
+            assign(
+                "discardDoThing",
+                call_expr(
+                    "DoThing",
+                    vec![var("y"), Expr::Out(Box::new(var("$DoThing_Result")))],
+                ),
+            ),
+            assign("self.X", var("$DoThing_Result")),
+        ];
+        rename_outparam_temps(&mut body);
+        assert_eq!(dollar_vars(&body), vec!["$Result", "$Result"]);
     }
 
+    /// Call name not in scope: `$Foo_Bar` is left untouched.
     #[test]
     fn call_name_not_in_scope_skipped() {
-        let mut list = lines(&["self.X = $Foo_Bar"]);
-        let before = list.clone();
-        rename_outparam_temps_text(&mut list);
-        assert_eq!(list, before);
+        let mut body = vec![assign("self.X", var("$Foo_Bar"))];
+        let before = dollar_vars(&body);
+        rename_outparam_temps(&mut body);
+        assert_eq!(dollar_vars(&body), before);
+    }
+
+    /// Empty body is a no-op.
+    #[test]
+    fn empty_is_noop() {
+        let mut body: Vec<Stmt> = Vec::new();
+        rename_outparam_temps(&mut body);
+        assert!(body.is_empty());
     }
 }
