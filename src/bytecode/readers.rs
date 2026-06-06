@@ -52,37 +52,32 @@ pub fn read_bc_fname(bytecode: &[u8], pos: &mut usize, name_table: &NameTable) -
 /// Read 3 floats as f64 values. `lwc` = Large World Coordinates (UE5 >= 1004):
 /// vectors/rotators are serialized as f64 instead of f32.
 pub fn read_bc_xyz(bytecode: &[u8], pos: &mut usize, lwc: bool) -> (f64, f64, f64) {
-    if lwc {
-        (
-            read_bc_f64(bytecode, pos),
-            read_bc_f64(bytecode, pos),
-            read_bc_f64(bytecode, pos),
-        )
-    } else {
-        (
-            read_bc_f32(bytecode, pos) as f64,
-            read_bc_f32(bytecode, pos) as f64,
-            read_bc_f32(bytecode, pos) as f64,
-        )
-    }
+    (
+        read_bc_float(bytecode, pos, lwc),
+        read_bc_float(bytecode, pos, lwc),
+        read_bc_float(bytecode, pos, lwc),
+    )
 }
 
 /// Read 4 floats (f32 or f64 depending on LWC) as f64 values.
 pub fn read_bc_xyzw(bytecode: &[u8], pos: &mut usize, lwc: bool) -> (f64, f64, f64, f64) {
+    (
+        read_bc_float(bytecode, pos, lwc),
+        read_bc_float(bytecode, pos, lwc),
+        read_bc_float(bytecode, pos, lwc),
+        read_bc_float(bytecode, pos, lwc),
+    )
+}
+
+/// Read one float and widen to f64. With `lwc` (Large World Coordinates,
+/// the UE5 1004+ double-vector format) the value is stored as f64; pre-LWC
+/// it is f32, widened. Tuple elements evaluate left-to-right, so callers
+/// reading several in sequence advance `pos` in component order.
+fn read_bc_float(bytecode: &[u8], pos: &mut usize, lwc: bool) -> f64 {
     if lwc {
-        (
-            read_bc_f64(bytecode, pos),
-            read_bc_f64(bytecode, pos),
-            read_bc_f64(bytecode, pos),
-            read_bc_f64(bytecode, pos),
-        )
+        read_bc_f64(bytecode, pos)
     } else {
-        (
-            read_bc_f32(bytecode, pos) as f64,
-            read_bc_f32(bytecode, pos) as f64,
-            read_bc_f32(bytecode, pos) as f64,
-            read_bc_f32(bytecode, pos) as f64,
-        )
+        read_bc_f32(bytecode, pos) as f64
     }
 }
 
