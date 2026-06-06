@@ -79,11 +79,12 @@ Variables:
 
 Functions:
   GetSteeringAngle(out SteeringAngle: float) [Public|HasOutParms|BlueprintPure|Const]
-    out SteeringAngle = self.WinchConstraintInstance.GetRotationAlpha() * 2.0000 - 1.0000
+    self.WinchConstraintInstance.GetRotationAlpha($RotationAlpha)
+    out SteeringAngle = (($RotationAlpha * 2.0000) - 1.0000)
 
   UserConstructionScript() [Event|Public|BlueprintPure]
-    $Cast_AsWinch_Constraint_BP = cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)
-    if ($Cast_AsWinch_Constraint_BP) {
+    $Cast_AsWinch_Constraint_BP = Cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)
+    if ($Cast_AsWinch_Constraint_BP as bool) {
         self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP
     }
 
