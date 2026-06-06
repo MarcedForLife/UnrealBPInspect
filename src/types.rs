@@ -1,14 +1,14 @@
 //! Core data types shared across the parser.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-// -- UE4 file_ver gates --
+// UE4 file_ver gates
 pub const VER_UE4_TEMPLATE_INDEX: i32 = 459;
 pub const VER_UE4_PROPERTY_GUID: i32 = 503;
 pub const VER_UE4_LOCALIZATION_ID: i32 = 516;
 pub const VER_UE4_PACKAGE_NAME_IN_IMPORT: i32 = 518;
 
-// -- UE5 file_ver_ue5 gates --
+// UE5 file_ver_ue5 gates
 pub const VER_UE5_OPTIONAL_RESOURCES: i32 = 1003;
 pub const VER_UE5_LARGE_WORLD_COORDINATES: i32 = 1004;
 pub const VER_UE5_REMOVE_EXPORT_GUID: i32 = 1005;
@@ -151,10 +151,46 @@ pub struct NodePinData {
     pub pins: Vec<EdGraphPin>,
 }
 
+/// One parameter of a Blueprint function or event signature.
+///
+/// `flags` carries the raw UE property flags read off disk; the meaningful
+/// bits for downstream consumers are `CPF_PARM` (0x80), `CPF_OUT_PARM`
+/// (0x100), and `CPF_RETURN_PARM` (0x200).
+#[derive(Debug, Clone)]
+pub struct ParamInfo {
+    pub name: String,
+    pub type_name: String,
+    pub flags: u64,
+}
+
+/// Parameter list and return type for a single function export.
+///
+/// Used by the bytecode decoder to look up callee signatures so it can
+/// wrap call-site arguments at OUT-parameter positions in `Expr::Out`.
+/// Imported (cross-asset) functions are not represented here, the lookup
+/// falls back gracefully for unknown names.
+#[derive(Debug, Clone, Default)]
+pub struct FunctionSignature {
+    pub params: Vec<ParamInfo>,
+    pub return_type: Option<String>,
+}
+
 pub struct ParsedAsset {
     pub imports: Vec<ImportEntry>,
     pub exports: Vec<(ExportHeader, Vec<Property>)>,
     /// Pin connection data per export index (1-based). Only populated for
     /// EdGraph node exports where pin serialization was successfully parsed.
     pub pin_data: HashMap<usize, NodePinData>,
+    /// Function name to parameter signature, populated for every Function
+    /// export with at least one declared FField child. Keyed by the export's
+    /// `object_name`. Multiple exports sharing a name would collide; in
+    /// practice Blueprint functions have unique names within an asset.
+    pub function_signatures: BTreeMap<String, FunctionSignature>,
+    /// Raw bytecode bytes captured during the prologue walk, keyed by
+    /// 1-based export index. Value is `(disk_bytes, mem_size)` where
+    /// `mem_size` is the runtime memory size used to translate jump
+    /// targets between memory and disk coordinates. Only populated for
+    /// function-class exports whose serialized bytecode block was
+    /// successfully read.
+    pub bytecode_by_export: BTreeMap<usize, (Vec<u8>, u32)>,
 }

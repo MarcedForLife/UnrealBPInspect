@@ -3,6 +3,8 @@
 use anyhow::Result;
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
+use crate::property_type::PROPERTY_CLASS_SUFFIX;
+
 pub type Reader<'a> = Cursor<&'a [u8]>;
 
 macro_rules! read_le {
@@ -56,6 +58,7 @@ pub fn read_fstring(reader: &mut Reader) -> Result<String> {
     }
 }
 
+#[derive(Clone)]
 pub struct NameTable {
     names: Vec<String>,
 }
@@ -135,6 +138,6 @@ impl NameTable {
             return Ok(false);
         }
         let base = self.get(index);
-        Ok(base.ends_with("Property"))
+        Ok(base.ends_with(PROPERTY_CLASS_SUFFIX))
     }
 }
