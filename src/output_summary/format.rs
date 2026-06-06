@@ -4,28 +4,12 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use crate::bytecode::transforms::fold_long_lines;
-use crate::helpers::indent_of;
-use crate::pin_hints::{build_branch_hints, build_bytecode_branch_map};
-use crate::pin_hints_scope;
 use crate::prop_query::{
     find_prop, find_prop_object, find_prop_object_array, find_prop_str, find_prop_str_items,
     prop_value_short,
 };
 use crate::resolve::{resolve_index, short_class};
-use crate::types::NodePinData;
 use crate::types::{ImportEntry, ParsedAsset, PropValue, Property};
-
-use super::call_graph::{
-    build_call_graph, build_ubergraph_ctx, collect_local_functions, format_call_graph, UbergraphCtx,
-};
-use super::comments::classify_comments;
-use super::edgraph::{collect_edgraph_data, merge_event_graph_data, EdGraphData};
-use super::ubergraph::{
-    compute_action_key_events, display_event_name, emit_ubergraph_events, is_ubergraph_stub,
-    split_ubergraph_sections,
-};
-use super::{emit_comment, section_sep, strip_offset_prefix};
 
 const COMP_SKIP_PROPS: &[&str] = &[
     "StaticMeshImportVersion",
@@ -128,7 +112,7 @@ fn fmt_comp_tree(
 
 /// Find the Blueprint name and parent class, write the header line.
 /// Returns `(bp_name, bp_parent)`.
-fn format_header(
+pub(crate) fn format_header(
     buf: &mut String,
     asset: &ParsedAsset,
     export_names: &[String],
@@ -167,7 +151,7 @@ fn format_header(
 
 /// Parse SCS_Node exports, build the component tree, format properties.
 /// Returns the list of `(comp_name, comp_class)` pairs (needed by variable filtering).
-fn format_component_tree(
+pub(crate) fn format_component_tree(
     buf: &mut String,
     asset: &ParsedAsset,
     export_names: &[String],
@@ -237,7 +221,7 @@ fn format_component_tree(
 }
 
 /// Collect member variables and defaults, write the variables section.
-fn format_variables(
+pub(crate) fn format_variables(
     buf: &mut String,
     asset: &ParsedAsset,
     export_names: &[String],
@@ -294,233 +278,4 @@ fn format_variables(
         }
         writeln!(buf).unwrap();
     }
-}
-
-/// Emit a single function's bytecode with inline and top-level comments.
-fn emit_function_body(
-    buf: &mut String,
-    func_name: &str,
-    props: &[Property],
-    edgraph: &EdGraphData,
-    pin_data: &HashMap<usize, NodePinData>,
-    callers_map: &HashMap<String, Vec<String>>,
-    signature: &str,
-) {
-    if let Some(callers) = callers_map.get(func_name) {
-        writeln!(buf, "  // called by: {}", callers.join(", ")).unwrap();
-    }
-    writeln!(buf, "  {}", signature).unwrap();
-
-    let bc_lines: Vec<String> = {
-        let summary = find_prop_str_items(props, "BytecodeSummary");
-        if !summary.is_empty() {
-            summary.iter().map(|s| s.to_string()).collect()
-        } else {
-            find_prop_str_items(props, "Bytecode")
-                .iter()
-                .map(|s| strip_offset_prefix(s).to_string())
-                .collect()
-        }
-    };
-
-    let comments = edgraph.graph_comments.get(func_name);
-    let nodes = edgraph.graph_nodes.get(func_name);
-    let (top_level, inline) = if let Some(cbs) = comments {
-        let node_slice = nodes.map(|v| v.as_slice()).unwrap_or(&[]);
-        classify_comments(
-            cbs,
-            node_slice,
-            &bc_lines,
-            pin_data,
-            &edgraph.all_node_positions,
-        )
-    } else {
-        (Vec::new(), Vec::new())
-    };
-
-    if !top_level.is_empty() {
-        let mut sorted_top = top_level;
-        sorted_top.sort_by(|a, b| a.x.cmp(&b.x).then(a.y.cmp(&b.y)).then(a.text.cmp(&b.text)));
-        for cb in &sorted_top {
-            emit_comment(buf, &cb.text, super::BODY_INDENT);
-        }
-    }
-
-    if bc_lines.is_empty() {
-        return;
-    }
-    let mut inline_idx = 0;
-    for (i, line) in bc_lines.iter().enumerate() {
-        while inline_idx < inline.len() && inline[inline_idx].0 == i {
-            let ws_len = indent_of(line);
-            let indent = format!("    {}", &line[..ws_len]);
-            emit_comment(buf, &inline[inline_idx].1.text, &indent);
-            inline_idx += 1;
-        }
-        writeln!(buf, "    {}", line).unwrap();
-    }
-}
-
-/// Emit the ubergraph (EventGraph) events with merged sub-page data.
-fn emit_ubergraph_section(
-    buf: &mut String,
-    structured: &[String],
-    edgraph: &EdGraphData,
-    pin_data: &HashMap<usize, NodePinData>,
-    callers_map: &HashMap<String, Vec<String>>,
-) {
-    let (ug_comments, ug_nodes) = merge_event_graph_data(&edgraph.event_graph_pages, edgraph);
-    let ug_comments_ref = if ug_comments.is_empty() {
-        None
-    } else {
-        Some(ug_comments.as_slice())
-    };
-    let ug_nodes_ref = if ug_nodes.is_empty() {
-        None
-    } else {
-        Some(ug_nodes.as_slice())
-    };
-    emit_ubergraph_events(
-        buf,
-        structured,
-        ug_comments_ref,
-        ug_nodes_ref,
-        edgraph,
-        pin_data,
-        callers_map,
-    );
-}
-
-/// Emit all function exports: ubergraph events and regular functions.
-fn format_functions(
-    buf: &mut String,
-    asset: &ParsedAsset,
-    export_names: &[String],
-    ubergraph_ctx: Option<&UbergraphCtx>,
-    edgraph: &EdGraphData,
-    callers_map: &HashMap<String, Vec<String>>,
-) {
-    let mut emitted_count = 0usize;
-    for (hdr, props) in &asset.exports {
-        let class = resolve_index(&asset.imports, export_names, hdr.class_index);
-        if !class.ends_with(".Function") {
-            continue;
-        }
-        if let Some(ctx) = ubergraph_ctx {
-            if !hdr.object_name.starts_with("ExecuteUbergraph_")
-                && is_ubergraph_stub(props, &ctx.name)
-            {
-                continue;
-            }
-        }
-
-        let sig =
-            find_prop_str(props, "Signature").unwrap_or_else(|| format!("{}()", hdr.object_name));
-        let flags = find_prop_str(props, "FunctionFlags")
-            .map(|f| filter_flags_for_summary(&f))
-            .filter(|f| !f.is_empty())
-            .map(|f| format!(" [{}]", f))
-            .unwrap_or_default();
-
-        if emitted_count == 0 {
-            writeln!(buf, "Functions:").unwrap();
-        }
-
-        if let Some(ctx) = ubergraph_ctx {
-            if hdr.object_name.starts_with("ExecuteUbergraph_") {
-                section_sep(buf, &mut emitted_count);
-                emit_ubergraph_section(buf, &ctx.structured, edgraph, &asset.pin_data, callers_map);
-                continue;
-            }
-        }
-
-        section_sep(buf, &mut emitted_count);
-        let signature = format!("{}{}", sig, flags);
-        emit_function_body(
-            buf,
-            &hdr.object_name,
-            props,
-            edgraph,
-            &asset.pin_data,
-            callers_map,
-            &signature,
-        );
-    }
-    if emitted_count > 0 {
-        writeln!(buf).unwrap();
-    }
-}
-
-fn filter_flags_for_summary(flags: &str) -> String {
-    const NOISE: &[&str] = &["BlueprintCallable"];
-    flags
-        .split('|')
-        .filter(|f| !NOISE.contains(&f.trim()))
-        .collect::<Vec<_>>()
-        .join("|")
-}
-
-pub fn format_summary(asset: &ParsedAsset) -> String {
-    let mut buf = String::new();
-    let export_names: Vec<String> = asset
-        .exports
-        .iter()
-        .map(|(h, _)| h.object_name.clone())
-        .collect();
-
-    // Install pin-derived branch hints in a thread-local scope for the
-    // duration of structuring, so the else-branch detector and post-structure
-    // relocation pass can consult them without threading through every
-    // intermediate signature.
-    let hints = build_branch_hints(asset);
-    let map = build_bytecode_branch_map(asset, &hints);
-    let _pin_hints_guard = pin_hints_scope::Guard::new(hints, map);
-
-    let (_bp_name, _bp_parent) = format_header(&mut buf, asset, &export_names);
-    let components = format_component_tree(&mut buf, asset, &export_names);
-    format_variables(&mut buf, asset, &export_names, &components);
-
-    let ubergraph_ctx = build_ubergraph_ctx(asset, &export_names);
-    let edgraph = collect_edgraph_data(asset, &export_names);
-    let local_functions = collect_local_functions(asset, &export_names, ubergraph_ctx.as_ref());
-
-    let (mut callees_map, mut callers_map) = build_call_graph(
-        asset,
-        &export_names,
-        &local_functions,
-        ubergraph_ctx.as_ref().map(|c| c.name.as_str()),
-        ubergraph_ctx.as_ref().map(|c| c.structured.as_slice()),
-    );
-
-    let action_key_events = ubergraph_ctx
-        .as_ref()
-        .map(|ctx| {
-            let (sections, _) = split_ubergraph_sections(&ctx.structured);
-            let names: Vec<&str> = sections.iter().map(|s| s.name.as_str()).collect();
-            compute_action_key_events(&names)
-        })
-        .unwrap_or_default();
-
-    // Rewrite mangled InpActEvt_*/InpAxisEvt_* names to their clean display
-    // form in the callers map so `// called by:` trailers match event headers.
-    // The callees map is remapped by `format_call_graph` directly.
-    for callers in callers_map.values_mut() {
-        for caller in callers.iter_mut() {
-            *caller = display_event_name(caller, &action_key_events);
-        }
-    }
-
-    format_call_graph(&mut buf, &mut callees_map, &action_key_events);
-    format_functions(
-        &mut buf,
-        asset,
-        &export_names,
-        ubergraph_ctx.as_ref(),
-        &edgraph,
-        &callers_map,
-    );
-
-    let mut final_lines: Vec<String> = buf.split('\n').map(|l| l.to_string()).collect();
-    fold_long_lines(&mut final_lines);
-    final_lines.join("\n")
 }
