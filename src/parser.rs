@@ -4,12 +4,11 @@
 //! 3. Per-export tagged properties and bytecode
 
 use anyhow::{ensure, Context, Result};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::binary::*;
-use crate::bytecode::decode_bytecode;
-use crate::bytecode::pipeline::structure_function;
+use crate::bytecode::names::K2NODE_PREFIX;
 use crate::ffield::*;
 use crate::pins::scan_for_pins;
 use crate::properties::read_properties;
@@ -18,6 +17,16 @@ use crate::types::*;
 
 /// Package file magic number (first 4 bytes of every valid `.uasset`).
 const PACKAGE_FILE_TAG: u32 = 0x9E2A83C1;
+
+/// Package-level `EPackageFlags` bits that mark a cooked package. Cooked
+/// assets split the header (`.uasset`) from the serialized data (`.uexp`)
+/// and strip editor-only fields, so the editor/uncooked layout this parser
+/// assumes (e.g. the +4 `WITH_CASE_PRESERVING_NAME` bytecode FName memory
+/// adjustment) does not hold. Either bit set means the package is cooked:
+/// `PKG_Cooked` (0x00000200) and `PKG_FilterEditorOnly` (0x80000000).
+const PKG_COOKED: u32 = 0x0000_0200;
+const PKG_FILTER_EDITOR_ONLY: u32 = 0x8000_0000;
+const PKG_COOKED_MASK: u32 = PKG_COOKED | PKG_FILTER_EDITOR_ONLY;
 
 /// UE function flag: function is replicated over the network.
 const FUNC_NET: u32 = 0x40;
@@ -95,7 +104,14 @@ fn read_package_header(reader: &mut Reader) -> Result<PackageHeader> {
     reader.seek(SeekFrom::Current(custom_ver_count as i64 * 20))?;
     let _total_header_size = read_i32(reader)?;
     let _folder_name = read_fstring(reader)?;
-    let _pkg_flags = read_u32(reader)?;
+    let pkg_flags = read_u32(reader)?;
+    ensure!(
+        pkg_flags & PKG_COOKED_MASK == 0,
+        "cooked asset is not supported (PackageFlags {:#010X}): \
+         this tool only parses uncooked editor .uasset files; cooked assets \
+         split the header and .uexp data and strip editor-only fields",
+        pkg_flags
+    );
     let name_count = read_i32(reader)?;
     let name_offset = read_i32(reader)?;
     if file_ver_ue5 >= VER_UE5_SOFT_OBJECT_PATH_LIST {
@@ -280,8 +296,58 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
         export_names: &export_names_pre,
         debug,
     };
+    let parsed_exports = parse_exports(&mut reader, &export_headers, &pctx, ver, file_size);
+
+    if debug && !parsed_exports.pin_data.is_empty() {
+        let total_links: usize = parsed_exports
+            .pin_data
+            .values()
+            .flat_map(|pd| &pd.pins)
+            .map(|pin| pin.linked_to.len())
+            .sum();
+        eprintln!(
+            "  Pins: {} nodes parsed, {} total links",
+            parsed_exports.pin_data.len(),
+            total_links
+        );
+    }
+    Ok(ParsedAsset {
+        imports,
+        exports: parsed_exports.exports,
+        pin_data: parsed_exports.pin_data,
+        function_signatures: parsed_exports.function_signatures,
+        bytecode_by_export: parsed_exports.bytecode_by_export,
+    })
+}
+
+/// Per-export parse products collected while walking the serialized export
+/// data: the export headers paired with their tagged-property streams, the
+/// EdGraph pin data per K2Node, the function call signatures, and the raw
+/// captured bytecode keyed by 1-based export index.
+struct ParsedExports {
+    exports: Vec<(ExportHeader, Vec<Property>)>,
+    pin_data: HashMap<usize, NodePinData>,
+    function_signatures: BTreeMap<String, FunctionSignature>,
+    bytecode_by_export: BTreeMap<usize, (Vec<u8>, u32)>,
+}
+
+/// Walk every export's serialized data, reading its tagged properties,
+/// UStruct header, FField children, and script bytecode.
+///
+/// Out-of-range or empty exports get an empty property vector. Property
+/// stream parse errors are recorded (logged when `pctx.debug`) and leave
+/// that export with an empty vector rather than aborting the whole asset.
+fn parse_exports(
+    reader: &mut Reader,
+    export_headers: &[ExportHeader],
+    pctx: &ParseCtx,
+    ver: AssetVersion,
+    file_size: usize,
+) -> ParsedExports {
     let mut exports = Vec::with_capacity(export_headers.len());
     let mut pin_data_map: HashMap<usize, NodePinData> = HashMap::new();
+    let mut function_signatures: BTreeMap<String, FunctionSignature> = BTreeMap::new();
+    let mut bytecode_by_export: BTreeMap<usize, (Vec<u8>, u32)> = BTreeMap::new();
     let mut pin_scan_hint: Option<u64> = None;
     for (ei, hdr) in export_headers.iter().enumerate() {
         if hdr.serial_size <= 0
@@ -292,29 +358,31 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
             continue;
         }
 
+        let mut captured_signature: Option<FunctionSignature> = None;
+        let mut captured_bytecode: Option<(Vec<u8>, u32)> = None;
         let export_result: Result<Vec<Property>> = (|| {
             reader.seek(SeekFrom::Start(hdr.serial_offset as u64))?;
             let end = hdr.serial_offset as u64 + hdr.serial_size as u64;
-            let class_name = resolve_index(&imports, &export_names_pre, hdr.class_index);
+            let class_name = resolve_index(pctx.imports, pctx.export_names, hdr.class_index);
             let kind = classify_export(&class_name);
 
             // UE5.2+: extension byte before tagged property stream.
             // UE source gates this on bIsUClass in SerializeVersionedTaggedProperties,
             // but uncooked assets emit it for all exports (verified empirically).
             if ver.has_complete_type_name() {
-                skip_serialization_extension(&mut reader, &name_table)?;
+                skip_serialization_extension(reader, pctx.name_table)?;
             }
 
             if kind == ExportKind::Other {
-                let props = read_properties(&mut reader, &name_table, end, ver);
+                let props = read_properties(reader, pctx.name_table, end, ver);
                 let short = short_class(&class_name);
-                if short.starts_with("K2Node_") || short == "EdGraphNode_Comment" {
+                if short.starts_with(K2NODE_PREFIX) || short == "EdGraphNode_Comment" {
                     // K2Node subclasses serialize additional data between the
                     // tagged property stream and the pin array. Scan forward
                     // from the current position looking for the pin data
                     // signature: deprecated_count(0) + reasonable pin_count.
                     let (pins, new_hint) =
-                        scan_for_pins(&mut reader, &name_table, end, ver, pin_scan_hint);
+                        scan_for_pins(reader, pctx.name_table, end, ver, pin_scan_hint);
                     pin_scan_hint = new_hint;
                     if let Some(ref pins) = pins {
                         pin_data_map.insert(ei + 1, NodePinData { pins: pins.clone() });
@@ -324,15 +392,15 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
             }
 
             let is_function = kind == ExportKind::Function;
-            let props = read_properties(&mut reader, &name_table, end, ver);
+            let props = read_properties(reader, pctx.name_table, end, ver);
             let props_end_pos = reader.position();
 
             let mut extra_props = props;
 
             // UStruct header: Next, Super, Children
             parse_ustruct_header(
-                &mut reader,
-                &pctx,
+                reader,
+                pctx,
                 &mut extra_props,
                 props_end_pos,
                 end,
@@ -340,12 +408,13 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
             )?;
 
             // FField children (parameters / member variables)
-            let ffield_children = parse_ffield_children(&mut reader, &pctx, end, &hdr.object_name)?;
+            let ffield_children = parse_ffield_children(reader, pctx, end, &hdr.object_name)?;
             if is_function && !ffield_children.is_empty() {
                 extra_props.push(Property {
                     name: "Signature".into(),
                     value: PropValue::Str(format_signature(&hdr.object_name, &ffield_children)),
                 });
+                captured_signature = Some(build_function_signature(&ffield_children));
             }
             if !is_function && !ffield_children.is_empty() {
                 extra_props.push(Property {
@@ -361,18 +430,11 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
             }
 
             // Script bytecode
-            parse_and_structure_bytecode(
-                &mut reader,
-                &pctx,
-                &mut extra_props,
-                ver,
-                end,
-                &hdr.object_name,
-            )?;
+            captured_bytecode = capture_bytecode(reader, pctx, end, &hdr.object_name)?;
 
             // Function flags (after bytecode, only for Function exports)
             if is_function && reader.position() + 4 <= end {
-                let func_flags = read_u32(&mut reader)?;
+                let func_flags = read_u32(reader)?;
                 if func_flags != 0 {
                     extra_props.push(Property {
                         name: "FunctionFlags".into(),
@@ -380,7 +442,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
                     });
                 }
                 if func_flags & FUNC_NET != 0 && reader.position() + 4 <= end {
-                    let _rep_offset = read_i32(&mut reader)?;
+                    let _rep_offset = read_i32(reader)?;
                 }
             }
 
@@ -388,9 +450,17 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
         })();
 
         match export_result {
-            Ok(props) => exports.push((hdr.clone(), props)),
+            Ok(props) => {
+                exports.push((hdr.clone(), props));
+                if let Some(sig) = captured_signature {
+                    function_signatures.insert(hdr.object_name.clone(), sig);
+                }
+                if let Some(bytecode) = captured_bytecode {
+                    bytecode_by_export.insert(ei + 1, bytecode);
+                }
+            }
             Err(e) => {
-                if debug {
+                if pctx.debug {
                     eprintln!("  {} parse error: {}", hdr.object_name, e);
                 }
                 exports.push((hdr.clone(), Vec::new()));
@@ -398,23 +468,38 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
         }
     }
 
-    if debug && !pin_data_map.is_empty() {
-        let total_links: usize = pin_data_map
-            .values()
-            .flat_map(|pd| &pd.pins)
-            .map(|pin| pin.linked_to.len())
-            .sum();
-        eprintln!(
-            "  Pins: {} nodes parsed, {} total links",
-            pin_data_map.len(),
-            total_links
-        );
-    }
-    Ok(ParsedAsset {
-        imports,
+    ParsedExports {
         exports,
         pin_data: pin_data_map,
-    })
+        function_signatures,
+        bytecode_by_export,
+    }
+}
+
+/// Build a `FunctionSignature` from raw FField child triples. The return
+/// type is the slot whose flags carry `CPF_RETURN_PARM`, the input list is
+/// every entry with `CPF_PARM`. Member variables (no `CPF_PARM`) are
+/// skipped, the signature is for the function call ABI.
+fn build_function_signature(children: &[(String, String, u64)]) -> FunctionSignature {
+    const CPF_PARM: u64 = 0x80;
+    const CPF_RETURN_PARM: u64 = 0x200;
+    let mut params = Vec::new();
+    let mut return_type = None;
+    for (name, type_name, flags) in children {
+        if flags & CPF_RETURN_PARM != 0 {
+            return_type = Some(type_name.clone());
+        } else if flags & CPF_PARM != 0 {
+            params.push(ParamInfo {
+                name: name.clone(),
+                type_name: type_name.clone(),
+                flags: *flags,
+            });
+        }
+    }
+    FunctionSignature {
+        params,
+        return_type,
+    }
 }
 
 fn skip_serialization_extension(reader: &mut Reader, name_table: &NameTable) -> Result<()> {
@@ -522,14 +607,14 @@ fn parse_ffield_children(
     if pctx.debug && child_prop_count > 0 {
         eprintln!("  {} child properties: {}", name, child_prop_count);
     }
-    // Phase 1: read declared children
+    // Read declared children
     for _ in 0..child_prop_count {
         if reader.position() + 16 > end {
             break;
         }
         children.push(read_one_ffield_child(reader, pctx, end)?);
     }
-    // Phase 2: some UE versions emit more children than declared
+    // Read undeclared trailing children: some UE versions emit more children than declared
     while reader.position() + 16 <= end {
         if !pctx.name_table.peek_is_ffield_class(reader)? {
             break;
@@ -542,26 +627,30 @@ fn parse_ffield_children(
     Ok(children)
 }
 
-fn parse_and_structure_bytecode(
+/// Capture the raw script bytecode block at the current reader position.
+///
+/// Returns the `(disk_bytes, mem_size)` pair so callers can hand the raw
+/// bytes to the decoder without having to re-locate the block. Decoding
+/// and structuring happen later in the pipeline; this only advances the
+/// reader past the block and captures the bytes. Returns `None` when there's
+/// no bytecode block (header truncated or `storage_size <= 0`).
+fn capture_bytecode(
     reader: &mut Reader,
     pctx: &ParseCtx,
-    props: &mut Vec<Property>,
-    ver: AssetVersion,
     end: u64,
     name: &str,
-) -> Result<()> {
+) -> Result<Option<(Vec<u8>, u32)>> {
     if reader.position() + 8 > end {
-        return Ok(());
+        return Ok(None);
     }
     if pctx.debug {
         debug_peek_script(reader, name, end)?;
     }
 
-    // Read raw bytecode from the export data
     let bytecode_size = read_i32(reader)?;
     let storage_size = read_i32(reader)?;
     if storage_size <= 0 || (reader.position() + storage_size as u64) > end {
-        return Ok(());
+        return Ok(None);
     }
     let mut bytecode_data = vec![0u8; storage_size as usize];
     reader.read_exact(&mut bytecode_data)?;
@@ -569,50 +658,7 @@ fn parse_and_structure_bytecode(
         debug_bytecode_hex(&bytecode_data, name, bytecode_size, storage_size);
     }
 
-    // Decode opcodes into flat statement list
-    let (stmts, final_mem_adj) = decode_bytecode(
-        &bytecode_data,
-        pctx.name_table,
-        pctx.imports,
-        pctx.export_names,
-        ver.file_ver_ue5,
-    );
-    if pctx.debug {
-        let expected = bytecode_size - storage_size;
-        let drift = final_mem_adj - expected;
-        eprintln!(
-            "  {} mem_adj: final={} expected={} drift={}",
-            name, final_mem_adj, expected, drift
-        );
-    }
-    if stmts.is_empty() {
-        return Ok(());
-    }
-
-    // Store raw decoded bytecode
-    props.push(Property {
-        name: "Bytecode".into(),
-        value: PropValue::Array {
-            inner_type: "StrProperty".into(),
-            items: stmts
-                .iter()
-                .map(|s| PropValue::Str(format!("{:04x}: {}", s.mem_offset, s.text)))
-                .collect(),
-        },
-    });
-
-    // Run the structuring pipeline: reorder, inline, structure, cleanup
-    let structured = structure_function(&stmts);
-    if !structured.is_empty() {
-        props.push(Property {
-            name: "BytecodeSummary".into(),
-            value: PropValue::Array {
-                inner_type: "StrProperty".into(),
-                items: structured.into_iter().map(PropValue::Str).collect(),
-            },
-        });
-    }
-    Ok(())
+    Ok(Some((bytecode_data, bytecode_size.max(0) as u32)))
 }
 
 fn debug_peek_script(reader: &mut Reader, name: &str, end: u64) -> Result<()> {
@@ -643,4 +689,80 @@ fn debug_bytecode_hex(bytecode_data: &[u8], name: &str, bytecode_size: i32, stor
         .map(|b| format!("{:02x}", b))
         .collect();
     eprintln!("    hex: {}", hex.join(" "));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn helm_fixture_path() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("samples")
+            .join("ue_4.27")
+            .join("Helm_BP.uasset")
+    }
+
+    /// Walk the package summary exactly as [`read_package_header`] does, up
+    /// to (but not consuming) the `PackageFlags` u32, and return its byte
+    /// offset. Derived rather than hardcoded because the `folder_name`
+    /// FString preceding it has a variable length.
+    fn package_flags_offset(data: &[u8]) -> u64 {
+        let mut reader = std::io::Cursor::new(data);
+        let _magic = read_u32(&mut reader).unwrap();
+        let legacy_ver = read_i32(&mut reader).unwrap();
+        if legacy_ver < LEGACY_VER_UE3_COMPAT && legacy_ver != -4 {
+            let _ue3_ver = read_i32(&mut reader).unwrap();
+        }
+        let _file_ver = read_i32(&mut reader).unwrap();
+        if legacy_ver <= LEGACY_VER_UE5_START {
+            let _file_ver_ue5 = read_i32(&mut reader).unwrap();
+        }
+        let _licensee_ver = read_i32(&mut reader).unwrap();
+        let custom_ver_count = read_i32(&mut reader).unwrap();
+        reader
+            .seek(SeekFrom::Current(custom_ver_count as i64 * 20))
+            .unwrap();
+        let _total_header_size = read_i32(&mut reader).unwrap();
+        let _folder_name = read_fstring(&mut reader).unwrap();
+        reader.position()
+    }
+
+    #[test]
+    fn uncooked_fixture_parses() {
+        let data = std::fs::read(helm_fixture_path()).expect("read Helm_BP fixture");
+        parse_asset(&data, false).expect("uncooked fixture should parse");
+    }
+
+    #[test]
+    fn cooked_flag_is_rejected() {
+        let mut data = std::fs::read(helm_fixture_path()).expect("read Helm_BP fixture");
+        let offset = package_flags_offset(&data) as usize;
+
+        // Sanity: the unmodified fixture has no cooked bit set.
+        let original = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+        assert_eq!(
+            original & PKG_COOKED_MASK,
+            0,
+            "test fixture unexpectedly already marked cooked"
+        );
+
+        // Flip the PKG_FilterEditorOnly bit to simulate a cooked package.
+        let cooked = original | PKG_FILTER_EDITOR_ONLY;
+        data[offset..offset + 4].copy_from_slice(&cooked.to_le_bytes());
+
+        let temp_path = std::env::temp_dir().join("bp_inspect_cooked_helm_test.uasset");
+        std::fs::write(&temp_path, &data).expect("write temp cooked fixture");
+        let cooked_data = std::fs::read(&temp_path).expect("read temp cooked fixture");
+        let _ = std::fs::remove_file(&temp_path);
+
+        let err = match parse_asset(&cooked_data, false) {
+            Ok(_) => panic!("cooked asset should be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            err.contains("cooked asset is not supported"),
+            "expected cooked-asset rejection message, got: {err}"
+        );
+    }
 }

@@ -2,9 +2,12 @@ use anyhow::{bail, Context, Result};
 use clap::Parser as ClapParser;
 use std::path::{Path, PathBuf};
 
-use unreal_bp_inspect::output_diff::format_diff;
+use unreal_bp_inspect::bytecode::decode::decode_asset;
+use unreal_bp_inspect::bytecode::dump_bridge::inject_v2_bytecode_props;
+use unreal_bp_inspect::bytecode::emit::emit_summary_with_asset;
+use unreal_bp_inspect::output_diff::diff_summary_texts;
 use unreal_bp_inspect::output_json::to_json;
-use unreal_bp_inspect::output_summary::{filter_summary, format_summary};
+use unreal_bp_inspect::output_summary::filter_summary;
 use unreal_bp_inspect::output_text::format_text;
 use unreal_bp_inspect::parser::parse_asset;
 use unreal_bp_inspect::update::run_update;
@@ -88,12 +91,28 @@ fn collect_from_dir(dir: &Path, out: &mut Vec<PathBuf>) {
 
 fn process_file(path: &Path, mode: &OutputMode, filters: &[String], debug: bool) -> Result<String> {
     let data = std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let asset =
+    let mut asset =
         parse_asset(&data, debug).with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(match mode {
-        OutputMode::Summary => filter_summary(&format_summary(&asset), filters),
-        OutputMode::Dump => format_text(&asset, filters),
-        OutputMode::Json => serde_json::to_string_pretty(&to_json(&asset, filters)).unwrap(),
+        // Summary routes through the decoder + emitter. Dump and JSON are
+        // parse-level table/property renderers; the override bridge below
+        // re-sources their per-function bytecode from the decoder so they
+        // stay consistent with the summary mode.
+        OutputMode::Summary => {
+            let decoded = decode_asset(&asset, &data);
+            filter_summary(&emit_summary_with_asset(&decoded, &asset), filters)
+        }
+        OutputMode::Dump => {
+            let decoded = decode_asset(&asset, &data);
+            inject_v2_bytecode_props(&mut asset, &decoded);
+            format_text(&asset, filters)
+        }
+        OutputMode::Json => {
+            let decoded = decode_asset(&asset, &data);
+            inject_v2_bytecode_props(&mut asset, &decoded);
+            serde_json::to_string_pretty(&to_json(&asset, filters))
+                .context("serializing asset to JSON")?
+        }
     })
 }
 
@@ -146,9 +165,22 @@ fn run_diff(files: &[PathBuf], filters: &[String], context: usize) -> Result<boo
         .with_context(|| format!("failed to read {}", files[0].display()))?;
     let after = std::fs::read(&files[1])
         .with_context(|| format!("failed to read {}", files[1].display()))?;
+    let before_asset = parse_asset(&before, false)
+        .with_context(|| format!("failed to parse {}", files[0].display()))?;
+    let after_asset = parse_asset(&after, false)
+        .with_context(|| format!("failed to parse {}", files[1].display()))?;
+    let before_text = filter_summary(
+        &emit_summary_with_asset(&decode_asset(&before_asset, &before), &before_asset),
+        filters,
+    );
+    let after_text = filter_summary(
+        &emit_summary_with_asset(&decode_asset(&after_asset, &after), &after_asset),
+        filters,
+    );
     let label_a = files[0].display().to_string();
     let label_b = files[1].display().to_string();
-    let (output, has_changes) = format_diff(&before, &after, &label_a, &label_b, filters, context)?;
+    let (output, has_changes) =
+        diff_summary_texts(&before_text, &after_text, &label_a, &label_b, context);
     if has_changes {
         print!("{}", output);
         return Ok(false);
@@ -167,8 +199,8 @@ fn run_batch_json(
     for path in files {
         match process_file(path, mode, filters, debug) {
             Ok(json_str) => {
-                let mut val: serde_json::Value =
-                    serde_json::from_str(&json_str).expect("internal JSON error");
+                let mut val: serde_json::Value = serde_json::from_str(&json_str)
+                    .context("re-parsing per-file JSON output for batch aggregation")?;
                 val["file"] = serde_json::json!(path.display().to_string());
                 results.push(val);
             }
@@ -181,10 +213,9 @@ fn run_batch_json(
     if results.is_empty() {
         bail!("all files failed to parse");
     }
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&results).expect("internal JSON error")
-    );
+    let serialized = serde_json::to_string_pretty(&results)
+        .context("serializing aggregated batch JSON results")?;
+    println!("{}", serialized);
     if failures > 0 {
         eprintln!("{} of {} files failed", failures, failures + results.len());
     }

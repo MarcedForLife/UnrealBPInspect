@@ -6,6 +6,7 @@ use anyhow::Result;
 use std::io::Read;
 
 use crate::binary::*;
+use crate::property_type::{PropertyType, PROPERTY_CLASS_SUFFIX};
 use crate::resolve::{resolve_index, short_class};
 use crate::types::*;
 
@@ -26,23 +27,24 @@ enum FieldExtra {
 }
 
 fn field_extra(class: &str) -> FieldExtra {
-    match class {
-        "ObjectProperty"
-        | "WeakObjectProperty"
-        | "LazyObjectProperty"
-        | "SoftObjectProperty"
-        | "InterfaceProperty"
-        | "StructProperty"
-        | "ByteProperty"
-        | "EnumProperty"
-        | "DelegateProperty"
-        | "MulticastDelegateProperty"
-        | "MulticastInlineDelegateProperty"
-        | "MulticastSparseDelegateProperty" => FieldExtra::OneRef,
-        "ClassProperty" | "SoftClassProperty" => FieldExtra::TwoRefs,
-        "BoolProperty" => FieldExtra::Bool,
-        "ArrayProperty" | "SetProperty" => FieldExtra::OneChild,
-        "MapProperty" => FieldExtra::TwoChildren,
+    use PropertyType::*;
+    match PropertyType::from_fname(class) {
+        Object
+        | WeakObject
+        | LazyObject
+        | SoftObject
+        | Interface
+        | Struct
+        | Byte
+        | Enum
+        | Delegate
+        | MulticastDelegate
+        | MulticastInlineDelegate
+        | MulticastSparseDelegate => FieldExtra::OneRef,
+        Class | SoftClass => FieldExtra::TwoRefs,
+        Bool => FieldExtra::Bool,
+        Array | Set => FieldExtra::OneChild,
+        Map => FieldExtra::TwoChildren,
         _ => FieldExtra::None,
     }
 }
@@ -108,19 +110,21 @@ pub fn resolve_ffield_type(
     export_names: &[String],
     end: u64,
 ) -> Result<String> {
+    let property_type = PropertyType::from_fname(field_class);
+
     // Simple types: no extra bytes to read, just return the display name.
-    let simple = match field_class {
-        // UE5 LWC promotes float -> double internally, but we display as "float"
-        // for consistency with UE4 and the Blueprint editor. Actual values are
-        // parsed at full f64 precision regardless.
-        "FloatProperty" | "DoubleProperty" => Some("float"),
-        "IntProperty" | "Int32Property" | "UInt32Property" => Some("int"),
-        "Int64Property" | "UInt64Property" => Some("int64"),
-        "Int16Property" | "UInt16Property" => Some("int16"),
-        "Int8Property" => Some("int8"),
-        "StrProperty" => Some("FString"),
-        "NameProperty" => Some("FName"),
-        "TextProperty" => Some("FText"),
+    let simple = match property_type {
+        // UE5 LWC (Large World Coordinates) promotes float -> double internally,
+        // but we display as "float" for consistency with UE4 and the Blueprint
+        // editor. Actual values are parsed at full f64 precision regardless.
+        PropertyType::Float | PropertyType::Double => Some("float"),
+        PropertyType::Int | PropertyType::Int32 | PropertyType::UInt32 => Some("int"),
+        PropertyType::Int64 | PropertyType::UInt64 => Some("int64"),
+        PropertyType::Int16 | PropertyType::UInt16 => Some("int16"),
+        PropertyType::Int8 => Some("int8"),
+        PropertyType::Str => Some("FString"),
+        PropertyType::Name => Some("FName"),
+        PropertyType::Text => Some("FText"),
         _ => None,
     };
     if let Some(name) = simple {
@@ -143,9 +147,12 @@ pub fn resolve_ffield_type(
         }
         FieldExtra::OneRef => {
             let ref_idx = read_i32(reader)?;
-            match field_class {
-                "ObjectProperty" | "WeakObjectProperty" | "LazyObjectProperty"
-                | "SoftObjectProperty" | "InterfaceProperty" => {
+            match property_type {
+                PropertyType::Object
+                | PropertyType::WeakObject
+                | PropertyType::LazyObject
+                | PropertyType::SoftObject
+                | PropertyType::Interface => {
                     if ref_idx != 0 {
                         Ok(format!(
                             "{}*",
@@ -155,8 +162,10 @@ pub fn resolve_ffield_type(
                         Ok("UObject*".into())
                     }
                 }
-                "StructProperty" => Ok(short_class(&resolve_index(imports, export_names, ref_idx))),
-                "ByteProperty" | "EnumProperty" => {
+                PropertyType::Struct => {
+                    Ok(short_class(&resolve_index(imports, export_names, ref_idx)))
+                }
+                PropertyType::Byte | PropertyType::Enum => {
                     if ref_idx != 0 {
                         Ok(short_class(&resolve_index(imports, export_names, ref_idx)))
                     } else {
@@ -169,7 +178,7 @@ pub fn resolve_ffield_type(
         }
         FieldExtra::OneChild => {
             skip_ffield_child(reader, name_table, end)?;
-            Ok(if field_class == "SetProperty" {
+            Ok(if property_type == PropertyType::Set {
                 "TSet<>".into()
             } else {
                 "TArray<>".into()
@@ -180,8 +189,9 @@ pub fn resolve_ffield_type(
             skip_ffield_child(reader, name_table, end)?;
             Ok("TMap<>".into())
         }
-        FieldExtra::None => Ok(field_class
-            .strip_suffix("Property")
+        FieldExtra::None => Ok(property_type
+            .as_str()
+            .strip_suffix(PROPERTY_CLASS_SUFFIX)
             .unwrap_or(field_class)
             .to_string()),
     }

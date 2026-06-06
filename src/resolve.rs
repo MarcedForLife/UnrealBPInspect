@@ -90,69 +90,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn short_class_with_dot() {
-        assert_eq!(short_class("/Script/Engine.Actor"), "Actor");
+    fn short_class_strips_to_last_segment() {
+        for (full, expected) in [
+            ("/Script/Engine.Actor", "Actor"),
+            ("Actor", "Actor"), // no dot: unchanged
+            ("/Script/Engine.SCS_Node", "SCS_Node"),
+        ] {
+            assert_eq!(short_class(full), expected, "short_class({full:?})");
+        }
     }
 
     #[test]
-    fn short_class_no_dot() {
-        assert_eq!(short_class("Actor"), "Actor");
+    fn matches_filter_cases() {
+        let cases: &[(&str, &[&str], bool)] = &[
+            ("Anything", &[], true),                   // empty filter matches everything
+            ("GetSteeringAngle", &["steering"], true), // case-insensitive substring
+            ("GetSteeringAngle", &["foobar"], false),
+        ];
+        for (name, filters, expected) in cases {
+            let filters: Vec<String> = filters.iter().map(|s| s.to_string()).collect();
+            assert_eq!(
+                matches_filter(name, &filters),
+                *expected,
+                "matches_filter({name:?}, {filters:?})"
+            );
+        }
     }
 
     #[test]
-    fn short_class_multiple_dots() {
-        assert_eq!(short_class("/Script/Engine.SCS_Node"), "SCS_Node");
+    fn format_func_flags_cases() {
+        for (flags, expected) in [
+            (0x04020000u32, "Public|BlueprintPure"),
+            (0, "0x00000000"), // no flags: hex fallback
+            (0x00000800, "Event"),
+        ] {
+            assert_eq!(format_func_flags(flags), expected, "flags=0x{flags:08x}");
+        }
     }
 
     #[test]
-    fn matches_filter_empty() {
-        assert!(matches_filter("Anything", &[]));
-    }
-
-    #[test]
-    fn matches_filter_match() {
-        assert!(matches_filter(
-            "GetSteeringAngle",
-            &["steering".to_string()]
-        ));
-    }
-
-    #[test]
-    fn matches_filter_no_match() {
-        assert!(!matches_filter("GetSteeringAngle", &["foobar".to_string()]));
-    }
-
-    #[test]
-    fn format_flags_public_pure() {
-        assert_eq!(format_func_flags(0x04020000), "Public|BlueprintPure");
-    }
-
-    #[test]
-    fn format_flags_zero() {
-        assert_eq!(format_func_flags(0), "0x00000000");
-    }
-
-    #[test]
-    fn format_flags_event() {
-        assert_eq!(format_func_flags(0x00000800), "Event");
-    }
-
-    #[test]
-    fn resolve_index_zero() {
-        assert_eq!(resolve_index(&[], &[], 0), "None");
-    }
-
-    #[test]
-    fn resolve_index_positive() {
+    fn resolve_index_cases() {
         let names = vec!["Foo".to_string(), "Bar".to_string()];
-        assert_eq!(resolve_index(&[], &names, 1), "Foo");
-        assert_eq!(resolve_index(&[], &names, 2), "Bar");
-    }
-
-    #[test]
-    fn resolve_index_out_of_bounds() {
-        let names = vec!["Foo".to_string()];
-        assert_eq!(resolve_index(&[], &names, 5), "Export(5)");
+        for (index, expected) in [(0, "None"), (1, "Foo"), (2, "Bar"), (5, "Export(5)")] {
+            assert_eq!(resolve_index(&[], &names, index), expected, "index={index}");
+        }
     }
 
     #[test]
