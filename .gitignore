@@ -2,6 +2,19 @@
 .DS_Store
 samples/*/*
 !samples/*/Helm_BP.uasset
+!samples/*/BP_DecoderTest.uasset
+
+# Baselines for local-only fixtures stay local. Only the committed samples
+# (Helm + the synthetic BP_DecoderTest) keep committed baselines.
+tests/baseline-snapshots/*
+!tests/baseline-snapshots/*Helm*.txt
+!tests/baseline-snapshots/*BP_DecoderTest*.txt
+
+# Local-only test machinery (loads uncommitted fixtures), kept on disk but not
+# tracked. `tests/local_*.rs` are auto-discovered integration tests; the
+# `src/**/local_tests.rs` modules compile only under `--features private-fixtures`.
+/tests/local_*.rs
+/src/bytecode/**/local_tests.rs
 
 .claude/
 .baseline/
