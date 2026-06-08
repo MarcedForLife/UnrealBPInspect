@@ -1,2 +1,14 @@
+# Normalize line endings: LF for all text files, type detected automatically.
+# Prevents CRLF churn when files are touched by Windows-side editors under WSL.
+* text=auto eol=lf
+
+# Snapshot and baseline fixtures must stay LF for byte-identity comparison.
 tests/snapshots/*.txt text eol=lf
 tests/snapshots/private/*.txt text eol=lf
+
+# Windows PowerShell installer keeps CRLF.
+*.ps1 text eol=crlf
+
+# Unreal binary assets, never normalize.
+*.uasset binary
+*.uexp binary
