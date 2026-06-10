@@ -586,13 +586,26 @@ pub(crate) fn gate_attribution_miss(
 
 /// Disk offsets of every gate-SET (`EX_LET_BOOL gate = true`) the
 /// locality pass attributed to `node_id`. Init-seeds (`=false`) are
-/// excluded: only the gate-set bears macro identity.
+/// excluded: only the gate-set bears macro identity. Thin wrapper over
+/// [`K2NodeByteMap::node_gate_set_offsets`] with no gate-var filter.
 fn node_owned_gate_sets(node_id: usize, map: &K2NodeByteMap) -> Vec<usize> {
-    map.gate_let_owner_by_offset
+    map.node_gate_set_offsets(node_id, None)
+}
+
+/// Disk extents of a candidate's member blocks, skipping empty blocks
+/// (no opcodes or a zero-width `start..end`). The gate-LET map walks
+/// (`in_body_seed_gate_var`, the doonce-wrap seed query) intersect these
+/// spans to decide which gate-LET offsets sit in the macro body.
+pub(crate) fn candidate_body_spans(
+    cfg: &ControlFlowGraph,
+    candidate: &MacroRegionCandidate,
+) -> Vec<Range<usize>> {
+    candidate
+        .member_blocks
         .iter()
-        .filter(|(_, &owner)| owner == node_id)
-        .map(|(&offset, _)| offset)
-        .filter(|offset| map.gate_let_is_set_by_offset.get(offset).copied() == Some(true))
+        .filter_map(|&block_id| cfg.blocks.get(block_id))
+        .filter(|block| !block.opcodes.is_empty() && block.end > block.start)
+        .map(|block| block.start..block.end)
         .collect()
 }
 
@@ -664,33 +677,8 @@ fn in_body_seed_gate_var(
     candidate: &MacroRegionCandidate,
     map: &K2NodeByteMap,
 ) -> Option<String> {
-    let body_spans: Vec<Range<usize>> = candidate
-        .member_blocks
-        .iter()
-        .filter_map(|&block_id| cfg.blocks.get(block_id))
-        .filter(|block| !block.opcodes.is_empty() && block.end > block.start)
-        .map(|block| block.start..block.end)
-        .collect();
-    let mut seed_vars: BTreeSet<String> = BTreeSet::new();
-    for (&offset, &owner) in &map.gate_let_owner_by_offset {
-        if owner != candidate.node_id {
-            continue;
-        }
-        if map.gate_let_is_set_by_offset.get(&offset).copied() != Some(false) {
-            continue;
-        }
-        if !body_spans.iter().any(|span| span.contains(&offset)) {
-            continue;
-        }
-        if let Some(var) = map.gate_let_var_by_offset.get(&offset) {
-            seed_vars.insert(var.clone());
-        }
-    }
-    if seed_vars.len() == 1 {
-        seed_vars.into_iter().next()
-    } else {
-        None
-    }
+    let body_spans = candidate_body_spans(cfg, candidate);
+    map.in_body_seed_gate_var(&body_spans, candidate.node_id)
 }
 
 /// True when the block containing the gate-set `EX_LET_BOOL` at

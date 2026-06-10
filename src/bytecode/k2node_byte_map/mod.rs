@@ -181,6 +181,70 @@ impl K2NodeByteMap {
     pub fn empty() -> Self {
         Self::default()
     }
+
+    /// Disk offsets of every gate-SET (`EX_LET_BOOL gate = true`) the
+    /// locality pass attributed to `node_id`, in ascending offset order.
+    /// Init-seeds (`=false`) are excluded: only the gate-set bears macro
+    /// identity. When `gate_var` is `Some`, the result is further
+    /// restricted to gate-sets writing that boolean leaf.
+    ///
+    /// `gate_let_owner_by_offset` is a `BTreeMap`, so iteration already
+    /// yields ascending offsets; the returned `Vec` inherits that order
+    /// without an explicit sort.
+    pub(crate) fn node_gate_set_offsets(
+        &self,
+        node_id: usize,
+        gate_var: Option<&str>,
+    ) -> Vec<usize> {
+        self.gate_let_owner_by_offset
+            .iter()
+            .filter(|(_, &owner)| owner == node_id)
+            .map(|(&offset, _)| offset)
+            .filter(|offset| self.gate_let_is_set_by_offset.get(offset).copied() == Some(true))
+            .filter(|offset| match gate_var {
+                Some(var) => {
+                    self.gate_let_var_by_offset.get(offset).map(String::as_str) == Some(var)
+                }
+                None => true,
+            })
+            .collect()
+    }
+
+    /// The gate variable named by `node_id`'s in-body `=false` init-seed,
+    /// when exactly one distinct such variable sits in `body_spans` (the
+    /// candidate's member-block disk extents). `None` when no in-body seed
+    /// exists or when several distinct seed variables sit in the body (the
+    /// locality pass mixed several macros' seeds in, so the var is not
+    /// determinable).
+    ///
+    /// Callers compute `body_spans` from their CFG; this query touches only
+    /// the gate-LET maps so the map-walk lives in one place.
+    pub(crate) fn in_body_seed_gate_var(
+        &self,
+        body_spans: &[Range<usize>],
+        node_id: usize,
+    ) -> Option<String> {
+        let mut seed_vars: BTreeSet<String> = BTreeSet::new();
+        for (&offset, &owner) in &self.gate_let_owner_by_offset {
+            if owner != node_id {
+                continue;
+            }
+            if self.gate_let_is_set_by_offset.get(&offset).copied() != Some(false) {
+                continue;
+            }
+            if !body_spans.iter().any(|span| span.contains(&offset)) {
+                continue;
+            }
+            if let Some(var) = self.gate_let_var_by_offset.get(&offset) {
+                seed_vars.insert(var.clone());
+            }
+        }
+        if seed_vars.len() == 1 {
+            seed_vars.into_iter().next()
+        } else {
+            None
+        }
+    }
 }
 
 /// Inputs the builder needs from the surrounding decode loop.
