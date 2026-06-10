@@ -4,8 +4,8 @@
 //! The `--dump` and `--json` renderers (`output_text`, `output_json`) emit a
 //! `BytecodeSummary` property per function export. The parser no longer
 //! decodes bytecode (it only captures the raw bytes), so this module
-//! populates `BytecodeSummary` from the decoded `DecodedAsset` for each
-//! function export whose `object_name` matches a decoded function/event body.
+//! populates `BytecodeSummary` from the decoded `DecodedAsset`, keying each
+//! decoded body back to the export it was decoded from by export index.
 //! Some parity gaps versus the parse-level renderer remain.
 
 use std::collections::HashMap;
@@ -13,56 +13,47 @@ use std::collections::HashMap;
 use crate::bytecode::asset::DecodedAsset;
 use crate::bytecode::emit::render_body_lines;
 use crate::bytecode::stmt::Stmt;
-use crate::resolve::resolve_index;
 use crate::types::{ParsedAsset, PropValue, Property};
 
 /// Populate the per-function `BytecodeSummary` property from the decoder's
 /// output, for the `--dump` and `--json` renderers.
 ///
-/// Restricts to function-class exports (class resolves to `.Function`, with
-/// captured bytecode in `bytecode_by_export`) whose `object_name` matches a
-/// decoded `Function`/`Event` body of the same name, then sets
-/// `BytecodeSummary` to the rendered body lines (the same content the
-/// summary mode emits for that body). The function-class restriction matters
-/// because EdGraph node exports share an `object_name` with their function
-/// (both the `EdGraph` and the `Function` export carry the function's name);
-/// only the function export should carry the summary. The class check is
-/// needed because `bytecode_by_export` also holds other UStruct-derived
-/// exports (`BlueprintGeneratedClass`, plain structs) whose script block is
-/// captured. Exports with no matching body (notably `ExecuteUbergraph_*`,
-/// which split into separate `events`) are left untouched, so no content is
-/// fabricated. Some parity gaps versus the parse-level renderer remain.
+/// Keys each decoded `Function`/`Event` body to its originating export by the
+/// `export_index` the decoder carried from event-entry collection through
+/// partition. Looking the body up by export identity (rather than re-joining
+/// by `object_name`) avoids two name-join hazards that the old keying had to
+/// work around:
+///
+/// - EdGraph node exports share an `object_name` with their function export
+///   (both carry the function's name); only the function export should carry
+///   the summary. Decoded bodies record a `.Function`-class export index by
+///   construction, so an EdGraph export's index is never a map key.
+/// - A standalone function and an ubergraph event could share a name. Their
+///   export sets are disjoint (an ubergraph stub export becomes an `Event`;
+///   every other `.Function` export becomes a `Function`), so their indices
+///   never collide and no insertion-precedence ordering is needed.
+///
+/// Exports with no decoded body (notably `ExecuteUbergraph_*`, which split
+/// into separate `events`) are left untouched, so no content is fabricated.
+/// Some parity gaps versus the parse-level renderer remain.
 pub fn inject_v2_bytecode_props(asset: &mut ParsedAsset, decoded: &DecodedAsset) {
-    // Events first so a same-named standalone function takes precedence:
-    // a function export's own decoded body always outranks an ubergraph
-    // event that happens to share its name.
-    let mut bodies: HashMap<&str, &[Stmt]> = HashMap::new();
+    // Body lookup keyed by 1-based package export index (the
+    // `bytecode_by_export` convention). Events and functions occupy disjoint
+    // export indices, so insertion order is irrelevant.
+    let mut bodies: HashMap<usize, &[Stmt]> = HashMap::new();
     for event in &decoded.events {
-        bodies.insert(event.name.as_str(), event.body.as_slice());
+        if let Some(export_index) = event.export_index {
+            bodies.insert(export_index, event.body.as_slice());
+        }
     }
     for function in &decoded.functions {
-        bodies.insert(function.name.as_str(), function.body.as_slice());
+        if let Some(export_index) = function.export_index {
+            bodies.insert(export_index, function.body.as_slice());
+        }
     }
 
-    let export_names: Vec<String> = asset
-        .exports
-        .iter()
-        .map(|(header, _)| header.object_name.clone())
-        .collect();
-    let is_function_class: Vec<bool> = asset
-        .exports
-        .iter()
-        .map(|(header, _)| {
-            resolve_index(&asset.imports, &export_names, header.class_index).ends_with(".Function")
-        })
-        .collect();
-
-    let captured_exports = &asset.bytecode_by_export;
-    for (export_index, (header, props)) in asset.exports.iter_mut().enumerate() {
-        if !is_function_class[export_index] || !captured_exports.contains_key(&(export_index + 1)) {
-            continue;
-        }
-        let Some(body) = bodies.get(header.object_name.as_str()) else {
+    for (zero_based_index, (_header, props)) in asset.exports.iter_mut().enumerate() {
+        let Some(body) = bodies.get(&(zero_based_index + 1)) else {
             continue;
         };
         let lines = render_body_lines(body, &decoded.resume_bodies);

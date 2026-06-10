@@ -27,6 +27,7 @@ mod tests {
         let asset = DecodedAsset {
             functions: vec![Function {
                 name: "Loop".into(),
+                export_index: None,
                 body: vec![Stmt::Break { offset: 0x20 }],
             }],
             events: vec![],
@@ -41,6 +42,7 @@ mod tests {
             functions: vec![],
             events: vec![Event {
                 name: "ReceiveTick".into(),
+                export_index: None,
                 body: vec![Stmt::Assignment {
                     lhs: Expr::Var("Counter".into()),
                     rhs: Expr::Literal("0".into()),
@@ -58,6 +60,7 @@ mod tests {
         let asset = DecodedAsset {
             functions: vec![Function {
                 name: "Foo".into(),
+                export_index: None,
                 body: vec![Stmt::Unknown {
                     reason: "bad opcode".into(),
                     raw_bytes: vec![0xab],
@@ -247,6 +250,7 @@ mod tests {
         let asset = DecodedAsset {
             functions: vec![Function {
                 name: "ReleaseGrip".into(),
+                export_index: None,
                 body: vec![Stmt::Call {
                     func: Expr::FieldAccess {
                         recv: Box::new(ternary_recv),
@@ -321,6 +325,7 @@ mod tests {
             functions: vec![],
             events: vec![Event {
                 name: "Test".into(),
+                export_index: None,
                 body: vec![loop_stmt],
             }],
             resume_bodies: std::collections::BTreeMap::new(),
@@ -506,6 +511,7 @@ mod tests {
             functions: vec![],
             events: vec![Event {
                 name: "Test".into(),
+                export_index: None,
                 body: vec![latch],
             }],
             resume_bodies: std::collections::BTreeMap::new(),

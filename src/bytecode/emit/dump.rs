@@ -374,6 +374,7 @@ mod tests {
         let asset = DecodedAsset {
             functions: vec![Function {
                 name: "TestFunc".into(),
+                export_index: None,
                 body: vec![Stmt::Assignment {
                     lhs: Expr::Var("x".into()),
                     rhs: Expr::Literal("5".into()),
@@ -395,6 +396,7 @@ mod tests {
         let asset = DecodedAsset {
             functions: vec![Function {
                 name: "BranchFunc".into(),
+                export_index: None,
                 body: vec![Stmt::Branch {
                     cond: Expr::Var("flag".into()),
                     then_body: vec![Stmt::Return {
@@ -435,6 +437,7 @@ mod tests {
         let asset = DecodedAsset {
             functions: vec![Function {
                 name: "CallFunc".into(),
+                export_index: None,
                 body: vec![Stmt::Call {
                     func: Expr::Var("DoSomething".into()),
                     args: vec![],
@@ -456,6 +459,7 @@ mod tests {
             functions: vec![],
             events: vec![Event {
                 name: "OnBeginPlay".into(),
+                export_index: None,
                 body: vec![Stmt::Return {
                     value: None,
                     offset: 0x0000,

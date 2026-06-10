@@ -160,6 +160,7 @@ pub(super) fn translate_entries_to_disk(
                 return Some(EventEntry {
                     name: entry.name.clone(),
                     mem_offset: disk_offset,
+                    export_index: entry.export_index,
                 });
             }
 
@@ -176,6 +177,7 @@ pub(super) fn translate_entries_to_disk(
                 return Some(EventEntry {
                     name: entry.name.clone(),
                     mem_offset: disk_offset,
+                    export_index: entry.export_index,
                 });
             }
 
@@ -230,6 +232,7 @@ pub(super) fn collect_event_entries(
                 entries.push(EventEntry {
                     name: hdr.object_name.clone(),
                     mem_offset: offset,
+                    export_index: export_idx + 1,
                 });
             }
         }
