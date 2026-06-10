@@ -329,6 +329,7 @@ mod tests {
         Function {
             name: name.to_string(),
             body,
+            export_index: None,
         }
     }
 
@@ -336,6 +337,7 @@ mod tests {
         Event {
             name: name.to_string(),
             body,
+            export_index: None,
         }
     }
 

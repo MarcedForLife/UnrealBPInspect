@@ -27,9 +27,17 @@ use crate::bytecode::opcodes::*;
 /// `ExecuteUbergraph_Name(N)` call sites), which maps directly onto a byte
 /// position in the raw bytecode slice. For UE4 uncooked assets the
 /// on-disk/in-memory adjustment is zero, so `mem_offset` equals the byte index.
+///
+/// `export_index` is the 1-based package export index of the export whose
+/// bytecode holds the `ExecuteUbergraph_Name(N)` dispatch call (the event's
+/// stub function export, named after the event). It uses the same convention
+/// as `ParsedAsset::bytecode_by_export` keys (`export_idx + 1`). The decoder
+/// carries it through partition so the resulting event body can be keyed back
+/// to its originating export rather than re-joined by name downstream.
 pub struct EventEntry {
     pub name: String,
     pub mem_offset: usize,
+    pub export_index: usize,
 }
 
 /// Shared context threaded through the stack-aware partition pipeline.

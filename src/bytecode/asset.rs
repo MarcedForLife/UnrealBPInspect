@@ -30,6 +30,12 @@ pub struct DecodedAsset {
 pub struct Function {
     pub name: String,
     pub body: Vec<Stmt>,
+    /// 1-based package export index this body was decoded from, used to key
+    /// the body back to its export in `dump_bridge`. `None` only for synthetic
+    /// test constructors. `skip_serializing_if` keeps the JSON form identical
+    /// to assets decoded before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_index: Option<usize>,
 }
 
 /// A decoded Blueprint event entry point.
@@ -37,4 +43,9 @@ pub struct Function {
 pub struct Event {
     pub name: String,
     pub body: Vec<Stmt>,
+    /// 1-based package export index of the event's stub function export (the
+    /// export whose bytecode dispatches into the ubergraph). `None` only for
+    /// synthetic test constructors. See [`Function::export_index`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_index: Option<usize>,
 }

@@ -62,6 +62,7 @@ mod tests {
         DecodedAsset {
             functions: vec![Function {
                 name: func_name.into(),
+                export_index: None,
                 body: vec![Stmt::Assignment {
                     lhs: Expr::Var(var_name.into()),
                     rhs: Expr::Literal(value.into()),
@@ -105,6 +106,7 @@ mod tests {
         let right = DecodedAsset {
             functions: vec![Function {
                 name: "NewFunc".into(),
+                export_index: None,
                 body: vec![],
             }],
             events: vec![],
@@ -141,6 +143,7 @@ mod tests {
             functions: vec![],
             events: vec![Event {
                 name: "OnBeginPlay".into(),
+                export_index: None,
                 body: vec![],
             }],
             resume_bodies: std::collections::BTreeMap::new(),

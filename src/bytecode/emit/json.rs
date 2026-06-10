@@ -47,6 +47,7 @@ mod tests {
         let asset = DecodedAsset {
             functions: vec![Function {
                 name: "MyFunc".into(),
+                export_index: None,
                 body: vec![Stmt::Call {
                     func: Expr::Var("DoThing".into()),
                     args: vec![Expr::Literal("42".into())],
@@ -71,6 +72,7 @@ mod tests {
         let asset = DecodedAsset {
             functions: vec![Function {
                 name: "RoundtripFunc".into(),
+                export_index: None,
                 body: vec![Stmt::Return {
                     value: Some(Expr::Literal("true".into())),
                     offset: 0x0000,
@@ -78,6 +80,7 @@ mod tests {
             }],
             events: vec![Event {
                 name: "OnBeginPlay".into(),
+                export_index: None,
                 body: vec![],
             }],
             resume_bodies: std::collections::BTreeMap::new(),

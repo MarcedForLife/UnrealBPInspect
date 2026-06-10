@@ -138,6 +138,9 @@ pub(super) fn make_entries(pairs: &[(&str, usize)]) -> Vec<EventEntry> {
         .map(|&(name, offset)| EventEntry {
             name: name.to_string(),
             mem_offset: offset,
+            // Synthetic entries don't originate from a real export; partition
+            // keys ranges by name and never reads this field.
+            export_index: 0,
         })
         .collect()
 }

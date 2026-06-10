@@ -291,6 +291,14 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
                             .iter()
                             .map(|entry| (entry.name.clone(), entry.mem_offset))
                             .collect();
+                        // Event-name to originating export index, mirroring
+                        // the name-keyed collapse of `event_entry_disks`.
+                        // `event_ranges` is also name-keyed, so each event
+                        // name resolves to one stub export here.
+                        let event_export_indices: BTreeMap<String, usize> = translated_entries
+                            .iter()
+                            .map(|entry| (entry.name.clone(), entry.export_index))
+                            .collect();
                         let k2node_byte_map_inputs =
                             crate::bytecode::k2node_byte_map::K2NodeByteMapInputs {
                                 asset,
@@ -353,6 +361,7 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
                             events.push(Event {
                                 name: event_name.clone(),
                                 body,
+                                export_index: event_export_indices.get(event_name).copied(),
                             });
                         }
                     }
@@ -439,6 +448,7 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
             functions.push(Function {
                 name: hdr.object_name.clone(),
                 body,
+                export_index: Some(export_index),
             });
         }
     }
