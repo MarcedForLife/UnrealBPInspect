@@ -10,7 +10,8 @@
 use std::collections::BTreeSet;
 
 use crate::bytecode::cfg::macro_region::{
-    attribute_macro_gate, decode_macro_region_body, form_event_macro_regions, MacroRegionCandidate,
+    attribute_macro_gate, candidate_body_spans, decode_macro_region_body, form_event_macro_regions,
+    MacroRegionCandidate,
 };
 use crate::bytecode::cfg::ControlFlowGraph;
 use crate::bytecode::decode::ctx::DecodeCtx;
@@ -27,57 +28,15 @@ use crate::bytecode::transforms::latch_recognition::{
 /// geometry. Reads the locality-pass byte map and the CFG block extents
 /// directly (the same maps `select_gate_set` reads); not inference.
 /// `None` when no in-body seed exists or several distinct seed vars sit
-/// in the body.
+/// in the body. Shares the body-span build and the map walk with
+/// `select_gate_set`'s `in_body_seed_gate_var`; the logic is identical.
 fn candidate_seed_gate_var(
     cfg: &ControlFlowGraph,
     candidate: &MacroRegionCandidate,
     map: &K2NodeByteMap,
 ) -> Option<String> {
-    let body_spans: Vec<std::ops::Range<usize>> = candidate
-        .member_blocks
-        .iter()
-        .filter_map(|&block_id| cfg.blocks.get(block_id))
-        .filter(|block| !block.opcodes.is_empty() && block.end > block.start)
-        .map(|block| block.start..block.end)
-        .collect();
-    let mut seed_vars: BTreeSet<String> = BTreeSet::new();
-    for (&offset, &owner) in &map.gate_let_owner_by_offset {
-        if owner != candidate.node_id {
-            continue;
-        }
-        if map.gate_let_is_set_by_offset.get(&offset).copied() != Some(false) {
-            continue;
-        }
-        if !body_spans.iter().any(|span| span.contains(&offset)) {
-            continue;
-        }
-        if let Some(var) = map.gate_let_var_by_offset.get(&offset) {
-            seed_vars.insert(var.clone());
-        }
-    }
-    if seed_vars.len() == 1 {
-        seed_vars.into_iter().next()
-    } else {
-        None
-    }
-}
-
-/// Every `=true` gate-SET disk offset the locality pass attributed to
-/// the node on `gate_var` (sorted). The attributed gate is one of these;
-/// when ambiguous all of them are reported.
-fn node_gate_sets_on_var(node_id: usize, map: &K2NodeByteMap, gate_var: &str) -> Vec<usize> {
-    let mut offsets: Vec<usize> = map
-        .gate_let_owner_by_offset
-        .iter()
-        .filter(|(_, &owner)| owner == node_id)
-        .map(|(&offset, _)| offset)
-        .filter(|offset| map.gate_let_is_set_by_offset.get(offset).copied() == Some(true))
-        .filter(|offset| {
-            map.gate_let_var_by_offset.get(offset).map(String::as_str) == Some(gate_var)
-        })
-        .collect();
-    offsets.sort_unstable();
-    offsets
+    let body_spans = candidate_body_spans(cfg, candidate);
+    map.in_body_seed_gate_var(&body_spans, candidate.node_id)
 }
 
 /// The first user call inside a Latch body (recursing through nested
@@ -285,7 +244,7 @@ fn candidate_features(
     let gate_var = attribute_macro_gate(cfg, candidate, map)
         .map(|attr| attr.gate_var)
         .or_else(|| candidate_seed_gate_var(cfg, candidate, map))?;
-    let gate_sets = node_gate_sets_on_var(candidate.node_id, map, &gate_var);
+    let gate_sets = map.node_gate_set_offsets(candidate.node_id, Some(&gate_var));
     if gate_sets.is_empty() {
         return None;
     }
