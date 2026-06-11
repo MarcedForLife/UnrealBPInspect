@@ -43,7 +43,7 @@ The parser reads the binary format sequentially through these modules:
 3. **ffield.rs** — FField child property parsing, type resolution, function signatures
 4. **bytecode/** — Kismet bytecode: ~85 opcodes (UE5 LWC support) decoded into a typed statement IR, then a control-flow graph and single-entry/single-exit region tree (IfThen/IfThenElse/Loop/SequenceChain/DoOnceGate) for if/else/loop structuring, plus IR transforms (loop refinement, latch/DoOnce recognition, convergence folds, name synthesis)
 5. **parser.rs** — Orchestrates all parsing: header, name/import/export tables, export data, bytecode, EdGraph pin connections
-6. **output_summary/** (default), **output_text.rs** (`--dump`), **output_json.rs** (`--json`), **output_diff.rs** (`--diff`) — the four output modes. Summary places EdGraph comments inline near the matching bytecode via pin-based BFS event ownership, with spatial cluster matching as fallback.
+6. **output_summary/** (default), **output_text.rs** (`--dump`), **output_json.rs** (`--json`), **output_diff.rs** (`--diff`) — the four output modes. Summary renders function/event bodies from the typed statement IR (`bytecode/emit`); EdGraph pin data informs Sequence pin numbering but no longer drives comment placement (that v1 feature was retired at the decoder rewrite).
 
 Key dependency flow: `types` + `binary` → `resolve` → `properties` + `ffield` → `bytecode` → `parser` → `output_*`
 

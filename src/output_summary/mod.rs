@@ -1,7 +1,8 @@
 //! Summary output mode (default).
 //!
-//! EdGraph comments are placed inline near corresponding bytecode using pin-based
-//! structural analysis (exec entry points, BFS ownership) with spatial fallback.
+//! Function and event bodies are rendered from the typed statement IR by
+//! `bytecode::emit`; this module holds the surrounding section formatting,
+//! the post-processing filter, and event display-name helpers.
 
 pub(crate) mod call_graph;
 mod filter;
