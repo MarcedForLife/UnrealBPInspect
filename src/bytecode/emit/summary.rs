@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use crate::bytecode::asset::DecodedAsset;
+use crate::bytecode::emit::comments::{inline_comment_lines, with_block_comments};
 use crate::bytecode::emit::sections::{emit_prefix_sections, filter_flags_for_summary, EmitCtx};
 use crate::bytecode::expr::{
     binary_op_symbol, unary_op_symbol, BinaryOp, CastKind, Expr, SwitchExprCase,
@@ -234,9 +235,22 @@ fn emit_function_block(
     output.push_str(&signature);
     output.push_str(&flags);
     output.push('\n');
-    with_sequence_mask(ctx.sequence_masks.get(name), || {
-        emit_body(output, body, 1, resume_bodies);
+    // Function-level descriptions sit directly below the signature.
+    emit_comment_lines(output, ctx.comments.function_level_lines(name));
+    with_block_comments(&ctx.comments, name, || {
+        with_sequence_mask(ctx.sequence_masks.get(name), || {
+            emit_body(output, body, 1, resume_bodies);
+        });
     });
+}
+
+/// Append pre-rendered comment annotation lines (already indented) to
+/// `output`, each on its own line. No-op when `lines` is `None`.
+fn emit_comment_lines(output: &mut String, lines: Option<&[String]>) {
+    for line in lines.into_iter().flatten() {
+        output.push_str(line);
+        output.push('\n');
+    }
 }
 
 /// Emit one ubergraph event block: optional `// called by:` line,
@@ -257,6 +271,8 @@ fn emit_event_block(
         output.push_str(&callers.join(", "));
         output.push('\n');
     }
+    // Event-wrapping annotations sit directly above the event header.
+    emit_comment_lines(output, ctx.comments.event_wrapping_lines(raw_name));
     output.push_str("  ");
     output.push_str(&display_name);
     if display_name.contains('(') {
@@ -264,8 +280,12 @@ fn emit_event_block(
     } else {
         output.push_str("():\n");
     }
-    with_sequence_mask(ctx.sequence_masks.get(raw_name), || {
-        emit_body(output, body, 1, resume_bodies);
+    // An event graph can also carry a whole-graph function-level description.
+    emit_comment_lines(output, ctx.comments.function_level_lines(raw_name));
+    with_block_comments(&ctx.comments, raw_name, || {
+        with_sequence_mask(ctx.sequence_masks.get(raw_name), || {
+            emit_body(output, body, 1, resume_bodies);
+        });
     });
 }
 
@@ -297,7 +317,17 @@ fn emit_stmt(
     indent_level: usize,
     resume_bodies: &BTreeMap<usize, Vec<Stmt>>,
 ) {
+    // Inline comment annotations anchored to this statement's offset sit
+    // directly above it, rendered with this statement's own indent so they
+    // line up with the construct they annotate. The active map is installed
+    // only by the summary block emitters, so the dump/JSON paths never see it.
     let indent = indent_str(indent_level);
+    if let Some(lines) = inline_comment_lines(stmt.offset(), &indent) {
+        for line in lines {
+            output.push_str(&line);
+            output.push('\n');
+        }
+    }
     match stmt {
         Stmt::Assignment { lhs, rhs, .. } => {
             output.push_str(&indent);

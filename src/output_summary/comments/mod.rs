@@ -18,12 +18,17 @@
 //! where a box is anchored top-left and width/height grow right and down
 //! (`+Y` is down).
 //!
-//! The placement and rendering passes that consume this model land in a later
-//! commit; until then the public surface is exercised only by the unit tests,
-//! so the whole module opts out of the dead-code lint.
+//! The [`placement`] submodule classifies each box into an event-wrapping,
+//! function-level, or inline placement and resolves its anchor; [`render`]
+//! formats a box's text into the summary marker lines. The summary emitter
+//! consumes the placement plan via `bytecode::emit::comments`. A few
+//! diagnostic accessors (`PlacementPlan::count_class`, the `unanchored`
+//! count) are read only from tests, so the module keeps the dead-code allow.
 #![allow(dead_code)]
 
 pub(crate) mod extract;
+pub(crate) mod placement;
+pub(crate) mod render;
 
 /// Class name of the dedicated box-comment export. Bubble comments live on
 /// ordinary node exports and are recognised by their bubble-visibility flag

@@ -1,5 +1,6 @@
 //! Emit layer — one walker per output mode (summary, dump, JSON, diff).
 
+pub(crate) mod comments;
 pub mod diff;
 pub mod dump;
 pub mod json;
