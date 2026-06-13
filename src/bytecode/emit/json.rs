@@ -25,6 +25,7 @@ mod tests {
             functions: vec![],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
             byte_maps: Default::default(),
         }
     }
@@ -57,6 +58,7 @@ mod tests {
             }],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
             byte_maps: Default::default(),
         };
         let output = emit_json(&asset);
@@ -86,6 +88,7 @@ mod tests {
                 body: vec![],
             }],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
             byte_maps: Default::default(),
         };
 

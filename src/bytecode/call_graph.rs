@@ -322,6 +322,7 @@ mod tests {
             functions,
             events,
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
             byte_maps: Default::default(),
         }
     }

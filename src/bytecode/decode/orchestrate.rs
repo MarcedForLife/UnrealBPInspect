@@ -64,6 +64,7 @@ pub fn decode_asset(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
                 functions: vec![],
                 events: vec![],
                 resume_bodies: BTreeMap::new(),
+                resume_owner_events: BTreeMap::new(),
                 byte_maps: Default::default(),
             }
         }
@@ -108,6 +109,7 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
                 functions: vec![],
                 events: vec![],
                 resume_bodies: BTreeMap::new(),
+                resume_owner_events: BTreeMap::new(),
                 byte_maps: Default::default(),
             };
         }
@@ -136,6 +138,11 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
     // Keyed by the call's disk offset. Each ubergraph contributes its
     // own set; non-ubergraph assets leave this empty.
     let mut resume_bodies: BTreeMap<usize, Vec<crate::bytecode::stmt::Stmt>> = BTreeMap::new();
+    // Owner event per latent-resume chain, range-derived where the
+    // partition output is in hand. Carried on `DecodedAsset` so comment
+    // placement consumes ownership instead of re-deriving it from the
+    // decoded statement trees.
+    let mut resume_owner_events: BTreeMap<usize, String> = BTreeMap::new();
     // K2Node-to-bytes attribution, carried out to emit so a node can be
     // resolved to the statement it produced. The ubergraph map is built inside
     // the partition-OK arm below (`None` for assets with no ubergraph); the
@@ -273,6 +280,10 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
                     Ok(partition_output) => {
                         let event_ranges = partition_output.event_ranges;
                         let resume_blocks = partition_output.resume_blocks;
+                        resume_owner_events = build_resume_owner_map(&resume_blocks, &event_ranges);
+                        if debug_enabled() {
+                            eprintln!("probe: resume_owner_events={:?}", resume_owner_events);
+                        }
                         // Decode each latent-call resume chunk into its
                         // own statement vector. The map is keyed by the
                         // originating call's disk offset (the
@@ -548,11 +559,53 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
         functions,
         events,
         resume_bodies,
+        resume_owner_events,
         byte_maps: crate::bytecode::k2node_byte_map::ByteMaps {
             ubergraph: ubergraph_byte_map,
             functions: function_byte_maps,
         },
     }
+}
+
+/// Owner event per latent-resume chain, keyed by the originating call's
+/// disk offset, derived from partition ranges: a call offset inside an
+/// event's owned ranges takes that event; a call offset inside another
+/// chain's resume range takes that chain's owner, resolved to a fixpoint
+/// (a chained latent is a Delay-style call inside another resume chunk).
+///
+/// Consumed by summary comment placement (`anchor_via_owner_event`'s
+/// resume-chain search) via `DecodedAsset::resume_owner_events`.
+fn build_resume_owner_map(
+    resume_blocks: &BTreeMap<usize, Range<usize>>,
+    event_ranges: &BTreeMap<String, Vec<Range<usize>>>,
+) -> BTreeMap<usize, String> {
+    let mut owner: BTreeMap<usize, String> = BTreeMap::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &call_offset in resume_blocks.keys() {
+            if owner.contains_key(&call_offset) {
+                continue;
+            }
+            let direct = event_ranges.iter().find_map(|(name, ranges)| {
+                ranges
+                    .iter()
+                    .any(|range| range.contains(&call_offset))
+                    .then(|| name.clone())
+            });
+            let chained = || {
+                resume_blocks
+                    .iter()
+                    .find(|(&parent, range)| parent != call_offset && range.contains(&call_offset))
+                    .and_then(|(parent, _)| owner.get(parent).cloned())
+            };
+            if let Some(name) = direct.or_else(chained) {
+                owner.insert(call_offset, name);
+                changed = true;
+            }
+        }
+    }
+    owner
 }
 
 /// Shared inputs for decoding one ubergraph event body. Bundled because
