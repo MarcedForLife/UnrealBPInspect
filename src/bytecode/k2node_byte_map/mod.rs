@@ -58,7 +58,7 @@ mod offsets;
 mod partition;
 mod scaffold;
 
-pub(crate) use carry::{ByteMaps, UbergraphByteMap};
+pub(crate) use carry::ByteMaps;
 
 /// Macro short names whose pin reachability the partition builder
 /// honours (`DoOnce` / `IsValid` / `FlipFlop`). FlipFlop is handled by

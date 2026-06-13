@@ -26,36 +26,14 @@ use super::K2NodeByteMap;
 #[derive(Default)]
 pub(crate) struct ByteMaps {
     /// Ubergraph attribution, `None` for assets with no ubergraph.
-    pub ubergraph: Option<UbergraphByteMap>,
+    pub ubergraph: Option<K2NodeByteMap>,
     /// Per-function attribution, keyed by function name (the standalone graph
     /// page a comment box reports). `BTreeMap` for deterministic iteration.
-    pub functions: BTreeMap<String, UbergraphByteMap>,
+    pub functions: BTreeMap<String, K2NodeByteMap>,
 }
 
-impl ByteMaps {
-    /// The byte map covering `block`, an event name (ubergraph) or a function
-    /// name. Events fall back to the single ubergraph map; functions select
-    /// their own. Returns `None` when no map covers the block.
-    pub fn for_function(&self, function_name: &str) -> Option<&UbergraphByteMap> {
-        self.functions.get(function_name)
-    }
-}
-
-/// One graph's byte map with node-to-statement lookups for emit.
-///
-/// Built once per asset during ubergraph decode and carried on
-/// [`crate::bytecode::asset::DecodedAsset`]. Standalone function bodies carry
-/// their own instance in [`ByteMaps::functions`].
-pub(crate) struct UbergraphByteMap {
-    /// Node-id to disk-byte-range attribution for the graph's script stream.
-    pub byte_map: K2NodeByteMap,
-}
-
-impl UbergraphByteMap {
-    pub fn new(byte_map: K2NodeByteMap) -> Self {
-        UbergraphByteMap { byte_map }
-    }
-
+/// Node-to-statement lookups for emit, over the map's disk-range attribution.
+impl K2NodeByteMap {
     /// The statement in `body` produced by graph node `node_id`, if the node
     /// has a disk-range attribution and a covering statement exists.
     ///
@@ -95,7 +73,7 @@ impl UbergraphByteMap {
     /// The node's anchor coordinate: the first disk byte of its attributed
     /// ranges.
     fn node_anchor_disk(&self, node_id: usize) -> Option<usize> {
-        let partition = self.byte_map.partitions.get(&node_id)?;
+        let partition = self.partitions.get(&node_id)?;
         partition.ranges.iter().map(|range| range.start).min()
     }
 }
@@ -233,7 +211,7 @@ mod tests {
                 via_fallback: Vec::new(),
             },
         );
-        let carried = UbergraphByteMap::new(byte_map);
+        let carried = byte_map;
 
         // Anchor inside the body span resolves to the covering statement.
         let owning_body = vec![call(10), call(20), call(30)];
@@ -289,7 +267,6 @@ mod tests {
 
         // The node has a disk-range attribution that names the owning event.
         let partition = carried
-            .byte_map
             .partitions
             .get(&RELEASE_NODE_ID)
             .expect("Release node has a partition");
