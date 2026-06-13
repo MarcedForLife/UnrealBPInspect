@@ -28,7 +28,6 @@ pub(crate) struct UbergraphByteMap {
     pub byte_map: K2NodeByteMap,
 }
 
-#[allow(dead_code)]
 impl UbergraphByteMap {
     pub fn new(byte_map: K2NodeByteMap) -> Self {
         UbergraphByteMap { byte_map }
@@ -64,9 +63,6 @@ impl UbergraphByteMap {
 /// as the statement with the greatest `offset() <= target`, descending into
 /// the matched statement's child bodies to find the most specific one. Returns
 /// `None` when every statement starts after `target`.
-// Consumed only by the fixture test and `statement_for_node` until the
-// emit-side comment placement lands in a later commit.
-#[allow(dead_code)]
 pub(crate) fn covering_statement(body: &[Stmt], target: usize) -> Option<&Stmt> {
     let mut best: Option<&Stmt> = None;
     for stmt in body {

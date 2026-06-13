@@ -111,6 +111,7 @@ Functions:
         self.VREPhysicsConstraint.SetAngularTwistLimit(0, 0.0000)
     }
 
+  // "On wheel gripped"
   BndEvt__Helm_BP_Wheel_K2Node_ComponentBoundEvent_1_VROnGripSignature__DelegateSignature():
     // sequence [0]:
     SetActorTickEnabled(false)
@@ -121,11 +122,13 @@ Functions:
 
   BndEvt__Helm_BP_Wheel_K2Node_ComponentBoundEvent_2_VROnDropSignature__DelegateSignature():
 
+  // "Begin play"
   ReceiveBeginPlay():
     self.WheelRotationAudioComponent = SpawnSoundAttached(self.WheelRotationCue, self.VREPhysicsConstraint, 'None',
         Vec(0.0000,0.0000,0.0000), Rot(0.0000,0.0000,0.0000), 2, false, 1.0000, 1.0000, 0.0000, None, None, false)
     self.WheelRotationAudioComponent.Stop()
 
+  // "Event tick"
   ReceiveTick():
     UpdateWheelRotation()
     UpdateAudio()

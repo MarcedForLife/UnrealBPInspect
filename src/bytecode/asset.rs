@@ -31,10 +31,9 @@ pub struct DecodedAsset {
     /// JSON output is unaffected. `pub(crate)` because the carrier type is an
     /// internal decode artifact, unlike the serialisable IR fields above.
     ///
-    /// Written here but not yet read by a production path; the emit-side
-    /// comment placement that consumes it lands in a later commit.
+    /// Read by the summary-mode comment placement (`bytecode::emit::comments`)
+    /// to anchor inline annotations to the statement a graph node produced.
     #[serde(skip)]
-    #[allow(dead_code)]
     pub(crate) ubergraph_byte_map: Option<UbergraphByteMap>,
 }
 

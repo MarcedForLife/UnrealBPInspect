@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::bytecode::asset::DecodedAsset;
 use crate::bytecode::call_graph::build_call_graph as build_typed_call_graph;
+use crate::bytecode::emit::comments::CommentEmitPlan;
 use crate::bytecode::names::K2NODE_EXECUTION_SEQUENCE;
 use crate::output_summary::call_graph::{collect_local_functions, format_call_graph};
 use crate::output_summary::format::{format_component_tree, format_header, format_variables};
@@ -47,6 +48,10 @@ pub(crate) struct EmitCtx {
     /// multiple ExecutionSequence nodes are absent and fall back to the
     /// compact decoded-pin numbering.
     pub sequence_masks: HashMap<String, Vec<bool>>,
+    /// Placed comment annotations (event-wrapping, function-level, inline)
+    /// for this asset, consumed only by the summary block emitters. Empty
+    /// for assets that author no comment boxes.
+    pub comments: CommentEmitPlan,
 }
 
 /// Append the Blueprint, Components, Variables, Call graph, and
@@ -101,6 +106,7 @@ pub(crate) fn emit_prefix_sections(
 
     let (signatures, flags) = collect_function_metadata(parsed);
     let sequence_masks = collect_sequence_masks(parsed, &export_names);
+    let comments = CommentEmitPlan::build(decoded, parsed);
 
     EmitCtx {
         callers_map,
@@ -108,6 +114,7 @@ pub(crate) fn emit_prefix_sections(
         signatures,
         flags,
         sequence_masks,
+        comments,
     }
 }
 
