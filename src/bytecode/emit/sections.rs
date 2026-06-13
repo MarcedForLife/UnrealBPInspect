@@ -17,7 +17,7 @@ use crate::output_summary::call_graph::{collect_local_functions, format_call_gra
 use crate::output_summary::format::{format_component_tree, format_header, format_variables};
 use crate::output_summary::ubergraph::{compute_action_key_events, display_event_name};
 use crate::prop_query::find_prop_str;
-use crate::resolve::{resolve_index, short_class};
+use crate::resolve::{enclosing_graph_name, resolve_index, short_class};
 use crate::types::ParsedAsset;
 
 /// Function-header metadata shared between the prefix-section pass and
@@ -118,35 +118,6 @@ pub(crate) fn emit_prefix_sections(
     }
 }
 
-/// Walk a K2Node export's `outer_index` chain to the owning `EdGraph`
-/// export, whose `object_name` is the function/event block name. Stops at
-/// the first EdGraph ancestor; returns `None` if the chain reaches a null
-/// outer or exceeds the depth guard before finding one.
-fn owning_block_name(
-    parsed: &ParsedAsset,
-    export_names: &[String],
-    node_one_based: usize,
-) -> Option<String> {
-    const MAX_OUTER_DEPTH: usize = 8;
-    let mut current = node_one_based as i32;
-    for _ in 0..MAX_OUTER_DEPTH {
-        let (hdr, _) = parsed.exports.get((current - 1) as usize)?;
-        let class = short_class(&resolve_index(
-            &parsed.imports,
-            export_names,
-            hdr.class_index,
-        ));
-        if class == "EdGraph" {
-            return Some(hdr.object_name.clone());
-        }
-        if hdr.outer_index <= 0 {
-            return None;
-        }
-        current = hdr.outer_index;
-    }
-    None
-}
-
 /// Build `block_name -> editor then-pin connected-mask` for every block
 /// whose graph contains exactly one `K2Node_ExecutionSequence` node.
 ///
@@ -174,7 +145,7 @@ fn collect_sequence_masks(
         let Some(pin_data) = parsed.pin_data.get(&one_based) else {
             continue;
         };
-        let Some(block) = owning_block_name(parsed, export_names, one_based) else {
+        let Some(block) = enclosing_graph_name(parsed, export_names, one_based) else {
             continue;
         };
         let mask: Vec<bool> = pin_data

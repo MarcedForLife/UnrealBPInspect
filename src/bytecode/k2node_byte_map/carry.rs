@@ -8,21 +8,44 @@
 //! node's first attributed disk byte matches statement offsets directly and
 //! the lookup is a covering walk over the decoded body, no translation.
 
+use std::collections::BTreeMap;
+
 use crate::bytecode::stmt::Stmt;
 
 use super::K2NodeByteMap;
 
-/// The ubergraph byte map with node-to-statement lookups for emit.
+/// All carried byte maps for one asset: the ubergraph map plus one map per
+/// standalone function graph.
+///
+/// Comment boxes live on a graph page that is either an ubergraph event page
+/// or a standalone function page. Events resolve through the single ubergraph
+/// map; functions each have their own map, keyed by function name, so a box on
+/// a function page anchors against the bytes that function compiled rather than
+/// the ubergraph's. Built once per asset during decode and carried on
+/// [`crate::bytecode::asset::DecodedAsset`].
+#[derive(Default)]
+pub(crate) struct ByteMaps {
+    /// Ubergraph attribution, `None` for assets with no ubergraph.
+    pub ubergraph: Option<UbergraphByteMap>,
+    /// Per-function attribution, keyed by function name (the standalone graph
+    /// page a comment box reports). `BTreeMap` for deterministic iteration.
+    pub functions: BTreeMap<String, UbergraphByteMap>,
+}
+
+impl ByteMaps {
+    /// The byte map covering `block`, an event name (ubergraph) or a function
+    /// name. Events fall back to the single ubergraph map; functions select
+    /// their own. Returns `None` when no map covers the block.
+    pub fn for_function(&self, function_name: &str) -> Option<&UbergraphByteMap> {
+        self.functions.get(function_name)
+    }
+}
+
+/// One graph's byte map with node-to-statement lookups for emit.
 ///
 /// Built once per asset during ubergraph decode and carried on
-/// [`crate::bytecode::asset::DecodedAsset`]. Standalone function bodies are not
-/// covered (they have no ubergraph byte map); a node-to-statement lookup for
-/// those returns `None`.
-///
-/// The lookup methods (`statement_for_node` and the private helper it drives,
-/// plus the free [`covering_statement`]) are exercised by the fixture test
-/// here but not yet from a production path; the emit-side comment placement
-/// that consumes them lands in a later commit, hence the dead-code allows.
+/// [`crate::bytecode::asset::DecodedAsset`]. Standalone function bodies carry
+/// their own instance in [`ByteMaps::functions`].
 pub(crate) struct UbergraphByteMap {
     /// Node-id to disk-byte-range attribution for the graph's script stream.
     pub byte_map: K2NodeByteMap,
@@ -48,12 +71,54 @@ impl UbergraphByteMap {
         covering_statement(body, anchor_disk)
     }
 
+    /// Like [`Self::statement_for_node`], but only when the node's disk
+    /// anchor falls inside `body`'s statement-offset span.
+    ///
+    /// Used when the owning block is inferred (a comment box on
+    /// an ubergraph editor page resolved through the partition's owner
+    /// events) rather than named directly: the span requirement stops a
+    /// multi-owner node from anchoring into a sibling event whose offsets
+    /// all precede the target.
+    pub fn statement_for_node_in_span<'body>(
+        &self,
+        node_id: usize,
+        body: &'body [Stmt],
+    ) -> Option<&'body Stmt> {
+        let anchor_disk = self.node_anchor_disk(node_id)?;
+        let (span_min, span_max) = body_offset_span(body)?;
+        if !(span_min..=span_max).contains(&anchor_disk) {
+            return None;
+        }
+        covering_statement(body, anchor_disk)
+    }
+
     /// The node's anchor coordinate: the first disk byte of its attributed
     /// ranges.
     fn node_anchor_disk(&self, node_id: usize) -> Option<usize> {
         let partition = self.byte_map.partitions.get(&node_id)?;
         partition.ranges.iter().map(|range| range.start).min()
     }
+}
+
+/// Minimum and maximum statement offsets across `body` and every nested child
+/// body. `None` for an empty body.
+fn body_offset_span(body: &[Stmt]) -> Option<(usize, usize)> {
+    let mut span: Option<(usize, usize)> = None;
+    let mut merge = |lo: usize, hi: usize| {
+        span = Some(match span {
+            Some((cur_lo, cur_hi)) => (cur_lo.min(lo), cur_hi.max(hi)),
+            None => (lo, hi),
+        });
+    };
+    for stmt in body {
+        merge(stmt.offset(), stmt.offset());
+        for child in stmt.child_bodies() {
+            if let Some((child_lo, child_hi)) = body_offset_span(child) {
+                merge(child_lo, child_hi);
+            }
+        }
+    }
+    span
 }
 
 /// The statement in `body` (or any nested body) whose offset most tightly
@@ -148,6 +213,56 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn in_span_lookup_requires_span_containment() {
+        use super::super::K2NodePartition;
+        use crate::bytecode::decode::cross_event_inline::K2NodeClass;
+
+        // Node 7's bytes start at disk 25 (the minimum across its scattered
+        // ranges); statement offsets are disk coordinates, so no translation
+        // applies.
+        let mut byte_map = K2NodeByteMap::default();
+        byte_map.partitions.insert(
+            7,
+            K2NodePartition {
+                node_id: 7,
+                ranges: vec![30..31, 25..26],
+                owner_events: Default::default(),
+                kind: K2NodeClass::Other,
+                macro_kind: None,
+                via_fallback: Vec::new(),
+            },
+        );
+        let carried = UbergraphByteMap::new(byte_map);
+
+        // Anchor inside the body span resolves to the covering statement.
+        let owning_body = vec![call(10), call(20), call(30)];
+        assert_eq!(
+            name_of(carried.statement_for_node_in_span(7, &owning_body).unwrap()),
+            "Call_20"
+        );
+        // A sibling body whose offsets all precede the anchor is rejected,
+        // even though a covering statement exists from below.
+        let sibling_body = vec![call(2), call(4)];
+        assert!(carried
+            .statement_for_node_in_span(7, &sibling_body)
+            .is_none());
+        // A body that starts after the anchor is rejected too.
+        let later_body = vec![call(40), call(50)];
+        assert!(carried.statement_for_node_in_span(7, &later_body).is_none());
+        // Unknown node resolves to nothing.
+        assert!(carried
+            .statement_for_node_in_span(99, &owning_body)
+            .is_none());
+    }
+
+    #[test]
+    fn body_offset_span_covers_nested_children() {
+        let body = vec![call(10), branch(20, vec![call(24), call(90)], vec![])];
+        assert_eq!(body_offset_span(&body), Some((10, 90)));
+        assert_eq!(body_offset_span(&[]), None);
+    }
+
     /// End-to-end check that the carried byte map resolves a real graph node
     /// to the statement it produced, against the committed BP_DecoderTest
     /// fixture. Node 113 is the `Release` `K2Node_CallFunction` reached by the
@@ -167,7 +282,8 @@ mod tests {
         let decoded = crate::bytecode::decode::decode_asset(&parsed, &bytes);
 
         let carried = decoded
-            .ubergraph_byte_map
+            .byte_maps
+            .ubergraph
             .as_ref()
             .expect("DecoderTest has an ubergraph, so the byte map must be carried");
 

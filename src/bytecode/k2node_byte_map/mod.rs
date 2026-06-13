@@ -44,7 +44,9 @@ use crate::bytecode::decode::cross_event_inline::K2NodeClass;
 use crate::bytecode::names::{normalize_lwc_name, strip_guid_suffix, MacroKind};
 use crate::types::ParsedAsset;
 
-use offsets::{attribute_calls, attribute_dynamic_casts, attribute_variable_sets};
+use offsets::{
+    attribute_calls, attribute_dynamic_casts, attribute_function_results, attribute_variable_sets,
+};
 use partition::{
     attribute_enclosing_scope_fallback, attribute_execution_sequences,
     attribute_latent_resume_blocks, attribute_macro_instances, attribute_tracepoints,
@@ -56,7 +58,7 @@ mod offsets;
 mod partition;
 mod scaffold;
 
-pub(crate) use carry::UbergraphByteMap;
+pub(crate) use carry::{ByteMaps, UbergraphByteMap};
 
 /// Macro short names whose pin reachability the partition builder
 /// honours (`DoOnce` / `IsValid` / `FlipFlop`). FlipFlop is handled by
@@ -285,6 +287,23 @@ pub(crate) struct K2NodeByteMapInputs<'a> {
     /// enclosing-scope attribution passes ride this instance instead of
     /// rebuilding it from `(bytecode, ue5, name_table, mem_to_disk)`.
     pub graph: &'a crate::bytecode::partition::OpcodeGraph,
+    /// Which graph this map covers. Member-name indices are asset-wide, so
+    /// ambiguous matches are restricted to graph-local candidates before
+    /// event-scope clamping (see [`clamp_to_event_scope`]).
+    pub scope: GraphScope<'a>,
+}
+
+/// Identifies the graph a byte map is built for, the basis for restricting
+/// ambiguous member-name matches to nodes that live on that graph.
+#[derive(Clone, Copy)]
+pub(crate) enum GraphScope<'a> {
+    /// The ubergraph stream. Local nodes are those the event-entry pin BFS
+    /// reaches (`node_to_reaching_events`) plus the event entry nodes
+    /// themselves; standalone-function-graph nodes are never reached.
+    Ubergraph,
+    /// One standalone function graph, named by its page. Local nodes are
+    /// those whose enclosing EdGraph export carries this name.
+    FunctionPage(&'a str),
 }
 
 /// The recorded class for `node_id`, defaulting to `Other` when the node
@@ -308,6 +327,7 @@ pub(crate) fn build_k2node_byte_map(inputs: &K2NodeByteMapInputs<'_>) -> K2NodeB
         attribute_macro_scaffold_bytes(inputs, &mut partitions, &mut byte_to_node);
     attribute_variable_sets(inputs, &mut partitions, &mut byte_to_node);
     attribute_dynamic_casts(inputs, &mut partitions, &mut byte_to_node);
+    attribute_function_results(inputs, &mut partitions, &mut byte_to_node);
     attribute_execution_sequences(inputs, &mut partitions, &mut byte_to_node);
     attribute_latent_resume_blocks(inputs, &mut partitions, &mut byte_to_node);
     attribute_tracepoints(inputs, &mut partitions, &mut byte_to_node);
@@ -386,21 +406,26 @@ pub(super) fn normalise_member_name(raw: &str) -> String {
 /// K2Nodes share a member name (the kismet helper case, e.g.
 /// `Add_FloatFloat` or a user-named duplicate call) the unfiltered
 /// set fans every bytecode site out to every K2Node that bears the
-/// name. Clamping via `node_to_reaching_events` plus
-/// `event_owned_ranges` keeps the K2Node whose event actually covers
-/// the bytes.
+/// name, including nodes on other graph pages entirely.
+///
+/// Two stages. First the set is restricted to graph-local candidates
+/// per [`GraphScope`] (the member indices are asset-wide; without this
+/// a function map's call sites could attribute to a same-named node on
+/// a different page, since function maps have no reaching-events data
+/// and always fell through to the lowest-id fallback). An all-foreign
+/// set attributes nothing. Then the event clamp keeps the local
+/// candidate whose reaching event actually covers the bytes
+/// (`node_to_reaching_events` plus `event_owned_ranges`).
 ///
 /// Tiebreak when more than one candidate survives the clamp: the
 /// lowest export id wins. Deterministic across runs.
 ///
-/// Fallback when ZERO candidates survive event-scope filtering:
-/// the lowest-id candidate from the input set is returned. This
-/// happens for K2Nodes that compile bytecode but whose
-/// `node_to_reaching_events` entry is empty or absent (e.g. callees
-/// that the pin-BFS-from-event-entries didn't reach because the
-/// candidate lives in a local function body, not the ubergraph). The
-/// fallback is logged when `BP_INSPECT_K2NODE_AUDIT` is set so
-/// the fire rate stays visible.
+/// Fallback when ZERO local candidates survive event-scope filtering:
+/// the lowest-id local candidate is returned. This happens on function
+/// maps (no event data at all) and for ubergraph call sites outside
+/// every event-owned range (e.g. latent-resume chunks). The fallback
+/// is logged when `BP_INSPECT_K2NODE_AUDIT` is set so the fire rate
+/// stays visible.
 pub(super) fn clamp_to_event_scope(
     candidates: &[usize],
     call_offset: usize,
@@ -409,7 +434,16 @@ pub(super) fn clamp_to_event_scope(
     if candidates.len() <= 1 {
         return candidates.to_vec();
     }
-    let mut survivors: Vec<usize> = candidates
+    let scoped = graph_local_candidates(candidates, inputs);
+    if scoped.is_empty() {
+        // Every candidate is foreign to this graph (e.g. a macro-internal
+        // call whose only same-named K2Nodes live on other pages).
+        return Vec::new();
+    }
+    if scoped.len() == 1 {
+        return scoped;
+    }
+    let mut survivors: Vec<usize> = scoped
         .iter()
         .copied()
         .filter(|node_id| {
@@ -427,18 +461,41 @@ pub(super) fn clamp_to_event_scope(
     if survivors.is_empty() {
         if std::env::var_os("BP_INSPECT_K2NODE_AUDIT").is_some_and(|val| !val.is_empty()) {
             eprintln!(
-                "k2node clamp: zero survivors at 0x{:x} from {} candidates ({:?}); using lowest-id fallback",
+                "k2node clamp: zero survivors at 0x{:x} from {} local candidates ({:?}); using lowest-id fallback",
                 call_offset,
-                candidates.len(),
-                candidates,
+                scoped.len(),
+                scoped,
             );
         }
-        let lowest = *candidates.iter().min().expect("non-empty");
+        let lowest = *scoped.iter().min().expect("non-empty");
         return vec![lowest];
     }
     survivors.sort_unstable();
     survivors.truncate(1);
     survivors
+}
+
+/// The subset of `candidates` living on the graph this map covers (see
+/// [`GraphScope`]).
+fn graph_local_candidates(candidates: &[usize], inputs: &K2NodeByteMapInputs<'_>) -> Vec<usize> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|&node_id| match inputs.scope {
+            GraphScope::Ubergraph => {
+                inputs.node_to_reaching_events.contains_key(&node_id)
+                    || inputs
+                        .event_node_index
+                        .values()
+                        .any(|&entry| entry == node_id)
+            }
+            GraphScope::FunctionPage(page) => {
+                crate::resolve::enclosing_graph_name(inputs.asset, inputs.export_names, node_id)
+                    .as_deref()
+                    == Some(page)
+            }
+        })
+        .collect()
 }
 
 /// Insert a range into a sorted-by-start list, deduping exact
@@ -579,6 +636,7 @@ mod tests {
             event_node_index: &event_node_index,
             resume_blocks: &resume_blocks,
             graph: &graph,
+            scope: GraphScope::Ubergraph,
         };
         let map = build_k2node_byte_map(&inputs);
         assert!(map.partitions.is_empty());
@@ -632,6 +690,7 @@ mod tests {
             event_node_index: &event_node_index,
             resume_blocks: &resume_blocks,
             graph: &graph,
+            scope: GraphScope::Ubergraph,
         };
         let map = build_k2node_byte_map(&inputs);
         let partition = map
@@ -691,6 +750,7 @@ mod tests {
             event_node_index: &event_node_index,
             resume_blocks: &resume_blocks,
             graph: &graph,
+            scope: GraphScope::Ubergraph,
         };
         let map = build_k2node_byte_map(&inputs);
         assert!(map.partitions.is_empty());
@@ -739,6 +799,7 @@ mod tests {
             event_node_index: &event_node_index,
             resume_blocks: &resume_blocks,
             graph: &graph,
+            scope: GraphScope::Ubergraph,
         };
         let map = build_k2node_byte_map(&inputs);
         assert!(map.partitions.is_empty());
@@ -820,6 +881,7 @@ mod tests {
             event_node_index: &event_node_index,
             resume_blocks: &resume_blocks,
             graph: &graph,
+            scope: GraphScope::Ubergraph,
         };
         let map = build_k2node_byte_map(&inputs);
         let partition = map

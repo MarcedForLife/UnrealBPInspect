@@ -85,6 +85,36 @@ pub fn format_func_flags(flags: u32) -> String {
     }
 }
 
+/// Walk a node export's `outer_index` chain to the owning `EdGraph` export,
+/// whose `object_name` is the graph-page name (a standalone function graph,
+/// an ubergraph page like `EventGraph`, or a collapsed graph). Returns `None`
+/// when the chain hits a null outer or exceeds the depth guard before
+/// reaching an EdGraph ancestor (variables and function exports have none).
+pub fn enclosing_graph_name(
+    parsed: &ParsedAsset,
+    export_names: &[String],
+    node_one_based: usize,
+) -> Option<String> {
+    const MAX_OUTER_DEPTH: usize = 8;
+    let mut current = node_one_based as i32;
+    for _ in 0..MAX_OUTER_DEPTH {
+        let (hdr, _) = parsed.exports.get((current - 1) as usize)?;
+        let class = short_class(&resolve_index(
+            &parsed.imports,
+            export_names,
+            hdr.class_index,
+        ));
+        if class == "EdGraph" {
+            return Some(hdr.object_name.clone());
+        }
+        if hdr.outer_index <= 0 {
+            return None;
+        }
+        current = hdr.outer_index;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

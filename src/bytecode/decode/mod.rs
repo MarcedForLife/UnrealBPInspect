@@ -64,6 +64,10 @@ pub(crate) use orchestrate::{
     build_event_cfg_and_region_tree, build_inline_cfg_and_region_tree_flow_scoped,
     decode_region_body, synthesize_owner_doonce_name, synthesize_owner_flipflop,
 };
+// The canonical event-name -> entry-K2Node derivation, also consumed by the
+// summary comment classifier (placement.rs) so EventWrapping detection and
+// decode agree on the event-node set (including the InputAction pattern).
+pub(crate) use ubergraph_scan::build_event_node_index;
 
 // Re-exported for test harnesses (the cfg reaching-condition probes and
 // the private-fixtures `partition_tests::local_tests`); production

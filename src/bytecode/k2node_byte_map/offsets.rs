@@ -10,17 +10,17 @@ use std::collections::{BTreeMap, HashMap};
 use crate::bytecode::decode::walker::{walk_opcode, FieldPath, OpcodeVisitor, WalkCtx};
 use crate::bytecode::opcodes::{
     EX_DYNAMIC_CAST, EX_LET, EX_LET_DELEGATE, EX_LET_MULTICAST_DELEGATE,
-    EX_LET_VALUE_ON_PERSISTENT_FRAME, EX_META_CAST,
+    EX_LET_VALUE_ON_PERSISTENT_FRAME, EX_META_CAST, EX_RETURN,
 };
 use crate::bytecode::pin_attribution::{build_callfunc_member_index, collect_call_sites};
 use crate::bytecode::resolve::resolve_bc_obj;
 use crate::prop_query::{find_prop_str, find_struct_field_str};
-use crate::resolve::{resolve_index, short_class};
+use crate::resolve::{enclosing_graph_name, resolve_index, short_class};
 use crate::types::ParsedAsset;
 
 use super::{
     clamp_to_event_scope, extend_owner_events, node_class, normalise_member_name,
-    owner_events_for_node, push_range, K2NodeByteMapInputs, K2NodePartition,
+    owner_events_for_node, push_range, GraphScope, K2NodeByteMapInputs, K2NodePartition,
 };
 
 /// Attribute every call opcode to its K2Node_CallFunction node(s)
@@ -132,6 +132,89 @@ pub(super) fn attribute_dynamic_casts(
             byte_to_node.entry(disk_offset).or_default().push(node_id);
         }
     }
+}
+
+/// Attribute the page's `K2Node_FunctionResult` node to the function's
+/// `EX_Return` site(s). Function-map scope only (the ubergraph has no Result
+/// nodes); skipped when the page has zero or several Result nodes (each
+/// compiles its own return and the sites cannot be told apart by name).
+///
+/// A pure function's graph is pure expression nodes feeding the Result node,
+/// so without this partition nothing on the page resolves and every comment
+/// on it drops. The covering statement for a return site is the function's
+/// tail statement (the decoded body strips the implicit trailing Return),
+/// which is where the output computation lands.
+pub(super) fn attribute_function_results(
+    inputs: &K2NodeByteMapInputs<'_>,
+    partitions: &mut BTreeMap<usize, K2NodePartition>,
+    byte_to_node: &mut BTreeMap<usize, Vec<usize>>,
+) {
+    let GraphScope::FunctionPage(page) = inputs.scope else {
+        return;
+    };
+    let result_nodes: Vec<usize> = inputs
+        .asset
+        .exports
+        .iter()
+        .enumerate()
+        .filter_map(|(zero_based, (hdr, _))| {
+            let one_based = zero_based + 1;
+            let class = short_class(&resolve_index(
+                &inputs.asset.imports,
+                inputs.export_names,
+                hdr.class_index,
+            ));
+            (class == "K2Node_FunctionResult"
+                && enclosing_graph_name(inputs.asset, inputs.export_names, one_based).as_deref()
+                    == Some(page))
+            .then_some(one_based)
+        })
+        .collect();
+    let [result_node] = result_nodes[..] else {
+        return;
+    };
+    let walk_ctx = WalkCtx::new(inputs.bytecode, inputs.name_table, inputs.ue5);
+    let mut visitor = ReturnSiteVisitor {
+        offsets: Vec::new(),
+    };
+    let mut cursor = 0usize;
+    while cursor < inputs.bytecode.len() {
+        walk_opcode(&walk_ctx, &mut cursor, &mut visitor);
+    }
+    if visitor.offsets.is_empty() {
+        return;
+    }
+    let owners = owner_events_for_node(result_node, inputs);
+    let partition = partitions.entry(result_node).or_insert_with(|| {
+        K2NodePartition::new(
+            result_node,
+            owners.clone(),
+            node_class(inputs, result_node),
+            None,
+        )
+    });
+    extend_owner_events(partition, owners);
+    for offset in visitor.offsets {
+        push_range(&mut partition.ranges, offset..offset + 1);
+        byte_to_node.entry(offset).or_default().push(result_node);
+    }
+}
+
+/// Records the disk offset of every `EX_Return` opcode.
+struct ReturnSiteVisitor {
+    offsets: Vec<usize>,
+}
+
+impl OpcodeVisitor for ReturnSiteVisitor {
+    type Result = ();
+
+    fn enter_opcode(&mut self, opcode: u8, start_offset: usize) {
+        if opcode == EX_RETURN {
+            self.offsets.push(start_offset);
+        }
+    }
+
+    fn default_result(&mut self, _opcode: u8, _start_offset: usize) -> Self::Result {}
 }
 
 /// Reverse the call-site list to a per-node-id offset list so the
