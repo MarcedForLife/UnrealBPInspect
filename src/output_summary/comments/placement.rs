@@ -151,10 +151,6 @@ struct ClassifyContext<'a> {
     decoded: &'a DecodedAsset,
     /// `event_node_export_index -> event_name`, for the EventWrapping check.
     event_node_to_name: BTreeMap<usize, String>,
-    /// Owning event per latent-resume chain, keyed by the originating call's
-    /// disk offset. Resume-body statements render interleaved inside this
-    /// event's body, so it is the block an anchor in that chain keys by.
-    resume_owner_events: BTreeMap<usize, String>,
     /// `export_index -> (x, y)` node geometry, for entry ordering.
     node_positions: BTreeMap<usize, (i32, i32)>,
     /// Identifiable-node count per graph page, the coverage-rule denominator.
@@ -171,7 +167,6 @@ impl<'a> ClassifyContext<'a> {
         model: &CommentModel,
     ) -> Self {
         let event_node_to_name = build_event_node_to_name(parsed, export_names);
-        let resume_owner_events = build_resume_owner_events(decoded);
         let mut node_positions: BTreeMap<usize, (i32, i32)> = BTreeMap::new();
         let mut page_node_totals: BTreeMap<String, usize> = BTreeMap::new();
         for node in &model.nodes {
@@ -185,7 +180,6 @@ impl<'a> ClassifyContext<'a> {
         ClassifyContext {
             decoded,
             event_node_to_name,
-            resume_owner_events,
             node_positions,
             page_node_totals,
             parsed,
@@ -518,7 +512,7 @@ fn anchor_via_owner_event(
     // event body, so the span search above misses nodes that compiled into a
     // resume chunk (everything after a Delay-style call). Search the chains.
     for (call_offset, resume_body) in &context.decoded.resume_bodies {
-        let Some(event_name) = context.resume_owner_events.get(call_offset) else {
+        let Some(event_name) = context.decoded.resume_owner_events.get(call_offset) else {
             continue;
         };
         if let Some(stmt) = ubergraph.statement_for_node_in_span(node, resume_body) {
@@ -530,71 +524,6 @@ fn anchor_via_owner_event(
         }
     }
     Classification::Unanchored
-}
-
-/// Owning event per latent-resume chain, keyed by the originating call's
-/// disk offset.
-///
-/// A resume body belongs to the event whose rendered output interleaves it:
-/// the event whose body contains the originating latent call, or, for a
-/// chained latent (a Delay inside another resume chunk), the owner of the
-/// chain it sits in, resolved to a fixpoint.
-fn build_resume_owner_events(decoded: &DecodedAsset) -> BTreeMap<usize, String> {
-    fn collect_call_offsets(body: &[Stmt], out: &mut BTreeSet<usize>) {
-        for stmt in body {
-            if let Stmt::Call { offset, .. } = stmt {
-                out.insert(*offset);
-            }
-            for child in stmt.child_bodies() {
-                collect_call_offsets(child, out);
-            }
-        }
-    }
-
-    let event_calls: Vec<(&str, BTreeSet<usize>)> = decoded
-        .events
-        .iter()
-        .map(|event| {
-            let mut calls = BTreeSet::new();
-            collect_call_offsets(&event.body, &mut calls);
-            (event.name.as_str(), calls)
-        })
-        .collect();
-    let resume_calls: BTreeMap<usize, BTreeSet<usize>> = decoded
-        .resume_bodies
-        .iter()
-        .map(|(&call_offset, body)| {
-            let mut calls = BTreeSet::new();
-            collect_call_offsets(body, &mut calls);
-            (call_offset, calls)
-        })
-        .collect();
-
-    let mut owner: BTreeMap<usize, String> = BTreeMap::new();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for &call_offset in decoded.resume_bodies.keys() {
-            if owner.contains_key(&call_offset) {
-                continue;
-            }
-            let direct = event_calls
-                .iter()
-                .find(|(_, calls)| calls.contains(&call_offset))
-                .map(|(name, _)| name.to_string());
-            let chained = || {
-                resume_calls
-                    .iter()
-                    .find(|(&parent, calls)| parent != call_offset && calls.contains(&call_offset))
-                    .and_then(|(parent, _)| owner.get(parent).cloned())
-            };
-            if let Some(name) = direct.or_else(chained) {
-                owner.insert(call_offset, name);
-                changed = true;
-            }
-        }
-    }
-    owner
 }
 
 /// Package one inline placement at `statement_offset` in `block`.
@@ -767,6 +696,7 @@ mod tests {
                 export_index: None,
             }],
             resume_bodies: Default::default(),
+            resume_owner_events: Default::default(),
             byte_maps: Default::default(),
         }
     }
@@ -845,6 +775,7 @@ mod tests {
             }],
             events: vec![],
             resume_bodies: Default::default(),
+            resume_owner_events: Default::default(),
             byte_maps,
         }
     }
@@ -865,6 +796,7 @@ mod tests {
             functions: vec![],
             events: vec![],
             resume_bodies: Default::default(),
+            resume_owner_events: Default::default(),
             byte_maps: Default::default(),
         };
         let parsed = empty_parsed();
@@ -999,6 +931,7 @@ mod tests {
                 export_index: None,
             }],
             resume_bodies: std::iter::once((10usize, vec![call(50, "AfterDelay")])).collect(),
+            resume_owner_events: std::iter::once((10usize, "Ev".to_string())).collect(),
             byte_maps: ByteMaps {
                 ubergraph: Some(byte_map),
                 functions: Default::default(),
@@ -1111,6 +1044,7 @@ mod tests {
             functions: vec![],
             events: vec![],
             resume_bodies: Default::default(),
+            resume_owner_events: Default::default(),
             byte_maps: Default::default(),
         };
         let parsed = empty_parsed();

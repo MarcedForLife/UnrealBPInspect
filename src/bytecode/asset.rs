@@ -24,6 +24,15 @@ pub struct DecodedAsset {
     /// after the call line. Empty for assets without latent calls.
     #[serde(default)]
     pub resume_bodies: BTreeMap<usize, Vec<Stmt>>,
+    /// Owner event per latent-resume chain, keyed like `resume_bodies` by
+    /// the originating call's disk offset. Derived at partition time by
+    /// range containment (see `build_resume_owner_map` in
+    /// `decode::orchestrate`). Read by summary comment placement to key
+    /// resume-chunk anchors to the event whose rendered body interleaves
+    /// the chunk. Not serialised: rebuilt on every decode, no JSON
+    /// representation.
+    #[serde(skip)]
+    pub(crate) resume_owner_events: BTreeMap<usize, String>,
     /// K2Node-to-bytes attribution carried out to emit so a graph node can be
     /// resolved to the statement it produced: one ubergraph map plus one map
     /// per standalone function. Built during decode. Not serialised (it has no
