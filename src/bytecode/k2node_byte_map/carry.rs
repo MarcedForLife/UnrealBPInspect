@@ -70,6 +70,32 @@ impl K2NodeByteMap {
         covering_statement(body, anchor_disk)
     }
 
+    /// Fallback variant of [`Self::statement_for_node_in_span`] that
+    /// tries every attributed range start, anchoring at the earliest
+    /// one inside `body`'s span rather than only the global minimum.
+    ///
+    /// Recovers nodes whose first attributed byte is resume-chunk
+    /// prologue or scaffold a few bytes before the body's first
+    /// statement, where the strict gate rejects every body. Looser than
+    /// the strict variant (a collision-merged partition can carry range
+    /// starts in several bodies' spans), so callers run it only after
+    /// the strict variant has failed everywhere.
+    pub fn statement_for_node_in_span_per_range<'body>(
+        &self,
+        node_id: usize,
+        body: &'body [Stmt],
+    ) -> Option<&'body Stmt> {
+        let partition = self.partitions.get(&node_id)?;
+        let (span_min, span_max) = body_offset_span(body)?;
+        let anchor_disk = partition
+            .ranges
+            .iter()
+            .map(|range| range.start)
+            .filter(|start| (span_min..=span_max).contains(start))
+            .min()?;
+        covering_statement(body, anchor_disk)
+    }
+
     /// The node's anchor coordinate: the first disk byte of its attributed
     /// ranges.
     fn node_anchor_disk(&self, node_id: usize) -> Option<usize> {
