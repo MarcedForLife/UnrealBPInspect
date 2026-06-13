@@ -64,6 +64,7 @@ pub fn decode_asset(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
                 functions: vec![],
                 events: vec![],
                 resume_bodies: BTreeMap::new(),
+                ubergraph_byte_map: None,
             }
         }
     }
@@ -107,6 +108,7 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
                 functions: vec![],
                 events: vec![],
                 resume_bodies: BTreeMap::new(),
+                ubergraph_byte_map: None,
             };
         }
     };
@@ -134,6 +136,10 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
     // Keyed by the call's disk offset. Each ubergraph contributes its
     // own set; non-ubergraph assets leave this empty.
     let mut resume_bodies: BTreeMap<usize, Vec<crate::bytecode::stmt::Stmt>> = BTreeMap::new();
+    // Ubergraph K2Node-to-bytes attribution, carried out to emit so a node
+    // can be resolved to the statement it produced. Built inside the
+    // partition-OK arm below; stays `None` for assets with no ubergraph.
+    let mut ubergraph_byte_map: Option<crate::bytecode::k2node_byte_map::UbergraphByteMap> = None;
 
     // Locate the ubergraph export by name prefix.
     let ubergraph_export = asset
@@ -364,6 +370,13 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
                                 export_index: event_export_indices.get(event_name).copied(),
                             });
                         }
+                        // The event loop's last borrow of `k2node_byte_map`
+                        // (through `event_inputs`) ends above, so the map can
+                        // now move into the carrier emit uses.
+                        ubergraph_byte_map =
+                            Some(crate::bytecode::k2node_byte_map::UbergraphByteMap::new(
+                                k2node_byte_map,
+                            ));
                     }
                     Err(err) => {
                         eprintln!("decode: partition failed for {}: {}", ug_name, err);
@@ -509,6 +522,7 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
         functions,
         events,
         resume_bodies,
+        ubergraph_byte_map,
     }
 }
 

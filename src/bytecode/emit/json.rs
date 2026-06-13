@@ -25,6 +25,7 @@ mod tests {
             functions: vec![],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
+            ubergraph_byte_map: None,
         }
     }
 
@@ -56,6 +57,7 @@ mod tests {
             }],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
+            ubergraph_byte_map: None,
         };
         let output = emit_json(&asset);
         let parsed: serde_json::Value =
@@ -84,6 +86,7 @@ mod tests {
                 body: vec![],
             }],
             resume_bodies: std::collections::BTreeMap::new(),
+            ubergraph_byte_map: None,
         };
 
         let json_str = emit_json(&asset);

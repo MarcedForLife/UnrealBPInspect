@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::bytecode::k2node_byte_map::UbergraphByteMap;
 use crate::bytecode::stmt::Stmt;
 
 /// The decoded representation of a single Blueprint asset.
@@ -23,6 +24,18 @@ pub struct DecodedAsset {
     /// after the call line. Empty for assets without latent calls.
     #[serde(default)]
     pub resume_bodies: BTreeMap<usize, Vec<Stmt>>,
+    /// Ubergraph K2Node-to-bytes attribution carried out to emit so a graph
+    /// node can be resolved to the statement it produced. Built during
+    /// ubergraph decode; `None` for assets with no ubergraph. Not serialised
+    /// (it has no JSON representation and is rebuilt on every decode), so the
+    /// JSON output is unaffected. `pub(crate)` because the carrier type is an
+    /// internal decode artifact, unlike the serialisable IR fields above.
+    ///
+    /// Written here but not yet read by a production path; the emit-side
+    /// comment placement that consumes it lands in a later commit.
+    #[serde(skip)]
+    #[allow(dead_code)]
+    pub(crate) ubergraph_byte_map: Option<UbergraphByteMap>,
 }
 
 /// A decoded Blueprint function.

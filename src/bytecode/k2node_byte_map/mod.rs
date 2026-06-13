@@ -51,9 +51,12 @@ use partition::{
 };
 use scaffold::attribute_macro_scaffold_bytes;
 
+mod carry;
 mod offsets;
 mod partition;
 mod scaffold;
+
+pub(crate) use carry::UbergraphByteMap;
 
 /// Macro short names whose pin reachability the partition builder
 /// honours (`DoOnce` / `IsValid` / `FlipFlop`). FlipFlop is handled by

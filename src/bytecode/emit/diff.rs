@@ -55,6 +55,7 @@ mod tests {
             functions: vec![],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
+            ubergraph_byte_map: None,
         }
     }
 
@@ -71,6 +72,7 @@ mod tests {
             }],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
+            ubergraph_byte_map: None,
         }
     }
 
@@ -111,6 +113,7 @@ mod tests {
             }],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
+            ubergraph_byte_map: None,
         };
         let (diff_text, has_changes) = emit_diff(&left, &right, "before", "after", 3);
         assert!(has_changes);
@@ -147,6 +150,7 @@ mod tests {
                 body: vec![],
             }],
             resume_bodies: std::collections::BTreeMap::new(),
+            ubergraph_byte_map: None,
         };
         let right = empty_asset();
         let (diff_text, has_changes) = emit_diff(&left, &right, "before", "after", 3);
