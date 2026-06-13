@@ -53,10 +53,10 @@ pub(crate) mod walker;
 #[cfg(test)]
 mod walker_tests;
 
-// Re-exported for the private-fixtures `partition_tests::local_tests`
-// harness (`crate::bytecode::decode::build_mem_to_disk_map`); production
+// Re-exported for test harnesses (the cfg reaching-condition probes and
+// the private-fixtures `partition_tests::local_tests`); production
 // callers reach it through `super::mem_disk` directly.
-#[cfg(all(test, feature = "private-fixtures"))]
+#[cfg(test)]
 pub(crate) use mem_disk::build_mem_to_disk_map;
 
 pub use orchestrate::decode_asset;
@@ -65,9 +65,10 @@ pub(crate) use orchestrate::{
     decode_region_body, synthesize_owner_doonce_name, synthesize_owner_flipflop,
 };
 
-// Re-exported for the private-fixtures `partition_tests::local_tests`
-// harness; production callers reach it through `super::header` directly.
-#[cfg(all(test, feature = "private-fixtures"))]
+// Re-exported for test harnesses (the cfg reaching-condition probes and
+// the private-fixtures `partition_tests::local_tests`); production
+// callers reach it through `super::header` directly.
+#[cfg(test)]
 pub(crate) use header::read_version_and_name_table;
 
 // Crate-public so the `tests/local_*` integration harness (e.g.

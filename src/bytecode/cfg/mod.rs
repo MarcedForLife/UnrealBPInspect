@@ -14,6 +14,12 @@ use std::collections::{BTreeMap, BTreeSet};
 pub mod build;
 pub mod dom;
 pub mod macro_region;
+/// Reaching-condition oracle. Test-only by contract: it defines and checks
+/// "semantically equivalent" for emitted conditional structure (the
+/// `rc_vs_structure_survey` guard in `probe_tests`); nothing in the
+/// decode / emit pipeline may depend on it.
+#[cfg(test)]
+pub mod reaching;
 pub mod reducibility;
 pub mod region;
 pub mod region_linear;
