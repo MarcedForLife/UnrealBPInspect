@@ -9,14 +9,14 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::bytecode::decode::walker::{walk_opcode, FieldPath, OpcodeVisitor, WalkCtx};
 use crate::bytecode::opcodes::{
-    EX_DYNAMIC_CAST, EX_LET, EX_LET_DELEGATE, EX_LET_MULTICAST_DELEGATE,
-    EX_LET_VALUE_ON_PERSISTENT_FRAME, EX_META_CAST, EX_RETURN,
+    EX_DYNAMIC_CAST, EX_LET, EX_LET_BOOL, EX_LET_DELEGATE, EX_LET_MULTICAST_DELEGATE, EX_LET_OBJ,
+    EX_LET_VALUE_ON_PERSISTENT_FRAME, EX_LET_WEAK_OBJ_PTR, EX_META_CAST, EX_RETURN,
 };
 use crate::bytecode::pin_attribution::{build_callfunc_member_index, collect_call_sites};
 use crate::bytecode::resolve::resolve_bc_obj;
-use crate::prop_query::{find_prop_str, find_struct_field_str};
+use crate::prop_query::{find_prop, find_struct_field_str};
 use crate::resolve::{enclosing_graph_name, resolve_index, short_class};
-use crate::types::ParsedAsset;
+use crate::types::{ParsedAsset, PropValue};
 
 use super::{
     clamp_to_event_scope, extend_owner_events, node_class, normalise_member_name,
@@ -297,9 +297,11 @@ fn build_variableset_member_index(
 }
 
 /// Target-class to node-id index for every `K2Node_DynamicCast` with
-/// a `TargetType` property. `TargetType` is serialised as a
-/// string-rendered object reference (verified against a real UE 4.27
-/// fixture).
+/// a `TargetType` property. `TargetType` is an ObjectProperty package
+/// index (verified at runtime on a UE 4.27 fixture; a string-rendered
+/// object path is also accepted). Both forms key on the same short
+/// class name [`CastSiteVisitor`] records for the cast operand via
+/// `resolve_bc_obj`.
 fn build_dynamic_cast_index(
     asset: &ParsedAsset,
     export_names: &[String],
@@ -311,36 +313,61 @@ fn build_dynamic_cast_index(
         if short_class(&class_full) != "K2Node_DynamicCast" {
             continue;
         }
-        let Some(target_type) = find_prop_str(props, "TargetType") else {
-            continue;
+        let target_short = match find_prop(props, "TargetType").map(|prop| &prop.value) {
+            Some(PropValue::Object(obj_idx)) => {
+                resolve_bc_obj(*obj_idx, &asset.imports, export_names)
+            }
+            Some(PropValue::Str(path) | PropValue::Name(path)) => short_class(path),
+            _ => continue,
         };
-        index.entry(target_type).or_default().push(one_based);
+        index.entry(target_short).or_default().push(one_based);
     }
     index
 }
 
-/// Visitor that records `EX_LET*` target offsets and the last segment
-/// of the target field path (the member-variable name). All other
-/// opcodes fall through to the default no-op.
+/// Visitor that records `EX_LET*` target offsets and the target's
+/// member-variable name. `EX_Let` / delegate LETs carry the name as a
+/// field-path operand; the no-path variants (`EX_LetBool`, `EX_LetObj`,
+/// `EX_LetWeakObjPtr`) carry it inside the destination expression, so
+/// the variable-access hook hands its leaf one level up through the
+/// walk result. All other opcodes fall through to the default `None`.
 struct LetTargetVisitor {
     recorded: Vec<(usize, String)>,
 }
 
 impl LetTargetVisitor {
-    fn push_path(&mut self, start_offset: usize, path: &FieldPath) {
+    fn leaf_member(path: &FieldPath) -> Option<String> {
         if path.is_null() || path.display.is_empty() {
-            return;
+            return None;
         }
         let leaf = path.display.rsplit("::").next().unwrap_or(&path.display);
-        self.recorded
-            .push((start_offset, normalise_member_name(leaf)));
+        Some(normalise_member_name(leaf))
+    }
+
+    fn push_path(&mut self, start_offset: usize, path: &FieldPath) {
+        if let Some(member) = Self::leaf_member(path) {
+            self.recorded.push((start_offset, member));
+        }
     }
 }
 
 impl OpcodeVisitor for LetTargetVisitor {
-    type Result = ();
+    /// Leaf member name of a variable-access expression, carried one
+    /// level up so the no-path LET hooks can read their destination.
+    type Result = Option<String>;
 
-    fn default_result(&mut self, _opcode: u8, _start_offset: usize) -> Self::Result {}
+    fn default_result(&mut self, _opcode: u8, _start_offset: usize) -> Self::Result {
+        None
+    }
+
+    fn on_field_path_var(
+        &mut self,
+        _opcode: u8,
+        path: FieldPath,
+        _start_offset: usize,
+    ) -> Self::Result {
+        Self::leaf_member(&path)
+    }
 
     fn on_let_with_path(
         &mut self,
@@ -354,6 +381,23 @@ impl OpcodeVisitor for LetTargetVisitor {
             opcode == EX_LET || opcode == EX_LET_MULTICAST_DELEGATE || opcode == EX_LET_DELEGATE
         );
         self.push_path(start_offset, &path);
+        None
+    }
+
+    fn on_let_no_path(
+        &mut self,
+        opcode: u8,
+        lhs: Self::Result,
+        _rhs: Self::Result,
+        start_offset: usize,
+    ) -> Self::Result {
+        debug_assert!(
+            opcode == EX_LET_BOOL || opcode == EX_LET_OBJ || opcode == EX_LET_WEAK_OBJ_PTR
+        );
+        if let Some(member) = lhs {
+            self.recorded.push((start_offset, member));
+        }
+        None
     }
 
     fn on_let_value_on_persistent_frame(
@@ -364,6 +408,7 @@ impl OpcodeVisitor for LetTargetVisitor {
     ) -> Self::Result {
         let _ = EX_LET_VALUE_ON_PERSISTENT_FRAME;
         self.push_path(start_offset, &path);
+        None
     }
 }
 

@@ -86,9 +86,12 @@ Functions:
     GetSteeringAngle(out $SteeringAngle)
     if (NearlyEqual_FloatFloat(Abs($SteeringAngle), 1.0000, 0.0200) && self.WheelHitPlayable) {
         // "Play hit audio when the wheel hits max rotation"
+        // "Check if we are hitting the limit"
         $SpawnSoundAttached = SpawnSoundAttached(self.WheelMaxRotationCue, self.VREPhysicsConstraint, 'None',
             Vec(0.0000,0.0000,0.0000), Rot(0.0000,0.0000,0.0000), 0, false,
             FClamp(($Velocity / 100.0000), 0.0000, 2.0000), 1.0000, 0.0000, None, None, true)
+        // "Check if we have backed off"
+        // "the limit enough to reset"
         self.WheelHitPlayable = false
     } else {
         self.WheelHitPlayable = (Abs($SteeringAngle) <= self.WheeMaxRotationCueReset)
@@ -109,8 +112,10 @@ Functions:
         }
     }
     $GetCurrentTwist = self.VREPhysicsConstraint.GetCurrentTwist()
+    // "Subtract the rotation offset"
     // "We need to store the current rotation for comparing"
     // "the difference in future invocations"
+    // "Add the rotation offset"
     self.PreviousRotation = $GetCurrentTwist
     // "Calculate the current complete rotation from the physics constraint"
     // "The current, unclamped total rotation"
@@ -127,6 +132,8 @@ Functions:
         $Percent_FloatFloat = Percent_FloatFloat(self.MaxRotation, 360.0000)
         // "Enabled/Disable the twist limit if closer/further than 180 degrees to the max rotation
         //  limit"
+        // "Make sure we set the twist limit if we are below"
+        // "180 degrees until the max rotation"
         self.VREPhysicsConstraint.SetAngularTwistLimit(1,
             FClamp(SelectFloat(($Percent_FloatFloat - $Roll), ($Percent_FloatFloat + $Roll),
             (self.TotalRotation > 0.0000)), 0.0000, 170.0000))
@@ -140,6 +147,8 @@ Functions:
     SetActorTickEnabled(false)
     // sequence [1]:
     Delay(self, 0.0000)
+    // "The twist doesn't change until the next tick."
+    // "So, wait exactly one tick/frame"
     self.PreviousRotation = self.VREPhysicsConstraint.GetCurrentTwist()
     // "We've updated the previous twist and"
     // "can now resume ticking"

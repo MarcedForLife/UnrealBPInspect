@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::bytecode::asset::DecodedAsset;
 use crate::bytecode::stmt::Stmt;
-use crate::types::ParsedAsset;
+use crate::types::{EdGraphPin, ParsedAsset};
 
 use super::render::render_comment_lines;
 use super::{CommentBox, CommentModel};
@@ -146,6 +146,19 @@ enum Classification {
     Suppressed,
 }
 
+impl Classification {
+    /// Cascade combinator: keep a resolved outcome (`Placed`/`Suppressed`),
+    /// otherwise evaluate the next strategy. Lets a fallback chain read as
+    /// an ordered list of anchoring attempts instead of repeated
+    /// match-on-`Unanchored`.
+    fn or_else(self, next: impl FnOnce() -> Classification) -> Classification {
+        match self {
+            Classification::Unanchored => next(),
+            resolved => resolved,
+        }
+    }
+}
+
 /// Per-asset lookups the classifier consults, built once.
 struct ClassifyContext<'a> {
     decoded: &'a DecodedAsset,
@@ -231,15 +244,18 @@ fn classify(
 ) -> Option<Classification> {
     let page = comment.graph_page.clone()?;
 
-    // Bubble comments own one node; anchor to the owner's statement, or to
-    // the owner's nearest data consumer when the owner compiled to no bytes
-    // of its own (a bubble on a pure node).
+    // Bubble comments own one node; anchor to the owner's statement, to the
+    // owner's nearest data consumer when the owner compiled to no bytes of
+    // its own (a bubble on a pure node), or to the nearest downstream exec
+    // statement when the owner has no data outputs either (a bubble on a
+    // Branch or Knot).
     if comment.is_bubble {
         let owner = comment.owner_export?;
-        return Some(match anchor_to_node(comment, &page, owner, context) {
-            Classification::Unanchored => anchor_via_pin_follow(comment, &page, &[owner], context),
-            placed => placed,
-        });
+        return Some(
+            anchor_to_node(comment, &page, owner, context)
+                .or_else(|| anchor_via_pin_follow(comment, &page, &[owner], context))
+                .or_else(|| anchor_via_exec_follow_outward(comment, &page, owner, context)),
+        );
     }
 
     let contained = model.contained_nodes(comment);
@@ -380,15 +396,48 @@ fn anchor_via_exec_follow(
 /// pure node compiles to no bytes of its own, its expression renders inside
 /// the consuming statement, so the nearest resolvable consumer is the line
 /// the comment annotates (v1 reached the same line by string-matching the
-/// rendered expression text). Candidates at one depth are tried in
-/// export-index order, so the nearest consumer wins deterministically.
-/// Display-only EdGraph read; enumerated in
+/// rendered expression text). Display-only EdGraph read; enumerated in
 /// `docs/edgraph-correlation-inventory.md`.
 fn anchor_via_pin_follow(
     comment: &CommentBox,
     page: &str,
     start: &[usize],
     context: &ClassifyContext,
+) -> Classification {
+    anchor_via_link_follow(comment, page, start, context, EdGraphPin::is_data_output)
+}
+
+/// Last-resort bubble anchor: follow exec-output pin links outward from the
+/// bubble's owner, breadth-first, anchoring to the first reached node that
+/// resolves to a covering statement.
+///
+/// A bubble on an exec node with no attributable bytes of its own (a Branch
+/// whose JumpIfNot carries no member name, a Knot reroute) resolves neither
+/// directly nor through data pins; its nearest downstream execution
+/// statement is the line the comment annotates. The outward mirror of
+/// [`anchor_via_exec_follow`], without the contained-set restriction (a
+/// bubble has no box), so the walk is depth-capped like pin-following.
+/// Display-only EdGraph read; enumerated in
+/// `docs/edgraph-correlation-inventory.md`.
+fn anchor_via_exec_follow_outward(
+    comment: &CommentBox,
+    page: &str,
+    owner: usize,
+    context: &ClassifyContext,
+) -> Classification {
+    anchor_via_link_follow(comment, page, &[owner], context, EdGraphPin::is_exec_output)
+}
+
+/// Breadth-first walk over `follow_pin`-selected output links from `start`,
+/// trying each reached node as an anchor, up to [`PIN_FOLLOW_MAX_DEPTH`].
+/// Candidates at one depth are tried in export-index order, so the nearest
+/// match wins deterministically.
+fn anchor_via_link_follow(
+    comment: &CommentBox,
+    page: &str,
+    start: &[usize],
+    context: &ClassifyContext,
+    follow_pin: fn(&EdGraphPin) -> bool,
 ) -> Classification {
     let mut visited: BTreeSet<usize> = start.iter().copied().collect();
     let mut frontier: Vec<usize> = start.to_vec();
@@ -401,7 +450,7 @@ fn anchor_via_pin_follow(
             for link in pin_data
                 .pins
                 .iter()
-                .filter(|pin| pin.is_data_output())
+                .filter(|pin| follow_pin(pin))
                 .flat_map(|pin| pin.linked_to.iter())
             {
                 if visited.insert(link.node) {
@@ -490,16 +539,36 @@ fn anchor_via_owner_event(
     let Some(partition) = ubergraph.partitions.get(&node) else {
         return Classification::Unanchored;
     };
-    for event_name in &partition.owner_events {
-        let Some(event) = context
-            .decoded
-            .events
-            .iter()
-            .find(|event| &event.name == event_name)
-        else {
-            continue;
-        };
-        if let Some(stmt) = ubergraph.statement_for_node_in_span(node, &event.body) {
+    let owner_bodies: Vec<(&String, &[Stmt])> = partition
+        .owner_events
+        .iter()
+        .filter_map(|event_name| {
+            context
+                .decoded
+                .events
+                .iter()
+                .find(|event| &event.name == event_name)
+                .map(|event| (event_name, event.body.as_slice()))
+        })
+        .collect();
+    // Latent-resume continuations render interleaved inside the owning
+    // event's body, but their statements live in `resume_bodies`, not the
+    // event body, so the owner-body search misses nodes that compiled into
+    // a resume chunk (everything after a Delay-style call).
+    let chunk_bodies: Vec<(&String, &[Stmt])> = context
+        .decoded
+        .resume_bodies
+        .iter()
+        .filter_map(|(call_offset, resume_body)| {
+            context
+                .decoded
+                .resume_owner_events
+                .get(call_offset)
+                .map(|event_name| (event_name, resume_body.as_slice()))
+        })
+        .collect();
+    for (event_name, body) in owner_bodies.iter().chain(&chunk_bodies) {
+        if let Some(stmt) = ubergraph.statement_for_node_in_span(node, body) {
             return Classification::Placed(build_inline_placement(
                 comment,
                 event_name,
@@ -507,15 +576,12 @@ fn anchor_via_owner_event(
             ));
         }
     }
-    // Latent-resume continuations render interleaved inside the owning
-    // event's body, but their statements live in `resume_bodies`, not the
-    // event body, so the span search above misses nodes that compiled into a
-    // resume chunk (everything after a Delay-style call). Search the chains.
-    for (call_offset, resume_body) in &context.decoded.resume_bodies {
-        let Some(event_name) = context.decoded.resume_owner_events.get(call_offset) else {
-            continue;
-        };
-        if let Some(stmt) = ubergraph.statement_for_node_in_span(node, resume_body) {
+    // Per-range fallback, only after the strict gate rejected every body so
+    // existing anchors never move. Chunks before owner bodies: a near-miss
+    // node's true bytes live in its resume chunk, while a collision-merged
+    // partition can carry stray range starts inside any owner's span.
+    for (event_name, body) in chunk_bodies.iter().chain(&owner_bodies) {
+        if let Some(stmt) = ubergraph.statement_for_node_in_span_per_range(node, body) {
             return Classification::Placed(build_inline_placement(
                 comment,
                 event_name,
