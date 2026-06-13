@@ -140,11 +140,9 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
     // resolved to the statement it produced. The ubergraph map is built inside
     // the partition-OK arm below (`None` for assets with no ubergraph); the
     // per-function maps are collected by the standalone-function loop.
-    let mut ubergraph_byte_map: Option<crate::bytecode::k2node_byte_map::UbergraphByteMap> = None;
-    let mut function_byte_maps: BTreeMap<
-        String,
-        crate::bytecode::k2node_byte_map::UbergraphByteMap,
-    > = BTreeMap::new();
+    let mut ubergraph_byte_map: Option<crate::bytecode::k2node_byte_map::K2NodeByteMap> = None;
+    let mut function_byte_maps: BTreeMap<String, crate::bytecode::k2node_byte_map::K2NodeByteMap> =
+        BTreeMap::new();
 
     // Locate the ubergraph export by name prefix.
     let ubergraph_export = asset
@@ -379,10 +377,7 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
                         // The event loop's last borrow of `k2node_byte_map`
                         // (through `event_inputs`) ends above, so the map can
                         // now move into the carrier emit uses.
-                        ubergraph_byte_map =
-                            Some(crate::bytecode::k2node_byte_map::UbergraphByteMap::new(
-                                k2node_byte_map,
-                            ));
+                        ubergraph_byte_map = Some(k2node_byte_map);
                     }
                     Err(err) => {
                         eprintln!("decode: partition failed for {}: {}", ug_name, err);
@@ -742,7 +737,7 @@ fn decode_standalone_function_body(
     macro_names: &std::collections::HashMap<usize, String>,
 ) -> (
     Vec<crate::bytecode::stmt::Stmt>,
-    crate::bytecode::k2node_byte_map::UbergraphByteMap,
+    crate::bytecode::k2node_byte_map::K2NodeByteMap,
 ) {
     let full_range = Range {
         start: 0,
@@ -815,9 +810,8 @@ fn decode_standalone_function_body(
         scope: crate::bytecode::k2node_byte_map::GraphScope::FunctionPage(function_name),
     };
     let byte_map = crate::bytecode::k2node_byte_map::build_k2node_byte_map(&byte_map_inputs);
-    let carried = crate::bytecode::k2node_byte_map::UbergraphByteMap::new(byte_map);
 
-    (body, carried)
+    (body, byte_map)
 }
 
 /// Apply the transform pipeline to every function and event body.

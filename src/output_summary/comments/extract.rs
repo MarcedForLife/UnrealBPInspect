@@ -6,9 +6,9 @@
 //! node so the model can answer spatial-containment queries.
 
 use super::{CommentBox, CommentModel, NodeGeometry, EDGRAPH_NODE_COMMENT_CLASS};
-use crate::prop_query::{find_prop, find_prop_i32, find_prop_str};
+use crate::prop_query::{find_prop_bool, find_prop_i32, find_prop_str};
 use crate::resolve::{enclosing_graph_name, resolve_index, short_class};
-use crate::types::{ParsedAsset, PropValue, Property};
+use crate::types::{ParsedAsset, Property};
 
 /// Reroute (knot) nodes label wire routing, not logic, so their bubble
 /// comments are dropped during extraction.
@@ -135,18 +135,10 @@ fn bubble_comment(
     })
 }
 
-/// Read a boolean tagged property by name.
-fn find_prop_bool(props: &[Property], name: &str) -> Option<bool> {
-    match &find_prop(props, name)?.value {
-        PropValue::Bool(value) => Some(*value),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ExportHeader, ImportEntry};
+    use crate::types::{ExportHeader, ImportEntry, PropValue};
 
     fn str_prop(name: &str, value: &str) -> Property {
         Property {

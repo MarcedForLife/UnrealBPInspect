@@ -4,6 +4,7 @@ pub(crate) mod comments;
 pub mod diff;
 pub mod dump;
 pub mod json;
+mod scoped_ptr;
 mod sections;
 pub mod summary;
 

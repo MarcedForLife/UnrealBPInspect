@@ -10,7 +10,7 @@
 //!   `emit_function_block`.
 //! - Inline annotations keyed by `(block, statement_offset)`, installed as a
 //!   thread-local around each block's body so the statement-emit arm can look
-//!   them up by the statement's mem offset without threading a parameter
+//!   them up by the statement's disk offset without threading a parameter
 //!   through every `Stmt` variant.
 //!
 //! The thread-local is only ever installed by the summary block emitters, so
@@ -22,6 +22,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use crate::bytecode::asset::DecodedAsset;
+use crate::bytecode::emit::scoped_ptr::ScopedPtr;
 use crate::output_summary::comments::extract::build_comment_model;
 use crate::output_summary::comments::placement::{
     build_placement_plan, PlacedComment, PlacementClass,
@@ -113,7 +114,7 @@ thread_local! {
     /// for blocks with no inline comments and for the `--dump`/`--json` paths
     /// (which never install it). Set by [`with_block_comments`] around each
     /// block's body so the statement-emit arm can prepend annotation lines by
-    /// the statement's mem offset.
+    /// the statement's disk offset.
     static ACTIVE_INLINE_COMMENTS: RefCell<Option<*const BTreeMap<usize, Vec<String>>>> =
         const { RefCell::new(None) };
 }
@@ -138,10 +139,8 @@ pub(crate) fn with_inline_comments<R>(
     body: impl FnOnce() -> R,
 ) -> R {
     let next = map.map(|inner| inner as *const _);
-    let previous = ACTIVE_INLINE_COMMENTS.with(|cell| cell.replace(next));
-    let result = body();
-    ACTIVE_INLINE_COMMENTS.with(|cell| *cell.borrow_mut() = previous);
-    result
+    let _guard = ScopedPtr::set(&ACTIVE_INLINE_COMMENTS, next);
+    body()
 }
 
 /// Inline annotation lines for the statement at `offset` in the active block,
@@ -149,9 +148,9 @@ pub(crate) fn with_inline_comments<R>(
 /// annotation lines up with the construct it annotates). `None` when no
 /// comment anchors there (or no map is installed).
 pub(crate) fn inline_comment_lines(offset: usize, indent: &str) -> Option<Vec<String>> {
-    let map_ptr = ACTIVE_INLINE_COMMENTS.with(|cell| *cell.borrow())?;
+    let map_ptr = ScopedPtr::get(&ACTIVE_INLINE_COMMENTS)?;
     // Safety: the pointer is installed by `with_inline_comments` for the
-    // duration of one block's emit and restored before the borrow ends; the
+    // duration of one block's emit and restored when the guard drops; the
     // map outlives the block body it wraps.
     let map: &BTreeMap<usize, Vec<String>> = unsafe { &*map_ptr };
     let texts = map.get(&offset)?;
