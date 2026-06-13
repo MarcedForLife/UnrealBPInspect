@@ -7,7 +7,7 @@
 
 use super::{CommentBox, CommentModel, NodeGeometry, EDGRAPH_NODE_COMMENT_CLASS};
 use crate::prop_query::{find_prop, find_prop_i32, find_prop_str};
-use crate::resolve::{resolve_index, short_class};
+use crate::resolve::{enclosing_graph_name, resolve_index, short_class};
 use crate::types::{ParsedAsset, PropValue, Property};
 
 /// Reroute (knot) nodes label wire routing, not logic, so their bubble
@@ -35,12 +35,13 @@ pub(crate) fn build_comment_model(parsed: &ParsedAsset, export_names: &[String])
         ));
 
         // The EdGraph page export is the container, not a node on a page;
-        // `owning_block_name` would resolve it to itself, so skip it outright.
+        // `enclosing_graph_name` would resolve it to itself, so skip it
+        // outright.
         if class == EDGRAPH_CLASS {
             continue;
         }
 
-        let page = owning_block_name(parsed, export_names, one_based);
+        let page = enclosing_graph_name(parsed, export_names, one_based);
 
         if class == EDGRAPH_NODE_COMMENT_CLASS {
             if let Some(comment) = box_comment(props, page.clone()) {
@@ -140,35 +141,6 @@ fn find_prop_bool(props: &[Property], name: &str) -> Option<bool> {
         PropValue::Bool(value) => Some(*value),
         _ => None,
     }
-}
-
-/// Walk a node export's `outer_index` chain to the owning `EdGraph` export,
-/// whose `object_name` is the function/event graph-page name. Returns `None`
-/// if the chain hits a null outer or exceeds the depth guard before reaching
-/// an EdGraph ancestor.
-fn owning_block_name(
-    parsed: &ParsedAsset,
-    export_names: &[String],
-    node_one_based: usize,
-) -> Option<String> {
-    const MAX_OUTER_DEPTH: usize = 8;
-    let mut current = node_one_based as i32;
-    for _ in 0..MAX_OUTER_DEPTH {
-        let (hdr, _) = parsed.exports.get((current - 1) as usize)?;
-        let class = short_class(&resolve_index(
-            &parsed.imports,
-            export_names,
-            hdr.class_index,
-        ));
-        if class == EDGRAPH_CLASS {
-            return Some(hdr.object_name.clone());
-        }
-        if hdr.outer_index <= 0 {
-            return None;
-        }
-        current = hdr.outer_index;
-    }
-    None
 }
 
 #[cfg(test)]

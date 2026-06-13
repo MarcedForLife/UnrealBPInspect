@@ -322,7 +322,7 @@ mod tests {
             functions,
             events,
             resume_bodies: std::collections::BTreeMap::new(),
-            ubergraph_byte_map: None,
+            byte_maps: Default::default(),
         }
     }
 

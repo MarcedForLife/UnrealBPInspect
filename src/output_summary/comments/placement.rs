@@ -12,7 +12,15 @@
 //!    under the block header.
 //! 4. `InlineAtEntry` - a box anchored to the statement produced by its
 //!    top-left contained execution node.
-//! 5. `Fallback`      - no usable anchor; dropped (and counted).
+//! 5. Exec follow-through - when no entry point anchors (the entry is a Knot
+//!    reroute or a Branch with no attributable bytes), walk exec-output links
+//!    deeper into the contained set and anchor at the box's first anchorable
+//!    own statement.
+//! 6. Pin-follow      - when no contained node resolves directly (a bubble
+//!    on a pure node, a box of pure expression nodes, or exec nodes with no
+//!    byte attribution), follow data-output pin links outward and anchor to
+//!    the nearest consuming statement.
+//! 7. `Fallback`      - no usable anchor; dropped (and counted).
 //!
 //! Inline and bubble placements anchor through the byte map: contained node
 //! (or the bubble's owner) -> disk byte range -> covering statement -> the
@@ -24,7 +32,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::bytecode::asset::DecodedAsset;
 use crate::bytecode::stmt::Stmt;
-use crate::resolve::{resolve_index, short_class};
 use crate::types::{ParsedAsset, PIN_DIRECTION_INPUT, PIN_TYPE_EXEC};
 
 use super::render::render_comment_lines;
@@ -47,6 +54,12 @@ const EVENT_WRAP_INDENT: &str = "  ";
 /// Indent applied to a function-level description, sitting directly below the
 /// block signature at body indent (two summary levels, four spaces).
 const FUNCTION_LEVEL_INDENT: &str = "    ";
+
+/// Maximum breadth-first depth when following data-output pin links to find a
+/// consuming statement. Real chains run through Knot reroute nodes and nested
+/// pure-math nodes; the deepest anchor observed across the fixture corpus sits
+/// at depth 5.
+const PIN_FOLLOW_MAX_DEPTH: usize = 8;
 
 /// Where a placed comment attaches and how the emitter keys it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,9 +151,10 @@ struct ClassifyContext<'a> {
     decoded: &'a DecodedAsset,
     /// `event_node_export_index -> event_name`, for the EventWrapping check.
     event_node_to_name: BTreeMap<usize, String>,
-    /// Carried byte map for statement anchoring; `None` for assets with no
-    /// ubergraph (then inline placements cannot anchor and are dropped).
-    byte_map: Option<&'a crate::bytecode::k2node_byte_map::UbergraphByteMap>,
+    /// Owning event per latent-resume chain, keyed by the originating call's
+    /// disk offset. Resume-body statements render interleaved inside this
+    /// event's body, so it is the block an anchor in that chain keys by.
+    resume_owner_events: BTreeMap<usize, String>,
     /// Pin data is read here to find a box's execution entry point.
     parsed: &'a ParsedAsset,
 }
@@ -148,16 +162,16 @@ struct ClassifyContext<'a> {
 impl<'a> ClassifyContext<'a> {
     fn new(decoded: &'a DecodedAsset, parsed: &'a ParsedAsset, export_names: &[String]) -> Self {
         let event_node_to_name = build_event_node_to_name(parsed, export_names);
+        let resume_owner_events = build_resume_owner_events(decoded);
         ClassifyContext {
             decoded,
             event_node_to_name,
-            byte_map: decoded.ubergraph_byte_map.as_ref(),
+            resume_owner_events,
             parsed,
         }
     }
 
-    /// Body slice for `block`, searching events first (the byte map only
-    /// covers the ubergraph) then functions.
+    /// Body slice for `block`, searching events first then functions.
     fn body_for_block(&self, block: &str) -> Option<&[Stmt]> {
         if let Some(event) = self.decoded.events.iter().find(|event| event.name == block) {
             return Some(&event.body);
@@ -167,6 +181,19 @@ impl<'a> ClassifyContext<'a> {
             .iter()
             .find(|func| func.name == block)
             .map(|func| func.body.as_slice())
+    }
+
+    /// Byte map covering `block`: the ubergraph map for an event page, the
+    /// function's own map for a standalone-function page. `None` when no map
+    /// covers the block (then inline placements cannot anchor and are dropped).
+    fn byte_map_for_block(
+        &self,
+        block: &str,
+    ) -> Option<&crate::bytecode::k2node_byte_map::UbergraphByteMap> {
+        if self.decoded.events.iter().any(|event| event.name == block) {
+            return self.decoded.byte_maps.ubergraph.as_ref();
+        }
+        self.decoded.byte_maps.for_function(block)
     }
 }
 
@@ -179,10 +206,15 @@ fn classify(
 ) -> Option<Classification> {
     let page = comment.graph_page.clone()?;
 
-    // Bubble comments own one node; anchor to the owner's statement.
+    // Bubble comments own one node; anchor to the owner's statement, or to
+    // the owner's nearest data consumer when the owner compiled to no bytes
+    // of its own (a bubble on a pure node).
     if comment.is_bubble {
         let owner = comment.owner_export?;
-        return Some(anchor_to_node(comment, &page, owner, context));
+        return Some(match anchor_to_node(comment, &page, owner, context) {
+            Classification::Unanchored => anchor_via_pin_follow(comment, &page, &[owner], context),
+            placed => placed,
+        });
     }
 
     let contained = model.contained_nodes(comment);
@@ -236,33 +268,315 @@ fn classify(
 
     // InlineAtEntry: anchor to the top-left execution entry point of the box.
     let Some(entry) = exec_entry_point(&contained, model, context) else {
-        // Self-contained block with no exec boundary crossing. v1 punted these
-        // to the text-cluster fallback we deliberately do not port, so they
-        // are dropped here.
-        return Some(Classification::Unanchored);
+        // No exec boundary crossing: a box of pure expression nodes, or a
+        // self-contained exec block. Pure expressions render inside their
+        // consuming statement, so follow the data pins out before giving up.
+        return Some(anchor_via_pin_follow(comment, &page, &contained, context));
     };
-    Some(anchor_to_node(comment, &page, entry, context))
+    // The geometric entry is the top-left exec node, but it may be a pure node
+    // or a node whose member name didn't survive byte attribution. When it
+    // does not resolve, fall back to the first contained exec node that does,
+    // in deterministic (y, x, export) order, then to exec follow-through,
+    // then to pin-following.
+    match anchor_to_node(comment, &page, entry, context) {
+        Classification::Placed(placed) => Some(Classification::Placed(placed)),
+        Classification::Unanchored => {
+            let placed =
+                anchor_to_first_resolvable(comment, &page, &contained, entry, model, context)
+                    .or_else(|| anchor_via_exec_follow(comment, &page, &contained, context))
+                    .unwrap_or_else(|| anchor_via_pin_follow(comment, &page, &contained, context));
+            Some(placed)
+        }
+        other => Some(other),
+    }
+}
+
+/// After the box's exec entry points fail to anchor, walk exec-output pin
+/// links from them deeper into the contained set, breadth-first, trying each
+/// reached contained node as an anchor. Returns `None` when nothing inside
+/// the box anchors.
+///
+/// This reaches a box's real content when its entry compiles to no
+/// attributable bytes of its own: a Knot reroute on the box boundary, or an
+/// IfThenElse whose JumpIfNot carries no member name to match. The first
+/// anchorable node in execution order is the box's first own statement.
+/// Targets outside the contained set are never tried, so the anchor stays
+/// inside the box. Display-only EdGraph read; enumerated in
+/// `docs/edgraph-correlation-inventory.md`.
+fn anchor_via_exec_follow(
+    comment: &CommentBox,
+    page: &str,
+    contained: &[usize],
+    context: &ClassifyContext,
+) -> Option<Classification> {
+    let contained_set: BTreeSet<usize> = contained.iter().copied().collect();
+    // Seed with the entry points (already tried by the direct cascade).
+    let mut visited: BTreeSet<usize> = contained
+        .iter()
+        .copied()
+        .filter(|&node| node_has_external_exec_input(node, &contained_set, context.parsed))
+        .collect();
+    let mut frontier: Vec<usize> = visited.iter().copied().collect();
+    while !frontier.is_empty() {
+        let mut next: Vec<usize> = Vec::new();
+        for &node in &frontier {
+            let Some(pin_data) = context.parsed.pin_data.get(&node) else {
+                continue;
+            };
+            for link in pin_data
+                .pins
+                .iter()
+                .filter(|pin| pin.is_exec_output())
+                .flat_map(|pin| pin.linked_to.iter())
+            {
+                if contained_set.contains(&link.node) && visited.insert(link.node) {
+                    next.push(link.node);
+                }
+            }
+        }
+        next.sort_unstable();
+        for &candidate in &next {
+            if let placed @ Classification::Placed(_) =
+                anchor_to_node(comment, page, candidate, context)
+            {
+                return Some(placed);
+            }
+        }
+        frontier = next;
+    }
+    None
+}
+
+/// Last-resort anchor: follow data-output pin links outward from `start`,
+/// breadth-first, anchoring to the first reached node that resolves to a
+/// covering statement.
+///
+/// This is what places a bubble on a pure node (`VariableGet`, pure
+/// `CallFunction`, math operators) or a box containing only pure nodes: a
+/// pure node compiles to no bytes of its own, its expression renders inside
+/// the consuming statement, so the nearest resolvable consumer is the line
+/// the comment annotates (v1 reached the same line by string-matching the
+/// rendered expression text). Candidates at one depth are tried in
+/// export-index order, so the nearest consumer wins deterministically.
+/// Display-only EdGraph read; enumerated in
+/// `docs/edgraph-correlation-inventory.md`.
+fn anchor_via_pin_follow(
+    comment: &CommentBox,
+    page: &str,
+    start: &[usize],
+    context: &ClassifyContext,
+) -> Classification {
+    let mut visited: BTreeSet<usize> = start.iter().copied().collect();
+    let mut frontier: Vec<usize> = start.to_vec();
+    for _ in 0..PIN_FOLLOW_MAX_DEPTH {
+        let mut next: Vec<usize> = Vec::new();
+        for &node in &frontier {
+            let Some(pin_data) = context.parsed.pin_data.get(&node) else {
+                continue;
+            };
+            for link in pin_data
+                .pins
+                .iter()
+                .filter(|pin| pin.is_data_output())
+                .flat_map(|pin| pin.linked_to.iter())
+            {
+                if visited.insert(link.node) {
+                    next.push(link.node);
+                }
+            }
+        }
+        if next.is_empty() {
+            return Classification::Unanchored;
+        }
+        next.sort_unstable();
+        for &candidate in &next {
+            if let placed @ Classification::Placed(_) =
+                anchor_to_node(comment, page, candidate, context)
+            {
+                return placed;
+            }
+        }
+        frontier = next;
+    }
+    Classification::Unanchored
+}
+
+/// Try each contained execution entry point after `already_tried`, in the same
+/// `(y, x, export)` order [`exec_entry_point`] uses, returning the first that
+/// resolves to a covering statement. `None` when none resolve.
+fn anchor_to_first_resolvable(
+    comment: &CommentBox,
+    page: &str,
+    contained: &[usize],
+    already_tried: usize,
+    model: &CommentModel,
+    context: &ClassifyContext,
+) -> Option<Classification> {
+    let contained_set: BTreeSet<usize> = contained.iter().copied().collect();
+    let mut entries: Vec<(i32, i32, usize)> = contained
+        .iter()
+        .copied()
+        .filter(|&node| node_has_external_exec_input(node, &contained_set, context.parsed))
+        .map(|node| {
+            let (x, y) = node_position(model, node);
+            (y, x, node)
+        })
+        .collect();
+    entries.sort_unstable();
+    for (_, _, node) in entries {
+        if node == already_tried {
+            continue;
+        }
+        if let Classification::Placed(placed) = anchor_to_node(comment, page, node, context) {
+            return Some(Classification::Placed(placed));
+        }
+    }
+    None
 }
 
 /// Resolve `node` (a contained or owner export) to the statement it produced
 /// and build the inline placement. Returns `Unanchored` when no byte map
 /// covers the node or no statement covers its range.
+///
+/// When `page` names a decoded block directly, the anchor resolves inside that
+/// block. When it does not (an ubergraph editor page like `EventGraph` or
+/// `Input`, which decoded events are not keyed by), the owning event is
+/// inferred from the node's byte attribution instead.
 fn anchor_to_node(
     comment: &CommentBox,
     page: &str,
     node: usize,
     context: &ClassifyContext,
 ) -> Classification {
-    let Some(byte_map) = context.byte_map else {
-        return Classification::Unanchored;
-    };
     let Some(body) = context.body_for_block(page) else {
+        return anchor_via_owner_event(comment, node, context);
+    };
+    let Some(byte_map) = context.byte_map_for_block(page) else {
         return Classification::Unanchored;
     };
     let Some(stmt) = byte_map.statement_for_node(node, body) else {
         return Classification::Unanchored;
     };
     Classification::Placed(build_inline_placement(comment, page, stmt.offset()))
+}
+
+/// Anchor a box whose `graph_page` is an ubergraph editor page name rather
+/// than a decoded block name. The ubergraph partition for `node` carries the
+/// events whose pin trees reach it (`owner_events`); try each owning event in
+/// sorted order and anchor inside the first decoded body whose statement span
+/// contains the node's bytes. The span requirement stops a multi-owner node
+/// (shared scaffold) from anchoring to the trailing statement of a sibling
+/// event that merely precedes it.
+fn anchor_via_owner_event(
+    comment: &CommentBox,
+    node: usize,
+    context: &ClassifyContext,
+) -> Classification {
+    let Some(ubergraph) = context.decoded.byte_maps.ubergraph.as_ref() else {
+        return Classification::Unanchored;
+    };
+    let Some(partition) = ubergraph.byte_map.partitions.get(&node) else {
+        return Classification::Unanchored;
+    };
+    for event_name in &partition.owner_events {
+        let Some(event) = context
+            .decoded
+            .events
+            .iter()
+            .find(|event| &event.name == event_name)
+        else {
+            continue;
+        };
+        if let Some(stmt) = ubergraph.statement_for_node_in_span(node, &event.body) {
+            return Classification::Placed(build_inline_placement(
+                comment,
+                event_name,
+                stmt.offset(),
+            ));
+        }
+    }
+    // Latent-resume continuations render interleaved inside the owning
+    // event's body, but their statements live in `resume_bodies`, not the
+    // event body, so the span search above misses nodes that compiled into a
+    // resume chunk (everything after a Delay-style call). Search the chains.
+    for (call_offset, resume_body) in &context.decoded.resume_bodies {
+        let Some(event_name) = context.resume_owner_events.get(call_offset) else {
+            continue;
+        };
+        if let Some(stmt) = ubergraph.statement_for_node_in_span(node, resume_body) {
+            return Classification::Placed(build_inline_placement(
+                comment,
+                event_name,
+                stmt.offset(),
+            ));
+        }
+    }
+    Classification::Unanchored
+}
+
+/// Owning event per latent-resume chain, keyed by the originating call's
+/// disk offset.
+///
+/// A resume body belongs to the event whose rendered output interleaves it:
+/// the event whose body contains the originating latent call, or, for a
+/// chained latent (a Delay inside another resume chunk), the owner of the
+/// chain it sits in, resolved to a fixpoint.
+fn build_resume_owner_events(decoded: &DecodedAsset) -> BTreeMap<usize, String> {
+    fn collect_call_offsets(body: &[Stmt], out: &mut BTreeSet<usize>) {
+        for stmt in body {
+            if let Stmt::Call { offset, .. } = stmt {
+                out.insert(*offset);
+            }
+            for child in stmt.child_bodies() {
+                collect_call_offsets(child, out);
+            }
+        }
+    }
+
+    let event_calls: Vec<(&str, BTreeSet<usize>)> = decoded
+        .events
+        .iter()
+        .map(|event| {
+            let mut calls = BTreeSet::new();
+            collect_call_offsets(&event.body, &mut calls);
+            (event.name.as_str(), calls)
+        })
+        .collect();
+    let resume_calls: BTreeMap<usize, BTreeSet<usize>> = decoded
+        .resume_bodies
+        .iter()
+        .map(|(&call_offset, body)| {
+            let mut calls = BTreeSet::new();
+            collect_call_offsets(body, &mut calls);
+            (call_offset, calls)
+        })
+        .collect();
+
+    let mut owner: BTreeMap<usize, String> = BTreeMap::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &call_offset in decoded.resume_bodies.keys() {
+            if owner.contains_key(&call_offset) {
+                continue;
+            }
+            let direct = event_calls
+                .iter()
+                .find(|(_, calls)| calls.contains(&call_offset))
+                .map(|(name, _)| name.to_string());
+            let chained = || {
+                resume_calls
+                    .iter()
+                    .find(|(&parent, calls)| parent != call_offset && calls.contains(&call_offset))
+                    .and_then(|(parent, _)| owner.get(parent).cloned())
+            };
+            if let Some(name) = direct.or_else(chained) {
+                owner.insert(call_offset, name);
+                changed = true;
+            }
+        }
+    }
+    owner
 }
 
 /// Package one inline placement at `statement_offset` in `block`.
@@ -341,49 +655,22 @@ fn node_position(model: &CommentModel, node: usize) -> (i32, i32) {
         .unwrap_or((0, 0))
 }
 
-/// Map each event-entry node export index to its event name.
+/// Map each event-entry node export index to its event name, by inverting the
+/// canonical decode-side derivation (`decode::build_event_node_index`), which
+/// also covers `K2Node_InputAction` nodes (their event names follow the
+/// `InpActEvt_{action}_...` function-export pattern, not a node property).
+///
+/// A single node can serve several compiled events (one InputAction node
+/// backs both the Pressed and Released functions); name-ascending iteration
+/// keeps the lexicographically first, matching the EventWrapping
+/// first-contained-event tie-break.
 fn build_event_node_to_name(
     parsed: &ParsedAsset,
     export_names: &[String],
 ) -> BTreeMap<usize, String> {
-    use crate::prop_query::find_prop;
-    use crate::types::PropValue;
-
-    const EVENT_CLASSES_WITH_FUNCTION_NAME: [&str; 3] = [
-        "K2Node_CustomEvent",
-        "K2Node_InputAxisEvent",
-        "K2Node_ComponentBoundEvent",
-    ];
-
     let mut map = BTreeMap::new();
-    for (zero_based, (hdr, props)) in parsed.exports.iter().enumerate() {
-        let one_based = zero_based + 1;
-        let class = short_class(&resolve_index(
-            &parsed.imports,
-            export_names,
-            hdr.class_index,
-        ));
-        let event_name = if EVENT_CLASSES_WITH_FUNCTION_NAME.contains(&class.as_str()) {
-            match find_prop(props, "CustomFunctionName").map(|prop| &prop.value) {
-                Some(PropValue::Name(name)) => Some(name.clone()),
-                _ => None,
-            }
-        } else if class == "K2Node_Event" {
-            find_prop(props, "EventReference")
-                .and_then(|prop| match &prop.value {
-                    PropValue::Struct { fields, .. } => find_prop(fields, "MemberName"),
-                    _ => None,
-                })
-                .and_then(|prop| match &prop.value {
-                    PropValue::Name(name) => Some(name.clone()),
-                    _ => None,
-                })
-        } else {
-            None
-        };
-        if let Some(name) = event_name {
-            map.insert(one_based, name);
-        }
+    for (name, node) in crate::bytecode::decode::build_event_node_index(parsed, export_names) {
+        map.entry(node).or_insert(name);
     }
     map
 }
@@ -428,9 +715,14 @@ fn inline_offset(class: &PlacementClass) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bytecode::asset::Event;
+    use crate::bytecode::asset::{Event, Function};
+    use crate::bytecode::decode::cross_event_inline::K2NodeClass;
     use crate::bytecode::expr::Expr;
+    use crate::bytecode::k2node_byte_map::{
+        ByteMaps, K2NodeByteMap, K2NodePartition, UbergraphByteMap,
+    };
     use crate::output_summary::comments::NodeGeometry;
+    use crate::types::{EdGraphPin, LinkedPin, NodePinData, PIN_DIRECTION_OUTPUT};
 
     fn call(offset: usize, name: &str) -> Stmt {
         Stmt::Call {
@@ -472,7 +764,7 @@ mod tests {
                 export_index: None,
             }],
             resume_bodies: Default::default(),
-            ubergraph_byte_map: None,
+            byte_maps: Default::default(),
         }
     }
 
@@ -483,6 +775,76 @@ mod tests {
             pin_data: Default::default(),
             function_signatures: Default::default(),
             bytecode_by_export: Default::default(),
+        }
+    }
+
+    /// One exec pin in `direction`, optionally linked to `target`.
+    fn exec_pin(direction: u8, target: Option<usize>) -> EdGraphPin {
+        EdGraphPin {
+            name: "exec".into(),
+            pin_type: PIN_TYPE_EXEC.into(),
+            direction,
+            pin_id: [0; 16],
+            linked_to: target
+                .map(|node| {
+                    vec![LinkedPin {
+                        node,
+                        pin_id: [0; 16],
+                    }]
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Pin data for a pure node: one data-output pin linked to `target`.
+    fn pure_node_pins(target: usize) -> NodePinData {
+        NodePinData {
+            pins: vec![EdGraphPin {
+                name: "Out".into(),
+                pin_type: "float".into(),
+                direction: PIN_DIRECTION_OUTPUT,
+                pin_id: [0; 16],
+                linked_to: vec![LinkedPin {
+                    node: target,
+                    pin_id: [0; 16],
+                }],
+            }],
+        }
+    }
+
+    /// A decoded asset with one function whose byte map attributes
+    /// `attributed_node` to a disk range starting at `disk_start`.
+    fn decoded_with_mapped_function(
+        name: &str,
+        body: Vec<Stmt>,
+        attributed_node: usize,
+        disk_start: usize,
+    ) -> DecodedAsset {
+        let mut byte_map = K2NodeByteMap::default();
+        byte_map.partitions.insert(
+            attributed_node,
+            K2NodePartition {
+                node_id: attributed_node,
+                ranges: std::iter::once(disk_start..disk_start + 4).collect(),
+                owner_events: Default::default(),
+                kind: K2NodeClass::Other,
+                macro_kind: None,
+                via_fallback: Vec::new(),
+            },
+        );
+        let mut byte_maps = ByteMaps::default();
+        byte_maps
+            .functions
+            .insert(name.into(), UbergraphByteMap::new(byte_map));
+        DecodedAsset {
+            functions: vec![Function {
+                name: name.into(),
+                body,
+                export_index: None,
+            }],
+            events: vec![],
+            resume_bodies: Default::default(),
+            byte_maps,
         }
     }
 
@@ -502,7 +864,7 @@ mod tests {
             functions: vec![],
             events: vec![],
             resume_bodies: Default::default(),
-            ubergraph_byte_map: None,
+            byte_maps: Default::default(),
         };
         let parsed = empty_parsed();
         let plan = build_placement_plan(&decoded, &parsed, &[], &model);
@@ -526,6 +888,195 @@ mod tests {
         };
         let decoded = decoded_with_event("MyFunc", vec![call(0, "f")]);
         let parsed = empty_parsed();
+        let plan = build_placement_plan(&decoded, &parsed, &[], &model);
+        assert_eq!(plan.placed.len(), 0);
+        assert_eq!(plan.unanchored, 1);
+    }
+
+    #[test]
+    fn bubble_on_pure_node_anchors_via_pin_follow() {
+        // Node 2 is pure (no byte attribution); its data output feeds node 3,
+        // attributed to disk bytes from 20. The bubble anchors to the
+        // statement covering those bytes.
+        let model = CommentModel {
+            boxes: vec![CommentBox {
+                text: "pure note".into(),
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+                is_bubble: true,
+                owner_export: Some(2),
+                graph_page: Some("MyFunc".into()),
+            }],
+            nodes: vec![],
+        };
+        let decoded =
+            decoded_with_mapped_function("MyFunc", vec![call(10, "a"), call(20, "b")], 3, 20);
+        let mut parsed = empty_parsed();
+        parsed.pin_data.insert(2, pure_node_pins(3));
+        let plan = build_placement_plan(&decoded, &parsed, &[], &model);
+        assert_eq!(plan.unanchored, 0);
+        assert_eq!(plan.placed.len(), 1);
+        assert_eq!(plan.placed[0].block, "MyFunc");
+        assert_eq!(
+            plan.placed[0].class,
+            PlacementClass::InlineAtStatement {
+                statement_offset: 20
+            }
+        );
+    }
+
+    #[test]
+    fn all_pure_box_anchors_through_knot_chain() {
+        // The box contains only pure node 2 (25% of the page, below the
+        // coverage threshold, no exec pins). Its output reroutes through pure
+        // node 9 before reaching the attributed consumer node 3 at depth 2.
+        let model = CommentModel {
+            boxes: vec![box_at("pure box", -5, -5, 10, 10, "MyFunc")],
+            nodes: vec![
+                node_geom(2, 0, 0, "MyFunc"),
+                node_geom(3, 100, 100, "MyFunc"),
+                node_geom(4, 200, 200, "MyFunc"),
+                node_geom(5, 300, 300, "MyFunc"),
+            ],
+        };
+        let decoded =
+            decoded_with_mapped_function("MyFunc", vec![call(10, "a"), call(20, "b")], 3, 20);
+        let mut parsed = empty_parsed();
+        parsed.pin_data.insert(2, pure_node_pins(9));
+        parsed.pin_data.insert(9, pure_node_pins(3));
+        let plan = build_placement_plan(&decoded, &parsed, &[], &model);
+        assert_eq!(plan.unanchored, 0);
+        assert_eq!(plan.placed.len(), 1);
+        assert_eq!(
+            plan.placed[0].class,
+            PlacementClass::InlineAtStatement {
+                statement_offset: 20
+            }
+        );
+    }
+
+    #[test]
+    fn ubergraph_page_node_anchors_inside_resume_body() {
+        // Node 7 compiled into a latent-resume chunk: its bytes (50..51) lie
+        // in the resume body of the Delay call at offset 10, which itself
+        // sits in event "Ev". The bubble's page is the ubergraph editor page
+        // name, so anchoring goes through anchor_via_owner_event; the event
+        // body span (10..=10) misses the node, the resume-chain search finds
+        // it and keys the placement by the owning event.
+        let model = CommentModel {
+            boxes: vec![CommentBox {
+                text: "after the delay".into(),
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+                is_bubble: true,
+                owner_export: Some(7),
+                graph_page: Some("EventGraph".into()),
+            }],
+            nodes: vec![],
+        };
+        let mut byte_map = K2NodeByteMap::default();
+        byte_map.partitions.insert(
+            7,
+            K2NodePartition {
+                node_id: 7,
+                ranges: std::iter::once(50..51).collect(),
+                owner_events: Default::default(),
+                kind: K2NodeClass::Other,
+                macro_kind: None,
+                via_fallback: Vec::new(),
+            },
+        );
+        let decoded = DecodedAsset {
+            functions: vec![],
+            events: vec![Event {
+                name: "Ev".into(),
+                body: vec![call(10, "Delay")],
+                export_index: None,
+            }],
+            resume_bodies: std::iter::once((10usize, vec![call(50, "AfterDelay")])).collect(),
+            byte_maps: ByteMaps {
+                ubergraph: Some(UbergraphByteMap::new(byte_map)),
+                functions: Default::default(),
+            },
+        };
+        let parsed = empty_parsed();
+        let plan = build_placement_plan(&decoded, &parsed, &[], &model);
+        assert_eq!(plan.unanchored, 0);
+        assert_eq!(plan.placed.len(), 1);
+        assert_eq!(plan.placed[0].block, "Ev");
+        assert_eq!(
+            plan.placed[0].class,
+            PlacementClass::InlineAtStatement {
+                statement_offset: 50
+            }
+        );
+    }
+
+    #[test]
+    fn knot_entry_box_anchors_via_exec_follow() {
+        // Node 2 is the box's only exec entry (wired from node 99 outside)
+        // but has no byte attribution (a reroute); its exec output leads to
+        // contained node 3, which is attributed. The box anchors at node 3's
+        // statement instead of dropping.
+        let model = CommentModel {
+            boxes: vec![box_at("entry is a knot", -5, -5, 120, 120, "MyFunc")],
+            nodes: vec![
+                node_geom(2, 0, 0, "MyFunc"),
+                node_geom(3, 50, 50, "MyFunc"),
+                node_geom(4, 500, 500, "MyFunc"),
+                node_geom(5, 600, 600, "MyFunc"),
+                node_geom(99, -300, 0, "MyFunc"),
+            ],
+        };
+        let decoded =
+            decoded_with_mapped_function("MyFunc", vec![call(10, "a"), call(20, "b")], 3, 20);
+        let mut parsed = empty_parsed();
+        parsed.pin_data.insert(
+            2,
+            NodePinData {
+                pins: vec![
+                    exec_pin(PIN_DIRECTION_INPUT, Some(99)),
+                    exec_pin(PIN_DIRECTION_OUTPUT, Some(3)),
+                ],
+            },
+        );
+        parsed.pin_data.insert(
+            3,
+            NodePinData {
+                pins: vec![exec_pin(PIN_DIRECTION_INPUT, Some(2))],
+            },
+        );
+        let plan = build_placement_plan(&decoded, &parsed, &[], &model);
+        assert_eq!(plan.unanchored, 0);
+        assert_eq!(plan.placed.len(), 1);
+        assert_eq!(
+            plan.placed[0].class,
+            PlacementClass::InlineAtStatement {
+                statement_offset: 20
+            }
+        );
+    }
+
+    #[test]
+    fn pin_follow_dead_end_stays_unanchored() {
+        // Node 2's data chain ends at node 9, which has no attribution and no
+        // further links; the box drops to the unanchored count.
+        let model = CommentModel {
+            boxes: vec![box_at("dead end", -5, -5, 10, 10, "MyFunc")],
+            nodes: vec![
+                node_geom(2, 0, 0, "MyFunc"),
+                node_geom(3, 100, 100, "MyFunc"),
+                node_geom(4, 200, 200, "MyFunc"),
+                node_geom(5, 300, 300, "MyFunc"),
+            ],
+        };
+        let decoded = decoded_with_mapped_function("MyFunc", vec![call(10, "a")], 3, 20);
+        let mut parsed = empty_parsed();
+        parsed.pin_data.insert(2, pure_node_pins(9));
         let plan = build_placement_plan(&decoded, &parsed, &[], &model);
         assert_eq!(plan.placed.len(), 0);
         assert_eq!(plan.unanchored, 1);
@@ -559,7 +1110,7 @@ mod tests {
             functions: vec![],
             events: vec![],
             resume_bodies: Default::default(),
-            ubergraph_byte_map: None,
+            byte_maps: Default::default(),
         };
         let parsed = empty_parsed();
         let plan = build_placement_plan(&decoded, &parsed, &[], &model);
