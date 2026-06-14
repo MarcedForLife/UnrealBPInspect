@@ -42,7 +42,7 @@ use std::ops::Range;
 use crate::binary::NameTable;
 use crate::bytecode::decode::cross_event_inline::K2NodeClass;
 use crate::bytecode::names::{normalize_lwc_name, strip_guid_suffix, MacroKind};
-use crate::types::ParsedAsset;
+use crate::types::{NodePinData, ParsedAsset};
 
 use offsets::{
     attribute_calls, attribute_dynamic_casts, attribute_function_results, attribute_variable_sets,
@@ -289,7 +289,7 @@ pub(crate) struct K2NodeByteMapInputs<'a> {
     pub graph: &'a crate::bytecode::partition::OpcodeGraph,
     /// Which graph this map covers. Member-name indices are asset-wide, so
     /// ambiguous matches are restricted to graph-local candidates before
-    /// event-scope clamping (see [`clamp_to_event_scope`]).
+    /// event-scope clamping (see [`resolve_member_group`]).
     pub scope: GraphScope<'a>,
 }
 
@@ -316,17 +316,52 @@ fn node_class(inputs: &K2NodeByteMapInputs<'_>, node_id: usize) -> K2NodeClass {
         .unwrap_or(K2NodeClass::Other)
 }
 
-/// Construct a [`K2NodeByteMap`] for one ubergraph.
+/// Which attribution view a byte map is built for. The two views differ
+/// only in the same-name group bijection (see [`resolve_member_group`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttributionMode {
+    /// Decoder view: per-site lowest-id attribution only. The decode loop
+    /// threads this. Frozen with respect to comment work, so comment
+    /// attribution changes can never alter decoded structure (the
+    /// cross-event-inline classifier and macro_region read these
+    /// partitions).
+    Conservative,
+    /// Comment view: the conservative baseline plus the same-name group
+    /// bijection. Consumed only by summary comment placement.
+    CommentRefined,
+}
+
+/// Construct the COMMENT-view [`K2NodeByteMap`] for one graph (group
+/// bijection applied). This is the map carried out to summary comment
+/// placement; nothing in the decode path reads it.
 pub(crate) fn build_k2node_byte_map(inputs: &K2NodeByteMapInputs<'_>) -> K2NodeByteMap {
+    build_k2node_byte_map_with_mode(inputs, AttributionMode::CommentRefined)
+}
+
+/// Construct the DECODER-view [`K2NodeByteMap`] for one graph
+/// (conservative per-site attribution, no comment-only group bijection).
+/// The decode loop threads this so that comment-precision work, which
+/// rides the [`CommentRefined`](AttributionMode::CommentRefined) view,
+/// cannot regress decoded structure.
+pub(crate) fn build_k2node_byte_map_conservative(
+    inputs: &K2NodeByteMapInputs<'_>,
+) -> K2NodeByteMap {
+    build_k2node_byte_map_with_mode(inputs, AttributionMode::Conservative)
+}
+
+fn build_k2node_byte_map_with_mode(
+    inputs: &K2NodeByteMapInputs<'_>,
+    mode: AttributionMode,
+) -> K2NodeByteMap {
     let mut partitions: BTreeMap<usize, K2NodePartition> = BTreeMap::new();
     let mut byte_to_node: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
 
-    attribute_calls(inputs, &mut partitions, &mut byte_to_node);
+    attribute_calls(inputs, mode, &mut partitions, &mut byte_to_node);
     attribute_macro_instances(inputs, &mut partitions);
     let (gate_let_owner_by_offset, gate_let_var_by_offset, gate_let_is_set_by_offset) =
         attribute_macro_scaffold_bytes(inputs, &mut partitions, &mut byte_to_node);
-    attribute_variable_sets(inputs, &mut partitions, &mut byte_to_node);
-    attribute_dynamic_casts(inputs, &mut partitions, &mut byte_to_node);
+    attribute_variable_sets(inputs, mode, &mut partitions, &mut byte_to_node);
+    attribute_dynamic_casts(inputs, mode, &mut partitions, &mut byte_to_node);
     attribute_function_results(inputs, &mut partitions, &mut byte_to_node);
     attribute_execution_sequences(inputs, &mut partitions, &mut byte_to_node);
     attribute_latent_resume_blocks(inputs, &mut partitions, &mut byte_to_node);
@@ -401,38 +436,49 @@ pub(super) fn normalise_member_name(raw: &str) -> String {
     normalize_lwc_name(strip_guid_suffix(raw))
 }
 
-/// Filter a candidate K2Node id set down to a single owner whose
-/// owning events physically contain `call_offset`. When several
-/// K2Nodes share a member name (the kismet helper case, e.g.
-/// `Add_FloatFloat` or a user-named duplicate call) the unfiltered
-/// set fans every bytecode site out to every K2Node that bears the
-/// name, including nodes on other graph pages entirely.
+/// Resolve every same-member site offset to its owning K2Node id.
 ///
-/// Two stages. First the set is restricted to graph-local candidates
-/// per [`GraphScope`] (the member indices are asset-wide; without this
-/// a function map's call sites could attribute to a same-named node on
-/// a different page, since function maps have no reaching-events data
-/// and always fell through to the lowest-id fallback). An all-foreign
-/// set attributes nothing. Then the event clamp keeps the local
-/// candidate whose reaching event actually covers the bytes
-/// (`node_to_reaching_events` plus `event_owned_ranges`).
+/// When several K2Nodes share a member name (the kismet helper case,
+/// e.g. `Add_FloatFloat`, or N user calls to the same function) the
+/// unfiltered member index fans every bytecode site out to every node
+/// that bears the name, including nodes on other graph pages. This
+/// collapses each site to a single owner.
 ///
-/// Tiebreak when more than one candidate survives the clamp: the
-/// lowest export id wins. Deterministic across runs.
+/// Per-site resolution stages (the conservative baseline, preserved
+/// exactly for sites the group bijection does not claim):
 ///
-/// Fallback when ZERO local candidates survive event-scope filtering:
-/// the lowest-id local candidate is returned. This happens on function
-/// maps (no event data at all) and for ubergraph call sites outside
-/// every event-owned range (e.g. latent-resume chunks). The fallback
-/// is logged when `BP_INSPECT_K2NODE_AUDIT` is set so the fire rate
-/// stays visible.
-pub(super) fn clamp_to_event_scope(
+/// 1. Restrict to graph-local candidates per [`GraphScope`] (member
+///    indices are asset-wide; without this a function map's call sites
+///    could attribute to a same-named node on another page). An
+///    all-foreign set attributes nothing.
+/// 2. Keep the local candidates whose reaching event covers the offset
+///    (`node_to_reaching_events` plus `event_owned_ranges`).
+/// 3. Lowest export id among the survivors wins. Zero survivors falls
+///    back to the lowest-id local candidate (function maps, latent
+///    resume chunks); logged under `BP_INSPECT_K2NODE_AUDIT`.
+///
+/// Group bijection (the starvation fix): when N same-name nodes all
+/// reach one event and exactly N sites of that member sit in the
+/// event's owned ranges, the per-site lowest-id tiebreak hands every
+/// site to one node and starves the rest. Instead, order the N nodes by
+/// exec-traversal rank (the compiler emits bytecode in exec-flow order,
+/// so the k-th node in exec order compiles to the k-th site in disk
+/// order) and zip k-th node to k-th site. Gated on a unique covering
+/// event and a total exec order; any group that fails a gate falls
+/// through to the per-site baseline, never worse than before.
+pub(super) fn resolve_member_group(
     candidates: &[usize],
-    call_offset: usize,
+    offsets: &[usize],
     inputs: &K2NodeByteMapInputs<'_>,
-) -> Vec<usize> {
+    mode: AttributionMode,
+) -> Vec<(usize, usize)> {
+    // Single-candidate (no scoping needed) and trivially-scoped cases
+    // match the historical per-site clamp exactly.
     if candidates.len() <= 1 {
-        return candidates.to_vec();
+        return match candidates.first() {
+            Some(&only) => offsets.iter().map(|&offset| (offset, only)).collect(),
+            None => Vec::new(),
+        };
     }
     let scoped = graph_local_candidates(candidates, inputs);
     if scoped.is_empty() {
@@ -441,38 +487,316 @@ pub(super) fn clamp_to_event_scope(
         return Vec::new();
     }
     if scoped.len() == 1 {
-        return scoped;
+        let only = scoped[0];
+        return offsets.iter().map(|&offset| (offset, only)).collect();
     }
-    let mut survivors: Vec<usize> = scoped
+    let per_site: Vec<(usize, Vec<usize>)> = offsets
+        .iter()
+        .map(|&offset| (offset, event_survivors(&scoped, offset, inputs)))
+        .collect();
+    // The group bijection is the comment-only refinement; the decoder
+    // view keeps the per-site lowest-id baseline so its partitions stay
+    // frozen.
+    let bijection = match mode {
+        AttributionMode::CommentRefined => build_group_bijection(&per_site, inputs),
+        AttributionMode::Conservative => BTreeMap::new(),
+    };
+    let lowest_local = *scoped.iter().min().expect("non-empty");
+    per_site
+        .iter()
+        .map(|(offset, survivors)| {
+            if let Some(&node_id) = bijection.get(offset) {
+                (*offset, node_id)
+            } else if let Some(&lowest) = survivors.iter().min() {
+                (*offset, lowest)
+            } else {
+                audit_zero_survivors(*offset, &scoped);
+                (*offset, lowest_local)
+            }
+        })
+        .collect()
+}
+
+/// Graph-local candidates whose reaching event physically covers
+/// `call_offset` (stage 2 of the per-site clamp). Order preserves the
+/// input candidate order so the lowest-id tiebreak stays deterministic.
+///
+/// On a [`FunctionPage`](GraphScope::FunctionPage) scope there are no
+/// events: a standalone function owns its entire byte stream, so the
+/// `event_owned_ranges` / `node_to_reaching_events` filter would starve
+/// every site to zero survivors. Every graph-local candidate covers every
+/// in-function offset, so the whole scoped set survives and the existing
+/// chain-gated bijection can run on function-internal same-name groups.
+fn event_survivors(
+    scoped: &[usize],
+    call_offset: usize,
+    inputs: &K2NodeByteMapInputs<'_>,
+) -> Vec<usize> {
+    if matches!(inputs.scope, GraphScope::FunctionPage(_)) {
+        return scoped.to_vec();
+    }
+    scoped
         .iter()
         .copied()
         .filter(|node_id| {
-            let Some(events) = inputs.node_to_reaching_events.get(node_id) else {
-                return false;
-            };
-            events.iter().any(|event_name| {
-                inputs
-                    .event_owned_ranges
-                    .get(event_name)
-                    .is_some_and(|ranges| ranges.iter().any(|range| range.contains(&call_offset)))
-            })
+            inputs
+                .node_to_reaching_events
+                .get(node_id)
+                .is_some_and(|events| {
+                    events.iter().any(|event_name| {
+                        inputs
+                            .event_owned_ranges
+                            .get(event_name)
+                            .is_some_and(|ranges| {
+                                ranges.iter().any(|range| range.contains(&call_offset))
+                            })
+                    })
+                })
         })
-        .collect();
-    if survivors.is_empty() {
-        if std::env::var_os("BP_INSPECT_K2NODE_AUDIT").is_some_and(|val| !val.is_empty()) {
-            eprintln!(
-                "k2node clamp: zero survivors at 0x{:x} from {} local candidates ({:?}); using lowest-id fallback",
-                call_offset,
-                scoped.len(),
-                scoped,
-            );
-        }
-        let lowest = *scoped.iter().min().expect("non-empty");
-        return vec![lowest];
+        .collect()
+}
+
+/// Log a zero-survivor lowest-id fallback when `BP_INSPECT_K2NODE_AUDIT`
+/// is set, so the fire rate stays visible during investigation.
+fn audit_zero_survivors(call_offset: usize, scoped: &[usize]) {
+    if std::env::var_os("BP_INSPECT_K2NODE_AUDIT").is_some_and(|val| !val.is_empty()) {
+        eprintln!(
+            "k2node clamp: zero survivors at 0x{:x} from {} local candidates ({:?}); using lowest-id fallback",
+            call_offset,
+            scoped.len(),
+            scoped,
+        );
     }
-    survivors.sort_unstable();
-    survivors.truncate(1);
-    survivors
+}
+
+/// Map qualifying same-name same-reach starvation groups to a 1:1
+/// exec-order-to-disk-order assignment. Returns `offset -> node_id` only
+/// for sites inside a qualifying group; all other sites are left for the
+/// per-site baseline in [`resolve_member_group`].
+///
+/// A group is the set of sites sharing one survivor set of size >= 2
+/// (the same N nodes reach all of them). It qualifies when the site
+/// count equals the node count, the nodes share a unique covering event,
+/// and that event yields a total exec order over the nodes.
+fn build_group_bijection(
+    per_site: &[(usize, Vec<usize>)],
+    inputs: &K2NodeByteMapInputs<'_>,
+) -> BTreeMap<usize, usize> {
+    let mut groups: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
+    for (offset, survivors) in per_site {
+        if survivors.len() >= 2 {
+            let mut nodes = survivors.clone();
+            nodes.sort_unstable();
+            groups.entry(nodes).or_default().push(*offset);
+        }
+    }
+    let mut bijection = BTreeMap::new();
+    for (nodes, mut group_offsets) in groups {
+        if group_offsets.len() != nodes.len() {
+            continue;
+        }
+        let Some(entry) = unique_group_event_entry(&nodes, &group_offsets, inputs) else {
+            continue;
+        };
+        let Some(ordered) = exec_ordered_nodes(&nodes, entry, inputs) else {
+            continue;
+        };
+        // Only reassign when the group's nodes lie on one linear exec
+        // path; sibling-branch groups stay at the per-site baseline. See
+        // `nodes_form_exec_chain` for why that bound is a correctness
+        // limit (branch order is a non-derivable compiler tiebreak), not
+        // a deferred improvement.
+        if !nodes_form_exec_chain(&ordered, inputs) {
+            continue;
+        }
+        group_offsets.sort_unstable();
+        for (&offset, &node_id) in group_offsets.iter().zip(ordered.iter()) {
+            bijection.insert(offset, node_id);
+        }
+    }
+    bijection
+}
+
+/// The entry K2Node to root the exec walk at. On the ubergraph this is
+/// the single reaching event whose owned ranges cover every site offset
+/// (`None`, fall back, when no such event is unique). On a function page
+/// there are no events, so the function's own `K2Node_FunctionEntry` is
+/// the root; the whole function range already covers every site, so no
+/// per-site coverage check is needed.
+fn unique_group_event_entry(
+    nodes: &[usize],
+    offsets: &[usize],
+    inputs: &K2NodeByteMapInputs<'_>,
+) -> Option<usize> {
+    if let GraphScope::FunctionPage(page) = inputs.scope {
+        return function_entry_node(page, inputs);
+    }
+    let mut common: Option<BTreeSet<String>> = None;
+    for node_id in nodes {
+        let events = inputs.node_to_reaching_events.get(node_id)?;
+        common = Some(match common {
+            None => events.clone(),
+            Some(prev) => prev.intersection(events).cloned().collect(),
+        });
+    }
+    let common = common?;
+    let mut covering = common.iter().filter(|event_name| {
+        inputs
+            .event_owned_ranges
+            .get(*event_name)
+            .is_some_and(|ranges| {
+                offsets
+                    .iter()
+                    .all(|offset| ranges.iter().any(|range| range.contains(offset)))
+            })
+    });
+    let event_name = covering.next()?;
+    if covering.next().is_some() {
+        return None;
+    }
+    inputs.event_node_index.get(event_name).copied()
+}
+
+/// The group's nodes ordered by exec-traversal rank from `entry`, or
+/// `None` (no total order, fall back) when any node is unreached by the
+/// exec walk (e.g. a pure node fed only through data pins).
+fn exec_ordered_nodes(
+    nodes: &[usize],
+    entry: usize,
+    inputs: &K2NodeByteMapInputs<'_>,
+) -> Option<Vec<usize>> {
+    let ranks = exec_visit_ranks(entry, inputs);
+    let mut ranked: Vec<(usize, usize)> = Vec::with_capacity(nodes.len());
+    for &node_id in nodes {
+        ranked.push((*ranks.get(&node_id)?, node_id));
+    }
+    ranked.sort_unstable();
+    Some(ranked.into_iter().map(|(_, node_id)| node_id).collect())
+}
+
+/// True when `ordered` (nodes in exec-rank order) lie on a single linear
+/// exec path: each node is forward-reachable from its predecessor along
+/// exec-output pins. Knots are walked transparently. A chain guarantees
+/// the compiler emits the nodes contiguously in this order, so exec rank
+/// equals on-disk order.
+///
+/// This gate is what bounds the group bijection to chains and leaves
+/// branch-sibling same-name groups at the per-site lowest-id baseline.
+/// The bound is a correctness limit, not a TODO. The compiler emits
+/// bytecode in `CreateExecutionSchedule` order (a Kahn topological sort
+/// with a `RemoveAtSwap` worklist tiebreak). On one exec chain the
+/// data-dependency edges pin the nodes' relative order, so exec rank
+/// recovers on-disk order. Two arms of a branch carry no dependency edge
+/// between them, so their relative on-disk order is decided by the
+/// worklist tiebreak, which is not graph-derivable. The only oracle that
+/// records the true node-to-offset mapping, `FBlueprintDebugData`, is
+/// transient and never serialized, so reassigning branch siblings would
+/// be a guess. A wrong anchor is worse than the lowest-id drop (it
+/// attaches a comment to the wrong node), so branch siblings stay at
+/// baseline.
+fn nodes_form_exec_chain(ordered: &[usize], inputs: &K2NodeByteMapInputs<'_>) -> bool {
+    ordered
+        .windows(2)
+        .all(|pair| exec_forward_reachable(pair[0], pair[1], inputs))
+}
+
+/// Node ids targeted by `node_pins`' exec-output pins, in on-disk
+/// (`linked_to`) order. The exec-graph traversal primitive shared by the
+/// rank walk and the reachability walk.
+fn exec_output_targets(node_pins: &NodePinData) -> impl Iterator<Item = usize> + '_ {
+    node_pins
+        .pins
+        .iter()
+        .filter(|pin| pin.is_exec_output())
+        .flat_map(|pin| pin.linked_to.iter().map(|link| link.node))
+}
+
+/// True when `target` is reachable from `from` (exclusive) by following
+/// exec-output pins.
+fn exec_forward_reachable(from: usize, target: usize, inputs: &K2NodeByteMapInputs<'_>) -> bool {
+    let pin_data = &inputs.asset.pin_data;
+    let mut visited: BTreeSet<usize> = BTreeSet::new();
+    let mut stack: Vec<usize> = vec![from];
+    visited.insert(from);
+    while let Some(node_id) = stack.pop() {
+        let Some(node_pins) = pin_data.get(&node_id) else {
+            continue;
+        };
+        for child in exec_output_targets(node_pins) {
+            if child == target {
+                return true;
+            }
+            if visited.insert(child) {
+                stack.push(child);
+            }
+        }
+    }
+    false
+}
+
+/// First-visit pre-order DFS rank of every node reachable from `entry`
+/// along exec-output pins, following `linked_to` in on-disk order. Knot
+/// routing nodes are traversed transparently (they fall between the
+/// real nodes without changing their relative order). The compiler emits
+/// bytecode in this exec-flow order, so rank order matches on-disk order
+/// within a single execution path.
+fn exec_visit_ranks(entry: usize, inputs: &K2NodeByteMapInputs<'_>) -> HashMap<usize, usize> {
+    let pin_data = &inputs.asset.pin_data;
+    let mut ranks: HashMap<usize, usize> = HashMap::new();
+    let mut stack: Vec<usize> = vec![entry];
+    let mut next_rank = 0usize;
+    while let Some(node_id) = stack.pop() {
+        if ranks.contains_key(&node_id) {
+            continue;
+        }
+        ranks.insert(node_id, next_rank);
+        next_rank += 1;
+        let Some(node_pins) = pin_data.get(&node_id) else {
+            continue;
+        };
+        let children: Vec<usize> = exec_output_targets(node_pins).collect();
+        // Push reversed so the first exec link is popped (visited) first.
+        for &child in children.iter().rev() {
+            stack.push(child);
+        }
+    }
+    ranks
+}
+
+/// The `K2Node_FunctionEntry` node id on `page`, the exec root for a
+/// standalone function's group bijection. `None` when the page has zero
+/// or several entry nodes (no single exec root to walk from). Resolves
+/// the class through the import/export tables like the function-result
+/// attribution pass does.
+fn function_entry_node(page: &str, inputs: &K2NodeByteMapInputs<'_>) -> Option<usize> {
+    let mut entries =
+        inputs
+            .asset
+            .exports
+            .iter()
+            .enumerate()
+            .filter_map(|(zero_based, (hdr, _))| {
+                let one_based = zero_based + 1;
+                let class = crate::resolve::short_class(&crate::resolve::resolve_index(
+                    &inputs.asset.imports,
+                    inputs.export_names,
+                    hdr.class_index,
+                ));
+                (class == "K2Node_FunctionEntry"
+                    && crate::resolve::enclosing_graph_name(
+                        inputs.asset,
+                        inputs.export_names,
+                        one_based,
+                    )
+                    .as_deref()
+                        == Some(page))
+                .then_some(one_based)
+            });
+    let entry = entries.next()?;
+    if entries.next().is_some() {
+        return None;
+    }
+    Some(entry)
 }
 
 /// The subset of `candidates` living on the graph this map covers (see
