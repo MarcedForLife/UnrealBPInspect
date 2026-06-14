@@ -8,8 +8,8 @@
 //! 2. `EventWrapping` - a box that contains an event-entry node, rendered
 //!    above that event's header.
 //! 3. `FunctionLevel` - a box covering more than [`COVERAGE_THRESHOLD_PERCENT`]
-//!    of the identifiable nodes on its graph page, promoted to a description
-//!    under the block header.
+//!    of the identifiable nodes on its graph page AND containing the page's
+//!    execution-root, promoted to a description under the block header.
 //! 4. `InlineAtEntry` - a box anchored to the statement produced by its
 //!    top-left contained execution node.
 //! 5. Exec follow-through - when no entry point anchors (the entry is a Knot
@@ -28,18 +28,28 @@
 //! function-level placements need no byte map; they key by block name and
 //! attach at the block header.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::bytecode::asset::DecodedAsset;
 use crate::bytecode::stmt::Stmt;
 use crate::types::{EdGraphPin, ParsedAsset};
 
+use super::audit::{maybe_emit_audit, DropReason, PlacementTrace, Strategy};
 use super::render::render_comment_lines;
 use super::{CommentBox, CommentModel};
 
-/// A box covering more than this percentage of a graph page's identifiable
-/// nodes is promoted to a function-level description rather than anchored
-/// inline. The comparison is strictly greater-than.
+/// Coverage half of the function-level promotion rule: a box must cover more
+/// than this percentage of a graph page's identifiable nodes (strictly
+/// greater-than) AND contain the page's exec-root (see
+/// [`box_contains_exec_root`]) to promote to a whole-graph description.
+///
+/// The threshold is data-justified, not fitted. Across the fixture corpus the
+/// per-box coverage ratio is bimodal: whole-graph boxes cluster at 1.0 and
+/// every other box sits below 0.4, a clean gap with nothing in between, so any
+/// cut in `(0.4, 1.0)` selects the same boxes. 80% sits inside that gap. The
+/// exec-root requirement is what actually distinguishes the two clusters
+/// structurally; the threshold only excludes near-total-but-partial coverage.
 const COVERAGE_THRESHOLD_PERCENT: usize = 80;
 
 /// Indent applied to an event-wrapping comment, sitting directly above the
@@ -49,12 +59,6 @@ const EVENT_WRAP_INDENT: &str = "  ";
 /// Indent applied to a function-level description, sitting directly below the
 /// block signature at body indent (two summary levels, four spaces).
 const FUNCTION_LEVEL_INDENT: &str = "    ";
-
-/// Maximum breadth-first depth when following data-output pin links to find a
-/// consuming statement. Real chains run through Knot reroute nodes and nested
-/// pure-math nodes; the deepest anchor observed across the fixture corpus sits
-/// at depth 5.
-const PIN_FOLLOW_MAX_DEPTH: usize = 8;
 
 /// Where a placed comment attaches and how the emitter keys it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,11 +91,17 @@ pub(crate) struct PlacedComment {
 /// The full set of placed comments for one asset, plus the count of boxes that
 /// classified as inline/bubble but could not anchor (no byte map, or no
 /// covering statement). The drop count is reported, never silently swallowed.
+///
+/// `trace` is the per-comment placement audit, populated for measurement only
+/// (consumed by `BP_INSPECT_COMMENT_AUDIT`, never by STDOUT). It carries no
+/// influence on `placed`/`unanchored`; it records how each one was reached.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PlacementPlan {
     pub placed: Vec<PlacedComment>,
     /// Boxes that wanted a statement anchor but found none.
     pub unanchored: usize,
+    /// One audit entry per comment box/bubble, in box iteration order.
+    pub trace: Vec<PlacementTrace>,
 }
 
 impl PlacementPlan {
@@ -121,14 +131,17 @@ pub(crate) fn build_placement_plan(
     // Event-wrapping suppression is page-global: a box over more than the
     // group-size cap of event nodes is a layout divider, dropped outright.
     for comment in &model.boxes {
-        match classify(comment, model, &context) {
+        let (outcome, trace) = classify(comment, model, &context);
+        match outcome {
             Some(Classification::Placed(placed)) => plan.placed.push(*placed),
             Some(Classification::Unanchored) => plan.unanchored += 1,
             None => {}
         }
+        plan.trace.push(trace);
     }
 
     sort_placed(&mut plan.placed);
+    maybe_emit_audit(&plan.trace);
     plan
 }
 
@@ -149,6 +162,32 @@ impl Classification {
             Classification::Unanchored => next(),
             resolved => resolved,
         }
+    }
+}
+
+/// Audit-only side channel the anchor strategies write into as they run.
+///
+/// The cascade short-circuits on the first `Placed`, so the helper that
+/// produces it records its strategy (and the follow depth it used) here just
+/// before returning. Plain interior mutability, no influence on the returned
+/// `Classification`; if the env var is unset the recorded values are simply
+/// discarded by [`build_placement_plan`].
+#[derive(Default)]
+struct TraceRecorder {
+    strategy: Cell<Option<Strategy>>,
+    depth: Cell<usize>,
+}
+
+impl TraceRecorder {
+    /// Tag the strategy that just produced a `Placed`. Last writer before the
+    /// cascade short-circuits wins, which is the winning strategy.
+    fn record(&self, strategy: Strategy) {
+        self.strategy.set(Some(strategy));
+    }
+
+    /// Note the follow depth a pin-follow / exec-follow walk consumed.
+    fn record_depth(&self, depth: usize) {
+        self.depth.set(depth);
     }
 }
 
@@ -228,14 +267,19 @@ impl<'a> ClassifyContext<'a> {
     }
 }
 
-/// Classify one box. Returns `None` for a box with no graph page (cannot be
-/// placed at all).
+/// Classify one box, returning both the placement outcome and the audit trace.
+/// The outcome is `None` for a box with no graph page (cannot be placed at
+/// all); the trace records that as a `NoGraphPage` drop. The trace is
+/// side-channel only and never influences the outcome.
 fn classify(
     comment: &CommentBox,
     model: &CommentModel,
     context: &ClassifyContext,
-) -> Option<Classification> {
-    let page = comment.graph_page.clone()?;
+) -> (Option<Classification>, PlacementTrace) {
+    let recorder = TraceRecorder::default();
+    let Some(page) = comment.graph_page.clone() else {
+        return (None, drop_trace(comment, "<none>", DropReason::NoGraphPage));
+    };
 
     // Bubble comments own one node; anchor to the owner's statement, to the
     // owner's nearest data consumer when the owner compiled to no bytes of
@@ -243,19 +287,44 @@ fn classify(
     // statement when the owner has no data outputs either (a bubble on a
     // Branch or Knot).
     if comment.is_bubble {
-        let owner = comment.owner_export?;
-        return Some(
-            anchor_to_node(comment, &page, owner, context)
-                .or_else(|| anchor_via_pin_follow(comment, &page, &[owner], context))
-                .or_else(|| anchor_via_exec_follow_outward(comment, &page, owner, context)),
-        );
+        let Some(owner) = comment.owner_export else {
+            return (
+                None,
+                drop_trace(comment, &page, DropReason::NoContainedNodes),
+            );
+        };
+        let outcome = anchor_to_node(
+            comment,
+            &page,
+            owner,
+            Strategy::BubbleDirect,
+            context,
+            &recorder,
+        )
+        .or_else(|| {
+            anchor_via_pin_follow(
+                comment,
+                &page,
+                &[owner],
+                Strategy::BubblePinFollow,
+                context,
+                &recorder,
+            )
+        })
+        .or_else(|| anchor_via_exec_follow_outward(comment, &page, owner, context, &recorder));
+        let trace = trace_for(comment, &page, None, None, &recorder, &outcome);
+        return (Some(outcome), trace);
     }
 
     let contained = model.contained_nodes(comment);
     if contained.is_empty() {
         // A box with no contained nodes has nothing to annotate.
-        return None;
+        return (
+            None,
+            drop_trace(comment, &page, DropReason::NoContainedNodes),
+        );
     }
+    let page_total = context.page_node_total(&page);
 
     // EventWrapping: the box contains one or more event-entry nodes. A box
     // spanning many events is a canvas region label ("Latches and delays"
@@ -276,51 +345,167 @@ fn classify(
             .cloned()
             .expect("event_nodes is non-empty");
         let lines = render_comment_lines(&comment.text, EVENT_WRAP_INDENT);
-        return Some(Classification::Placed(Box::new(PlacedComment {
+        recorder.record(Strategy::EventWrapping);
+        let outcome = Classification::Placed(Box::new(PlacedComment {
             block: event_name,
             class: PlacementClass::EventWrapping,
             lines,
             box_x: comment.x,
             box_y: comment.y,
             text: comment.text.clone(),
-        })));
+        }));
+        let trace = trace_for(
+            comment,
+            &page,
+            Some(contained.len()),
+            Some(page_total),
+            &recorder,
+            &outcome,
+        );
+        return (Some(outcome), trace);
     }
 
     // FunctionLevel: the box covers more than the coverage threshold of the
-    // page's identifiable nodes.
-    let page_total = context.page_node_total(&page);
-    if page_total > 0 && contained.len() * 100 / page_total > COVERAGE_THRESHOLD_PERCENT {
+    // page's identifiable nodes AND reaches the page's execution-entry. The
+    // coverage gate alone could misfire on a dense graph where a box that is
+    // not whole-graph still crosses the threshold; requiring the box to
+    // contain an exec-root confirms it really spans the graph from the entry.
+    if page_total > 0
+        && contained.len() * 100 / page_total > COVERAGE_THRESHOLD_PERCENT
+        && box_contains_exec_root(&contained, context.parsed)
+    {
         let lines = render_comment_lines(&comment.text, FUNCTION_LEVEL_INDENT);
-        return Some(Classification::Placed(Box::new(PlacedComment {
+        recorder.record(Strategy::FunctionLevel);
+        let outcome = Classification::Placed(Box::new(PlacedComment {
             block: page.clone(),
             class: PlacementClass::FunctionLevel,
             lines,
             box_x: comment.x,
             box_y: comment.y,
             text: comment.text.clone(),
-        })));
+        }));
+        let trace = trace_for(
+            comment,
+            &page,
+            Some(contained.len()),
+            Some(page_total),
+            &recorder,
+            &outcome,
+        );
+        return (Some(outcome), trace);
     }
 
     // InlineAtEntry: anchor to the top-left execution entry point of the box.
-    let Some(entry) = exec_entry_point(&contained, context) else {
+    let outcome = match exec_entry_point(&contained, context) {
         // No exec boundary crossing: a box of pure expression nodes, or a
         // self-contained exec block. Pure expressions render inside their
         // consuming statement, so follow the data pins out before giving up.
-        return Some(anchor_via_pin_follow(comment, &page, &contained, context));
+        None => anchor_via_pin_follow(
+            comment,
+            &page,
+            &contained,
+            Strategy::PinFollow,
+            context,
+            &recorder,
+        ),
+        // The geometric entry is the top-left exec node, but it may be a pure
+        // node or a node whose member name didn't survive byte attribution.
+        // When it does not resolve, fall back to the first contained exec node
+        // that does, in deterministic (y, x, export) order, then to exec
+        // follow-through, then to pin-following.
+        Some(entry) => anchor_to_node(
+            comment,
+            &page,
+            entry,
+            Strategy::InlineEntry,
+            context,
+            &recorder,
+        )
+        .or_else(|| {
+            anchor_to_first_resolvable(comment, &page, &contained, entry, context, &recorder)
+                .unwrap_or(Classification::Unanchored)
+        })
+        .or_else(|| anchor_via_exec_follow(comment, &page, &contained, context, &recorder))
+        .or_else(|| {
+            anchor_via_pin_follow(
+                comment,
+                &page,
+                &contained,
+                Strategy::PinFollow,
+                context,
+                &recorder,
+            )
+        }),
     };
-    // The geometric entry is the top-left exec node, but it may be a pure node
-    // or a node whose member name didn't survive byte attribution. When it
-    // does not resolve, fall back to the first contained exec node that does,
-    // in deterministic (y, x, export) order, then to exec follow-through,
-    // then to pin-following.
-    match anchor_to_node(comment, &page, entry, context) {
-        placed @ Classification::Placed(_) => Some(placed),
-        Classification::Unanchored => {
-            let placed = anchor_to_first_resolvable(comment, &page, &contained, entry, context)
-                .or_else(|| anchor_via_exec_follow(comment, &page, &contained, context))
-                .unwrap_or_else(|| anchor_via_pin_follow(comment, &page, &contained, context));
-            Some(placed)
+    let trace = trace_for(
+        comment,
+        &page,
+        Some(contained.len()),
+        Some(page_total),
+        &recorder,
+        &outcome,
+    );
+    (Some(outcome), trace)
+}
+
+/// Build a drop trace for a box that never entered the anchor cascade
+/// (page-less, bubble without owner, or no contained nodes).
+fn drop_trace(comment: &CommentBox, page: &str, reason: DropReason) -> PlacementTrace {
+    PlacementTrace {
+        page: page.to_string(),
+        snippet: super::audit::snippet_of(&comment.text),
+        strategy: Strategy::Dropped(reason),
+        contained: None,
+        page_total: None,
+        depth: 0,
+        placement: None,
+    }
+}
+
+/// Assemble the audit trace from the recorded strategy/depth and the final
+/// outcome. An `Unanchored` outcome with no recorded strategy means the
+/// cascade exhausted every follow without reaching a covering statement
+/// (`PinFollowDeadEnd`).
+fn trace_for(
+    comment: &CommentBox,
+    page: &str,
+    contained: Option<usize>,
+    page_total: Option<usize>,
+    recorder: &TraceRecorder,
+    outcome: &Classification,
+) -> PlacementTrace {
+    let (strategy, placement) = match outcome {
+        Classification::Placed(placed) => {
+            let strategy = recorder
+                .strategy
+                .get()
+                .unwrap_or(Strategy::Dropped(DropReason::NoCoveringStatement));
+            let offset = match placed.class {
+                PlacementClass::InlineAtStatement { statement_offset } => Some(statement_offset),
+                _ => None,
+            };
+            (strategy, Some((placed.block.clone(), offset)))
         }
+        Classification::Unanchored => {
+            let reason = recorder
+                .strategy
+                .get()
+                .and_then(|strategy| match strategy {
+                    Strategy::Dropped(reason) => Some(reason),
+                    _ => None,
+                })
+                .unwrap_or(DropReason::PinFollowDeadEnd);
+            (Strategy::Dropped(reason), None)
+        }
+    };
+    PlacementTrace {
+        page: page.to_string(),
+        snippet: super::audit::snippet_of(&comment.text),
+        strategy,
+        contained,
+        page_total,
+        depth: recorder.depth.get(),
+        placement,
     }
 }
 
@@ -340,7 +525,8 @@ fn anchor_via_exec_follow(
     page: &str,
     contained: &[usize],
     context: &ClassifyContext,
-) -> Option<Classification> {
+    recorder: &TraceRecorder,
+) -> Classification {
     let contained_set: BTreeSet<usize> = contained.iter().copied().collect();
     // Seed with the entry points (already tried by the direct cascade).
     let mut visited: BTreeSet<usize> = contained
@@ -349,7 +535,9 @@ fn anchor_via_exec_follow(
         .filter(|&node| node_has_external_exec_input(node, &contained_set, context.parsed))
         .collect();
     let mut frontier: Vec<usize> = visited.iter().copied().collect();
+    let mut depth = 0usize;
     while !frontier.is_empty() {
+        depth += 1;
         let mut next: Vec<usize> = Vec::new();
         for &node in &frontier {
             let Some(pin_data) = context.parsed.pin_data.get(&node) else {
@@ -368,15 +556,24 @@ fn anchor_via_exec_follow(
         }
         next.sort_unstable();
         for &candidate in &next {
-            if let placed @ Classification::Placed(_) =
-                anchor_to_node(comment, page, candidate, context)
-            {
-                return Some(placed);
+            if let placed @ Classification::Placed(_) = anchor_to_node(
+                comment,
+                page,
+                candidate,
+                Strategy::ExecFollow,
+                context,
+                recorder,
+            ) {
+                recorder.record_depth(depth);
+                return placed;
             }
         }
         frontier = next;
     }
-    None
+    // The walk exhausted the contained set without an anchor. Overwrite any
+    // transient per-candidate drop reason with the walk-level verdict.
+    recorder.record(Strategy::Dropped(DropReason::PinFollowDeadEnd));
+    Classification::Unanchored
 }
 
 /// Last-resort anchor: follow data-output pin links outward from `start`,
@@ -392,9 +589,19 @@ fn anchor_via_pin_follow(
     comment: &CommentBox,
     page: &str,
     start: &[usize],
+    strategy: Strategy,
     context: &ClassifyContext,
+    recorder: &TraceRecorder,
 ) -> Classification {
-    anchor_via_link_follow(comment, page, start, context, EdGraphPin::is_data_output)
+    anchor_via_link_follow(
+        comment,
+        page,
+        start,
+        strategy,
+        context,
+        recorder,
+        EdGraphPin::is_data_output,
+    )
 }
 
 /// Last-resort bubble anchor: follow exec-output pin links outward from the
@@ -406,31 +613,47 @@ fn anchor_via_pin_follow(
 /// directly nor through data pins; its nearest downstream execution
 /// statement is the line the comment annotates. The outward mirror of
 /// [`anchor_via_exec_follow`], without the contained-set restriction (a
-/// bubble has no box), so the walk is depth-capped like pin-following.
+/// bubble has no box), so the walk is bounded only by graph reachability.
 /// Display-only EdGraph read.
 fn anchor_via_exec_follow_outward(
     comment: &CommentBox,
     page: &str,
     owner: usize,
     context: &ClassifyContext,
+    recorder: &TraceRecorder,
 ) -> Classification {
-    anchor_via_link_follow(comment, page, &[owner], context, EdGraphPin::is_exec_output)
+    anchor_via_link_follow(
+        comment,
+        page,
+        &[owner],
+        Strategy::BubbleExecFollow,
+        context,
+        recorder,
+        EdGraphPin::is_exec_output,
+    )
 }
 
 /// Breadth-first walk over `follow_pin`-selected output links from `start`,
-/// trying each reached node as an anchor, up to [`PIN_FOLLOW_MAX_DEPTH`].
-/// Candidates at one depth are tried in export-index order, so the nearest
-/// match wins deterministically.
+/// trying each reached node as an anchor. The walk is bounded by graph
+/// reachability: a node enters the `visited` set once, so the frontier empties
+/// after at most as many rounds as there are reachable nodes, with no fitted
+/// depth cap. Candidates at one depth are tried in export-index order, so the
+/// nearest match wins deterministically. `strategy` tags the audit trace for
+/// the winning anchor; the depth reached is recorded on success.
 fn anchor_via_link_follow(
     comment: &CommentBox,
     page: &str,
     start: &[usize],
+    strategy: Strategy,
     context: &ClassifyContext,
+    recorder: &TraceRecorder,
     follow_pin: fn(&EdGraphPin) -> bool,
 ) -> Classification {
     let mut visited: BTreeSet<usize> = start.iter().copied().collect();
     let mut frontier: Vec<usize> = start.to_vec();
-    for _ in 0..PIN_FOLLOW_MAX_DEPTH {
+    let mut depth = 0usize;
+    while !frontier.is_empty() {
+        depth += 1;
         let mut next: Vec<usize> = Vec::new();
         for &node in &frontier {
             let Some(pin_data) = context.parsed.pin_data.get(&node) else {
@@ -447,19 +670,19 @@ fn anchor_via_link_follow(
                 }
             }
         }
-        if next.is_empty() {
-            return Classification::Unanchored;
-        }
         next.sort_unstable();
         for &candidate in &next {
             if let placed @ Classification::Placed(_) =
-                anchor_to_node(comment, page, candidate, context)
+                anchor_to_node(comment, page, candidate, strategy, context, recorder)
             {
+                recorder.record_depth(depth);
                 return placed;
             }
         }
         frontier = next;
     }
+    // Reachability exhausted with no anchor (a dead-end data/exec chain).
+    recorder.record(Strategy::Dropped(DropReason::PinFollowDeadEnd));
     Classification::Unanchored
 }
 
@@ -472,12 +695,20 @@ fn anchor_to_first_resolvable(
     contained: &[usize],
     already_tried: usize,
     context: &ClassifyContext,
+    recorder: &TraceRecorder,
 ) -> Option<Classification> {
     for node in sorted_exec_entries(contained, context) {
         if node == already_tried {
             continue;
         }
-        if let Classification::Placed(placed) = anchor_to_node(comment, page, node, context) {
+        if let Classification::Placed(placed) = anchor_to_node(
+            comment,
+            page,
+            node,
+            Strategy::InlineFirstResolvable,
+            context,
+            recorder,
+        ) {
             return Some(Classification::Placed(placed));
         }
     }
@@ -492,21 +723,31 @@ fn anchor_to_first_resolvable(
 /// block. When it does not (an ubergraph editor page like `EventGraph` or
 /// `Input`, which decoded events are not keyed by), the owning event is
 /// inferred from the node's byte attribution instead.
+///
+/// `direct_strategy` is the audit tag the calling cascade branch wants
+/// recorded when the direct-statement path resolves; the owner-event path
+/// records its own (`OwnerEventStrict` / `OwnerEventPerRange`) more specific
+/// tag instead. On failure it records the precise drop reason.
 fn anchor_to_node(
     comment: &CommentBox,
     page: &str,
     node: usize,
+    direct_strategy: Strategy,
     context: &ClassifyContext,
+    recorder: &TraceRecorder,
 ) -> Classification {
     let Some(body) = context.body_for_block(page) else {
-        return anchor_via_owner_event(comment, node, context);
+        return anchor_via_owner_event(comment, node, context, recorder);
     };
     let Some(byte_map) = context.byte_map_for_block(page) else {
+        recorder.record(Strategy::Dropped(DropReason::NoByteMap));
         return Classification::Unanchored;
     };
     let Some(stmt) = byte_map.statement_for_node(node, body) else {
+        recorder.record(Strategy::Dropped(DropReason::NoCoveringStatement));
         return Classification::Unanchored;
     };
+    recorder.record(direct_strategy);
     Classification::Placed(build_inline_placement(comment, page, stmt.offset()))
 }
 
@@ -521,11 +762,14 @@ fn anchor_via_owner_event(
     comment: &CommentBox,
     node: usize,
     context: &ClassifyContext,
+    recorder: &TraceRecorder,
 ) -> Classification {
     let Some(ubergraph) = context.decoded.byte_maps.ubergraph.as_ref() else {
+        recorder.record(Strategy::Dropped(DropReason::NoByteMap));
         return Classification::Unanchored;
     };
     let Some(partition) = ubergraph.partitions.get(&node) else {
+        recorder.record(Strategy::Dropped(DropReason::OwnerEventUnresolved));
         return Classification::Unanchored;
     };
     let owner_bodies: Vec<(&String, &[Stmt])> = partition
@@ -558,6 +802,7 @@ fn anchor_via_owner_event(
         .collect();
     for (event_name, body) in owner_bodies.iter().chain(&chunk_bodies) {
         if let Some(stmt) = ubergraph.statement_for_node_in_span(node, body) {
+            recorder.record(Strategy::OwnerEventStrict);
             return Classification::Placed(build_inline_placement(
                 comment,
                 event_name,
@@ -571,6 +816,7 @@ fn anchor_via_owner_event(
     // partition can carry stray range starts inside any owner's span.
     for (event_name, body) in chunk_bodies.iter().chain(&owner_bodies) {
         if let Some(stmt) = ubergraph.statement_for_node_in_span_per_range(node, body) {
+            recorder.record(Strategy::OwnerEventPerRange);
             return Classification::Placed(build_inline_placement(
                 comment,
                 event_name,
@@ -578,6 +824,7 @@ fn anchor_via_owner_event(
             ));
         }
     }
+    recorder.record(Strategy::Dropped(DropReason::OwnerEventUnresolved));
     Classification::Unanchored
 }
 
@@ -622,6 +869,35 @@ fn sorted_exec_entries(contained: &[usize], context: &ClassifyContext) -> Vec<us
 /// The top-left execution entry point of the box, if any.
 fn exec_entry_point(contained: &[usize], context: &ClassifyContext) -> Option<usize> {
     sorted_exec_entries(contained, context).into_iter().next()
+}
+
+/// Whether `node` is an execution-root: it drives exec flow (has at least one
+/// exec-output pin) and is itself a source (no exec-input pin carries an
+/// incoming link). This is the structural shape of a graph's entry, the
+/// `K2Node_FunctionEntry` of a function page or the event-entry node of an
+/// event page, without needing the node's class. A box that spans a whole
+/// graph contains such a root; a dense box that merely crosses the coverage
+/// threshold without reaching the root does not.
+fn node_is_exec_root(node: usize, parsed: &ParsedAsset) -> bool {
+    let Some(pin_data) = parsed.pin_data.get(&node) else {
+        return false;
+    };
+    let drives_exec = pin_data.pins.iter().any(EdGraphPin::is_exec_output);
+    let has_incoming_exec = pin_data
+        .pins
+        .iter()
+        .filter(|pin| pin.is_exec_input())
+        .any(|pin| !pin.linked_to.is_empty());
+    drives_exec && !has_incoming_exec
+}
+
+/// Whether the box covers the page's execution-entry: at least one contained
+/// node is an exec-root (see [`node_is_exec_root`]). The structural half of the
+/// function-level promotion rule, paired with the coverage threshold.
+fn box_contains_exec_root(contained: &[usize], parsed: &ParsedAsset) -> bool {
+    contained
+        .iter()
+        .any(|&node| node_is_exec_root(node, parsed))
 }
 
 /// Whether `node`'s input exec pin is wired from a node outside `contained`.
@@ -784,6 +1060,17 @@ mod tests {
         }
     }
 
+    /// Pin data for an exec-root node: an exec-output linked to `target` and an
+    /// unlinked exec-input, so the node drives exec flow but is itself a source.
+    fn exec_root_pins(target: usize) -> NodePinData {
+        NodePinData {
+            pins: vec![
+                exec_pin(PIN_DIRECTION_INPUT, None),
+                exec_pin(PIN_DIRECTION_OUTPUT, Some(target)),
+            ],
+        }
+    }
+
     /// Pin data for a pure node: one data-output pin linked to `target`.
     fn pure_node_pins(target: usize) -> NodePinData {
         NodePinData {
@@ -837,7 +1124,9 @@ mod tests {
 
     #[test]
     fn function_level_when_box_covers_over_threshold() {
-        // Page "MyFunc" has 4 nodes; the box contains all 4 (100% > 80%).
+        // Page "MyFunc" has 4 nodes; the box contains all 4 (100% > 80%) and
+        // node 2 is the page's exec-root (drives exec, no incoming exec link),
+        // so both halves of the promotion rule hold.
         let model = CommentModel {
             boxes: vec![box_at("whole graph desc", -10, -10, 500, 500, "MyFunc")],
             nodes: vec![
@@ -854,11 +1143,42 @@ mod tests {
             resume_owner_events: Default::default(),
             byte_maps: Default::default(),
         };
-        let parsed = empty_parsed();
+        let mut parsed = empty_parsed();
+        parsed.pin_data.insert(2, exec_root_pins(3));
         let plan = build_placement_plan(&decoded, &parsed, &[], &model);
         assert_eq!(plan.count_class(&PlacementClass::FunctionLevel), 1);
         assert_eq!(plan.placed[0].block, "MyFunc");
         assert_eq!(plan.placed[0].lines, vec!["    // \"whole graph desc\""]);
+    }
+
+    /// A box that clears the coverage threshold but contains no exec-root does
+    /// not promote: the structural half of the rule keeps a dense partial box
+    /// from being mistaken for a whole-graph description. With no byte map it
+    /// then drops to the unanchored count.
+    #[test]
+    fn over_threshold_without_exec_root_does_not_promote() {
+        let model = CommentModel {
+            boxes: vec![box_at("dense but not whole", -10, -10, 500, 500, "MyFunc")],
+            nodes: vec![
+                node_geom(2, 0, 0, "MyFunc"),
+                node_geom(3, 10, 10, "MyFunc"),
+                node_geom(4, 20, 20, "MyFunc"),
+                node_geom(5, 30, 30, "MyFunc"),
+            ],
+        };
+        let decoded = decoded_with_event("MyFunc", vec![call(0, "f")]);
+        // Node 2 has an incoming exec link, so it is not a source/root; no
+        // other contained node carries exec pins, so the box has no exec-root.
+        let mut parsed = empty_parsed();
+        parsed.pin_data.insert(
+            2,
+            NodePinData {
+                pins: vec![exec_pin(PIN_DIRECTION_INPUT, Some(99))],
+            },
+        );
+        let plan = build_placement_plan(&decoded, &parsed, &[], &model);
+        assert_eq!(plan.count_class(&PlacementClass::FunctionLevel), 0);
+        assert_eq!(plan.unanchored, 1);
     }
 
     #[test]
@@ -1086,8 +1406,9 @@ mod tests {
 
     #[test]
     fn placed_comments_sorted_by_block_then_position() {
-        // Both boxes cover their page's sole node (100% > 80%), so both
-        // promote to function-level; the plan must order them by block name.
+        // Both boxes cover their page's sole node (100% > 80%), and that node
+        // is an exec-root, so both promote to function-level; the plan must
+        // order them by block name.
         let model = CommentModel {
             boxes: vec![
                 box_at("zzz", -10, -10, 500, 500, "BFunc"),
@@ -1102,7 +1423,9 @@ mod tests {
             resume_owner_events: Default::default(),
             byte_maps: Default::default(),
         };
-        let parsed = empty_parsed();
+        let mut parsed = empty_parsed();
+        parsed.pin_data.insert(2, exec_root_pins(99));
+        parsed.pin_data.insert(3, exec_root_pins(99));
         let plan = build_placement_plan(&decoded, &parsed, &[], &model);
         assert_eq!(plan.placed.len(), 2);
         assert_eq!(plan.placed[0].block, "AFunc");
@@ -1150,5 +1473,123 @@ mod tests {
         assert_eq!(inline, 0, "inline count");
         assert_eq!(plan.unanchored, 0, "unanchored count");
         assert_eq!(plan.placed.len(), 35, "total placed");
+    }
+
+    #[test]
+    fn trace_records_function_level_strategy() {
+        // The whole-graph box from `function_level_when_box_covers_over_threshold`
+        // must be tagged `FunctionLevel` in the audit trace, with coverage
+        // reconstructable from the recorded contained/page-total counts.
+        let model = CommentModel {
+            boxes: vec![box_at("whole graph desc", -10, -10, 500, 500, "MyFunc")],
+            nodes: vec![
+                node_geom(2, 0, 0, "MyFunc"),
+                node_geom(3, 10, 10, "MyFunc"),
+                node_geom(4, 20, 20, "MyFunc"),
+                node_geom(5, 30, 30, "MyFunc"),
+            ],
+        };
+        let decoded = DecodedAsset {
+            functions: vec![],
+            events: vec![],
+            resume_bodies: Default::default(),
+            resume_owner_events: Default::default(),
+            byte_maps: Default::default(),
+        };
+        let mut parsed = empty_parsed();
+        parsed.pin_data.insert(2, exec_root_pins(3));
+        let plan = build_placement_plan(&decoded, &parsed, &[], &model);
+        assert_eq!(plan.trace.len(), 1);
+        assert_eq!(plan.trace[0].strategy, Strategy::FunctionLevel);
+        assert_eq!(plan.trace[0].contained, Some(4));
+        assert_eq!(plan.trace[0].page_total, Some(4));
+        assert_eq!(plan.trace[0].depth, 0);
+        assert_eq!(plan.trace[0].placement, Some(("MyFunc".to_string(), None)));
+    }
+
+    /// One trace entry exists per box, in box order, even for drops. The
+    /// dead-end box (below coverage, data chain ends unattributed) and the
+    /// page-less box both surface as `Dropped` traces. The page carries four
+    /// nodes so the single contained node stays under the coverage threshold.
+    #[test]
+    fn trace_records_drop_reasons_in_box_order() {
+        let model = CommentModel {
+            boxes: vec![
+                box_at("dead end", -5, -5, 10, 10, "MyFunc"),
+                CommentBox {
+                    text: "no page".into(),
+                    x: 0,
+                    y: 0,
+                    width: 5,
+                    height: 5,
+                    is_bubble: false,
+                    owner_export: None,
+                    graph_page: None,
+                },
+            ],
+            nodes: vec![
+                node_geom(2, 0, 0, "MyFunc"),
+                node_geom(3, 100, 100, "MyFunc"),
+                node_geom(4, 200, 200, "MyFunc"),
+                node_geom(5, 300, 300, "MyFunc"),
+            ],
+        };
+        let decoded = decoded_with_mapped_function("MyFunc", vec![call(10, "a")], 3, 20);
+        let mut parsed = empty_parsed();
+        parsed.pin_data.insert(2, pure_node_pins(9));
+        let plan = build_placement_plan(&decoded, &parsed, &[], &model);
+        assert_eq!(plan.trace.len(), 2);
+        assert_eq!(
+            plan.trace[0].strategy,
+            Strategy::Dropped(DropReason::PinFollowDeadEnd)
+        );
+        assert_eq!(
+            plan.trace[1].strategy,
+            Strategy::Dropped(DropReason::NoGraphPage)
+        );
+        assert_eq!(plan.trace[1].page, "<none>");
+    }
+
+    /// The audit must not alter `placed`/`unanchored`; the trace is a pure
+    /// side channel. The plan-building path is env-independent (only the
+    /// stderr emit reads the env var, never mutating the plan), so a baseline
+    /// run already establishes the placed/unanchored shape; this asserts the
+    /// trace rides alongside without disturbing it. Building twice must be
+    /// identical, including the trace.
+    #[test]
+    fn audit_trace_is_a_pure_side_channel() {
+        let model = CommentModel {
+            boxes: vec![box_at("whole graph desc", -10, -10, 500, 500, "MyFunc")],
+            nodes: vec![
+                node_geom(2, 0, 0, "MyFunc"),
+                node_geom(3, 10, 10, "MyFunc"),
+                node_geom(4, 20, 20, "MyFunc"),
+                node_geom(5, 30, 30, "MyFunc"),
+            ],
+        };
+        let decoded = DecodedAsset {
+            functions: vec![],
+            events: vec![],
+            resume_bodies: Default::default(),
+            resume_owner_events: Default::default(),
+            byte_maps: Default::default(),
+        };
+        let mut parsed = empty_parsed();
+        parsed.pin_data.insert(2, exec_root_pins(3));
+
+        let first = build_placement_plan(&decoded, &parsed, &[], &model);
+        let second = build_placement_plan(&decoded, &parsed, &[], &model);
+        // Placed/unanchored are deterministic and unaffected by the trace.
+        assert_eq!(first.placed, second.placed);
+        assert_eq!(first.unanchored, second.unanchored);
+        // The trace is populated (one entry for the single box) and stable.
+        assert_eq!(first.trace, second.trace);
+        assert_eq!(first.trace.len(), 1);
+        assert_eq!(first.placed.len(), 1);
+        // Dropping the trace yields exactly the pre-audit plan shape.
+        let mut without_trace = first.clone();
+        without_trace.trace.clear();
+        assert_eq!(without_trace.placed, first.placed);
+        assert_eq!(without_trace.unanchored, first.unanchored);
     }
 }
