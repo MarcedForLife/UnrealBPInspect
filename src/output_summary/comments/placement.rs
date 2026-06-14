@@ -42,11 +42,6 @@ use super::{CommentBox, CommentModel};
 /// inline. The comparison is strictly greater-than.
 const COVERAGE_THRESHOLD_PERCENT: usize = 80;
 
-/// A box containing more than this many event-entry nodes is treated as a
-/// layout divider and suppressed (a large organisational grouping, not a
-/// per-event annotation). Matches the v1 `MAX_MULTI_EVENT_GROUP_SIZE`.
-const MAX_MULTI_EVENT_GROUP_SIZE: usize = 3;
-
 /// Indent applied to an event-wrapping comment, sitting directly above the
 /// `EventName():` header. One summary indent level (two spaces).
 const EVENT_WRAP_INDENT: &str = "  ";
@@ -129,7 +124,7 @@ pub(crate) fn build_placement_plan(
         match classify(comment, model, &context) {
             Some(Classification::Placed(placed)) => plan.placed.push(*placed),
             Some(Classification::Unanchored) => plan.unanchored += 1,
-            Some(Classification::Suppressed) | None => {}
+            None => {}
         }
     }
 
@@ -142,14 +137,12 @@ enum Classification {
     Placed(Box<PlacedComment>),
     /// Inline/bubble box with no resolvable statement anchor.
     Unanchored,
-    /// Multi-event layout divider, deliberately dropped.
-    Suppressed,
 }
 
 impl Classification {
-    /// Cascade combinator: keep a resolved outcome (`Placed`/`Suppressed`),
-    /// otherwise evaluate the next strategy. Lets a fallback chain read as
-    /// an ordered list of anchoring attempts instead of repeated
+    /// Cascade combinator: keep a resolved `Placed` outcome, otherwise
+    /// evaluate the next strategy. Lets a fallback chain read as an ordered
+    /// list of anchoring attempts instead of repeated
     /// match-on-`Unanchored`.
     fn or_else(self, next: impl FnOnce() -> Classification) -> Classification {
         match self {
@@ -264,15 +257,16 @@ fn classify(
         return None;
     }
 
-    // EventWrapping: the box contains one or more event-entry nodes.
+    // EventWrapping: the box contains one or more event-entry nodes. A box
+    // spanning many events is a canvas region label ("Latches and delays"
+    // over a cluster of events); a linear summary can't bracket the group,
+    // so it anchors to the first contained event in render order and renders
+    // as a plain `// "text"` marker like any other event-wrapping comment.
     let event_nodes: Vec<&String> = contained
         .iter()
         .filter_map(|node| context.event_node_to_name.get(node))
         .collect();
     if !event_nodes.is_empty() {
-        if event_nodes.len() > MAX_MULTI_EVENT_GROUP_SIZE {
-            return Some(Classification::Suppressed);
-        }
         // First contained event in export order wins (contained is sorted),
         // a deterministic stand-in for the box's first contained event.
         let event_name = event_nodes
@@ -320,14 +314,13 @@ fn classify(
     // in deterministic (y, x, export) order, then to exec follow-through,
     // then to pin-following.
     match anchor_to_node(comment, &page, entry, context) {
-        Classification::Placed(placed) => Some(Classification::Placed(placed)),
+        placed @ Classification::Placed(_) => Some(placed),
         Classification::Unanchored => {
             let placed = anchor_to_first_resolvable(comment, &page, &contained, entry, context)
                 .or_else(|| anchor_via_exec_follow(comment, &page, &contained, context))
                 .unwrap_or_else(|| anchor_via_pin_follow(comment, &page, &contained, context));
             Some(placed)
         }
-        other => Some(other),
     }
 }
 
@@ -1148,18 +1141,18 @@ mod tests {
             statement_offset: 0,
         });
 
-        // Matches the v1 binary exactly: 14 EventWrapping, 18 function-level,
-        // 0 inline. The remaining 3 of 35 boxes ("Latches and delays",
-        // "Cross-event convergence", "Complex nested symetrical flow gates
-        // with event convergence") are multi-event region boxes containing 5,
-        // 10, and 4 event nodes, all over MAX_MULTI_EVENT_GROUP_SIZE, so the
-        // layout-divider suppression drops them (v1 reported 32 comment runs
-        // likewise).
+        // 17 EventWrapping, 18 function-level, 0 inline, every box placed.
+        // 14 of the EventWrapping boxes are single/small-group annotations;
+        // the other 3 are the multi-event region labels ("Latches and
+        // delays" / "Cross-event convergence" / "Complex nested symetrical
+        // flow gates with event convergence", spanning 5/10/4 events), which
+        // anchor to their first contained event in render order (a linear
+        // summary cannot bracket the group).
         assert_eq!(model.boxes.len(), 35, "DecoderTest comment-box count");
-        assert_eq!(event_wrapping, 14, "EventWrapping count");
+        assert_eq!(event_wrapping, 17, "EventWrapping count");
         assert_eq!(function_level, 18, "function-level count");
         assert_eq!(inline, 0, "inline count");
         assert_eq!(plan.unanchored, 0, "unanchored count");
-        assert_eq!(plan.placed.len(), 32, "total placed");
+        assert_eq!(plan.placed.len(), 35, "total placed");
     }
 }

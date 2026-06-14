@@ -215,6 +215,7 @@ Functions:
             PrintString(self, "Default", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
     }
 
+  // "Cross-event convergence"
   // "Two events converging on one shared DoOnce, wired straight into its exec pin"
   Conv_DirectDoOnce_A():
     DoOnce(DoOnce_3) {
@@ -279,6 +280,7 @@ Functions:
     // sequence [1]:
     PrintString(self, "Seq 1", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
+  // "Latches and delays"
   // "A DoOnce that gets Reset later in the same call"
   Latch_DoOnce():
     DoOnce(DoOnce_4) {
@@ -321,6 +323,7 @@ Functions:
     Delay(self, 0.2000)
     PrintString(self, "C", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
+  // "Complex nested symetrical flow gates with event convergence"
   // "Left side of a paired axis input. Above the threshold runs Attempt, dropping below resets
   //  Attempt and runs Release."
   // "Attempt and Release are shared with the right side, called here with bIsLeft = true.
