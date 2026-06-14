@@ -337,8 +337,14 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
                                 graph: &graph,
                                 scope: crate::bytecode::k2node_byte_map::GraphScope::Ubergraph,
                             };
+                        // The decode loop reads this map (cross-event
+                        // inline + macro_region), so it uses the
+                        // conservative view: comment-only attribution
+                        // refinements must not move decoded structure. The
+                        // CommentRefined map for placement is built once
+                        // below, after the loop.
                         let k2node_byte_map =
-                            crate::bytecode::k2node_byte_map::build_k2node_byte_map(
+                            crate::bytecode::k2node_byte_map::build_k2node_byte_map_conservative(
                                 &k2node_byte_map_inputs,
                             );
                         let event_inputs = EventDecodeInputs {
@@ -385,10 +391,17 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
                                 export_index: event_export_indices.get(event_name).copied(),
                             });
                         }
-                        // The event loop's last borrow of `k2node_byte_map`
-                        // (through `event_inputs`) ends above, so the map can
-                        // now move into the carrier emit uses.
-                        ubergraph_byte_map = Some(k2node_byte_map);
+                        // The event loop's last borrow of the conservative
+                        // `k2node_byte_map` (through `event_inputs`) ends
+                        // above. Comment placement consumes the
+                        // CommentRefined view (the same-name group bijection
+                        // applied); building it here, after decode, is what
+                        // keeps comment attribution from touching structure.
+                        drop(k2node_byte_map);
+                        ubergraph_byte_map =
+                            Some(crate::bytecode::k2node_byte_map::build_k2node_byte_map(
+                                &k2node_byte_map_inputs,
+                            ));
                     }
                     Err(err) => {
                         eprintln!("decode: partition failed for {}: {}", ug_name, err);

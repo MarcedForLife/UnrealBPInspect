@@ -19,32 +19,35 @@ use crate::resolve::{enclosing_graph_name, resolve_index, short_class};
 use crate::types::{ParsedAsset, PropValue};
 
 use super::{
-    clamp_to_event_scope, extend_owner_events, node_class, normalise_member_name,
-    owner_events_for_node, push_range, GraphScope, K2NodeByteMapInputs, K2NodePartition,
+    extend_owner_events, node_class, normalise_member_name, owner_events_for_node, push_range,
+    resolve_member_group, AttributionMode, GraphScope, K2NodeByteMapInputs, K2NodePartition,
 };
 
-/// Attribute every call opcode to its K2Node_CallFunction node(s)
-/// via short-member-name lookup. Multiple K2Node_CallFunction exports
-/// may share a member name; all map into `byte_to_node[offset]`.
-pub(super) fn attribute_calls(
+/// Resolve a batch of `(disk_offset, member_key)` sites to their owning
+/// K2Node ids and record the attribution. Shared by the call /
+/// variable-set / dynamic-cast passes, which differ only in how they
+/// build `index` and collect `sites`; the per-member group resolution
+/// and the partition / `byte_to_node` insert are identical.
+fn attribute_member_sites(
+    sites: &[(usize, String)],
+    index: &HashMap<String, Vec<usize>>,
     inputs: &K2NodeByteMapInputs<'_>,
+    mode: AttributionMode,
     partitions: &mut BTreeMap<usize, K2NodePartition>,
     byte_to_node: &mut BTreeMap<usize, Vec<usize>>,
 ) {
-    let callfunc_by_member = build_callfunc_member_index(inputs.asset, inputs.export_names);
-    let call_sites = collect_call_sites(
-        inputs.bytecode,
-        inputs.name_table,
-        inputs.ue5,
-        inputs.asset,
-        inputs.export_names,
-    );
-    for (disk_offset, callee_short) in call_sites {
-        let Some(matching_nodes) = callfunc_by_member.get(&callee_short) else {
-            continue;
-        };
-        let owners_resolved = clamp_to_event_scope(matching_nodes, disk_offset, inputs);
-        for node_id in owners_resolved {
+    let mut offsets_by_member: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (disk_offset, member) in sites {
+        if index.contains_key(member.as_str()) {
+            offsets_by_member
+                .entry(member.as_str())
+                .or_default()
+                .push(*disk_offset);
+        }
+    }
+    for (member, offsets) in offsets_by_member {
+        let candidates = &index[member];
+        for (disk_offset, node_id) in resolve_member_group(candidates, &offsets, inputs, mode) {
             let owners = owner_events_for_node(node_id, inputs);
             let partition = partitions.entry(node_id).or_insert_with(|| {
                 K2NodePartition::new(node_id, owners.clone(), node_class(inputs, node_id), None)
@@ -58,11 +61,39 @@ pub(super) fn attribute_calls(
     }
 }
 
+/// Attribute every call opcode to its K2Node_CallFunction node(s)
+/// via short-member-name lookup. Multiple K2Node_CallFunction exports
+/// may share a member name; the group resolver assigns each site.
+pub(super) fn attribute_calls(
+    inputs: &K2NodeByteMapInputs<'_>,
+    mode: AttributionMode,
+    partitions: &mut BTreeMap<usize, K2NodePartition>,
+    byte_to_node: &mut BTreeMap<usize, Vec<usize>>,
+) {
+    let callfunc_by_member = build_callfunc_member_index(inputs.asset, inputs.export_names);
+    let call_sites = collect_call_sites(
+        inputs.bytecode,
+        inputs.name_table,
+        inputs.ue5,
+        inputs.asset,
+        inputs.export_names,
+    );
+    attribute_member_sites(
+        &call_sites,
+        &callfunc_by_member,
+        inputs,
+        mode,
+        partitions,
+        byte_to_node,
+    );
+}
+
 /// Attribute member-var `EX_LET*` opcodes to matching
 /// `K2Node_VariableSet` export(s) via last-segment FieldPath compared
 /// against `VariableReference.MemberName`.
 pub(super) fn attribute_variable_sets(
     inputs: &K2NodeByteMapInputs<'_>,
+    mode: AttributionMode,
     partitions: &mut BTreeMap<usize, K2NodePartition>,
     byte_to_node: &mut BTreeMap<usize, Vec<usize>>,
 ) {
@@ -78,21 +109,14 @@ pub(super) fn attribute_variable_sets(
     while cursor < inputs.bytecode.len() {
         walk_opcode(&walk_ctx, &mut cursor, &mut visitor);
     }
-    for (disk_offset, member_name) in visitor.recorded {
-        let Some(matching_nodes) = varset_by_member.get(&member_name) else {
-            continue;
-        };
-        let owners_resolved = clamp_to_event_scope(matching_nodes, disk_offset, inputs);
-        for node_id in owners_resolved {
-            let owners = owner_events_for_node(node_id, inputs);
-            let partition = partitions.entry(node_id).or_insert_with(|| {
-                K2NodePartition::new(node_id, owners.clone(), node_class(inputs, node_id), None)
-            });
-            extend_owner_events(partition, owners);
-            push_range(&mut partition.ranges, disk_offset..disk_offset + 1);
-            byte_to_node.entry(disk_offset).or_default().push(node_id);
-        }
-    }
+    attribute_member_sites(
+        &visitor.recorded,
+        &varset_by_member,
+        inputs,
+        mode,
+        partitions,
+        byte_to_node,
+    );
 }
 
 /// Attribute `EX_DynamicCast` / `EX_MetaCast` opcodes to matching
@@ -100,6 +124,7 @@ pub(super) fn attribute_variable_sets(
 /// reference operand compared against the K2Node's `TargetType`.
 pub(super) fn attribute_dynamic_casts(
     inputs: &K2NodeByteMapInputs<'_>,
+    mode: AttributionMode,
     partitions: &mut BTreeMap<usize, K2NodePartition>,
     byte_to_node: &mut BTreeMap<usize, Vec<usize>>,
 ) {
@@ -117,21 +142,14 @@ pub(super) fn attribute_dynamic_casts(
     while cursor < inputs.bytecode.len() {
         walk_opcode(&walk_ctx, &mut cursor, &mut visitor);
     }
-    for (disk_offset, class_ref) in visitor.recorded {
-        let Some(matching_nodes) = cast_by_target.get(&class_ref) else {
-            continue;
-        };
-        let owners_resolved = clamp_to_event_scope(matching_nodes, disk_offset, inputs);
-        for node_id in owners_resolved {
-            let owners = owner_events_for_node(node_id, inputs);
-            let partition = partitions.entry(node_id).or_insert_with(|| {
-                K2NodePartition::new(node_id, owners.clone(), node_class(inputs, node_id), None)
-            });
-            extend_owner_events(partition, owners);
-            push_range(&mut partition.ranges, disk_offset..disk_offset + 1);
-            byte_to_node.entry(disk_offset).or_default().push(node_id);
-        }
-    }
+    attribute_member_sites(
+        &visitor.recorded,
+        &cast_by_target,
+        inputs,
+        mode,
+        partitions,
+        byte_to_node,
+    );
 }
 
 /// Attribute the page's `K2Node_FunctionResult` node to the function's
