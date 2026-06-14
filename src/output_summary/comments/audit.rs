@@ -77,7 +77,8 @@ pub(crate) enum DropReason {
     NoByteMap,
     /// A byte map existed but no statement covered the node's bytes.
     NoCoveringStatement,
-    /// A pin-follow / exec-follow walk reached its depth cap or ran dry.
+    /// A pin-follow / exec-follow walk exhausted the reachable graph without
+    /// reaching a covering statement.
     PinFollowDeadEnd,
     /// An ubergraph-page node resolved to no owning event body.
     OwnerEventUnresolved,
