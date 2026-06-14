@@ -334,8 +334,7 @@ fn classify(
 /// IfThenElse whose JumpIfNot carries no member name to match. The first
 /// anchorable node in execution order is the box's first own statement.
 /// Targets outside the contained set are never tried, so the anchor stays
-/// inside the box. Display-only EdGraph read; enumerated in
-/// `docs/edgraph-correlation-inventory.md`.
+/// inside the box. Display-only EdGraph read.
 fn anchor_via_exec_follow(
     comment: &CommentBox,
     page: &str,
@@ -388,9 +387,7 @@ fn anchor_via_exec_follow(
 /// `CallFunction`, math operators) or a box containing only pure nodes: a
 /// pure node compiles to no bytes of its own, its expression renders inside
 /// the consuming statement, so the nearest resolvable consumer is the line
-/// the comment annotates (v1 reached the same line by string-matching the
-/// rendered expression text). Display-only EdGraph read; enumerated in
-/// `docs/edgraph-correlation-inventory.md`.
+/// the comment annotates. Display-only EdGraph read.
 fn anchor_via_pin_follow(
     comment: &CommentBox,
     page: &str,
@@ -410,8 +407,7 @@ fn anchor_via_pin_follow(
 /// statement is the line the comment annotates. The outward mirror of
 /// [`anchor_via_exec_follow`], without the contained-set restriction (a
 /// bubble has no box), so the walk is depth-capped like pin-following.
-/// Display-only EdGraph read; enumerated in
-/// `docs/edgraph-correlation-inventory.md`.
+/// Display-only EdGraph read.
 fn anchor_via_exec_follow_outward(
     comment: &CommentBox,
     page: &str,
@@ -607,7 +603,7 @@ fn build_inline_placement(
 
 /// The box's execution entry points: contained nodes whose input exec pin
 /// links to a node outside the contained set. Ordered by `(y, x)` then export
-/// index, matching v1's top-to-bottom order.
+/// index, top-to-bottom as drawn in the editor.
 fn sorted_exec_entries(contained: &[usize], context: &ClassifyContext) -> Vec<usize> {
     let contained_set: BTreeSet<usize> = contained.iter().copied().collect();
     let mut entries: Vec<(i32, i32, usize)> = contained
