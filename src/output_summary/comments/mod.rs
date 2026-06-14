@@ -26,6 +26,7 @@
 //! count) are read only from tests, so the module keeps the dead-code allow.
 #![allow(dead_code)]
 
+pub(crate) mod audit;
 pub(crate) mod extract;
 pub(crate) mod placement;
 pub(crate) mod render;
