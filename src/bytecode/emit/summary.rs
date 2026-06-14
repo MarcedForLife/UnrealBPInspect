@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use crate::bytecode::asset::DecodedAsset;
 use crate::bytecode::emit::comments::{inline_comment_lines, with_block_comments};
-use crate::bytecode::emit::scoped_ptr::ScopedPtr;
+use crate::bytecode::emit::scoped_value::ScopedValue;
 use crate::bytecode::emit::sections::{emit_prefix_sections, filter_flags_for_summary, EmitCtx};
 use crate::bytecode::expr::{
     binary_op_symbol, unary_op_symbol, BinaryOp, CastKind, Expr, SwitchExprCase,
@@ -29,7 +29,9 @@ thread_local! {
     /// body so the `Stmt::Sequence` arm can render disconnected then-pins
     /// as `// sequence [N] (empty):` headers with faithful editor-index
     /// numbering, without threading the mask through every Stmt variant.
-    static ACTIVE_SEQUENCE_MASK: RefCell<Option<*const Vec<bool>>> =
+    /// The mask is stored by value (cloned in at scope entry) so the consult
+    /// path holds no borrow.
+    static ACTIVE_SEQUENCE_MASK: RefCell<Option<Vec<bool>>> =
         const { RefCell::new(None) };
 }
 
@@ -52,8 +54,8 @@ pub(crate) fn is_latent_function(name: &str) -> bool {
 /// restoring the previous binding on the way out. `mask` is `None` for
 /// blocks that aren't gate-eligible.
 fn with_sequence_mask<R>(mask: Option<&Vec<bool>>, body: impl FnOnce() -> R) -> R {
-    let next = mask.map(|inner| inner as *const _);
-    let _guard = ScopedPtr::set(&ACTIVE_SEQUENCE_MASK, next);
+    let next = mask.cloned();
+    let _guard = ScopedValue::set(&ACTIVE_SEQUENCE_MASK, next);
     body()
 }
 
@@ -68,17 +70,15 @@ fn with_sequence_mask<R>(mask: Option<&Vec<bool>>, body: impl FnOnce() -> R) -> 
 ///
 /// Otherwise `None`, and the caller renders the compact decoded numbering.
 fn faithful_sequence_mask(decoded_pin_count: usize) -> Option<Vec<bool>> {
-    let mask_ptr = ScopedPtr::get(&ACTIVE_SEQUENCE_MASK)?;
-    // Safety: the pointer is installed by `with_sequence_mask` for the
-    // duration of one block's emit and cleared before the guard drops;
-    // the mask outlives the block body it wraps.
-    let mask: &Vec<bool> = unsafe { &*mask_ptr };
-    let connected = mask.iter().filter(|wired| **wired).count();
-    if connected == decoded_pin_count && mask.len() > decoded_pin_count {
-        Some(mask.clone())
-    } else {
-        None
-    }
+    ScopedValue::with_current(&ACTIVE_SEQUENCE_MASK, |mask| {
+        let connected = mask.iter().filter(|wired| **wired).count();
+        if connected == decoded_pin_count && mask.len() > decoded_pin_count {
+            Some(mask.clone())
+        } else {
+            None
+        }
+    })
+    .flatten()
 }
 
 /// Emit summary pseudocode for a decoded Blueprint (Unreal Blueprint) asset.

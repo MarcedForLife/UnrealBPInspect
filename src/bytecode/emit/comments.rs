@@ -22,7 +22,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use crate::bytecode::asset::DecodedAsset;
-use crate::bytecode::emit::scoped_ptr::ScopedPtr;
+use crate::bytecode::emit::scoped_value::ScopedValue;
 use crate::output_summary::comments::extract::build_comment_model;
 use crate::output_summary::comments::placement::{
     build_placement_plan, PlacedComment, PlacementClass,
@@ -114,8 +114,9 @@ thread_local! {
     /// for blocks with no inline comments and for the `--dump`/`--json` paths
     /// (which never install it). Set by [`with_block_comments`] around each
     /// block's body so the statement-emit arm can prepend annotation lines by
-    /// the statement's disk offset.
-    static ACTIVE_INLINE_COMMENTS: RefCell<Option<*const BTreeMap<usize, Vec<String>>>> =
+    /// the statement's disk offset. The map is stored by value (cloned in at
+    /// scope entry) so the consult path holds no borrow.
+    static ACTIVE_INLINE_COMMENTS: RefCell<Option<BTreeMap<usize, Vec<String>>>> =
         const { RefCell::new(None) };
 }
 
@@ -138,8 +139,8 @@ pub(crate) fn with_inline_comments<R>(
     map: Option<&BTreeMap<usize, Vec<String>>>,
     body: impl FnOnce() -> R,
 ) -> R {
-    let next = map.map(|inner| inner as *const _);
-    let _guard = ScopedPtr::set(&ACTIVE_INLINE_COMMENTS, next);
+    let next = map.cloned();
+    let _guard = ScopedValue::set(&ACTIVE_INLINE_COMMENTS, next);
     body()
 }
 
@@ -148,18 +149,16 @@ pub(crate) fn with_inline_comments<R>(
 /// annotation lines up with the construct it annotates). `None` when no
 /// comment anchors there (or no map is installed).
 pub(crate) fn inline_comment_lines(offset: usize, indent: &str) -> Option<Vec<String>> {
-    let map_ptr = ScopedPtr::get(&ACTIVE_INLINE_COMMENTS)?;
-    // Safety: the pointer is installed by `with_inline_comments` for the
-    // duration of one block's emit and restored when the guard drops; the
-    // map outlives the block body it wraps.
-    let map: &BTreeMap<usize, Vec<String>> = unsafe { &*map_ptr };
-    let texts = map.get(&offset)?;
-    Some(
-        texts
-            .iter()
-            .flat_map(|text| render_comment_lines(text, indent))
-            .collect(),
-    )
+    ScopedValue::with_current(&ACTIVE_INLINE_COMMENTS, |map| {
+        let texts = map.get(&offset)?;
+        Some(
+            texts
+                .iter()
+                .flat_map(|text| render_comment_lines(text, indent))
+                .collect(),
+        )
+    })
+    .flatten()
 }
 
 #[cfg(test)]
