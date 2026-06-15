@@ -20,7 +20,7 @@ use crate::bytecode::partition::{
     EventEntry,
 };
 use crate::bytecode::structure::build_skeleton;
-use crate::resolve::resolve_index;
+use crate::resolve::class_of;
 use crate::types::ParsedAsset;
 
 use super::ctx::DecodeCtx;
@@ -551,7 +551,7 @@ fn decode_standalone_functions(
     } = build_node_class_indices(asset, export_names);
 
     for (export_idx, (hdr, _props)) in asset.exports.iter().enumerate() {
-        let class = resolve_index(&asset.imports, export_names, hdr.class_index);
+        let class = class_of(&asset.imports, export_names, hdr);
         if !class.ends_with(".Function") {
             continue;
         }

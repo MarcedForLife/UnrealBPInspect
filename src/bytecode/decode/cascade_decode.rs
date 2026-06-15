@@ -246,13 +246,7 @@ pub(crate) fn try_decode_jumpifnot_cascade_shared(
     // flow stack.
     let last_pair = pairs.last()?;
     let term_pos = skip_instrumentation(last_pair.after_jumpifnot, range_end, ctx)?;
-    if term_pos >= ctx.bytecode.len() || term_pos >= range_end {
-        return None;
-    }
-    if ctx.bytecode[term_pos] != EX_POP_EXECUTION_FLOW {
-        return None;
-    }
-    let dispatch_end = term_pos + 1;
+    let dispatch_end = cascade_pop_flow_dispatch_end(term_pos, range_end, ctx)?;
 
     // Resolve every case target via mem_to_disk. Targets must be in
     // bounds and lie at or past the dispatch end.
@@ -420,13 +414,7 @@ pub(crate) fn try_decode_jumpifnot_cascade_shared_via_trampoline(
 
     let last_pair = pairs.last()?;
     let term_pos = skip_instrumentation(last_pair.after_jumpifnot, range_end, ctx)?;
-    if term_pos >= ctx.bytecode.len() || term_pos >= range_end {
-        return None;
-    }
-    if ctx.bytecode[term_pos] != EX_POP_EXECUTION_FLOW {
-        return None;
-    }
-    let dispatch_end = term_pos + 1;
+    let dispatch_end = cascade_pop_flow_dispatch_end(term_pos, range_end, ctx)?;
 
     // Every pair must share the same target. Mixed-target cascades go
     // through the canonical or forward-shared arms.
@@ -861,6 +849,23 @@ pub(crate) fn peek_terminating_jump(
         target_mem,
         after_jump: peek,
     })
+}
+
+/// Detect the pop_flow terminator after the last dispatch pair: bounds-check
+/// `term_pos`, require EX_POP_EXECUTION_FLOW, return the dispatch-table end
+/// (term_pos + 1). None when out of range or not a pop_flow.
+fn cascade_pop_flow_dispatch_end(
+    term_pos: usize,
+    range_end: usize,
+    ctx: &DecodeCtx,
+) -> Option<usize> {
+    if term_pos >= ctx.bytecode.len() || term_pos >= range_end {
+        return None;
+    }
+    if ctx.bytecode[term_pos] != EX_POP_EXECUTION_FLOW {
+        return None;
+    }
+    Some(term_pos + 1)
 }
 
 /// Translate a mem-coordinate jump target to a disk position via

@@ -30,7 +30,7 @@ use crate::bytecode::opcodes::{
 };
 use crate::bytecode::resolve::resolve_bc_obj;
 use crate::prop_query::find_struct_field_str;
-use crate::resolve::{resolve_index, short_class};
+use crate::resolve::{class_of, short_class};
 use crate::types::ParsedAsset;
 
 /// Disk-offset to event-name-set mapping built from K2Node exec-pin
@@ -141,7 +141,7 @@ pub(crate) fn build_callfunc_member_index(
     let mut index: HashMap<String, Vec<usize>> = HashMap::new();
     for (zero_based, (hdr, props)) in asset.exports.iter().enumerate() {
         let one_based = zero_based + 1;
-        let class_full = resolve_index(&asset.imports, export_names, hdr.class_index);
+        let class_full = class_of(&asset.imports, export_names, hdr);
         if short_class(&class_full) != "K2Node_CallFunction" {
             continue;
         }

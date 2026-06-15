@@ -49,6 +49,55 @@ fn field_extra(class: &str) -> FieldExtra {
     }
 }
 
+/// Values retained from the FieldExtra block for the resolve path. Variants without
+/// retained values (`TwoRefs`, `Bool`, `OneChild`, `TwoChildren`) map to a fixed
+/// display string; the resolve path never inspects their consumed bytes.
+enum FieldExtraData {
+    None,
+    OneRef { ref_idx: i32 },
+    TwoRefs,
+    Bool,
+    OneChild,
+    TwoChildren,
+}
+
+/// Consume the FieldExtra block, advancing the reader, and return the retained values.
+/// Single source of the byte-read layout for both the skip and resolve paths.
+fn read_field_extra(
+    class: &str,
+    reader: &mut Reader,
+    name_table: &NameTable,
+    end: u64,
+) -> Result<FieldExtraData> {
+    Ok(match field_extra(class) {
+        FieldExtra::None => FieldExtraData::None,
+        FieldExtra::OneRef => {
+            let ref_idx = read_i32(reader)?;
+            FieldExtraData::OneRef { ref_idx }
+        }
+        FieldExtra::TwoRefs => {
+            read_i32(reader)?;
+            read_i32(reader)?;
+            FieldExtraData::TwoRefs
+        }
+        FieldExtra::Bool => {
+            for _ in 0..6 {
+                read_u8(reader)?;
+            }
+            FieldExtraData::Bool
+        }
+        FieldExtra::OneChild => {
+            skip_ffield_child(reader, name_table, end)?;
+            FieldExtraData::OneChild
+        }
+        FieldExtra::TwoChildren => {
+            skip_ffield_child(reader, name_table, end)?;
+            skip_ffield_child(reader, name_table, end)?;
+            FieldExtraData::TwoChildren
+        }
+    })
+}
+
 /// Skip past one serialized FField child without extracting type information.
 fn skip_ffield_extra(
     class: &str,
@@ -56,28 +105,7 @@ fn skip_ffield_extra(
     name_table: &NameTable,
     end: u64,
 ) -> Result<()> {
-    match field_extra(class) {
-        FieldExtra::None => {}
-        FieldExtra::OneRef => {
-            read_i32(reader)?;
-        }
-        FieldExtra::TwoRefs => {
-            read_i32(reader)?;
-            read_i32(reader)?;
-        }
-        FieldExtra::Bool => {
-            for _ in 0..6 {
-                read_u8(reader)?;
-            }
-        }
-        FieldExtra::OneChild => {
-            skip_ffield_child(reader, name_table, end)?;
-        }
-        FieldExtra::TwoChildren => {
-            skip_ffield_child(reader, name_table, end)?;
-            skip_ffield_child(reader, name_table, end)?;
-        }
-    }
+    read_field_extra(class, reader, name_table, end)?;
     Ok(())
 }
 
@@ -168,43 +196,24 @@ pub fn resolve_ffield_type(
         return Ok(name.into());
     }
 
-    // Types that need extra bytes read. Use field_extra() for the read layout,
-    // then interpret the values per field class.
-    match field_extra(field_class) {
-        FieldExtra::Bool => {
-            for _ in 0..6 {
-                read_u8(reader)?;
-            }
-            Ok("bool".into())
-        }
-        FieldExtra::TwoRefs => {
-            read_i32(reader)?;
-            read_i32(reader)?;
-            Ok("UClass*".into())
-        }
-        FieldExtra::OneRef => {
-            let ref_idx = read_i32(reader)?;
-            Ok(resolve_one_ref_type(
-                property_type,
-                ref_idx,
-                imports,
-                export_names,
-            ))
-        }
-        FieldExtra::OneChild => {
-            skip_ffield_child(reader, name_table, end)?;
-            Ok(if property_type == PropertyType::Set {
-                "TSet<>".into()
-            } else {
-                "TArray<>".into()
-            })
-        }
-        FieldExtra::TwoChildren => {
-            skip_ffield_child(reader, name_table, end)?;
-            skip_ffield_child(reader, name_table, end)?;
-            Ok("TMap<>".into())
-        }
-        FieldExtra::None => Ok(property_type
+    // Types that need extra bytes read. read_field_extra() consumes the block per
+    // the shared layout; interpret the retained values per field class here.
+    match read_field_extra(field_class, reader, name_table, end)? {
+        FieldExtraData::Bool => Ok("bool".into()),
+        FieldExtraData::TwoRefs => Ok("UClass*".into()),
+        FieldExtraData::OneRef { ref_idx } => Ok(resolve_one_ref_type(
+            property_type,
+            ref_idx,
+            imports,
+            export_names,
+        )),
+        FieldExtraData::OneChild => Ok(if property_type == PropertyType::Set {
+            "TSet<>".into()
+        } else {
+            "TArray<>".into()
+        }),
+        FieldExtraData::TwoChildren => Ok("TMap<>".into()),
+        FieldExtraData::None => Ok(property_type
             .as_str()
             .strip_suffix(PROPERTY_CLASS_SUFFIX)
             .unwrap_or(field_class)
