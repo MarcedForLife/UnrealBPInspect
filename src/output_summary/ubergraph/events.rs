@@ -1,8 +1,6 @@
 //! Event-name and section resolution for ubergraph sections.
 
-use std::collections::HashMap;
-
-use super::super::UbergraphSection;
+use std::collections::{BTreeMap, HashMap};
 
 /// Short action name from an InputAction stub, e.g.
 /// `InpActEvt_Fly_K2Node_InputActionEvent_6` -> `Some("Fly")`.
@@ -28,10 +26,10 @@ fn extract_input_axis_name(section_name: &str) -> Option<&str> {
 
 /// Pressed/Released labels for InputAction events: for each action name,
 /// lower suffix -> Pressed, higher -> Released; single event -> Pressed.
-pub(in crate::output_summary) fn compute_action_key_events(
-    section_names: &[&str],
-) -> HashMap<String, String> {
-    let mut by_action: HashMap<&str, Vec<(&str, u32)>> = HashMap::new();
+pub(crate) fn compute_action_key_events(section_names: &[&str]) -> HashMap<String, String> {
+    // BTreeMap so the build below iterates actions in a deterministic order;
+    // result keys are distinct event names so output is unaffected today.
+    let mut by_action: BTreeMap<&str, Vec<(&str, u32)>> = BTreeMap::new();
     for &name in section_names {
         if let Some(action) = extract_input_action_name(name) {
             let num = extract_event_suffix_number(name).unwrap_or(0);
@@ -60,7 +58,7 @@ pub(in crate::output_summary) fn compute_action_key_events(
 ///
 /// Used by call graph and `// called by:` trailers; see [`clean_event_header`]
 /// for the signature-carrying variant.
-pub(in crate::output_summary) fn display_event_name(
+pub(crate) fn display_event_name(
     raw_name: &str,
     action_key_events: &HashMap<String, String>,
 ) -> String {
@@ -79,7 +77,7 @@ pub(in crate::output_summary) fn display_event_name(
 
 /// Raw UberGraph section name -> display name with signature. InputAxis
 /// adds `(AxisValue: float)`; custom events pass through, caller appends `()`.
-pub(super) fn clean_event_header(
+pub(crate) fn clean_event_header(
     raw_name: &str,
     action_key_events: &HashMap<String, String>,
 ) -> String {
@@ -88,47 +86,4 @@ pub(super) fn clean_event_header(
         return format!("{}(AxisValue: float)", bare);
     }
     display_event_name(raw_name, action_key_events)
-}
-
-/// Resolve an event's graph node position by section name. Exact lookup
-/// first; otherwise extract the action name from `InpActEvt_{Action}_K2Node_*`
-/// and look in `input_action_positions`.
-pub(super) fn resolve_event_position(
-    section_name: &str,
-    event_positions: &HashMap<String, (i32, i32, String)>,
-    input_action_positions: &HashMap<String, (i32, i32, String)>,
-) -> Option<(i32, i32, String)> {
-    if let Some(pos) = event_positions.get(section_name) {
-        return Some(pos.clone());
-    }
-    let action = extract_input_action_name(section_name)?;
-    input_action_positions.get(action).cloned()
-}
-
-/// Resolve an event name to its ubergraph section name. Most match directly;
-/// K2Node_InputAction events store the short action name ("Fly") while the
-/// section carries the full stub (`InpActEvt_Fly_K2Node_InputActionEvent_6`).
-pub(super) fn resolve_section_name<'a>(
-    event_name: &str,
-    sections: &'a [UbergraphSection],
-) -> Option<&'a str> {
-    if let Some(section) = sections.iter().find(|s| s.name == event_name) {
-        return Some(&section.name);
-    }
-    sections
-        .iter()
-        .find(|s| extract_input_action_name(&s.name) == Some(event_name))
-        .map(|s| s.name.as_str())
-}
-
-/// Enclosing section (name, start_line) for a line index in the full output.
-pub(super) fn section_for_line<'a>(
-    line_idx: usize,
-    boundaries: &[(usize, &'a str)],
-) -> Option<(usize, &'a str)> {
-    boundaries
-        .iter()
-        .rev()
-        .find(|(start, _)| *start <= line_idx)
-        .map(|&(start, name)| (start, name))
 }

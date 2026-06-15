@@ -1,0 +1,132 @@
+Blueprint: Helm_BP (extends Actor)
+
+Components:
+  DefaultSceneRoot (SceneComponent)
+  Stand (StaticMeshComponent)
+    StaticMesh: helm_elemnt_02
+    bGenerateOverlapEvents: false
+    BodyInstance: CollisionProfileName: Custom, PhysMaterialOverride: 11_Wood_Physic_Mat
+    VREPhysicsConstraint (VREPhysicsConstraintComponent)
+      ComponentName1: ComponentName: Stand
+      ComponentName2: ComponentName: Wheel
+      RelativeLocation: (-0.0000, 0.0000, 146.6086)
+    Wheel (GrippableStaticMeshComponent)
+      VRGripInterfaceSettings: bAllowMultipleGrips: true,
+          SlotDefaultGripType: EGripCollisionType::InteractiveCollisionWithPhysics,
+          FreeDefaultGripType: EGripCollisionType::InteractiveCollisionWithPhysics, ConstraintStiffness: 0.0000,
+          ConstraintDamping: 0.0000, ConstraintBreakDistance: 60.0000
+      StaticMesh: helm_elemnt_01
+      bGenerateOverlapEvents: false
+      CanCharacterStepUpOn: ECB_No
+      BodyInstance: ObjectType: ECC_PhysicsBody, CollisionProfileName: Custom, AngularDamping: 8.0000,
+          PhysMaterialOverride: 11_Wood_Physic_Mat, bSimulatePhysics: true, bOverrideMass: true
+      RelativeLocation: (-0.0000, 0.0000, 146.6086)
+
+Variables:
+  TotalRotation: float
+  PreviousRotation: float
+  MaxRotation: float = 870.0000
+  WheelRotationCue: SoundCue* = HelmRotate_Cue
+  WheelRotationAudioComponent: AudioComponent*
+  WheelHitPlayable: bool
+  WheelMaxRotationCue: SoundCue* = HelmMaxRotation_Cue
+  WheeMaxRotationCueReset: float = 0.9800
+
+Call graph:
+  ReceiveTick → UpdateAudio, UpdateWheelRotation
+  UpdateAudio → GetSteeringAngle, GetWheelVelocity
+
+Functions:
+  ClampWheelRotation(CurrentAngle: float) [Public|BlueprintPure]
+    if ((CurrentAngle > self.MaxRotation) || (CurrentAngle < (self.MaxRotation * -1.0000))) {
+        BreakRotator(self.Wheel.GetComponentRotation(), $Roll, $Pitch, $Yaw)
+        self.Wheel.SetWorldRotation(MakeRotator(($Roll
+            - ((CurrentAngle > self.MaxRotation)
+            ? (self.MaxRotation - CurrentAngle) : ((self.MaxRotation * -1.0000) - CurrentAngle))), $Pitch, $Yaw),
+            false, $SetWorldRotation_SweepHitResult, true)
+    }
+
+  // called by: UpdateAudio
+  GetSteeringAngle(out SteeringAngle: float) [Public|HasOutParms|BlueprintPure|Const]
+    out SteeringAngle = FClamp((self.TotalRotation / (self.MaxRotation - 5.0000)), -1.0000, 1.0000)
+
+  // called by: UpdateAudio
+  GetWheelVelocity(out Velocity: float) [Public|HasOutParms|BlueprintPure|Const]
+    BreakVector(InverseTransformDirection(self.Stand.GetComponentToWorld(),
+        self.Wheel.GetPhysicsAngularVelocityInDegrees('None')), $X, $Y, $Z)
+    out Velocity = Abs($X)
+
+  // called by: ReceiveTick
+  UpdateAudio() [Public|BlueprintPure]
+    // sequence [0]:
+    GetWheelVelocity(out $Velocity)
+    $Divide_FloatFloat_1 = ($Velocity / 150.0000)
+    self.WheelRotationAudioComponent.SetPitchMultiplier(FClamp($Divide_FloatFloat_1, 0.0000, 1.3000))
+    $Divide_FloatFloat_1 = ($Velocity / 150.0000)
+    self.WheelRotationAudioComponent.SetVolumeMultiplier($Divide_FloatFloat_1)
+    $Divide_FloatFloat_1 = ($Velocity / 150.0000)
+    if ($Divide_FloatFloat_1 >= 0.0100) {
+        if (Not_PreBool(self.WheelRotationAudioComponent.IsPlaying())) {
+            self.WheelRotationAudioComponent.Play(0.0000)
+        }
+    } else {
+        if (self.WheelRotationAudioComponent.IsPlaying()) {
+            self.WheelRotationAudioComponent.Stop()
+        }
+    }
+    // sequence [1]:
+    GetSteeringAngle(out $SteeringAngle)
+    if (NearlyEqual_FloatFloat(Abs($SteeringAngle), 1.0000, 0.0200) && self.WheelHitPlayable) {
+        $SpawnSoundAttached = SpawnSoundAttached(self.WheelMaxRotationCue, self.VREPhysicsConstraint, 'None',
+            Vec(0.0000,0.0000,0.0000), Rot(0.0000,0.0000,0.0000), 0, false,
+            FClamp(($Velocity / 100.0000), 0.0000, 2.0000), 1.0000, 0.0000, None, None, true)
+        self.WheelHitPlayable = false
+    } else {
+        self.WheelHitPlayable = (Abs($SteeringAngle) <= self.WheeMaxRotationCueReset)
+    }
+
+  // called by: ReceiveTick
+  UpdateWheelRotation() [Public|BlueprintPure]
+    $GetCurrentTwist = self.VREPhysicsConstraint.GetCurrentTwist()
+    RotationDifference = ($GetCurrentTwist - self.PreviousRotation)
+    $GetCurrentTwist = self.VREPhysicsConstraint.GetCurrentTwist()
+    if ((RotationDifference > 180.0000) && ((self.PreviousRotation < 0.0000) && ($GetCurrentTwist > 0.0000))) {
+        RotationDifference = (RotationDifference - 360.0000)
+    } else {
+        if ((RotationDifference < -180.0000)
+            && ((self.PreviousRotation > 0.0000) && (self.VREPhysicsConstraint.GetCurrentTwist() < 0.0000))) {
+            RotationDifference = (RotationDifference + 360.0000)
+        }
+    }
+    $GetCurrentTwist = self.VREPhysicsConstraint.GetCurrentTwist()
+    self.PreviousRotation = $GetCurrentTwist
+    self.TotalRotation = (self.TotalRotation + (RotationDifference * -1.0000))
+    if ((self.MaxRotation - Abs(self.TotalRotation)) < 180.0000) {
+        BreakRotator(self.VREPhysicsConstraint.GetAngularOffset(), $Roll, $Pitch, $Yaw)
+        $Percent_FloatFloat = Percent_FloatFloat(self.MaxRotation, 360.0000)
+        self.VREPhysicsConstraint.SetAngularTwistLimit(1,
+            FClamp(SelectFloat(($Percent_FloatFloat - $Roll), ($Percent_FloatFloat + $Roll),
+            (self.TotalRotation > 0.0000)), 0.0000, 170.0000))
+    } else {
+        self.VREPhysicsConstraint.SetAngularTwistLimit(0, 0.0000)
+    }
+
+  BndEvt__Helm_BP_Wheel_K2Node_ComponentBoundEvent_1_VROnGripSignature__DelegateSignature():
+    // sequence [0]:
+    SetActorTickEnabled(false)
+    // sequence [1]:
+    Delay(self, 0.0000)
+    self.PreviousRotation = self.VREPhysicsConstraint.GetCurrentTwist()
+    SetActorTickEnabled(true)
+
+  BndEvt__Helm_BP_Wheel_K2Node_ComponentBoundEvent_2_VROnDropSignature__DelegateSignature():
+
+  ReceiveBeginPlay():
+    self.WheelRotationAudioComponent = SpawnSoundAttached(self.WheelRotationCue, self.VREPhysicsConstraint, 'None',
+        Vec(0.0000,0.0000,0.0000), Rot(0.0000,0.0000,0.0000), 2, false, 1.0000, 1.0000, 0.0000, None, None, false)
+    self.WheelRotationAudioComponent.Stop()
+
+  ReceiveTick():
+    UpdateWheelRotation()
+    UpdateAudio()
+

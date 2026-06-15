@@ -1,3 +1,18 @@
+/// Object-name prefix of the compiler-generated ubergraph entry function.
+pub(crate) const EXECUTE_UBERGRAPH_PREFIX: &str = "ExecuteUbergraph_";
+
+/// Free-function names recognised as Blueprint latent UFUNCTIONs. Their
+/// trailing `FLatentActionInfo` argument is editor-elided, and their Call
+/// statement carries an interleaved resume continuation. The argument-strip
+/// pass (`transforms::strip_latent_action_info`) and the emit-time
+/// resume-body lookup (`emit::summary`) share this single list.
+pub(crate) const LATENT_FUNCTIONS: &[&str] = &[
+    "Delay",
+    "DelayUntilNextTick",
+    "RetriggerableDelay",
+    "MoveComponentTo",
+];
+
 /// Strip UE compiler-generated GUID suffixes: `VarName_42_A1B2C3D4E5F6...` -> `VarName`.
 /// The compiler appends `_<digits>_<32 hex chars>` to disambiguate generated names.
 pub fn strip_guid_suffix(name: &str) -> &str {
@@ -25,6 +40,65 @@ pub fn strip_guid_suffix(name: &str) -> &str {
     &name[..i - 1]
 }
 
+/// FName prefix shared by all K2Node Blueprint graph-node classes.
+pub(crate) const K2NODE_PREFIX: &str = "K2Node_";
+/// K2Node class name for an execution-sequence node.
+pub(crate) const K2NODE_EXECUTION_SEQUENCE: &str = "K2Node_ExecutionSequence";
+/// K2Node class name for a macro-instance node.
+pub(crate) const K2NODE_MACRO_INSTANCE: &str = "K2Node_MacroInstance";
+
+/// Classification of a Blueprint flow-stack / control macro, decided once
+/// from its resolved macro short name (`build_macro_names`).
+///
+/// `from_name` maps any unrecognised name to `ExecutionSequence`,
+/// reproducing the historical unknown-default the flow-stack region
+/// classifier relied on. The variants distinguished by downstream passes
+/// are `DoOnce` (the only one carrying a gate-LET the wrap synthesis keys
+/// on) and `FlipFlop` (the only toggle the cross-event inliner re-synthesizes);
+/// `IsValid` / `MultiGate` / `ExecutionSequence` are recognised but not
+/// gate-attributed.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MacroKind {
+    DoOnce,
+    FlipFlop,
+    IsValid,
+    MultiGate,
+    ExecutionSequence,
+}
+
+impl MacroKind {
+    /// Classify a resolved macro short name. Any name outside the
+    /// recognised set falls through to `ExecutionSequence`, the same
+    /// default the flow-stack `has_push` fallback applied to a partition
+    /// with no recognised kind.
+    pub(crate) fn from_name(name: &str) -> MacroKind {
+        match name {
+            "DoOnce" => MacroKind::DoOnce,
+            "FlipFlop" => MacroKind::FlipFlop,
+            "IsValid" => MacroKind::IsValid,
+            "MultiGate" => MacroKind::MultiGate,
+            _ => MacroKind::ExecutionSequence,
+        }
+    }
+
+    /// True for the macros whose scattered scaffold the attributor walks
+    /// (`DoOnce` / `IsValid` / `FlipFlop`). Drives downstream
+    /// pin-reachability attribution.
+    pub(crate) fn is_recognised(self) -> bool {
+        matches!(
+            self,
+            MacroKind::DoOnce | MacroKind::IsValid | MacroKind::FlipFlop
+        )
+    }
+
+    /// True for the macros that emit a gate-LET / JIN / JUMP scaffold the
+    /// `attribute_macro_scaffold_bytes` pass attributes (`DoOnce` /
+    /// `FlipFlop`). Distinct from [`MacroKind::is_recognised`].
+    pub(crate) fn has_gate_scaffold(self) -> bool {
+        matches!(self, MacroKind::DoOnce | MacroKind::FlipFlop)
+    }
+}
+
 pub fn clean_bc_name(name: &str) -> String {
     let name = strip_guid_suffix(name);
     let name = normalize_lwc_name(name);
@@ -36,7 +110,7 @@ pub fn clean_bc_name(name: &str) -> String {
     if let Some(rest) = name.strip_prefix("K2Node_DynamicCast_") {
         return format!("$Cast_{}", rest);
     }
-    if let Some(rest) = name.strip_prefix("K2Node_") {
+    if let Some(rest) = name.strip_prefix(K2NODE_PREFIX) {
         return format!("${}", rest);
     }
     name.to_string()
@@ -83,137 +157,70 @@ pub fn normalize_lwc_name(name: &str) -> String {
     s
 }
 
-// Inline tests: strip_guid_suffix and clean_bytecode_name are private helpers.
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn strip_guid_with_suffix() {
-        // Format: NAME_DIGITS_32HEXCHARS
-        assert_eq!(
-            strip_guid_suffix("SomeVar_42_0123456789ABCDEF0123456789ABCDEF"),
-            "SomeVar"
-        );
+    fn strip_guid_suffix_cases() {
+        // Suffix stripped only for the exact NAME_DIGITS_32HEXCHARS shape.
+        for (input, expected) in [
+            ("SomeVar_42_0123456789ABCDEF0123456789ABCDEF", "SomeVar"),
+            ("Foo", "Foo"), // no suffix
+            (
+                "Foo_42_notahexstring_notahex_pad_",
+                "Foo_42_notahexstring_notahex_pad_",
+            ), // trailing segment isn't 32 hex chars
+        ] {
+            assert_eq!(
+                strip_guid_suffix(input),
+                expected,
+                "strip_guid_suffix({input:?})"
+            );
+        }
     }
 
     #[test]
-    fn strip_guid_short_name() {
-        assert_eq!(strip_guid_suffix("Foo"), "Foo");
-    }
-
-    #[test]
-    fn strip_guid_no_hex() {
-        assert_eq!(
-            strip_guid_suffix("Foo_42_notahexstring_notahex_pad_"),
-            "Foo_42_notahexstring_notahex_pad_"
-        );
-    }
-
-    #[test]
-    fn clean_callfunc() {
-        assert_eq!(clean_bc_name("CallFunc_Foo_ReturnValue"), "$Foo");
-    }
-
-    #[test]
-    fn clean_callfunc_no_retval() {
-        assert_eq!(clean_bc_name("CallFunc_Bar"), "$Bar");
-    }
-
-    #[test]
-    fn clean_callfunc_numbered_retval() {
-        // `_ReturnValue_<N>` is the decoder's disambiguator for duplicate
-        // out-params; strip `_ReturnValue` but keep the `_<N>` suffix.
-        assert_eq!(
-            clean_bc_name("CallFunc_IsValid_ReturnValue_1"),
-            "$IsValid_1"
-        );
-        assert_eq!(
-            clean_bc_name("CallFunc_IsValid_ReturnValue_42"),
-            "$IsValid_42"
-        );
-    }
-
-    #[test]
-    fn clean_callfunc_retval_with_non_digit_suffix_untouched() {
-        // `_ReturnValue_X` where X isn't digits isn't the disambiguator
-        // shape; leave the trailing segment as part of the name.
-        assert_eq!(
-            clean_bc_name("CallFunc_IsValid_ReturnValue_Foo"),
-            "$IsValid_ReturnValue_Foo"
-        );
-    }
-
-    #[test]
-    fn clean_dynamic_cast() {
-        assert_eq!(
-            clean_bc_name("K2Node_DynamicCast_SomeClass"),
-            "$Cast_SomeClass"
-        );
-    }
-
-    #[test]
-    fn clean_k2node() {
-        assert_eq!(clean_bc_name("K2Node_SomeThing"), "$SomeThing");
-    }
-
-    #[test]
-    fn clean_plain_name() {
-        assert_eq!(clean_bc_name("MyVariable"), "MyVariable");
-    }
-
-    #[test]
-    fn clean_k2_prefix_in_callfunc() {
-        assert_eq!(
-            clean_bc_name("CallFunc_K2_SetWorldLocationAndRotation_ReturnValue"),
-            "$SetWorldLocationAndRotation"
-        );
-    }
-
-    // LWC normalization
-
-    #[test]
-    fn lwc_double_double_to_float_float() {
-        assert_eq!(
-            clean_bc_name("CallFunc_Add_DoubleDouble_ReturnValue"),
-            "$Add_FloatFloat"
-        );
-    }
-
-    #[test]
-    fn lwc_select_double_to_select_float() {
-        assert_eq!(
-            clean_bc_name("CallFunc_SelectDouble_ReturnValue"),
-            "$SelectFloat"
-        );
-    }
-
-    #[test]
-    fn lwc_strip_implicit_cast_suffix() {
-        assert_eq!(
-            clean_bc_name("CallFunc_Subtract_DoubleDouble_A_ImplicitCast"),
-            "$Subtract_FloatFloat_A"
-        );
-    }
-
-    #[test]
-    fn lwc_strip_implicit_cast_numbered() {
-        assert_eq!(
-            clean_bc_name("CallFunc_Subtract_DoubleDouble_B_ImplicitCast_1"),
-            "$Subtract_FloatFloat_B_1"
-        );
-    }
-
-    #[test]
-    fn lwc_k2node_implicit_cast() {
-        assert_eq!(
-            clean_bc_name("K2Node_VariableSet_Health_ImplicitCast"),
-            "$VariableSet_Health"
-        );
-    }
-
-    #[test]
-    fn lwc_plain_name_no_change() {
-        assert_eq!(clean_bc_name("MyVariable"), "MyVariable");
+    fn clean_bc_name_cases() {
+        let cases = [
+            // CallFunc_/K2Node_ prefix and _ReturnValue stripping.
+            ("CallFunc_Foo_ReturnValue", "$Foo"),
+            ("CallFunc_Bar", "$Bar"),
+            ("K2Node_DynamicCast_SomeClass", "$Cast_SomeClass"),
+            ("K2Node_SomeThing", "$SomeThing"),
+            ("MyVariable", "MyVariable"), // plain name unchanged
+            (
+                "CallFunc_K2_SetWorldLocationAndRotation_ReturnValue",
+                "$SetWorldLocationAndRotation",
+            ),
+            // `_ReturnValue_<N>` is the duplicate-out-param disambiguator: strip
+            // `_ReturnValue`, keep the numeric `_<N>`. A non-digit suffix is not
+            // the disambiguator shape and stays intact.
+            ("CallFunc_IsValid_ReturnValue_1", "$IsValid_1"),
+            ("CallFunc_IsValid_ReturnValue_42", "$IsValid_42"),
+            (
+                "CallFunc_IsValid_ReturnValue_Foo",
+                "$IsValid_ReturnValue_Foo",
+            ),
+            // LWC (Large World Coordinates): double variants and implicit-cast
+            // suffixes fold back to the UE4 float names.
+            ("CallFunc_Add_DoubleDouble_ReturnValue", "$Add_FloatFloat"),
+            ("CallFunc_SelectDouble_ReturnValue", "$SelectFloat"),
+            (
+                "CallFunc_Subtract_DoubleDouble_A_ImplicitCast",
+                "$Subtract_FloatFloat_A",
+            ),
+            (
+                "CallFunc_Subtract_DoubleDouble_B_ImplicitCast_1",
+                "$Subtract_FloatFloat_B_1",
+            ),
+            (
+                "K2Node_VariableSet_Health_ImplicitCast",
+                "$VariableSet_Health",
+            ),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(clean_bc_name(raw), expected, "clean_bc_name({raw:?})");
+        }
     }
 }

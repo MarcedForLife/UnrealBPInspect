@@ -3,7 +3,7 @@
 //! Splits lines exceeding `MAX_LINE_WIDTH` at argument boundaries, logical
 //! operators, or ternary/arithmetic operators. Continuation lines are indented
 //! one level (4 spaces) beyond the original line's indentation. Runs as the
-//! final pass in `format_summary` on the fully assembled output.
+//! final pass in the summary emitter on the fully assembled output.
 
 use crate::bytecode::MAX_LINE_WIDTH;
 use crate::helpers::SECTION_SEPARATOR;
