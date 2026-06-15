@@ -543,87 +543,29 @@ fn decode_ifthenelse_arms(
         idom,
     );
 
-    // Full-arm IfThenElse child delegation: when the current region has
-    // a single IfThenElse child R2 whose entry equals the then-block and
-    // whose exit equals the current region's exit, R2 owns the entire
-    // then-arm structure (including its own then/else nesting). Emit
-    // R1.then by delegating to R2 via `emit_continuation_region`; the
-    // caller marks R2 consumed so the walker doesn't double-emit it.
-    // R1.else_body comes from else_segs verbatim.
-    // `find_full_arm_ifthenelse_child` only returns Some when `region_tree` is
-    // Some, so this pair-match can't drop the path; it avoids an expect.
-    if let (Some(child_id), Some(tree)) = (
-        find_full_arm_ifthenelse_child(region, region_tree, then_block_id),
+    if let Some(result) = try_full_arm_delegation(
+        then_block_id,
+        else_block_id,
+        region,
+        region_id,
         region_tree,
+        else_segments.as_deref(),
+        walk,
     ) {
-        let then_body = emit_continuation_region(child_id, tree, cfg, ctx, idom);
-        let else_body = match else_segments.as_ref() {
-            Some(else_segs) => decode_arm_segments(else_segs, ctx),
-            None => decode_arm_body(
-                else_block_id,
-                Some(then_block_id),
-                region,
-                region_id,
-                cfg,
-                ctx,
-                idom,
-            ),
-        };
-        return (then_body, else_body, Some(child_id));
+        return result;
     }
 
-    // Coverage-based full-then-arm IfThenElse delegation: when the
-    // current region has a child IfThenElse R1 whose entry equals the
-    // then-block AND whose transitive byte coverage equals the
-    // then-arm's coverage, R1 owns the entire then-arm structure even
-    // though R1.exit != R0.exit. R1's exit block is its own
-    // merge-continuation, and `emit_continuation_region(R1)` appends
-    // that exit content via `append_own_exit`. The else-arm decode
-    // proceeds normally from else_segs.
-    //
-    // Pattern: an event whose then-arm child region owns a local
-    // merge. R0 has exit=B6 (the function-wide merge), R1 has exit=B3
-    // (the then-arm-local merge). R1's coverage spans the whole
-    // then-arm, including the trailing calls in B3.
-    if let Some(then_segs) = then_segments.as_ref() {
-        // `find_coverage_full_then_arm_child` only returns Some when
-        // `region_tree` is Some, so the pair-match can't drop the path.
-        if let (Some(child_id), Some(tree)) = (
-            find_coverage_full_then_arm_child(region, region_tree, then_block_id, then_segs, ctx),
-            region_tree,
-        ) {
-            let child_region = &tree.regions[child_id];
-            // Call `try_emit_ifthenelse_region` directly rather than
-            // routing through `emit_continuation_region`. The continuation
-            // wrapper's `append_own_exit` would double the inner region's
-            // own-exit content (R1.exit is owned by R1 and the inner
-            // IfThenElse emitter already absorbs it via the
-            // `arms_reach_exit` dispatch).
-            let then_body = match try_emit_ifthenelse_region(
-                child_region,
-                child_id,
-                cfg,
-                ctx,
-                idom,
-                Some(tree),
-            ) {
-                Some((emitted, _)) => emitted,
-                None => emit_continuation_region(child_id, tree, cfg, ctx, idom),
-            };
-            let else_body = match else_segments.as_ref() {
-                Some(else_segs) => decode_arm_segments(else_segs, ctx),
-                None => decode_arm_body(
-                    else_block_id,
-                    Some(then_block_id),
-                    region,
-                    region_id,
-                    cfg,
-                    ctx,
-                    idom,
-                ),
-            };
-            return (then_body, else_body, Some(child_id));
-        }
+    if let Some(result) = try_coverage_full_then_delegation(
+        then_block_id,
+        else_block_id,
+        region,
+        region_id,
+        region_tree,
+        then_segments.as_deref(),
+        else_segments.as_deref(),
+        walk,
+    ) {
+        return result;
     }
 
     if let (Some(then_segs), Some(else_segs)) = (then_segments.as_ref(), else_segments.as_ref()) {
@@ -738,6 +680,110 @@ fn decode_ifthenelse_arms(
         idom,
     );
     (legacy_then, legacy_else, None)
+}
+
+/// Full-arm IfThenElse child delegation: when the current region has
+/// a single IfThenElse child R2 whose entry equals the then-block and
+/// whose exit equals the current region's exit, R2 owns the entire
+/// then-arm structure (including its own then/else nesting). Emit
+/// R1.then by delegating to R2 via `emit_continuation_region`; the
+/// caller marks R2 consumed so the walker doesn't double-emit it.
+/// R1.else_body comes from else_segs verbatim. Returns `None` when the
+/// region has no such child.
+fn try_full_arm_delegation(
+    then_block_id: BlockId,
+    else_block_id: BlockId,
+    region: &Region,
+    region_id: RegionId,
+    region_tree: Option<&RegionTree>,
+    else_segments: Option<&[Range<usize>]>,
+    walk: RegionWalkCtx,
+) -> Option<(Vec<Stmt>, Vec<Stmt>, Option<RegionId>)> {
+    let RegionWalkCtx { cfg, ctx, idom } = walk;
+    // `find_full_arm_ifthenelse_child` only returns Some when `region_tree` is
+    // Some, so this pair-match can't drop the path; it avoids an expect.
+    let (Some(child_id), Some(tree)) = (
+        find_full_arm_ifthenelse_child(region, region_tree, then_block_id),
+        region_tree,
+    ) else {
+        return None;
+    };
+    let then_body = emit_continuation_region(child_id, tree, cfg, ctx, idom);
+    let else_body = match else_segments {
+        Some(else_segs) => decode_arm_segments(else_segs, ctx),
+        None => decode_arm_body(
+            else_block_id,
+            Some(then_block_id),
+            region,
+            region_id,
+            cfg,
+            ctx,
+            idom,
+        ),
+    };
+    Some((then_body, else_body, Some(child_id)))
+}
+
+/// Coverage-based full-then-arm IfThenElse delegation: when the
+/// current region has a child IfThenElse R1 whose entry equals the
+/// then-block AND whose transitive byte coverage equals the
+/// then-arm's coverage, R1 owns the entire then-arm structure even
+/// though R1.exit != R0.exit. R1's exit block is its own
+/// merge-continuation, and `emit_continuation_region(R1)` appends
+/// that exit content via `append_own_exit`. The else-arm decode
+/// proceeds normally from else_segs.
+///
+/// Pattern: an event whose then-arm child region owns a local
+/// merge. R0 has exit=B6 (the function-wide merge), R1 has exit=B3
+/// (the then-arm-local merge). R1's coverage spans the whole
+/// then-arm, including the trailing calls in B3. Returns `None` when
+/// the then-segments are absent or no covering child exists.
+#[allow(clippy::too_many_arguments)]
+fn try_coverage_full_then_delegation(
+    then_block_id: BlockId,
+    else_block_id: BlockId,
+    region: &Region,
+    region_id: RegionId,
+    region_tree: Option<&RegionTree>,
+    then_segments: Option<&[Range<usize>]>,
+    else_segments: Option<&[Range<usize>]>,
+    walk: RegionWalkCtx,
+) -> Option<(Vec<Stmt>, Vec<Stmt>, Option<RegionId>)> {
+    let RegionWalkCtx { cfg, ctx, idom } = walk;
+    let then_segs = then_segments?;
+    // `find_coverage_full_then_arm_child` only returns Some when
+    // `region_tree` is Some, so the pair-match can't drop the path.
+    let (Some(child_id), Some(tree)) = (
+        find_coverage_full_then_arm_child(region, region_tree, then_block_id, then_segs, ctx),
+        region_tree,
+    ) else {
+        return None;
+    };
+    let child_region = &tree.regions[child_id];
+    // Call `try_emit_ifthenelse_region` directly rather than
+    // routing through `emit_continuation_region`. The continuation
+    // wrapper's `append_own_exit` would double the inner region's
+    // own-exit content (R1.exit is owned by R1 and the inner
+    // IfThenElse emitter already absorbs it via the
+    // `arms_reach_exit` dispatch).
+    let then_body =
+        match try_emit_ifthenelse_region(child_region, child_id, cfg, ctx, idom, Some(tree)) {
+            Some((emitted, _)) => emitted,
+            None => emit_continuation_region(child_id, tree, cfg, ctx, idom),
+        };
+    let else_body = match else_segments {
+        Some(else_segs) => decode_arm_segments(else_segs, ctx),
+        None => decode_arm_body(
+            else_block_id,
+            Some(then_block_id),
+            region,
+            region_id,
+            cfg,
+            ctx,
+            idom,
+        ),
+    };
+    Some((then_body, else_body, Some(child_id)))
 }
 
 /// Region-aware arm decode of both arms. Returns `Some((then, else))` when

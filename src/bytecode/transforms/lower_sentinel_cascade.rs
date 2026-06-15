@@ -132,15 +132,72 @@ fn try_lower_branch_via_chain(
         None => return false,
     };
 
-    // Step 3: locate the FIRST top-level Assignment whose lhs is the
-    // temp name in the current body. We only rewrite when the def lives
-    // here, an ancestor-only def stays put (rewriting it would mutate a
-    // parent body we don't own). If the chain has multiple hops
-    // (`$X = $Y; $Y = $Z != N`), only the head alias `$X = $Y` is
-    // removed; the deeper alias `$Y` remains. That is intentional: an
-    // intermediate alias may have other uses, and resolving them is the
-    // inliner's job. The single-use guard below ensures the head alias
-    // has only one use (the Branch we're rewriting).
+    // Steps 3-5: locate and remove the temp's def, yielding the cloned
+    // `Eq` operands for the new Branch cond.
+    let Some((def_idx, eq_lhs, eq_rhs)) = remove_chain_def(body, &temp_name, resolved_ne_operands)
+    else {
+        return false;
+    };
+
+    // Step 6: take the Branch fields and build the canonical
+    // `if (X == N) <original_else> else <original_then>` shape. The def
+    // removal above already shrank the body, so adjust the branch index
+    // when the def sat before it.
+    let adjusted_branch_idx = if def_idx < branch_idx {
+        branch_idx - 1
+    } else {
+        branch_idx
+    };
+    let placeholder_branch = Stmt::Unknown {
+        reason: String::new(),
+        raw_bytes: Vec::new(),
+        offset: 0,
+        length: 0,
+    };
+    let original_branch = std::mem::replace(&mut body[adjusted_branch_idx], placeholder_branch);
+
+    let (then_body, else_body, branch_offset) = match original_branch {
+        Stmt::Branch {
+            then_body,
+            else_body,
+            offset,
+            ..
+        } => (then_body, else_body, offset),
+        _ => return false,
+    };
+
+    body[adjusted_branch_idx] = Stmt::Branch {
+        cond: Expr::Binary {
+            op: BinaryOp::Eq,
+            lhs: Box::new(eq_lhs),
+            rhs: Box::new(eq_rhs),
+        },
+        then_body: else_body,
+        else_body: then_body,
+        offset: branch_offset,
+    };
+    true
+}
+
+/// Locate the temp's top-level definition, enforce the single-use guard,
+/// move the canonical `Eq` operands out of it, and remove the def slot.
+/// Returns `(def_idx, eq_lhs, eq_rhs)` where `def_idx` is the pre-removal
+/// index (the caller uses it to fix up the branch index), or `None` when
+/// the def isn't local, isn't single-use, or doesn't resolve as expected.
+fn remove_chain_def(
+    body: &mut Vec<Stmt>,
+    temp_name: &str,
+    resolved_ne_operands: (Expr, Expr),
+) -> Option<(usize, Expr, Expr)> {
+    // Locate the FIRST top-level Assignment whose lhs is the temp name in
+    // the current body. We only rewrite when the def lives here, an
+    // ancestor-only def stays put (rewriting it would mutate a parent body
+    // we don't own). If the chain has multiple hops
+    // (`$X = $Y; $Y = $Z != N`), only the head alias `$X = $Y` is removed;
+    // the deeper alias `$Y` remains. That is intentional: an intermediate
+    // alias may have other uses, and resolving them is the inliner's job.
+    // The single-use guard below ensures the head alias has only one use
+    // (the Branch we're rewriting).
     let def_idx = body.iter().position(|stmt| {
         matches!(
             stmt,
@@ -149,28 +206,24 @@ fn try_lower_branch_via_chain(
                 ..
             } if *name == temp_name,
         )
-    });
-    let def_idx = match def_idx {
-        Some(i) => i,
-        None => return false,
-    };
+    })?;
 
-    // Step 4: single-use guard. The temp must appear exactly once at
-    // the CURRENT scope level (the Branch's cond). Counts do not
-    // recurse into nested sub-bodies: each cascade level reuses the
-    // same temp name and operates in its own scope, safe regardless of
-    // the outer rewrite. The Assignment lhs is a def, not a use.
-    if count_var_uses_at_top_level(body, &temp_name) != 1 {
-        return false;
+    // Single-use guard. The temp must appear exactly once at the CURRENT
+    // scope level (the Branch's cond). Counts do not recurse into nested
+    // sub-bodies: each cascade level reuses the same temp name and operates
+    // in its own scope, safe regardless of the outer rewrite. The
+    // Assignment lhs is a def, not a use.
+    if count_var_uses_at_top_level(body, temp_name) != 1 {
+        return None;
     }
 
-    // Step 5: chain-aware rewrite path. We need the cloned `Eq` operands
-    // for the new Branch cond. If the def is a direct `Ne` assignment
-    // (the common case, including the original adjacent shape), we move
-    // the operands out by replacing the assignment in place. If the def
-    // is a `Var($Y)` alias, we clone the resolved Ne operands instead;
-    // the def slot is still removed but the chain target is left intact
-    // for the inliner (or other passes) to clean up later.
+    // Chain-aware rewrite path. We need the cloned `Eq` operands for the
+    // new Branch cond. If the def is a direct `Ne` assignment (the common
+    // case, including the original adjacent shape), we move the operands
+    // out by replacing the assignment in place. If the def is a `Var($Y)`
+    // alias, we clone the resolved Ne operands instead; the def slot is
+    // still removed but the chain target is left intact for the inliner
+    // (or other passes) to clean up later.
     let direct_ne = matches!(
         &body[def_idx],
         Stmt::Assignment {
@@ -193,55 +246,15 @@ fn try_lower_branch_via_chain(
                 rhs: Expr::Binary { lhs, rhs, .. },
                 ..
             } => (*lhs, *rhs),
-            _ => return false,
+            _ => return None,
         }
     } else {
         // Alias hop. Use the pre-cloned resolved Ne operands.
         resolved_ne_operands
     };
 
-    // Step 6: take the Branch fields and build the canonical
-    // `if (X == N) <original_else> else <original_then>` shape.
-    let placeholder_branch = Stmt::Unknown {
-        reason: String::new(),
-        raw_bytes: Vec::new(),
-        offset: 0,
-        length: 0,
-    };
-    let original_branch = std::mem::replace(&mut body[branch_idx], placeholder_branch);
-
-    let (then_body, else_body, branch_offset) = match original_branch {
-        Stmt::Branch {
-            then_body,
-            else_body,
-            offset,
-            ..
-        } => (then_body, else_body, offset),
-        _ => return false,
-    };
-
-    let new_branch = Stmt::Branch {
-        cond: Expr::Binary {
-            op: BinaryOp::Eq,
-            lhs: Box::new(eq_lhs),
-            rhs: Box::new(eq_rhs),
-        },
-        then_body: else_body,
-        else_body: then_body,
-        offset: branch_offset,
-    };
-
-    // Remove the def slot (now a placeholder Unknown) and overwrite the
-    // branch slot. Order matters: removing first shifts indices; the
-    // branch index adjusts when the def sat before it.
     body.remove(def_idx);
-    let adjusted_branch_idx = if def_idx < branch_idx {
-        branch_idx - 1
-    } else {
-        branch_idx
-    };
-    body[adjusted_branch_idx] = new_branch;
-    true
+    Some((def_idx, eq_lhs, eq_rhs))
 }
 
 /// Count `Expr::Var(name)` occurrences at the CURRENT scope level only,

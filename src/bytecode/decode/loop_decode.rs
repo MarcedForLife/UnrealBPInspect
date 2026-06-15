@@ -152,58 +152,16 @@ pub(crate) fn try_decode_loop(pos: &mut usize, range_end: usize, ctx: &DecodeCtx
     // suppression in `try_dispatch_loop_body_loop_region_at`).
     let mut break_if_else_displaced: Option<(usize, usize)> = None;
     let (body_stmts, completion) = match absorbed {
-        Some(layout) => {
-            body_byte_ranges.push((body_disk, layout.push_disk));
-            body_byte_ranges.push((layout.displaced_start, layout.pop_disk));
-            body_byte_ranges.push((layout.after_jump_disk, body_end_disk));
-            if layout.break_if_else.is_some() {
-                break_if_else_displaced = Some((layout.displaced_start, layout.pop_disk));
-            }
-            // Execution order: pre-trampoline body, displaced block,
-            // then the increment range that runs when the displaced
-            // block's pop_flow returns to `after_jump_disk`. Keeping
-            // the increment as the trailing statement preserves the
-            // ForC discrimination that `transforms::refine_loops`
-            // relies on.
-            let mut stmts = decode_subrange(body_disk, layout.push_disk, ctx);
-            if let Some(shape) = layout.break_if_else {
-                // Loop-break if/else: the displaced block is a loop break if/else whose
-                // break-test is an `EX_JUMP_IF_NOT` (not `EX_POP_FLOW_IF_NOT`,
-                // so the flow-pop break-guard path never engages). Decode the
-                // true-arm as `break` and the false-arm as the continue body.
-                stmts.extend(decode_break_if_else(ctx, &layout, &shape));
-            } else {
-                // The displaced block may carry a loop-internal `if` break
-                // guard: an `EX_POP_FLOW_IF_NOT` whose false path pops the
-                // trampoline frame and resumes the loop increment rather than
-                // closing a nested frame, so it has no balancing
-                // `EX_POP_EXECUTION_FLOW`. Install the loop-break-guard context
-                // so the naked-if recognizer can recover it, bounded by the
-                // displaced terminator (`pop_disk`) and discriminated by the
-                // continuation landing inside `[head_offset, resume_disk)`.
-                let break_guard =
-                    break_guard_for_displaced_body(ctx, &layout, head_offset, resume_disk);
-                let _break_guard_scope = break_guard.map(|guard| ctx.with_loop_break_guard(guard));
-                stmts.extend(decode_subrange(
-                    layout.displaced_start,
-                    layout.pop_disk,
-                    ctx,
-                ));
-            }
-            stmts.extend(decode_subrange(layout.after_jump_disk, body_end_disk, ctx));
-            let completion_stmts = if layout.completion_start < layout.completion_end {
-                let completion_block =
-                    decode_subrange(layout.completion_start, layout.completion_end, ctx);
-                if completion_block.is_empty() {
-                    None
-                } else {
-                    Some(completion_block)
-                }
-            } else {
-                None
-            };
-            (stmts, completion_stmts)
-        }
+        Some(layout) => decode_absorbed_loop_body(
+            ctx,
+            layout,
+            body_disk,
+            body_end_disk,
+            head_offset,
+            resume_disk,
+            &mut body_byte_ranges,
+            &mut break_if_else_displaced,
+        ),
         None => {
             body_byte_ranges.push((body_disk, body_end_disk));
             (decode_subrange(body_disk, body_end_disk, ctx), None)
@@ -233,6 +191,75 @@ pub(crate) fn try_decode_loop(pos: &mut usize, range_end: usize, ctx: &DecodeCtx
         completion,
         offset: head_offset,
     })
+}
+
+/// Decode the body and completion of an absorbed ForEach/ForC trampoline
+/// loop from its `DisplacedBodyLayout`. Returns the body statements and the
+/// optional completion block.
+///
+/// The three disjoint disk ranges the body spans (pre-trampoline body,
+/// displaced block, increment) are appended to `body_byte_ranges` so the
+/// disk-order re-walk skips them, and a loop-break if/else displaced range
+/// is recorded in `break_if_else_displaced` for sibling-region suppression.
+#[allow(clippy::too_many_arguments)]
+fn decode_absorbed_loop_body(
+    ctx: &DecodeCtx,
+    layout: DisplacedBodyLayout,
+    body_disk: usize,
+    body_end_disk: usize,
+    head_offset: usize,
+    resume_disk: usize,
+    body_byte_ranges: &mut Vec<(usize, usize)>,
+    break_if_else_displaced: &mut Option<(usize, usize)>,
+) -> (Vec<Stmt>, Option<Vec<Stmt>>) {
+    body_byte_ranges.push((body_disk, layout.push_disk));
+    body_byte_ranges.push((layout.displaced_start, layout.pop_disk));
+    body_byte_ranges.push((layout.after_jump_disk, body_end_disk));
+    if layout.break_if_else.is_some() {
+        *break_if_else_displaced = Some((layout.displaced_start, layout.pop_disk));
+    }
+    // Execution order: pre-trampoline body, displaced block,
+    // then the increment range that runs when the displaced
+    // block's pop_flow returns to `after_jump_disk`. Keeping
+    // the increment as the trailing statement preserves the
+    // ForC discrimination that `transforms::refine_loops`
+    // relies on.
+    let mut stmts = decode_subrange(body_disk, layout.push_disk, ctx);
+    if let Some(shape) = layout.break_if_else {
+        // Loop-break if/else: the displaced block is a loop break if/else whose
+        // break-test is an `EX_JUMP_IF_NOT` (not `EX_POP_FLOW_IF_NOT`,
+        // so the flow-pop break-guard path never engages). Decode the
+        // true-arm as `break` and the false-arm as the continue body.
+        stmts.extend(decode_break_if_else(ctx, &layout, &shape));
+    } else {
+        // The displaced block may carry a loop-internal `if` break
+        // guard: an `EX_POP_FLOW_IF_NOT` whose false path pops the
+        // trampoline frame and resumes the loop increment rather than
+        // closing a nested frame, so it has no balancing
+        // `EX_POP_EXECUTION_FLOW`. Install the loop-break-guard context
+        // so the naked-if recognizer can recover it, bounded by the
+        // displaced terminator (`pop_disk`) and discriminated by the
+        // continuation landing inside `[head_offset, resume_disk)`.
+        let break_guard = break_guard_for_displaced_body(ctx, &layout, head_offset, resume_disk);
+        let _break_guard_scope = break_guard.map(|guard| ctx.with_loop_break_guard(guard));
+        stmts.extend(decode_subrange(
+            layout.displaced_start,
+            layout.pop_disk,
+            ctx,
+        ));
+    }
+    stmts.extend(decode_subrange(layout.after_jump_disk, body_end_disk, ctx));
+    let completion = if layout.completion_start < layout.completion_end {
+        let completion_block = decode_subrange(layout.completion_start, layout.completion_end, ctx);
+        if completion_block.is_empty() {
+            None
+        } else {
+            Some(completion_block)
+        }
+    } else {
+        None
+    };
+    (stmts, completion)
 }
 
 /// Register dedup claims over a decoded loop's body byte ranges so the
