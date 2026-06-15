@@ -3,7 +3,7 @@
 use serde_json::{json, Value};
 
 use crate::prop_query::{find_prop, find_prop_str};
-use crate::resolve::{matches_filter, resolve_import_path, resolve_index};
+use crate::resolve::{class_of, matches_filter, resolve_import_path, resolve_index};
 use crate::types::*;
 
 /// Convert a parsed asset to a JSON value. Filters restrict to matching export names.
@@ -43,7 +43,7 @@ pub fn to_json(asset: &ParsedAsset, filters: &[String]) -> Value {
         .iter()
         .enumerate()
         .filter(|(_, (hdr, _))| {
-            let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
+            let class = class_of(&asset.imports, &export_names, hdr);
             class.ends_with(".Function") && matches_filter(&hdr.object_name, filters)
         })
         .map(|(i, (hdr, props))| function_to_json(i, hdr, props))
@@ -64,7 +64,7 @@ fn export_to_json(
     imports: &[ImportEntry],
     export_names: &[String],
 ) -> Value {
-    let class = resolve_index(imports, export_names, hdr.class_index);
+    let class = class_of(imports, export_names, hdr);
     let parent = resolve_index(imports, export_names, hdr.super_index);
     let mut exp = json!({
         "index": index + 1,

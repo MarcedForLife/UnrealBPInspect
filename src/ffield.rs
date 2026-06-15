@@ -102,6 +102,43 @@ pub fn skip_ffield_child(reader: &mut Reader, name_table: &NameTable, end: u64) 
     skip_ffield_extra(&field_class, reader, name_table, end)
 }
 
+/// Resolve a `OneRef` field's already-read reference index to a display type.
+/// Handles object/weak/lazy/soft-object/interface (`T*`, `UObject*` when null),
+/// struct (`T`), byte/enum (`T`, `byte` when null), and delegate variants.
+fn resolve_one_ref_type(
+    property_type: PropertyType,
+    ref_idx: i32,
+    imports: &[ImportEntry],
+    export_names: &[String],
+) -> String {
+    match property_type {
+        PropertyType::Object
+        | PropertyType::WeakObject
+        | PropertyType::LazyObject
+        | PropertyType::SoftObject
+        | PropertyType::Interface => {
+            if ref_idx != 0 {
+                format!(
+                    "{}*",
+                    short_class(&resolve_index(imports, export_names, ref_idx))
+                )
+            } else {
+                "UObject*".into()
+            }
+        }
+        PropertyType::Struct => short_class(&resolve_index(imports, export_names, ref_idx)),
+        PropertyType::Byte | PropertyType::Enum => {
+            if ref_idx != 0 {
+                short_class(&resolve_index(imports, export_names, ref_idx))
+            } else {
+                "byte".into()
+            }
+        }
+        // Delegate variants
+        _ => "Delegate".into(),
+    }
+}
+
 pub fn resolve_ffield_type(
     field_class: &str,
     reader: &mut Reader,
@@ -147,34 +184,12 @@ pub fn resolve_ffield_type(
         }
         FieldExtra::OneRef => {
             let ref_idx = read_i32(reader)?;
-            match property_type {
-                PropertyType::Object
-                | PropertyType::WeakObject
-                | PropertyType::LazyObject
-                | PropertyType::SoftObject
-                | PropertyType::Interface => {
-                    if ref_idx != 0 {
-                        Ok(format!(
-                            "{}*",
-                            short_class(&resolve_index(imports, export_names, ref_idx))
-                        ))
-                    } else {
-                        Ok("UObject*".into())
-                    }
-                }
-                PropertyType::Struct => {
-                    Ok(short_class(&resolve_index(imports, export_names, ref_idx)))
-                }
-                PropertyType::Byte | PropertyType::Enum => {
-                    if ref_idx != 0 {
-                        Ok(short_class(&resolve_index(imports, export_names, ref_idx)))
-                    } else {
-                        Ok("byte".into())
-                    }
-                }
-                // Delegate variants
-                _ => Ok("Delegate".into()),
-            }
+            Ok(resolve_one_ref_type(
+                property_type,
+                ref_idx,
+                imports,
+                export_names,
+            ))
         }
         FieldExtra::OneChild => {
             skip_ffield_child(reader, name_table, end)?;
@@ -198,9 +213,9 @@ pub fn resolve_ffield_type(
 }
 
 // UE property flags used to classify function parameters
-const CPF_PARM: u64 = 0x80;
+pub(crate) const CPF_PARM: u64 = 0x80;
 const CPF_OUT_PARM: u64 = 0x100;
-const CPF_RETURN_PARM: u64 = 0x200;
+pub(crate) const CPF_RETURN_PARM: u64 = 0x200;
 
 pub fn format_signature(func_name: &str, params: &[(String, String, u64)]) -> String {
     let mut inputs = Vec::new();

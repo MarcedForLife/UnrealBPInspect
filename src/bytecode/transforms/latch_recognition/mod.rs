@@ -23,15 +23,14 @@ mod shared;
 // `transforms::latch_recognition::X` resolving unchanged for external
 // consumers (decode/mod.rs, k2node_byte_map, region_decode doc refs).
 pub use doonce::{rewrite_asset_wide_reset_doonce_names, rewrite_reset_doonce_names};
-#[allow(unused_imports)]
-pub(crate) use shared::{stmt_call_display_name, LIBRARY_FUNC_PREFIXES};
+pub(crate) use shared::LIBRARY_FUNC_PREFIXES;
 pub(crate) use shared::{
     DOONCE_CALL_NAME, DOONCE_GATE_PREFIX, DOONCE_INIT_PREFIX, FLIPFLOP_TOGGLE_PREFIX,
     RESET_DOONCE_CALL_NAME,
 };
 
 use crate::bytecode::stmt::Stmt;
-use crate::bytecode::transforms::visit::{walk_bodies_with_ancestors_mut, walk_stmt_children_mut};
+use crate::bytecode::transforms::visit::descend_into_children;
 use cross_event::{try_rewrite_cross_event_doonce_in_sequence, try_rewrite_multi_sequence_doonce};
 use doonce::{
     absorb_post_chain_reset_into_else, try_rewrite_compound_doonce, try_rewrite_cross_arm_doonce,
@@ -60,10 +59,8 @@ pub fn recognize_latches(body: &mut Vec<Stmt>) {
 /// the current body plus ancestors so a toggle's chained def in a parent
 /// scope still resolves.
 fn recognize_in_body(body: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
-    walk_bodies_with_ancestors_mut(body, ancestors, &mut |stmt, child_ancestors| {
-        walk_stmt_children_mut(stmt, &mut |sub_body| {
-            recognize_in_body(sub_body, child_ancestors)
-        });
+    descend_into_children(body, ancestors, &mut |sub_body, child_ancestors| {
+        recognize_in_body(sub_body, child_ancestors)
     });
 
     // Cross-Sequence compound DoOnce: when the BP compiler splits the
@@ -167,15 +164,13 @@ fn recognize_in_body(body: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
     }
 
     // Single-Branch DoOnce. Structural match, no chain resolution needed.
-    let mut idx = 0;
-    while idx < body.len() {
-        if let Some(rewritten) = try_rewrite_doonce(&mut body[idx]) {
-            body[idx] = rewritten;
-            if let Stmt::Latch { body: inner, .. } = &mut body[idx] {
+    for stmt in body.iter_mut() {
+        if let Some(rewritten) = try_rewrite_doonce(stmt) {
+            *stmt = rewritten;
+            if let Stmt::Latch { body: inner, .. } = stmt {
                 recognize_in_body(inner, ancestors);
             }
         }
-        idx += 1;
     }
 
     // FlipFlop: walk forward, on a match drain the toggle assignments

@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use crate::bytecode::names::EXECUTE_UBERGRAPH_PREFIX;
-use crate::resolve::resolve_index;
+use crate::resolve::class_of;
 use crate::types::ParsedAsset;
 
 use super::ubergraph::display_event_name;
@@ -50,7 +50,7 @@ pub(crate) fn collect_local_functions(
         .exports
         .iter()
         .filter(|(hdr, _)| {
-            let class = resolve_index(&asset.imports, export_names, hdr.class_index);
+            let class = class_of(&asset.imports, export_names, hdr);
             class.ends_with(".Function") && !hdr.object_name.starts_with(EXECUTE_UBERGRAPH_PREFIX)
         })
         .map(|(hdr, _)| hdr.object_name.clone())

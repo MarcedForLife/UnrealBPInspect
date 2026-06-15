@@ -216,20 +216,11 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
                 // can compare its lowest-offset tie-break against
                 // the pin-BFS event sets these structures encode.
                 let event_node_index = build_event_node_index(asset, &export_names);
-                let node_class_names = build_node_class_names(asset, &export_names);
-                let node_classes: std::collections::HashMap<
-                    usize,
-                    super::cross_event_inline::K2NodeClass,
-                > = node_class_names
-                    .iter()
-                    .map(|(&node_id, class)| {
-                        (
-                            node_id,
-                            super::cross_event_inline::parse_k2node_class(class),
-                        )
-                    })
-                    .collect();
-                let macro_names = build_macro_names(asset, &export_names);
+                let NodeClassIndices {
+                    node_class_names,
+                    node_classes,
+                    macro_names,
+                } = build_node_class_indices(asset, &export_names);
                 // Pre-build the per-target "reaching events" map once
                 // per ubergraph; the per-jump classifier then does an
                 // O(1) lookup instead of running a fresh BFS per event
@@ -420,18 +411,11 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
     // standalone-function byte-map build below. The per-function map uses the
     // same name/operand-correlation passes the ubergraph map does; only the
     // event-scoped inputs differ (empty for a single function).
-    let fn_node_class_names = build_node_class_names(asset, &export_names);
-    let fn_node_classes: std::collections::HashMap<usize, super::cross_event_inline::K2NodeClass> =
-        fn_node_class_names
-            .iter()
-            .map(|(&node_id, class)| {
-                (
-                    node_id,
-                    super::cross_event_inline::parse_k2node_class(class),
-                )
-            })
-            .collect();
-    let fn_macro_names = build_macro_names(asset, &export_names);
+    let NodeClassIndices {
+        node_classes: fn_node_classes,
+        macro_names: fn_macro_names,
+        ..
+    } = build_node_class_indices(asset, &export_names);
 
     for (export_idx, (hdr, _props)) in asset.exports.iter().enumerate() {
         let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
@@ -577,6 +561,38 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
             ubergraph: ubergraph_byte_map,
             functions: function_byte_maps,
         },
+    }
+}
+
+/// Graph-agnostic node-class and macro-name indices, built over all asset
+/// exports and shared by both the ubergraph and standalone-function decode
+/// paths. `node_classes` is the `parse_k2node_class`-resolved view of
+/// `node_class_names`; the standalone path consumes only `node_classes` and
+/// `macro_names`.
+struct NodeClassIndices {
+    node_class_names: std::collections::HashMap<usize, String>,
+    node_classes: std::collections::HashMap<usize, super::cross_event_inline::K2NodeClass>,
+    macro_names: std::collections::HashMap<usize, String>,
+}
+
+/// Build the node-class names, their parsed `K2NodeClass` view, and the
+/// macro-name index for `asset`.
+fn build_node_class_indices(asset: &ParsedAsset, export_names: &[String]) -> NodeClassIndices {
+    let node_class_names = build_node_class_names(asset, export_names);
+    let node_classes = node_class_names
+        .iter()
+        .map(|(&node_id, class)| {
+            (
+                node_id,
+                super::cross_event_inline::parse_k2node_class(class),
+            )
+        })
+        .collect();
+    let macro_names = build_macro_names(asset, export_names);
+    NodeClassIndices {
+        node_class_names,
+        node_classes,
+        macro_names,
     }
 }
 
