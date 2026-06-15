@@ -32,6 +32,13 @@ pub fn find_prop_i32(props: &[Property], name: &str) -> Option<i32> {
     })
 }
 
+pub fn find_prop_bool(props: &[Property], name: &str) -> Option<bool> {
+    find_prop(props, name).and_then(|prop| match &prop.value {
+        PropValue::Bool(value) => Some(*value),
+        _ => None,
+    })
+}
+
 /// Extract an Object property as a resolved index string.
 pub fn find_prop_object(
     props: &[Property],

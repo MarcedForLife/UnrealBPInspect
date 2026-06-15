@@ -187,6 +187,7 @@ pub(crate) fn build_k2node_byte_map_for_test(
         event_node_index: &event_node_index,
         resume_blocks: &resume_blocks,
         graph: &graph,
+        scope: crate::bytecode::k2node_byte_map::GraphScope::Ubergraph,
     };
     let map = crate::bytecode::k2node_byte_map::build_k2node_byte_map(&inputs);
     Some((map, event_ranges))

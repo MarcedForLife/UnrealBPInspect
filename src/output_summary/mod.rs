@@ -5,6 +5,7 @@
 //! the post-processing filter, and event display-name helpers.
 
 pub(crate) mod call_graph;
+pub(crate) mod comments;
 mod filter;
 pub(crate) mod format;
 pub(crate) mod ubergraph;

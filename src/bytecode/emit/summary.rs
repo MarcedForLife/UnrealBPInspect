@@ -9,6 +9,8 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use crate::bytecode::asset::DecodedAsset;
+use crate::bytecode::emit::comments::{inline_comment_lines, with_block_comments};
+use crate::bytecode::emit::scoped_value::ScopedValue;
 use crate::bytecode::emit::sections::{emit_prefix_sections, filter_flags_for_summary, EmitCtx};
 use crate::bytecode::expr::{
     binary_op_symbol, unary_op_symbol, BinaryOp, CastKind, Expr, SwitchExprCase,
@@ -27,42 +29,10 @@ thread_local! {
     /// body so the `Stmt::Sequence` arm can render disconnected then-pins
     /// as `// sequence [N] (empty):` headers with faithful editor-index
     /// numbering, without threading the mask through every Stmt variant.
-    static ACTIVE_SEQUENCE_MASK: RefCell<Option<*const Vec<bool>>> =
+    /// The mask is stored by value (cloned in at scope entry) so the consult
+    /// path holds no borrow.
+    static ACTIVE_SEQUENCE_MASK: RefCell<Option<Vec<bool>>> =
         const { RefCell::new(None) };
-}
-
-/// RAII guard over a thread-local raw-pointer cell. On construction it
-/// installs `value` and saves the previous binding; on `Drop` it restores
-/// the saved binding. The `Drop`-based restore closes the latent hole the
-/// hand-rolled set/restore pairs left open: a panic or early return inside
-/// the wrapped body would otherwise skip the restore and leave a stale
-/// pointer installed for re-entrant emits.
-struct ScopedPtr<T: 'static> {
-    key: &'static std::thread::LocalKey<RefCell<Option<*const T>>>,
-    previous: Option<*const T>,
-}
-
-impl<T: 'static> ScopedPtr<T> {
-    /// Install `value` in `key`, returning a guard that restores the
-    /// previous binding when dropped.
-    fn set(
-        key: &'static std::thread::LocalKey<RefCell<Option<*const T>>>,
-        value: Option<*const T>,
-    ) -> Self {
-        let previous = key.with(|cell| cell.replace(value));
-        ScopedPtr { key, previous }
-    }
-
-    /// The pointer currently installed in `key`, or `None`.
-    fn get(key: &'static std::thread::LocalKey<RefCell<Option<*const T>>>) -> Option<*const T> {
-        key.with(|cell| *cell.borrow())
-    }
-}
-
-impl<T: 'static> Drop for ScopedPtr<T> {
-    fn drop(&mut self) {
-        self.key.with(|cell| *cell.borrow_mut() = self.previous);
-    }
 }
 
 /// Look up a latent call's resume body by the call's disk offset.
@@ -84,8 +54,8 @@ pub(crate) fn is_latent_function(name: &str) -> bool {
 /// restoring the previous binding on the way out. `mask` is `None` for
 /// blocks that aren't gate-eligible.
 fn with_sequence_mask<R>(mask: Option<&Vec<bool>>, body: impl FnOnce() -> R) -> R {
-    let next = mask.map(|inner| inner as *const _);
-    let _guard = ScopedPtr::set(&ACTIVE_SEQUENCE_MASK, next);
+    let next = mask.cloned();
+    let _guard = ScopedValue::set(&ACTIVE_SEQUENCE_MASK, next);
     body()
 }
 
@@ -100,17 +70,15 @@ fn with_sequence_mask<R>(mask: Option<&Vec<bool>>, body: impl FnOnce() -> R) -> 
 ///
 /// Otherwise `None`, and the caller renders the compact decoded numbering.
 fn faithful_sequence_mask(decoded_pin_count: usize) -> Option<Vec<bool>> {
-    let mask_ptr = ScopedPtr::get(&ACTIVE_SEQUENCE_MASK)?;
-    // Safety: the pointer is installed by `with_sequence_mask` for the
-    // duration of one block's emit and cleared before the guard drops;
-    // the mask outlives the block body it wraps.
-    let mask: &Vec<bool> = unsafe { &*mask_ptr };
-    let connected = mask.iter().filter(|wired| **wired).count();
-    if connected == decoded_pin_count && mask.len() > decoded_pin_count {
-        Some(mask.clone())
-    } else {
-        None
-    }
+    ScopedValue::with_current(&ACTIVE_SEQUENCE_MASK, |mask| {
+        let connected = mask.iter().filter(|wired| **wired).count();
+        if connected == decoded_pin_count && mask.len() > decoded_pin_count {
+            Some(mask.clone())
+        } else {
+            None
+        }
+    })
+    .flatten()
 }
 
 /// Emit summary pseudocode for a decoded Blueprint (Unreal Blueprint) asset.
@@ -234,9 +202,22 @@ fn emit_function_block(
     output.push_str(&signature);
     output.push_str(&flags);
     output.push('\n');
-    with_sequence_mask(ctx.sequence_masks.get(name), || {
-        emit_body(output, body, 1, resume_bodies);
+    // Function-level descriptions sit directly below the signature.
+    emit_comment_lines(output, ctx.comments.function_level_lines(name));
+    with_block_comments(&ctx.comments, name, || {
+        with_sequence_mask(ctx.sequence_masks.get(name), || {
+            emit_body(output, body, 1, resume_bodies);
+        });
     });
+}
+
+/// Append pre-rendered comment annotation lines (already indented) to
+/// `output`, each on its own line. No-op when `lines` is `None`.
+fn emit_comment_lines(output: &mut String, lines: Option<&[String]>) {
+    for line in lines.into_iter().flatten() {
+        output.push_str(line);
+        output.push('\n');
+    }
 }
 
 /// Emit one ubergraph event block: optional `// called by:` line,
@@ -257,6 +238,8 @@ fn emit_event_block(
         output.push_str(&callers.join(", "));
         output.push('\n');
     }
+    // Event-wrapping annotations sit directly above the event header.
+    emit_comment_lines(output, ctx.comments.event_wrapping_lines(raw_name));
     output.push_str("  ");
     output.push_str(&display_name);
     if display_name.contains('(') {
@@ -264,8 +247,12 @@ fn emit_event_block(
     } else {
         output.push_str("():\n");
     }
-    with_sequence_mask(ctx.sequence_masks.get(raw_name), || {
-        emit_body(output, body, 1, resume_bodies);
+    // An event graph can also carry a whole-graph function-level description.
+    emit_comment_lines(output, ctx.comments.function_level_lines(raw_name));
+    with_block_comments(&ctx.comments, raw_name, || {
+        with_sequence_mask(ctx.sequence_masks.get(raw_name), || {
+            emit_body(output, body, 1, resume_bodies);
+        });
     });
 }
 
@@ -297,7 +284,17 @@ fn emit_stmt(
     indent_level: usize,
     resume_bodies: &BTreeMap<usize, Vec<Stmt>>,
 ) {
+    // Inline comment annotations anchored to this statement's offset sit
+    // directly above it, rendered with this statement's own indent so they
+    // line up with the construct they annotate. The active map is installed
+    // only by the summary block emitters, so the dump/JSON paths never see it.
     let indent = indent_str(indent_level);
+    if let Some(lines) = inline_comment_lines(stmt.offset(), &indent) {
+        for line in lines {
+            output.push_str(&line);
+            output.push('\n');
+        }
+    }
     match stmt {
         Stmt::Assignment { lhs, rhs, .. } => {
             output.push_str(&indent);

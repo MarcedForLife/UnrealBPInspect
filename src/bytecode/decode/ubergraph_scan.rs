@@ -258,7 +258,7 @@ pub(super) fn collect_event_entries(
 /// is derived separately by scanning function exports whose names follow the
 /// `InpActEvt_{action}_K2Node_InputActionEvent_{N}` pattern and extracting
 /// the action name to match against the `InputActionName` property.
-pub(super) fn build_event_node_index(
+pub(crate) fn build_event_node_index(
     asset: &ParsedAsset,
     export_names: &[String],
 ) -> BTreeMap<String, usize> {

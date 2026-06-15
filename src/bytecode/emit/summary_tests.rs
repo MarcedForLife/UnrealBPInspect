@@ -14,6 +14,8 @@ mod tests {
             functions: vec![],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
+            byte_maps: Default::default(),
         }
     }
 
@@ -32,6 +34,8 @@ mod tests {
             }],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
+            byte_maps: Default::default(),
         };
         assert_eq!(emit_summary(&asset), "function Loop {\n    break\n}\n");
     }
@@ -50,6 +54,8 @@ mod tests {
                 }],
             }],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
+            byte_maps: Default::default(),
         };
         let result = emit_summary(&asset);
         assert_eq!(result, "event ReceiveTick {\n    Counter = 0\n}\n");
@@ -70,6 +76,8 @@ mod tests {
             }],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
+            byte_maps: Default::default(),
         };
         let result = emit_summary(&asset);
         assert!(result.contains("// UNKNOWN at 0x20: bad opcode [1 bytes]"));
@@ -262,6 +270,8 @@ mod tests {
             }],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
+            byte_maps: Default::default(),
         };
         let result = emit_summary(&asset);
         assert!(
@@ -329,6 +339,8 @@ mod tests {
                 body: vec![loop_stmt],
             }],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
+            byte_maps: Default::default(),
         }
     }
 
@@ -515,6 +527,8 @@ mod tests {
                 body: vec![latch],
             }],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
+            byte_maps: Default::default(),
         }
     }
 

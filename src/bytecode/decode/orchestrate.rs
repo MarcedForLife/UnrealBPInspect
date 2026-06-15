@@ -64,6 +64,8 @@ pub fn decode_asset(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
                 functions: vec![],
                 events: vec![],
                 resume_bodies: BTreeMap::new(),
+                resume_owner_events: BTreeMap::new(),
+                byte_maps: Default::default(),
             }
         }
     }
@@ -107,6 +109,8 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
                 functions: vec![],
                 events: vec![],
                 resume_bodies: BTreeMap::new(),
+                resume_owner_events: BTreeMap::new(),
+                byte_maps: Default::default(),
             };
         }
     };
@@ -134,6 +138,18 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
     // Keyed by the call's disk offset. Each ubergraph contributes its
     // own set; non-ubergraph assets leave this empty.
     let mut resume_bodies: BTreeMap<usize, Vec<crate::bytecode::stmt::Stmt>> = BTreeMap::new();
+    // Owner event per latent-resume chain, range-derived where the
+    // partition output is in hand. Carried on `DecodedAsset` so comment
+    // placement consumes ownership instead of re-deriving it from the
+    // decoded statement trees.
+    let mut resume_owner_events: BTreeMap<usize, String> = BTreeMap::new();
+    // K2Node-to-bytes attribution, carried out to emit so a node can be
+    // resolved to the statement it produced. The ubergraph map is built inside
+    // the partition-OK arm below (`None` for assets with no ubergraph); the
+    // per-function maps are collected by the standalone-function loop.
+    let mut ubergraph_byte_map: Option<crate::bytecode::k2node_byte_map::K2NodeByteMap> = None;
+    let mut function_byte_maps: BTreeMap<String, crate::bytecode::k2node_byte_map::K2NodeByteMap> =
+        BTreeMap::new();
 
     // Locate the ubergraph export by name prefix.
     let ubergraph_export = asset
@@ -264,6 +280,10 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
                     Ok(partition_output) => {
                         let event_ranges = partition_output.event_ranges;
                         let resume_blocks = partition_output.resume_blocks;
+                        resume_owner_events = build_resume_owner_map(&resume_blocks, &event_ranges);
+                        if debug_enabled() {
+                            eprintln!("probe: resume_owner_events={:?}", resume_owner_events);
+                        }
                         // Decode each latent-call resume chunk into its
                         // own statement vector. The map is keyed by the
                         // originating call's disk offset (the
@@ -315,9 +335,16 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
                                 event_node_index: &event_node_index,
                                 resume_blocks: &resume_blocks,
                                 graph: &graph,
+                                scope: crate::bytecode::k2node_byte_map::GraphScope::Ubergraph,
                             };
+                        // The decode loop reads this map (cross-event
+                        // inline + macro_region), so it uses the
+                        // conservative view: comment-only attribution
+                        // refinements must not move decoded structure. The
+                        // CommentRefined map for placement is built once
+                        // below, after the loop.
                         let k2node_byte_map =
-                            crate::bytecode::k2node_byte_map::build_k2node_byte_map(
+                            crate::bytecode::k2node_byte_map::build_k2node_byte_map_conservative(
                                 &k2node_byte_map_inputs,
                             );
                         let event_inputs = EventDecodeInputs {
@@ -364,6 +391,17 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
                                 export_index: event_export_indices.get(event_name).copied(),
                             });
                         }
+                        // The event loop's last borrow of the conservative
+                        // `k2node_byte_map` (through `event_inputs`) ends
+                        // above. Comment placement consumes the
+                        // CommentRefined view (the same-name group bijection
+                        // applied); building it here, after decode, is what
+                        // keeps comment attribution from touching structure.
+                        drop(k2node_byte_map);
+                        ubergraph_byte_map =
+                            Some(crate::bytecode::k2node_byte_map::build_k2node_byte_map(
+                                &k2node_byte_map_inputs,
+                            ));
                     }
                     Err(err) => {
                         eprintln!("decode: partition failed for {}: {}", ug_name, err);
@@ -376,6 +414,25 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
     // Decode standalone function exports (class `.Function`, not the
     // ubergraph dispatcher, and not ubergraph stubs).
     let ug_name_opt: Option<&str> = ubergraph_export.map(|(_, (hdr, _))| hdr.object_name.as_str());
+
+    // Node-class and macro-name indices are graph-agnostic (built over all
+    // asset exports), so build them once here and share across every
+    // standalone-function byte-map build below. The per-function map uses the
+    // same name/operand-correlation passes the ubergraph map does; only the
+    // event-scoped inputs differ (empty for a single function).
+    let fn_node_class_names = build_node_class_names(asset, &export_names);
+    let fn_node_classes: std::collections::HashMap<usize, super::cross_event_inline::K2NodeClass> =
+        fn_node_class_names
+            .iter()
+            .map(|(&node_id, class)| {
+                (
+                    node_id,
+                    super::cross_event_inline::parse_k2node_class(class),
+                )
+            })
+            .collect();
+    let fn_macro_names = build_macro_names(asset, &export_names);
+
     for (export_idx, (hdr, _props)) in asset.exports.iter().enumerate() {
         let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
         if !class.ends_with(".Function") {
@@ -428,14 +485,20 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
                 decode_standalone_function_body(
                     asset,
                     &export_names,
+                    &hdr.object_name,
                     &bytecode,
                     ue5,
                     &name_table,
                     &fn_mem_to_disk,
+                    &fn_node_classes,
+                    &fn_macro_names,
                 )
             });
             let body = match std::panic::catch_unwind(decode) {
-                Ok(body) => body,
+                Ok((body, byte_map)) => {
+                    function_byte_maps.insert(hdr.object_name.clone(), byte_map);
+                    body
+                }
                 Err(payload) => {
                     eprintln!(
                         "decode: function '{}' panicked during decode ({}); emitting placeholder body",
@@ -509,7 +572,53 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
         functions,
         events,
         resume_bodies,
+        resume_owner_events,
+        byte_maps: crate::bytecode::k2node_byte_map::ByteMaps {
+            ubergraph: ubergraph_byte_map,
+            functions: function_byte_maps,
+        },
     }
+}
+
+/// Owner event per latent-resume chain, keyed by the originating call's
+/// disk offset, derived from partition ranges: a call offset inside an
+/// event's owned ranges takes that event; a call offset inside another
+/// chain's resume range takes that chain's owner, resolved to a fixpoint
+/// (a chained latent is a Delay-style call inside another resume chunk).
+///
+/// Consumed by summary comment placement (`anchor_via_owner_event`'s
+/// resume-chain search) via `DecodedAsset::resume_owner_events`.
+fn build_resume_owner_map(
+    resume_blocks: &BTreeMap<usize, Range<usize>>,
+    event_ranges: &BTreeMap<String, Vec<Range<usize>>>,
+) -> BTreeMap<usize, String> {
+    let mut owner: BTreeMap<usize, String> = BTreeMap::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &call_offset in resume_blocks.keys() {
+            if owner.contains_key(&call_offset) {
+                continue;
+            }
+            let direct = event_ranges.iter().find_map(|(name, ranges)| {
+                ranges
+                    .iter()
+                    .any(|range| range.contains(&call_offset))
+                    .then(|| name.clone())
+            });
+            let chained = || {
+                resume_blocks
+                    .iter()
+                    .find(|(&parent, range)| parent != call_offset && range.contains(&call_offset))
+                    .and_then(|(parent, _)| owner.get(parent).cloned())
+            };
+            if let Some(name) = direct.or_else(chained) {
+                owner.insert(call_offset, name);
+                changed = true;
+            }
+        }
+    }
+    owner
 }
 
 /// Shared inputs for decoding one ubergraph event body. Bundled because
@@ -669,19 +778,33 @@ fn decode_ubergraph_event_body(
     (prod_body, plans)
 }
 
-/// Decode a standalone function export's body via the region-tree walker.
+/// Decode a standalone function export's body via the region-tree walker, plus
+/// the per-function K2Node-to-bytes attribution map carried out to emit.
 ///
 /// Builds the per-function skeleton, opcode graph, and CFG/region tree over
 /// the full bytecode range, then decodes. Mirrors the per-event path with
 /// no cross-event inline context (standalone functions own their bytes).
+///
+/// The byte map uses the same name/operand-correlation attribution passes the
+/// ubergraph map does (`build_k2node_byte_map`); a function has no event
+/// partitions, so the event-scoped inputs are passed empty and only the
+/// graph-agnostic call/let/cast passes contribute. `node_classes` and
+/// `macro_names` are asset-global indices the caller builds once and shares.
+#[allow(clippy::too_many_arguments)]
 fn decode_standalone_function_body(
     asset: &ParsedAsset,
     export_names: &[String],
+    function_name: &str,
     bytecode: &[u8],
     ue5: i32,
     name_table: &NameTable,
     fn_mem_to_disk: &BTreeMap<usize, usize>,
-) -> Vec<crate::bytecode::stmt::Stmt> {
+    node_classes: &std::collections::HashMap<usize, super::cross_event_inline::K2NodeClass>,
+    macro_names: &std::collections::HashMap<usize, String>,
+) -> (
+    Vec<crate::bytecode::stmt::Stmt>,
+    crate::bytecode::k2node_byte_map::K2NodeByteMap,
+) {
     let full_range = Range {
         start: 0,
         end: bytecode.len(),
@@ -722,7 +845,39 @@ fn decode_standalone_function_body(
         ..DecodeCtx::new(bytecode, name_table, &asset.imports, export_names, ue5)
     };
     // Region-tree walker.
-    decode_region_body(&fn_cfg_bundle.1, &fn_cfg_bundle.0, &ctx)
+    let body = decode_region_body(&fn_cfg_bundle.1, &fn_cfg_bundle.0, &ctx);
+
+    // Per-function K2Node-to-bytes attribution. The event-scoped inputs are
+    // empty for a single function (a function has no event partitions), so the
+    // event passes contribute nothing and the graph-agnostic call/let/cast
+    // passes carry the attribution. Wrapped with the per-function mem-to-disk
+    // bridge so emit can translate a node's disk range back to a statement.
+    let empty_reaching: std::collections::HashMap<usize, std::collections::BTreeSet<String>> =
+        std::collections::HashMap::new();
+    let empty_ranges: BTreeMap<String, Vec<Range<usize>>> = BTreeMap::new();
+    let empty_entries: BTreeMap<String, usize> = BTreeMap::new();
+    let empty_node_index: BTreeMap<String, usize> = BTreeMap::new();
+    let empty_resume: BTreeMap<usize, Range<usize>> = BTreeMap::new();
+    let byte_map_inputs = crate::bytecode::k2node_byte_map::K2NodeByteMapInputs {
+        asset,
+        export_names,
+        bytecode,
+        name_table,
+        ue5,
+        node_classes,
+        macro_names,
+        node_to_reaching_events: &empty_reaching,
+        event_owned_ranges: &empty_ranges,
+        mem_to_disk: fn_mem_to_disk,
+        event_entries: &empty_entries,
+        event_node_index: &empty_node_index,
+        resume_blocks: &empty_resume,
+        graph: &fn_graph,
+        scope: crate::bytecode::k2node_byte_map::GraphScope::FunctionPage(function_name),
+    };
+    let byte_map = crate::bytecode::k2node_byte_map::build_k2node_byte_map(&byte_map_inputs);
+
+    (body, byte_map)
 }
 
 /// Apply the transform pipeline to every function and event body.
