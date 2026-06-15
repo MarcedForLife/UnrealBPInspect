@@ -11,12 +11,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::bytecode::asset::DecodedAsset;
 use crate::bytecode::call_graph::build_call_graph as build_typed_call_graph;
+use crate::bytecode::emit::comments::CommentEmitPlan;
 use crate::bytecode::names::K2NODE_EXECUTION_SEQUENCE;
 use crate::output_summary::call_graph::{collect_local_functions, format_call_graph};
 use crate::output_summary::format::{format_component_tree, format_header, format_variables};
 use crate::output_summary::ubergraph::{compute_action_key_events, display_event_name};
 use crate::prop_query::find_prop_str;
-use crate::resolve::{resolve_index, short_class};
+use crate::resolve::{enclosing_graph_name, resolve_index, short_class};
 use crate::types::ParsedAsset;
 
 /// Function-header metadata shared between the prefix-section pass and
@@ -47,6 +48,10 @@ pub(crate) struct EmitCtx {
     /// multiple ExecutionSequence nodes are absent and fall back to the
     /// compact decoded-pin numbering.
     pub sequence_masks: HashMap<String, Vec<bool>>,
+    /// Placed comment annotations (event-wrapping, function-level, inline)
+    /// for this asset, consumed only by the summary block emitters. Empty
+    /// for assets that author no comment boxes.
+    pub comments: CommentEmitPlan,
 }
 
 /// Append the Blueprint, Components, Variables, Call graph, and
@@ -101,6 +106,7 @@ pub(crate) fn emit_prefix_sections(
 
     let (signatures, flags) = collect_function_metadata(parsed);
     let sequence_masks = collect_sequence_masks(parsed, &export_names);
+    let comments = CommentEmitPlan::build(decoded, parsed);
 
     EmitCtx {
         callers_map,
@@ -108,36 +114,8 @@ pub(crate) fn emit_prefix_sections(
         signatures,
         flags,
         sequence_masks,
+        comments,
     }
-}
-
-/// Walk a K2Node export's `outer_index` chain to the owning `EdGraph`
-/// export, whose `object_name` is the function/event block name. Stops at
-/// the first EdGraph ancestor; returns `None` if the chain reaches a null
-/// outer or exceeds the depth guard before finding one.
-fn owning_block_name(
-    parsed: &ParsedAsset,
-    export_names: &[String],
-    node_one_based: usize,
-) -> Option<String> {
-    const MAX_OUTER_DEPTH: usize = 8;
-    let mut current = node_one_based as i32;
-    for _ in 0..MAX_OUTER_DEPTH {
-        let (hdr, _) = parsed.exports.get((current - 1) as usize)?;
-        let class = short_class(&resolve_index(
-            &parsed.imports,
-            export_names,
-            hdr.class_index,
-        ));
-        if class == "EdGraph" {
-            return Some(hdr.object_name.clone());
-        }
-        if hdr.outer_index <= 0 {
-            return None;
-        }
-        current = hdr.outer_index;
-    }
-    None
 }
 
 /// Build `block_name -> editor then-pin connected-mask` for every block
@@ -167,7 +145,7 @@ fn collect_sequence_masks(
         let Some(pin_data) = parsed.pin_data.get(&one_based) else {
             continue;
         };
-        let Some(block) = owning_block_name(parsed, export_names, one_based) else {
+        let Some(block) = enclosing_graph_name(parsed, export_names, one_based) else {
             continue;
         };
         let mask: Vec<bool> = pin_data

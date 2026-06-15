@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::bytecode::k2node_byte_map::ByteMaps;
 use crate::bytecode::stmt::Stmt;
 
 /// The decoded representation of a single Blueprint asset.
@@ -23,6 +24,26 @@ pub struct DecodedAsset {
     /// after the call line. Empty for assets without latent calls.
     #[serde(default)]
     pub resume_bodies: BTreeMap<usize, Vec<Stmt>>,
+    /// Owner event per latent-resume chain, keyed like `resume_bodies` by
+    /// the originating call's disk offset. Derived at partition time by
+    /// range containment (see `build_resume_owner_map` in
+    /// `decode::orchestrate`). Read by summary comment placement to key
+    /// resume-chunk anchors to the event whose rendered body interleaves
+    /// the chunk. Not serialised: rebuilt on every decode, no JSON
+    /// representation.
+    #[serde(skip)]
+    pub(crate) resume_owner_events: BTreeMap<usize, String>,
+    /// K2Node-to-bytes attribution carried out to emit so a graph node can be
+    /// resolved to the statement it produced: one ubergraph map plus one map
+    /// per standalone function. Built during decode. Not serialised (it has no
+    /// JSON representation and is rebuilt on every decode), so the JSON output
+    /// is unaffected. `pub(crate)` because the carrier type is an internal
+    /// decode artifact, unlike the serialisable IR fields above.
+    ///
+    /// Read by the summary-mode comment placement (`bytecode::emit::comments`)
+    /// to anchor inline annotations to the statement a graph node produced.
+    #[serde(skip)]
+    pub(crate) byte_maps: ByteMaps,
 }
 
 /// A decoded Blueprint function.

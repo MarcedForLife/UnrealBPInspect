@@ -132,6 +132,10 @@ pub struct EdGraphPin {
 }
 
 impl EdGraphPin {
+    pub fn is_exec_input(&self) -> bool {
+        self.pin_type == PIN_TYPE_EXEC && self.direction == PIN_DIRECTION_INPUT
+    }
+
     pub fn is_exec_output(&self) -> bool {
         self.pin_type == PIN_TYPE_EXEC && self.direction == PIN_DIRECTION_OUTPUT
     }

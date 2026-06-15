@@ -55,6 +55,8 @@ mod tests {
             functions: vec![],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
+            byte_maps: Default::default(),
         }
     }
 
@@ -71,6 +73,8 @@ mod tests {
             }],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
+            byte_maps: Default::default(),
         }
     }
 
@@ -111,6 +115,8 @@ mod tests {
             }],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
+            byte_maps: Default::default(),
         };
         let (diff_text, has_changes) = emit_diff(&left, &right, "before", "after", 3);
         assert!(has_changes);
@@ -147,6 +153,8 @@ mod tests {
                 body: vec![],
             }],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
+            byte_maps: Default::default(),
         };
         let right = empty_asset();
         let (diff_text, has_changes) = emit_diff(&left, &right, "before", "after", 3);

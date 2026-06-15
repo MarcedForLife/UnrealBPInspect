@@ -357,6 +357,8 @@ mod tests {
             functions: vec![],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
+            byte_maps: Default::default(),
         }
     }
 
@@ -383,6 +385,8 @@ mod tests {
             }],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
+            byte_maps: Default::default(),
         };
         let output = emit_dump(&asset);
         assert!(output.contains("function TestFunc {"));
@@ -409,6 +413,8 @@ mod tests {
             }],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
+            byte_maps: Default::default(),
         };
         let output = emit_dump(&asset);
         assert!(output.contains("stmt 0x0020: Branch"));
@@ -446,6 +452,8 @@ mod tests {
             }],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
+            byte_maps: Default::default(),
         };
         let output = emit_dump(&asset);
         assert!(output.contains("stmt 0x0000: Call"));
@@ -466,6 +474,8 @@ mod tests {
                 }],
             }],
             resume_bodies: std::collections::BTreeMap::new(),
+            resume_owner_events: std::collections::BTreeMap::new(),
+            byte_maps: Default::default(),
         };
         let output = emit_dump(&asset);
         assert!(output.contains("event OnBeginPlay {"));
