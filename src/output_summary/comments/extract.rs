@@ -87,13 +87,21 @@ fn node_pos(props: &[Property]) -> (i32, i32) {
     )
 }
 
+/// Read the `NodeComment` text, returning `None` when it is absent or empty
+/// (the editor omits empty comments from logic the same way).
+fn non_empty_comment_text(props: &[Property]) -> Option<String> {
+    let text = find_prop_str(props, "NodeComment")?;
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 /// Lift a dedicated `EdGraphNode_Comment` export into a [`CommentBox`].
 /// Returns `None` when the export has no `NodeComment` text.
 fn box_comment(props: &[Property], page: Option<String>) -> Option<CommentBox> {
-    let text = find_prop_str(props, "NodeComment")?;
-    if text.is_empty() {
-        return None;
-    }
+    let text = non_empty_comment_text(props)?;
     let (x, y) = node_pos(props);
     Some(CommentBox {
         text,
@@ -119,10 +127,7 @@ fn bubble_comment(
     if !find_prop_bool(props, "bCommentBubbleVisible").unwrap_or(false) {
         return None;
     }
-    let text = find_prop_str(props, "NodeComment")?;
-    if text.is_empty() {
-        return None;
-    }
+    let text = non_empty_comment_text(props)?;
     Some(CommentBox {
         text,
         x,

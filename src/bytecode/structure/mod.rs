@@ -223,97 +223,29 @@ fn build_chain_node(
     }
     let interleaved = chain.body_targets_mem.iter().all(|body| body.is_some());
 
-    // Pin 0 inline body always seeds the head of `seeds`, ahead of the
-    // pushed pins, regardless of chain form. Pin numbering follows BP
-    // execution order: pin 0 is the inline body that runs first
-    // (interleaved form) or the inline body that runs first AND has the
-    // full chain stack pre-pushed (grouped form). Pushed pins follow in
-    // execution order.
-    let mut seeds: Vec<StackSeed> = Vec::with_capacity(chain_pushes_disk.len() + 1);
-    let mut seed_addrs: Vec<usize> = Vec::with_capacity(seeds.capacity());
-
     // Partition boundary clamps each pin's BFS to the event's owned
     // range, extended past the end of the push chain when the chain's
     // `after_chain_disk` lands beyond `owner_range.end`.
     let upper = owner_range.end.max(chain.after_chain_disk);
     let boundary = owner_range.start..upper;
 
-    if interleaved {
-        // Interleaved-with-JUMP: each pin enters via JUMP with its own
-        // continuation on the flow stack; the inline trailer runs with
-        // empty stack after every continuation has popped.
-        for (push_index, &cont_disk) in chain_pushes_disk.iter().enumerate() {
-            let body_mem = chain.body_targets_mem[push_index]
-                .expect("interleaved => every push has a JUMP body");
-            let body_disk = *mem_to_disk.get(&body_mem)?;
-            if body_disk >= bytecode.len() {
-                return None;
-            }
-            seed_addrs.push(body_disk);
-            seeds.push(StackSeed {
-                seed: body_disk,
-                initial_stack: vec![cont_disk],
-                is_inline_pin: false,
-            });
-        }
-        // The inline pin runs after every PUSH operand has been popped.
-        // In the canonical interleaved emit its body lives at T_{N-1}
-        // (the last PUSH's continuation). Seeding at T_{N-1} is safe
-        // because scope-aware BFS with a `chain_head_floor` rejects ANY
-        // successor below `head` regardless of edge mechanism (back-edge,
-        // forward jump, POP, switch case offset), so a BP-emitted
-        // for-loop scaffold cannot escape below the chain head into the
-        // outer event's init bytes via the loop back-edge.
-        let inline_body = pick_interleaved_inline_seed(
-            chain_pushes_disk.last().copied(),
-            chain.after_chain_disk,
-            graph,
-        );
-        if !seed_addrs.contains(&inline_body) {
-            seed_addrs.push(inline_body);
-            seeds.push(StackSeed {
-                seed: inline_body,
-                initial_stack: Vec::new(),
-                is_inline_pin: true,
-            });
-        }
+    // Pin numbering follows BP execution order. Both forms place the
+    // inline pin (pin 0) ahead of the pushed pins; the two seeding
+    // helpers differ only in how the flow stack is reconstructed per pin.
+    let seeds = if interleaved {
+        seed_interleaved_pins(&chain, &chain_pushes_disk, bytecode, mem_to_disk, graph)?
     } else {
-        let inline_body = chain.after_chain_disk;
-        // Grouped form: every continuation is pushed before pin 0 runs,
-        // so pin 0 starts with the full chain stack and each subsequent
-        // pin has one fewer item. Pop order is LIFO: the last-pushed
-        // continuation fires first, so pin 1 is the last PUSH operand,
-        // pin 2 the second-to-last, and so on.
-        seed_addrs.push(inline_body);
-        seeds.push(StackSeed {
-            seed: inline_body,
-            initial_stack: chain_pushes_disk.clone(),
-            is_inline_pin: true,
-        });
-        for popped_index in (0..chain_pushes_disk.len()).rev() {
-            let body_disk = match chain.body_targets_mem[popped_index] {
-                Some(body_mem) => *mem_to_disk.get(&body_mem)?,
-                None => follow_push_stub(
-                    chain_pushes_disk[popped_index],
-                    owner_range.end,
-                    bytecode,
-                    mem_to_disk,
-                ),
-            };
-            if body_disk >= bytecode.len() {
-                return None;
-            }
-            // Stack after popping the i-th continuation: everything
-            // pushed before it remains on the stack (cont_0..cont_{i-1}).
-            let initial_stack = chain_pushes_disk[..popped_index].to_vec();
-            seed_addrs.push(body_disk);
-            seeds.push(StackSeed {
-                seed: body_disk,
-                initial_stack,
-                is_inline_pin: false,
-            });
-        }
-    }
+        seed_grouped_pins(
+            &chain,
+            &chain_pushes_disk,
+            owner_range.end,
+            bytecode,
+            mem_to_disk,
+        )?
+    };
+
+    // `push_targets` mirrors each seed's address in seeding order.
+    let seed_addrs: Vec<usize> = seeds.iter().map(|seed| seed.seed).collect();
 
     if !seed_addrs
         .iter()
@@ -336,6 +268,97 @@ fn build_chain_node(
         pin_partitions,
         parent_chain: None,
     })
+}
+
+/// Seed the pins of an interleaved-with-JUMP chain. Each pushed pin enters
+/// via JUMP with its own continuation on the flow stack; the inline trailer
+/// runs with an empty stack after every continuation has popped. Returns
+/// `None` when a body operand falls outside the bytecode stream.
+fn seed_interleaved_pins(
+    chain: &ChainShape,
+    chain_pushes_disk: &[usize],
+    bytecode: &[u8],
+    mem_to_disk: &BTreeMap<usize, usize>,
+    graph: &OpcodeGraph,
+) -> Option<Vec<StackSeed>> {
+    let mut seeds: Vec<StackSeed> = Vec::with_capacity(chain_pushes_disk.len() + 1);
+    for (push_index, &cont_disk) in chain_pushes_disk.iter().enumerate() {
+        let body_mem =
+            chain.body_targets_mem[push_index].expect("interleaved => every push has a JUMP body");
+        let body_disk = *mem_to_disk.get(&body_mem)?;
+        if body_disk >= bytecode.len() {
+            return None;
+        }
+        seeds.push(StackSeed {
+            seed: body_disk,
+            initial_stack: vec![cont_disk],
+            is_inline_pin: false,
+        });
+    }
+    // The inline pin runs after every PUSH operand has been popped. In the
+    // canonical interleaved emit its body lives at T_{N-1} (the last PUSH's
+    // continuation). Seeding at T_{N-1} is safe because scope-aware BFS with
+    // a `chain_head_floor` rejects ANY successor below `head` regardless of
+    // edge mechanism (back-edge, forward jump, POP, switch case offset), so
+    // a BP-emitted for-loop scaffold cannot escape below the chain head into
+    // the outer event's init bytes via the loop back-edge.
+    let inline_body = pick_interleaved_inline_seed(
+        chain_pushes_disk.last().copied(),
+        chain.after_chain_disk,
+        graph,
+    );
+    if !seeds.iter().any(|seed| seed.seed == inline_body) {
+        seeds.push(StackSeed {
+            seed: inline_body,
+            initial_stack: Vec::new(),
+            is_inline_pin: true,
+        });
+    }
+    Some(seeds)
+}
+
+/// Seed the pins of a canonical grouped chain. Every continuation is pushed
+/// before pin 0 runs, so pin 0 starts with the full chain stack and each
+/// subsequent pin has one fewer item. Pop order is LIFO: the last-pushed
+/// continuation fires first, so pin 1 is the last PUSH operand, pin 2 the
+/// second-to-last, and so on. Returns `None` when a body operand falls
+/// outside the bytecode stream.
+fn seed_grouped_pins(
+    chain: &ChainShape,
+    chain_pushes_disk: &[usize],
+    range_end: usize,
+    bytecode: &[u8],
+    mem_to_disk: &BTreeMap<usize, usize>,
+) -> Option<Vec<StackSeed>> {
+    let mut seeds: Vec<StackSeed> = Vec::with_capacity(chain_pushes_disk.len() + 1);
+    seeds.push(StackSeed {
+        seed: chain.after_chain_disk,
+        initial_stack: chain_pushes_disk.to_vec(),
+        is_inline_pin: true,
+    });
+    for popped_index in (0..chain_pushes_disk.len()).rev() {
+        let body_disk = match chain.body_targets_mem[popped_index] {
+            Some(body_mem) => *mem_to_disk.get(&body_mem)?,
+            None => follow_push_stub(
+                chain_pushes_disk[popped_index],
+                range_end,
+                bytecode,
+                mem_to_disk,
+            ),
+        };
+        if body_disk >= bytecode.len() {
+            return None;
+        }
+        // Stack after popping the i-th continuation: everything pushed
+        // before it remains on the stack (cont_0..cont_{i-1}).
+        let initial_stack = chain_pushes_disk[..popped_index].to_vec();
+        seeds.push(StackSeed {
+            seed: body_disk,
+            initial_stack,
+            is_inline_pin: false,
+        });
+    }
+    Some(seeds)
 }
 
 /// Pick the BFS seed for an interleaved-form chain's inline (last) pin.

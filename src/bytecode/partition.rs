@@ -900,66 +900,96 @@ pub(crate) fn bfs_reachable_with_scope(
             continue;
         };
 
-        if opcode == EX_PUSH_EXECUTION_FLOW {
-            if let Some(succs) = graph.successors.get(&addr) {
-                // Successors of PUSH are [pushed_target, fallthrough].
-                // Track the pushed target on the simulated stack and
-                // follow only the fallthrough through the graph.
-                if let Some(&pushed_target) = succs.first() {
-                    let mut new_stack = stack.clone();
-                    new_stack.push(pushed_target);
-                    for &succ in succs {
-                        if succ == pushed_target {
-                            continue;
-                        }
-                        admit(addr, succ, &new_stack, &mut queue);
-                    }
-                }
-            }
-            continue;
-        }
-
-        if opcode == EX_POP_EXECUTION_FLOW {
-            if stack.is_empty() {
-                continue;
-            }
-            let new_depth = stack.len() - 1;
-            if new_depth < baseline_depth {
-                // Popping below baseline lands in sibling territory.
-                continue;
-            }
-            let mut new_stack = stack.clone();
-            let popped = new_stack.pop().expect("non-empty by check above");
-            admit(addr, popped, &new_stack, &mut queue);
-            continue;
-        }
-
-        if opcode == EX_POP_FLOW_IF_NOT {
-            // Fallthrough always permitted (stack unchanged). The
-            // graph's successor list for this opcode is just the
-            // fallthrough; the conditional pop is added below.
-            if let Some(succs) = graph.successors.get(&addr) {
-                for &succ in succs {
-                    admit(addr, succ, &stack, &mut queue);
-                }
-            }
-            if stack.len() > baseline_depth {
-                let mut new_stack = stack.clone();
-                let popped = new_stack.pop().expect("non-empty");
-                admit(addr, popped, &new_stack, &mut queue);
-            }
-            continue;
-        }
-
-        // Default: follow graph successors with stack unchanged.
-        if let Some(succs) = graph.successors.get(&addr) {
-            for &succ in succs {
-                admit(addr, succ, &stack, &mut queue);
-            }
-        }
+        step_successors(
+            addr,
+            opcode,
+            &stack,
+            graph,
+            baseline_depth,
+            &admit,
+            &mut queue,
+        );
     }
 
     reached
+}
+
+/// Simulate the flow-stack effect of one opcode and admit its successors,
+/// dispatching across PUSH/POP/POP_IF_NOT and a graph-successor default.
+///
+/// `admit` carries the boundary, floor, arm, and back-edge gates; this
+/// helper only models the stack: PUSH records the pushed target and follows
+/// the fallthrough, POP returns to the stack top (unless that drops below
+/// `baseline_depth`, which lands in sibling territory), POP_IF_NOT follows
+/// the fallthrough and additionally the conditional pop, and every other
+/// opcode follows graph successors with the stack unchanged.
+#[allow(clippy::too_many_arguments)]
+fn step_successors(
+    addr: usize,
+    opcode: u8,
+    stack: &[usize],
+    graph: &OpcodeGraph,
+    baseline_depth: usize,
+    admit: &impl Fn(usize, usize, &[usize], &mut VecDeque<(usize, Vec<usize>)>),
+    queue: &mut VecDeque<(usize, Vec<usize>)>,
+) {
+    if opcode == EX_PUSH_EXECUTION_FLOW {
+        if let Some(succs) = graph.successors.get(&addr) {
+            // Successors of PUSH are [pushed_target, fallthrough].
+            // Track the pushed target on the simulated stack and
+            // follow only the fallthrough through the graph.
+            if let Some(&pushed_target) = succs.first() {
+                let mut new_stack = stack.to_vec();
+                new_stack.push(pushed_target);
+                for &succ in succs {
+                    if succ == pushed_target {
+                        continue;
+                    }
+                    admit(addr, succ, &new_stack, queue);
+                }
+            }
+        }
+        return;
+    }
+
+    if opcode == EX_POP_EXECUTION_FLOW {
+        if stack.is_empty() {
+            return;
+        }
+        let new_depth = stack.len() - 1;
+        if new_depth < baseline_depth {
+            // Popping below baseline lands in sibling territory.
+            return;
+        }
+        let mut new_stack = stack.to_vec();
+        let popped = new_stack.pop().expect("non-empty by check above");
+        admit(addr, popped, &new_stack, queue);
+        return;
+    }
+
+    if opcode == EX_POP_FLOW_IF_NOT {
+        // Fallthrough always permitted (stack unchanged). The
+        // graph's successor list for this opcode is just the
+        // fallthrough; the conditional pop is added below.
+        if let Some(succs) = graph.successors.get(&addr) {
+            for &succ in succs {
+                admit(addr, succ, stack, queue);
+            }
+        }
+        if stack.len() > baseline_depth {
+            let mut new_stack = stack.to_vec();
+            let popped = new_stack.pop().expect("non-empty");
+            admit(addr, popped, &new_stack, queue);
+        }
+        return;
+    }
+
+    // Default: follow graph successors with stack unchanged.
+    if let Some(succs) = graph.successors.get(&addr) {
+        for &succ in succs {
+            admit(addr, succ, stack, queue);
+        }
+    }
 }
 
 /// One pin's BFS seed for [`partition_seeds_with_stack`].

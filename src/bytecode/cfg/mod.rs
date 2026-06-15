@@ -84,7 +84,6 @@ impl ControlFlowGraph {
     }
 
     /// Return the BlockId whose `start` equals `addr`, if any.
-    #[allow(dead_code)]
     pub fn block_at_start(&self, addr: usize) -> Option<BlockId> {
         self.blocks
             .iter()

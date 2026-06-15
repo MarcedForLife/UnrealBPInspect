@@ -12,7 +12,7 @@ use crate::bytecode::names::K2NODE_PREFIX;
 use crate::ffield::*;
 use crate::pins::scan_for_pins;
 use crate::properties::read_properties;
-use crate::resolve::{format_func_flags, resolve_index, short_class};
+use crate::resolve::{class_of, format_func_flags, resolve_index, short_class};
 use crate::types::*;
 
 /// Package file magic number (first 4 bytes of every valid `.uasset`).
@@ -219,8 +219,6 @@ fn read_export_headers(
         let _pkg_flags = read_u32(reader)?;
         if ver.file_ver >= VER_UE4_TEMPLATE_INDEX {
             let _not_always = read_i32(reader)?;
-        }
-        if ver.file_ver >= VER_UE4_TEMPLATE_INDEX {
             let _is_asset = read_i32(reader)?;
         }
         if ver.file_ver_ue5 >= VER_UE5_OPTIONAL_RESOURCES {
@@ -363,7 +361,7 @@ fn parse_exports(
         let export_result: Result<Vec<Property>> = (|| {
             reader.seek(SeekFrom::Start(hdr.serial_offset as u64))?;
             let end = hdr.serial_offset as u64 + hdr.serial_size as u64;
-            let class_name = resolve_index(pctx.imports, pctx.export_names, hdr.class_index);
+            let class_name = class_of(pctx.imports, pctx.export_names, hdr);
             let kind = classify_export(&class_name);
 
             // UE5.2+: extension byte before tagged property stream.
@@ -481,8 +479,6 @@ fn parse_exports(
 /// every entry with `CPF_PARM`. Member variables (no `CPF_PARM`) are
 /// skipped, the signature is for the function call ABI.
 fn build_function_signature(children: &[(String, String, u64)]) -> FunctionSignature {
-    const CPF_PARM: u64 = 0x80;
-    const CPF_RETURN_PARM: u64 = 0x200;
     let mut params = Vec::new();
     let mut return_type = None;
     for (name, type_name, flags) in children {

@@ -33,8 +33,7 @@
 use crate::bytecode::expr::{BinaryOp, Expr};
 use crate::bytecode::stmt::Stmt;
 use crate::bytecode::transforms::visit::{
-    resolve_expr_chain, resolve_var_chain, walk_bodies_with_ancestors_mut, walk_expr,
-    walk_stmt_children_mut,
+    descend_into_children, resolve_expr_chain, resolve_var_chain, scope_stack, walk_expr,
 };
 
 /// Walk a statement body, lowering `[Var = X != N; if (Var) A else B]`
@@ -74,10 +73,8 @@ fn lower_in_body(body: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
 
     // Descend into nested bodies, threading preceding-siblings prefix as
     // the new innermost ancestor.
-    walk_bodies_with_ancestors_mut(body, ancestors, &mut |stmt, child_ancestors| {
-        walk_stmt_children_mut(stmt, &mut |sub_body| {
-            lower_in_body(sub_body, child_ancestors)
-        });
+    descend_into_children(body, ancestors, &mut |sub_body, child_ancestors| {
+        lower_in_body(sub_body, child_ancestors)
     });
 }
 
@@ -111,9 +108,7 @@ fn try_lower_branch_via_chain(
     // of the scope slices including `body` itself, so the clone has to
     // happen up front.
     let resolved_ne_operands: Option<(Expr, Expr)> = {
-        let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-        scopes.push(body.as_slice());
-        scopes.extend(ancestors.iter().copied());
+        let scopes = scope_stack(body.as_slice(), ancestors);
         match resolve_var_chain(&scopes, &temp_name) {
             Some(Expr::Binary {
                 op: BinaryOp::Ne,

@@ -23,7 +23,7 @@
 
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::{LoopKind, Stmt};
-use crate::bytecode::transforms::visit::walk_bodies_with_ancestors_mut;
+use crate::bytecode::transforms::visit::{scope_stack, walk_bodies_with_ancestors_mut};
 
 mod cond_recompute;
 mod for_break;
@@ -113,9 +113,7 @@ pub(super) fn refine_loops_vec(stmts: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
                 ..
             }
         ) {
-            let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-            scopes.push(stmts.as_slice());
-            scopes.extend(ancestors.iter().copied());
+            let scopes = scope_stack(stmts.as_slice(), ancestors);
             let Stmt::Loop {
                 kind: LoopKind::ForEach { array, .. },
                 ..
@@ -139,9 +137,7 @@ pub(super) fn refine_loops_vec(stmts: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
         // generic transitive `$`-temp closure sweep from `leak_idx`.
         let mut loop_idx = loop_idx;
         {
-            let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-            scopes.push(stmts.as_slice());
-            scopes.extend(ancestors.iter().copied());
+            let scopes = scope_stack(stmts.as_slice(), ancestors);
             if is_for_break_bound_leak(&stmts[loop_idx - 1], &scopes) {
                 let before = stmts.len();
                 drop_foreach_bound_expr_leak(stmts, loop_idx - 1);
@@ -266,9 +262,7 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                         .map(|aliases| {
                             let alias_refs: Vec<&str> =
                                 aliases.iter().map(String::as_str).collect();
-                            let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-                            scopes.push(body.as_slice());
-                            scopes.extend(ancestors.iter().copied());
+                            let scopes = scope_stack(body.as_slice(), ancestors);
                             find_item_binding_in_stmts(body, &alias_refs, &array, &scopes).is_none()
                         })
                         .unwrap_or(false);
@@ -424,9 +418,7 @@ pub(super) fn extract_increment(
     // walk: loop body innermost, then ancestors. The chain may hop through
     // a temp def in the parent body (e.g. real for-loop scaffold emitting
     // `$Less_IntInt = i < n` as a sibling of the Loop).
-    let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-    scopes.push(body.as_slice());
-    scopes.extend(ancestors.iter().copied());
+    let scopes = scope_stack(body.as_slice(), ancestors);
     if !expr_references_var_chain(cond, &last_lhs_name, &scopes) {
         return None;
     }

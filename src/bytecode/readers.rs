@@ -95,14 +95,14 @@ pub fn read_bc_fname_with_adj(
 }
 
 pub fn read_bc_string(bytecode: &[u8], pos: &mut usize) -> String {
-    let mut s = Vec::new();
+    let mut bytes = Vec::new();
     while *pos < bytecode.len() {
         let byte = bytecode[*pos];
         *pos += 1;
         if byte == 0 {
             break;
         }
-        s.push(byte);
+        bytes.push(byte);
     }
-    String::from_utf8_lossy(&s).to_string()
+    String::from_utf8_lossy(&bytes).to_string()
 }

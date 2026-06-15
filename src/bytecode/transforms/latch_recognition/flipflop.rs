@@ -298,9 +298,7 @@ fn matches_toggle_update(
     // Build the chain-resolution scope stack. Innermost is the body's
     // preceding siblings (`body[..idx]`), then the outer ancestors.
     let prefix: &[Stmt] = &body[..idx];
-    let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-    scopes.push(prefix);
-    scopes.extend(ancestors.iter().copied());
+    let scopes = visit::scope_stack(prefix, ancestors);
     let resolved = resolve_var_chain(&scopes, toggle_var)?;
     if !is_negation_of(resolved, toggle_var) {
         return None;

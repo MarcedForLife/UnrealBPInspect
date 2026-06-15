@@ -188,6 +188,15 @@ fn run_diff(files: &[PathBuf], filters: &[String], context: usize) -> Result<boo
     Ok(true)
 }
 
+/// Print the per-batch "N of M files failed" notice to stderr when some files
+/// failed but at least one succeeded. `successes` is the count that produced
+/// output, so `successes + failures` is the total file count.
+fn report_batch_failures(failures: usize, successes: usize) {
+    if failures > 0 {
+        eprintln!("{} of {} files failed", failures, failures + successes);
+    }
+}
+
 fn run_batch_json(
     files: &[PathBuf],
     mode: &OutputMode,
@@ -216,9 +225,7 @@ fn run_batch_json(
     let serialized = serde_json::to_string_pretty(&results)
         .context("serializing aggregated batch JSON results")?;
     println!("{}", serialized);
-    if failures > 0 {
-        eprintln!("{} of {} files failed", failures, failures + results.len());
-    }
+    report_batch_failures(failures, results.len());
     Ok(true)
 }
 
@@ -252,9 +259,7 @@ fn run_batch_text(
     if successes == 0 {
         bail!("all files failed to parse");
     }
-    if failures > 0 {
-        eprintln!("{} of {} files failed", failures, failures + successes);
-    }
+    report_batch_failures(failures, successes);
     Ok(true)
 }
 

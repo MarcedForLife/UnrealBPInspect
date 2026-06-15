@@ -137,11 +137,9 @@ fn c2_region_bounded_layout(
     Some(BranchLayout {
         then_range: (body_start_disk, then_end),
         else_range: (else_start, else_range_end),
-        then_event_call: None,
-        else_event_call: None,
         resume_disk: then_end,
-        body_owner: None,
         else_trailing_break: else_break,
+        ..Default::default()
     })
 }
 
@@ -202,6 +200,11 @@ pub(crate) fn decode_branch(pos: &mut usize, range_end: usize, ctx: &DecodeCtx) 
 /// Per-shape layout describing the slice ranges to decode for then and
 /// else bodies plus the post-construct resume point. Computed once,
 /// then handed to `decode_branch_bodies` for the actual recursion.
+///
+/// `Default` lets each construction site spell out only the fields that
+/// diverge from the empty/`None` baseline and fill the rest with
+/// `..Default::default()`.
+#[derive(Default)]
 struct BranchLayout {
     /// Range to decode for the then-body. May be empty (start == end)
     /// when the conditional flows directly into the else-target.
@@ -368,11 +371,9 @@ fn try_tail_jin_arm_layout(
                 return Some(BranchLayout {
                     then_range: arms.then_range,
                     else_range: arms.else_range,
-                    then_event_call: None,
-                    else_event_call: None,
                     resume_disk: range_end,
                     body_owner: Some(owner),
-                    else_trailing_break: None,
+                    ..Default::default()
                 });
             }
         }
@@ -442,11 +443,9 @@ fn try_backward_isvalid_layout(
                 return Some(BranchLayout {
                     then_range: (then_target_disk, seg_end),
                     else_range: (else_disk, else_end),
-                    then_event_call: None,
-                    else_event_call: None,
                     resume_disk: range_end,
                     body_owner: Some(owner),
-                    else_trailing_break: None,
+                    ..Default::default()
                 });
             }
         }
@@ -458,11 +457,9 @@ fn try_backward_isvalid_layout(
         // structural EX_POP that returns to the caller's frame.
         then_range: (body_start_disk, range_end),
         else_range: (else_disk, else_end),
-        then_event_call: None,
-        else_event_call: None,
         resume_disk: range_end,
         body_owner: Some(owner),
-        else_trailing_break: None,
+        ..Default::default()
     })
 }
 
@@ -522,11 +519,8 @@ fn decide_forward_branch_layout(
             Some(BranchLayout {
                 then_range: (then_disk, convergence),
                 else_range: (else_disk, convergence),
-                then_event_call: None,
-                else_event_call: None,
                 resume_disk: convergence,
-                body_owner: None,
-                else_trailing_break: None,
+                ..Default::default()
             })
         }
 
@@ -537,12 +531,9 @@ fn decide_forward_branch_layout(
             let then_end = range_end;
             Some(BranchLayout {
                 then_range: (body_start_disk, then_end),
-                else_range: (0, 0),
-                then_event_call: None,
                 else_event_call: Some((event_name, mem)),
                 resume_disk: then_end,
-                body_owner: None,
-                else_trailing_break: None,
+                ..Default::default()
             })
         }
 
@@ -617,11 +608,8 @@ fn decide_forward_branch_layout(
                     Some(BranchLayout {
                         then_range: (body_start_disk, then_range_end),
                         else_range: (else_disk, post_else),
-                        then_event_call: None,
-                        else_event_call: None,
                         resume_disk: post_else,
-                        body_owner: None,
-                        else_trailing_break: None,
+                        ..Default::default()
                     })
                 }
                 None => {
@@ -651,23 +639,17 @@ fn decide_forward_branch_layout(
                         return Some(BranchLayout {
                             then_range: (body_start_disk, then_end),
                             else_range: (else_start, else_end),
-                            then_event_call: None,
-                            else_event_call: None,
                             resume_disk: then_end,
                             body_owner: Some(owner),
-                            else_trailing_break: None,
+                            ..Default::default()
                         });
                     }
                     // No terminating EX_JUMP -> then-body falls through
                     // naturally. Empty else.
                     Some(BranchLayout {
                         then_range: (body_start_disk, else_disk),
-                        else_range: (0, 0),
-                        then_event_call: None,
-                        else_event_call: None,
                         resume_disk: else_disk,
-                        body_owner: None,
-                        else_trailing_break: None,
+                        ..Default::default()
                     })
                 }
             }

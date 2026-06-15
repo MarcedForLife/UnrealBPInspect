@@ -8,7 +8,7 @@ use crate::prop_query::{
     find_prop, find_prop_object, find_prop_object_array, find_prop_str, find_prop_str_items,
     prop_value_short,
 };
-use crate::resolve::{resolve_index, short_class};
+use crate::resolve::{class_of, resolve_index, short_class};
 use crate::types::{ImportEntry, ParsedAsset, PropValue, Property};
 
 const COMP_SKIP_PROPS: &[&str] = &[
@@ -75,13 +75,10 @@ fn fmt_comp_props(buf: &mut String, name: &str, class: &str, depth: usize, ctx: 
     let prop_indent = " ".repeat(super::INDENT_WIDTH * (depth + 2));
     writeln!(buf, "{}{} ({})", indent, name, class).unwrap();
     if let Some(props) = ctx.comp_props.get(name) {
-        let skip = &[
-            "ChildActorTemplate",
-            COMP_SKIP_PROPS[0],
-            COMP_SKIP_PROPS[1],
-            COMP_SKIP_PROPS[2],
-        ];
-        fmt_prop_list(buf, &prop_indent, props, skip, ctx);
+        let skip: Vec<&str> = std::iter::once("ChildActorTemplate")
+            .chain(COMP_SKIP_PROPS.iter().copied())
+            .collect();
+        fmt_prop_list(buf, &prop_indent, props, &skip, ctx);
         // Handle ChildActorTemplate
         let child_actor_tpl =
             find_prop_object(props, "ChildActorTemplate", ctx.imports, ctx.export_names);
@@ -121,7 +118,7 @@ pub(crate) fn format_header(
     let mut bp_parent = String::new();
 
     for (hdr, props) in &asset.exports {
-        let class = resolve_index(&asset.imports, export_names, hdr.class_index);
+        let class = class_of(&asset.imports, export_names, hdr);
         if class.ends_with(".Blueprint") {
             bp_name = hdr.object_name.clone();
             if let Some(p) = find_prop(props, "ParentClass") {
@@ -159,7 +156,7 @@ pub(crate) fn format_component_tree(
     let mut scs_nodes: HashMap<String, (String, String, Vec<String>)> = HashMap::new();
     let mut components: Vec<(String, String)> = Vec::new();
     for (hdr, props) in &asset.exports {
-        let class = resolve_index(&asset.imports, export_names, hdr.class_index);
+        let class = class_of(&asset.imports, export_names, hdr);
         if !class.ends_with(".SCS_Node") {
             continue;
         }
@@ -198,7 +195,7 @@ pub(crate) fn format_component_tree(
     let mut cat_exports: HashMap<String, (String, &[Property])> = HashMap::new();
     for (hdr, props) in &asset.exports {
         if hdr.object_name.contains("_CAT") {
-            let class = resolve_index(&asset.imports, export_names, hdr.class_index);
+            let class = class_of(&asset.imports, export_names, hdr);
             cat_exports.insert(hdr.object_name.clone(), (short_class(&class), props));
         }
     }
@@ -231,7 +228,7 @@ pub(crate) fn format_variables(
 
     let mut members: Vec<String> = Vec::new();
     for (hdr, props) in &asset.exports {
-        let class = resolve_index(&asset.imports, export_names, hdr.class_index);
+        let class = class_of(&asset.imports, export_names, hdr);
         if !class.ends_with(".BlueprintGeneratedClass") {
             continue;
         }

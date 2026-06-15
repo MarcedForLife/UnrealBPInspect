@@ -5,7 +5,7 @@ use super::{
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::Stmt;
 use crate::bytecode::transforms::visit::{
-    resolve_var_chain, walk_stmt_exprs, walk_stmt_exprs_mut, Action,
+    resolve_var_chain, scope_stack, walk_stmt_exprs, walk_stmt_exprs_mut, Action,
 };
 
 /// Check if the ForC shape (cond + increment + body) matches the canonical
@@ -104,9 +104,7 @@ pub(super) fn strip_foreach_boilerplate(
         None => return,
     };
     let alias_names = collect_index_aliases(body, &counter_name);
-    let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-    scopes.push(body);
-    scopes.extend(ancestors.iter().copied());
+    let scopes = scope_stack(body.as_slice(), ancestors);
 
     let fetch_idx = body.iter().position(|stmt| {
         let Stmt::Assignment { rhs, .. } = stmt else {
@@ -187,9 +185,7 @@ pub(super) fn substitute_foreach_fetches(
     // matcher can hop an opaque `Var($X)` recv through body-local temp
     // definitions while the live body is borrowed mutably below.
     let body_snapshot: Vec<Stmt> = body.to_vec();
-    let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-    scopes.push(body_snapshot.as_slice());
-    scopes.extend(ancestors.iter().copied());
+    let scopes = scope_stack(body_snapshot.as_slice(), ancestors);
     let replacement = Expr::Var(item.to_string());
     for stmt in body.iter_mut() {
         walk_stmt_exprs_mut(stmt, &mut |expr: &mut Expr| {
@@ -285,9 +281,7 @@ fn find_foreach_item(
 ) -> Option<String> {
     let alias_names = collect_index_aliases(body, counter_name);
     let alias_refs: Vec<&str> = alias_names.iter().map(String::as_str).collect();
-    let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-    scopes.push(body);
-    scopes.extend(ancestors.iter().copied());
+    let scopes = scope_stack(body, ancestors);
 
     if let Some(item) = find_item_binding_in_stmts(body, &alias_refs, array_expr, &scopes) {
         return Some(item);
@@ -436,9 +430,7 @@ pub(crate) fn match_foreach_cond(
     body: &[Stmt],
     ancestors: &[&[Stmt]],
 ) -> Option<(String, Expr)> {
-    let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-    scopes.push(body);
-    scopes.extend(ancestors.iter().copied());
+    let scopes = scope_stack(body, ancestors);
     let resolved = resolve_cond_chain(cond, &scopes);
     // When `resolved` is `Binary{And, ...}`, peel the break-flag wrapper.
     // The And operands may themselves be opaque `Var($X)` references that
@@ -654,9 +646,7 @@ pub(crate) fn match_foreach_increment(
     if !lhs_matches_var(lhs, counter_name) {
         return false;
     }
-    let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-    scopes.push(body);
-    scopes.extend(ancestors.iter().copied());
+    let scopes = scope_stack(body, ancestors);
     let resolved = resolve_cond_chain(rhs, &scopes);
     let Expr::Binary {
         op: crate::bytecode::expr::BinaryOp::Add,

@@ -242,7 +242,6 @@ mod tests {
     use crate::bytecode::transforms::test_fixtures::{assign, call, var};
     use crate::bytecode::transforms::visit::walk_body_exprs_visit_lhs;
 
-    /// Build `Expr::Call { name, args }`.
     fn call_expr(name: &str, args: Vec<Expr>) -> Expr {
         Expr::Call {
             name: name.to_string(),
