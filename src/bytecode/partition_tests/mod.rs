@@ -9,9 +9,15 @@
 mod addresses_to_ranges;
 mod back_edges;
 mod latent_resume;
-// Local-only tests that load uncommitted fixtures; kept out of default builds.
+// Local-only tests that load uncommitted fixtures; kept out of default
+// builds. The body is `include!`d rather than declared as a file module
+// so `cargo fmt` never resolves the absent sidecar (rustfmt follows
+// path-based `mod` declarations even when cfg-gated out, but not
+// `include!`).
 #[cfg(feature = "private-fixtures")]
-mod local_tests;
+mod local_tests {
+    include!("local_tests.rs");
+}
 mod opcode_boundaries;
 mod pop_resume;
 mod scope_bfs;

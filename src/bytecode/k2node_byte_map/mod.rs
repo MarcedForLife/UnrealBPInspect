@@ -507,19 +507,24 @@ pub(super) fn opcode_span(start: usize, inputs: &K2NodeByteMapInputs<'_>) -> Ran
     start..end
 }
 
-/// Asset-loading attribution tests live in a sibling `local_tests`
-/// module that is gitignored and only compiled with the
-/// `private-fixtures` feature, so the default build never references the
-/// local fixtures by name or path. The pure-logic tests below run in the
-/// default build.
-// Re-exported for the gitignored `local_tests` module, which pulls these
+/// Asset-loading attribution tests live in a gitignored `local_tests.rs`
+/// sidecar, compiled only with the `private-fixtures` feature, so the
+/// default build never references the local fixtures by name or path. The
+/// pure-logic tests below run in the default build.
+// Re-exported for the gitignored `local_tests` body, which pulls these
 // in through `use super::*`. The relocation moved the imports into the
 // submodules, so the parent scope must surface them again for the tests.
 #[cfg(all(test, feature = "private-fixtures"))]
 use crate::resolve::{resolve_index, short_class};
 
+// The body is `include!`d rather than declared as a file module so
+// `cargo fmt` never tries to resolve the absent sidecar: rustfmt walks
+// path-based `mod` declarations even when they are cfg-gated out, but it
+// does not follow `include!`.
 #[cfg(all(test, feature = "private-fixtures"))]
-mod local_tests;
+mod local_tests {
+    include!("local_tests.rs");
+}
 
 #[cfg(test)]
 mod tests {
