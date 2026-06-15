@@ -158,347 +158,31 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
         .enumerate()
         .find(|(_, (hdr, _))| hdr.object_name.starts_with(EXECUTE_UBERGRAPH_PREFIX));
 
-    if let Some((ug_idx, (ug_hdr, _ug_props))) = ubergraph_export {
-        let ug_name = ug_hdr.object_name.clone();
-        let ug_export_index = ug_idx + 1;
-
-        if let Some(bytecode) = lookup_export_bytecode(asset, ug_export_index, &ug_name) {
-            let entries = collect_event_entries(asset, &export_names, &ug_name, &name_table, ue5);
-
-            // Event entry offsets in the Bytecode property text are memory
-            // coordinates (FNames are 12 bytes in memory), but partition
-            // operates on the raw disk byte slice (FNames are 8 bytes on
-            // disk). Translate every entry mem -> disk before partitioning.
-            let (mem_to_disk, mem_disk_err) = build_mem_to_disk_map(&bytecode, &name_table, ue5);
-            if let Some(err) = mem_disk_err {
-                eprintln!("decode: mem-to-disk walk for {}: {}", ug_name, err);
-            }
-            if debug_enabled() {
-                let last_disk = mem_to_disk.values().copied().max().unwrap_or(0);
-                let last_mem = mem_to_disk.keys().copied().max().unwrap_or(0);
-                eprintln!(
-                    "probe: ug={} bytecode_len={} entries={} map_entries={} last_mem=0x{:x} last_disk=0x{:x}",
-                    ug_name,
-                    bytecode.len(),
-                    entries.len(),
-                    mem_to_disk.len(),
-                    last_mem,
-                    last_disk,
-                );
-                if let Some((first_name, first_off)) =
-                    entries.first().map(|e| (&e.name, e.mem_offset))
-                {
-                    eprintln!(
-                        "probe:  first_entry='{}' mem=0x{:x} -> disk={:?}",
-                        first_name,
-                        first_off,
-                        mem_to_disk.get(&first_off)
-                    );
-                }
-            }
-            let translated_entries = translate_entries_to_disk(&entries, &mem_to_disk, &ug_name);
-
-            if !entries.is_empty() && translated_entries.is_empty() {
-                eprintln!(
-                    "decode: dropped all event entries for {} during mem-to-disk translation",
-                    ug_name
-                );
-            }
-
-            if !translated_entries.is_empty() {
-                let event_entries_by_mem: std::collections::BTreeMap<usize, String> = entries
-                    .iter()
-                    .map(|entry| (entry.mem_offset, entry.name.clone()))
-                    .collect();
-                // Build cross-event inline classifier state shared
-                // across every event's decode. Built ahead
-                // of partition so the partition's pin-attribution probe
-                // can compare its lowest-offset tie-break against
-                // the pin-BFS event sets these structures encode.
-                let event_node_index = build_event_node_index(asset, &export_names);
-                let NodeClassIndices {
-                    node_class_names,
-                    node_classes,
-                    macro_names,
-                } = build_node_class_indices(asset, &export_names);
-                // Pre-build the per-target "reaching events" map once
-                // per ubergraph; the per-jump classifier then does an
-                // O(1) lookup instead of running a fresh BFS per event
-                // entry every time.
-                let node_to_reaching_events =
-                    super::cross_event_inline::build_node_to_reaching_events(
-                        &event_node_index,
-                        &asset.pin_data,
-                        |node_id| {
-                            matches!(
-                                node_classes.get(&node_id),
-                                Some(super::cross_event_inline::K2NodeClass::Knot)
-                            )
-                        },
-                    );
-                // Pin-attribution probe input. Maps disk offsets of
-                // K2Node_CallFunction call sites to the set of events
-                // whose exec-pin tree reaches them. The partition layer
-                // compares this against its lowest-offset tie-break and
-                // logs divergences.
-                let pin_attribution = crate::bytecode::pin_attribution::build_pin_event_attribution(
-                    asset,
-                    &export_names,
-                    &node_to_reaching_events,
-                    &bytecode,
-                    &name_table,
-                    ue5,
-                );
-                // Build the opcode graph (and harvest latent-call resume
-                // targets) once for the whole ubergraph. Every consumer
-                // rides this single instance: the partitioner, each event's
-                // region walk, the K2Node-byte attribution passes, and the
-                // resume-body decode. The graph is a pure function of
-                // `(bytecode, ue5, name_table, mem_to_disk)`, so the same
-                // instance is valid for any owned sub-range a consumer
-                // walks.
-                let (graph, latent_resumes) =
-                    build_opcode_graph_with_resume(&bytecode, ue5, &name_table, &mem_to_disk);
-                match partition_ubergraph_with_translation(
-                    &bytecode,
-                    &translated_entries,
-                    &name_table,
-                    ue5,
-                    &graph,
-                    &latent_resumes,
-                    Some(&pin_attribution),
-                ) {
-                    Ok(partition_output) => {
-                        let event_ranges = partition_output.event_ranges;
-                        let resume_blocks = partition_output.resume_blocks;
-                        resume_owner_events = build_resume_owner_map(&resume_blocks, &event_ranges);
-                        if debug_enabled() {
-                            eprintln!("probe: resume_owner_events={:?}", resume_owner_events);
-                        }
-                        // Decode each latent-call resume chunk into its
-                        // own statement vector. The map is keyed by the
-                        // originating call's disk offset (the
-                        // `Stmt::Call.offset` carried through transform
-                        // and emit), so the summary renderer can look
-                        // up the chunk by call site and interleave its
-                        // body after the latent call line.
-                        let ug_resume_bodies = decode_resume_bodies(
-                            asset,
-                            &resume_blocks,
-                            &bytecode,
-                            ue5,
-                            &name_table,
-                            &mem_to_disk,
-                            &graph,
-                            &export_names,
-                        );
-                        for (call_offset, body) in ug_resume_bodies {
-                            resume_bodies.insert(call_offset, body);
-                        }
-                        // Parallel K2Node-byte attribution map.
-                        // DecodeCtx threads an optional reference so
-                        // consumers can flip on additively.
-                        let event_entry_disks: BTreeMap<String, usize> = translated_entries
-                            .iter()
-                            .map(|entry| (entry.name.clone(), entry.mem_offset))
-                            .collect();
-                        // Event-name to originating export index, mirroring
-                        // the name-keyed collapse of `event_entry_disks`.
-                        // `event_ranges` is also name-keyed, so each event
-                        // name resolves to one stub export here.
-                        let event_export_indices: BTreeMap<String, usize> = translated_entries
-                            .iter()
-                            .map(|entry| (entry.name.clone(), entry.export_index))
-                            .collect();
-                        let k2node_byte_map_inputs =
-                            crate::bytecode::k2node_byte_map::K2NodeByteMapInputs {
-                                asset,
-                                export_names: &export_names,
-                                bytecode: &bytecode,
-                                name_table: &name_table,
-                                ue5,
-                                node_classes: &node_classes,
-                                macro_names: &macro_names,
-                                node_to_reaching_events: &node_to_reaching_events,
-                                event_owned_ranges: &event_ranges,
-                                mem_to_disk: &mem_to_disk,
-                                event_entries: &event_entry_disks,
-                                event_node_index: &event_node_index,
-                                resume_blocks: &resume_blocks,
-                                graph: &graph,
-                                scope: crate::bytecode::k2node_byte_map::GraphScope::Ubergraph,
-                            };
-                        // The decode loop reads this map (cross-event
-                        // inline + macro_region), so it uses the
-                        // conservative view: comment-only attribution
-                        // refinements must not move decoded structure. The
-                        // CommentRefined map for placement is built once
-                        // below, after the loop.
-                        let k2node_byte_map =
-                            crate::bytecode::k2node_byte_map::build_k2node_byte_map_conservative(
-                                &k2node_byte_map_inputs,
-                            );
-                        let event_inputs = EventDecodeInputs {
-                            asset,
-                            export_names: &export_names,
-                            bytecode: &bytecode,
-                            ue5,
-                            name_table: &name_table,
-                            mem_to_disk: &mem_to_disk,
-                            graph: &graph,
-                            event_ranges: &event_ranges,
-                            event_node_index: &event_node_index,
-                            node_to_reaching_events: &node_to_reaching_events,
-                            node_classes: &node_classes,
-                            node_class_names: &node_class_names,
-                            macro_names: &macro_names,
-                            k2node_byte_map: &k2node_byte_map,
-                            translated_entries: &translated_entries,
-                            event_entries_by_mem: &event_entries_by_mem,
-                        };
-                        for (event_name, ranges) in &event_ranges {
-                            let decode = std::panic::AssertUnwindSafe(|| {
-                                decode_ubergraph_event_body(&event_inputs, event_name, ranges)
-                            });
-                            let (body, plans) = match std::panic::catch_unwind(decode) {
-                                Ok(pair) => pair,
-                                Err(payload) => {
-                                    eprintln!(
-                                        "decode: event '{}' panicked during decode ({}); emitting placeholder body",
-                                        event_name,
-                                        panic_message(payload.as_ref())
-                                    );
-                                    let offset =
-                                        ranges.first().map(|range| range.start).unwrap_or(0);
-                                    (panicked_body(payload.as_ref(), offset), None)
-                                }
-                            };
-                            if let Some(plans) = plans {
-                                doonce_wrap_plans.insert(event_name.clone(), plans);
-                            }
-                            events.push(Event {
-                                name: event_name.clone(),
-                                body,
-                                export_index: event_export_indices.get(event_name).copied(),
-                            });
-                        }
-                        // The event loop's last borrow of the conservative
-                        // `k2node_byte_map` (through `event_inputs`) ends
-                        // above. Comment placement consumes the
-                        // CommentRefined view (the same-name group bijection
-                        // applied); building it here, after decode, is what
-                        // keeps comment attribution from touching structure.
-                        drop(k2node_byte_map);
-                        ubergraph_byte_map =
-                            Some(crate::bytecode::k2node_byte_map::build_k2node_byte_map(
-                                &k2node_byte_map_inputs,
-                            ));
-                    }
-                    Err(err) => {
-                        eprintln!("decode: partition failed for {}: {}", ug_name, err);
-                    }
-                }
-            }
-        }
-    }
+    decode_ubergraph_events(
+        asset,
+        &export_names,
+        &name_table,
+        ue5,
+        ubergraph_export,
+        &mut events,
+        &mut doonce_wrap_plans,
+        &mut resume_bodies,
+        &mut resume_owner_events,
+        &mut ubergraph_byte_map,
+    );
 
     // Decode standalone function exports (class `.Function`, not the
     // ubergraph dispatcher, and not ubergraph stubs).
     let ug_name_opt: Option<&str> = ubergraph_export.map(|(_, (hdr, _))| hdr.object_name.as_str());
-
-    // Node-class and macro-name indices are graph-agnostic (built over all
-    // asset exports), so build them once here and share across every
-    // standalone-function byte-map build below. The per-function map uses the
-    // same name/operand-correlation passes the ubergraph map does; only the
-    // event-scoped inputs differ (empty for a single function).
-    let NodeClassIndices {
-        node_classes: fn_node_classes,
-        macro_names: fn_macro_names,
-        ..
-    } = build_node_class_indices(asset, &export_names);
-
-    for (export_idx, (hdr, _props)) in asset.exports.iter().enumerate() {
-        let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
-        if !class.ends_with(".Function") {
-            continue;
-        }
-        if hdr.object_name.starts_with(EXECUTE_UBERGRAPH_PREFIX) {
-            continue;
-        }
-        if let Some(ug_name) = ug_name_opt {
-            if is_ubergraph_stub(
-                asset,
-                &export_names,
-                export_idx + 1,
-                &hdr.object_name,
-                ug_name,
-                &name_table,
-                ue5,
-            ) {
-                continue;
-            }
-        }
-
-        let export_index = export_idx + 1;
-        let read_result = lookup_export_bytecode(asset, export_index, &hdr.object_name);
-        if debug_enabled() {
-            eprintln!(
-                "probe: function '{}' serial=0x{:x}+{} -> {}",
-                hdr.object_name,
-                hdr.serial_offset,
-                hdr.serial_size,
-                read_result.as_ref().map(|b| b.len()).unwrap_or(0),
-            );
-        }
-        if let Some(bytecode) = read_result {
-            // Build a per-function mem-to-disk map so jump targets within
-            // this body can be translated. Standalone function bodies use
-            // the same disk vs mem split as ubergraph bytecode whenever
-            // FName-bearing literals appear in the stream.
-            let (fn_mem_to_disk, fn_mem_disk_err) =
-                build_mem_to_disk_map(&bytecode, &name_table, ue5);
-            if let Some(err) = fn_mem_disk_err {
-                if debug_enabled() {
-                    eprintln!(
-                        "decode: mem-to-disk walk for fn {}: {}",
-                        hdr.object_name, err
-                    );
-                }
-            }
-            let decode = std::panic::AssertUnwindSafe(|| {
-                decode_standalone_function_body(
-                    asset,
-                    &export_names,
-                    &hdr.object_name,
-                    &bytecode,
-                    ue5,
-                    &name_table,
-                    &fn_mem_to_disk,
-                    &fn_node_classes,
-                    &fn_macro_names,
-                )
-            });
-            let body = match std::panic::catch_unwind(decode) {
-                Ok((body, byte_map)) => {
-                    function_byte_maps.insert(hdr.object_name.clone(), byte_map);
-                    body
-                }
-                Err(payload) => {
-                    eprintln!(
-                        "decode: function '{}' panicked during decode ({}); emitting placeholder body",
-                        hdr.object_name,
-                        panic_message(payload.as_ref())
-                    );
-                    panicked_body(payload.as_ref(), 0)
-                }
-            };
-            functions.push(Function {
-                name: hdr.object_name.clone(),
-                body,
-                export_index: Some(export_index),
-            });
-        }
-    }
+    decode_standalone_functions(
+        asset,
+        &export_names,
+        &name_table,
+        ue5,
+        ug_name_opt,
+        &mut functions,
+        &mut function_byte_maps,
+    );
 
     // Sort for deterministic output.
     events.sort_by(|a, b| a.name.cmp(&b.name));
@@ -561,6 +245,392 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
             ubergraph: ubergraph_byte_map,
             functions: function_byte_maps,
         },
+    }
+}
+
+/// Decode every ubergraph event body. Locates the ubergraph export's
+/// bytecode, partitions it into per-event owned ranges, and decodes each
+/// event, appending decoded `Event`s to `events` and collecting the
+/// products the post-decode passes consume:
+/// - `doonce_wrap_plans`: per-event graph-identity DoOnce wrap plans;
+/// - `resume_bodies`: latent-call resume continuations keyed by call offset;
+/// - `resume_owner_events`: owner event per latent-resume chain;
+/// - `ubergraph_byte_map`: the CommentRefined K2Node-byte attribution map.
+///
+/// A no-ubergraph asset, an unreadable ubergraph body, empty translated
+/// entries, or a partition failure each leave every accumulator untouched.
+#[allow(clippy::too_many_arguments)]
+fn decode_ubergraph_events(
+    asset: &ParsedAsset,
+    export_names: &[String],
+    name_table: &NameTable,
+    ue5: i32,
+    ubergraph_export: Option<(
+        usize,
+        &(crate::types::ExportHeader, Vec<crate::types::Property>),
+    )>,
+    events: &mut Vec<Event>,
+    doonce_wrap_plans: &mut std::collections::BTreeMap<
+        String,
+        Vec<crate::bytecode::doonce_wrap_synthesis::SynthWrapPlan>,
+    >,
+    resume_bodies: &mut BTreeMap<usize, Vec<crate::bytecode::stmt::Stmt>>,
+    resume_owner_events: &mut BTreeMap<usize, String>,
+    ubergraph_byte_map: &mut Option<crate::bytecode::k2node_byte_map::K2NodeByteMap>,
+) {
+    if let Some((ug_idx, (ug_hdr, _ug_props))) = ubergraph_export {
+        let ug_name = ug_hdr.object_name.clone();
+        let ug_export_index = ug_idx + 1;
+
+        if let Some(bytecode) = lookup_export_bytecode(asset, ug_export_index, &ug_name) {
+            let entries = collect_event_entries(asset, export_names, &ug_name, name_table, ue5);
+
+            // Event entry offsets in the Bytecode property text are memory
+            // coordinates (FNames are 12 bytes in memory), but partition
+            // operates on the raw disk byte slice (FNames are 8 bytes on
+            // disk). Translate every entry mem -> disk before partitioning.
+            let (mem_to_disk, mem_disk_err) = build_mem_to_disk_map(&bytecode, name_table, ue5);
+            if let Some(err) = mem_disk_err {
+                eprintln!("decode: mem-to-disk walk for {}: {}", ug_name, err);
+            }
+            if debug_enabled() {
+                let last_disk = mem_to_disk.values().copied().max().unwrap_or(0);
+                let last_mem = mem_to_disk.keys().copied().max().unwrap_or(0);
+                eprintln!(
+                    "probe: ug={} bytecode_len={} entries={} map_entries={} last_mem=0x{:x} last_disk=0x{:x}",
+                    ug_name,
+                    bytecode.len(),
+                    entries.len(),
+                    mem_to_disk.len(),
+                    last_mem,
+                    last_disk,
+                );
+                if let Some((first_name, first_off)) =
+                    entries.first().map(|e| (&e.name, e.mem_offset))
+                {
+                    eprintln!(
+                        "probe:  first_entry='{}' mem=0x{:x} -> disk={:?}",
+                        first_name,
+                        first_off,
+                        mem_to_disk.get(&first_off)
+                    );
+                }
+            }
+            let translated_entries = translate_entries_to_disk(&entries, &mem_to_disk, &ug_name);
+
+            if !entries.is_empty() && translated_entries.is_empty() {
+                eprintln!(
+                    "decode: dropped all event entries for {} during mem-to-disk translation",
+                    ug_name
+                );
+            }
+
+            if !translated_entries.is_empty() {
+                let event_entries_by_mem: std::collections::BTreeMap<usize, String> = entries
+                    .iter()
+                    .map(|entry| (entry.mem_offset, entry.name.clone()))
+                    .collect();
+                // Build cross-event inline classifier state shared
+                // across every event's decode. Built ahead
+                // of partition so the partition's pin-attribution probe
+                // can compare its lowest-offset tie-break against
+                // the pin-BFS event sets these structures encode.
+                let event_node_index = build_event_node_index(asset, export_names);
+                let NodeClassIndices {
+                    node_class_names,
+                    node_classes,
+                    macro_names,
+                } = build_node_class_indices(asset, export_names);
+                // Pre-build the per-target "reaching events" map once
+                // per ubergraph; the per-jump classifier then does an
+                // O(1) lookup instead of running a fresh BFS per event
+                // entry every time.
+                let node_to_reaching_events =
+                    super::cross_event_inline::build_node_to_reaching_events(
+                        &event_node_index,
+                        &asset.pin_data,
+                        |node_id| {
+                            matches!(
+                                node_classes.get(&node_id),
+                                Some(super::cross_event_inline::K2NodeClass::Knot)
+                            )
+                        },
+                    );
+                // Pin-attribution probe input. Maps disk offsets of
+                // K2Node_CallFunction call sites to the set of events
+                // whose exec-pin tree reaches them. The partition layer
+                // compares this against its lowest-offset tie-break and
+                // logs divergences.
+                let pin_attribution = crate::bytecode::pin_attribution::build_pin_event_attribution(
+                    asset,
+                    export_names,
+                    &node_to_reaching_events,
+                    &bytecode,
+                    name_table,
+                    ue5,
+                );
+                // Build the opcode graph (and harvest latent-call resume
+                // targets) once for the whole ubergraph. Every consumer
+                // rides this single instance: the partitioner, each event's
+                // region walk, the K2Node-byte attribution passes, and the
+                // resume-body decode. The graph is a pure function of
+                // `(bytecode, ue5, name_table, mem_to_disk)`, so the same
+                // instance is valid for any owned sub-range a consumer
+                // walks.
+                let (graph, latent_resumes) =
+                    build_opcode_graph_with_resume(&bytecode, ue5, name_table, &mem_to_disk);
+                match partition_ubergraph_with_translation(
+                    &bytecode,
+                    &translated_entries,
+                    name_table,
+                    ue5,
+                    &graph,
+                    &latent_resumes,
+                    Some(&pin_attribution),
+                ) {
+                    Ok(partition_output) => {
+                        let event_ranges = partition_output.event_ranges;
+                        let resume_blocks = partition_output.resume_blocks;
+                        *resume_owner_events =
+                            build_resume_owner_map(&resume_blocks, &event_ranges);
+                        if debug_enabled() {
+                            eprintln!("probe: resume_owner_events={:?}", resume_owner_events);
+                        }
+                        // Decode each latent-call resume chunk into its
+                        // own statement vector. The map is keyed by the
+                        // originating call's disk offset (the
+                        // `Stmt::Call.offset` carried through transform
+                        // and emit), so the summary renderer can look
+                        // up the chunk by call site and interleave its
+                        // body after the latent call line.
+                        let ug_resume_bodies = decode_resume_bodies(
+                            asset,
+                            &resume_blocks,
+                            &bytecode,
+                            ue5,
+                            name_table,
+                            &mem_to_disk,
+                            &graph,
+                            export_names,
+                        );
+                        for (call_offset, body) in ug_resume_bodies {
+                            resume_bodies.insert(call_offset, body);
+                        }
+                        // Parallel K2Node-byte attribution map.
+                        // DecodeCtx threads an optional reference so
+                        // consumers can flip on additively.
+                        let event_entry_disks: BTreeMap<String, usize> = translated_entries
+                            .iter()
+                            .map(|entry| (entry.name.clone(), entry.mem_offset))
+                            .collect();
+                        // Event-name to originating export index, mirroring
+                        // the name-keyed collapse of `event_entry_disks`.
+                        // `event_ranges` is also name-keyed, so each event
+                        // name resolves to one stub export here.
+                        let event_export_indices: BTreeMap<String, usize> = translated_entries
+                            .iter()
+                            .map(|entry| (entry.name.clone(), entry.export_index))
+                            .collect();
+                        let k2node_byte_map_inputs =
+                            crate::bytecode::k2node_byte_map::K2NodeByteMapInputs {
+                                asset,
+                                export_names,
+                                bytecode: &bytecode,
+                                name_table,
+                                ue5,
+                                node_classes: &node_classes,
+                                macro_names: &macro_names,
+                                node_to_reaching_events: &node_to_reaching_events,
+                                event_owned_ranges: &event_ranges,
+                                mem_to_disk: &mem_to_disk,
+                                event_entries: &event_entry_disks,
+                                event_node_index: &event_node_index,
+                                resume_blocks: &resume_blocks,
+                                graph: &graph,
+                                scope: crate::bytecode::k2node_byte_map::GraphScope::Ubergraph,
+                            };
+                        // The decode loop reads this map (cross-event
+                        // inline + macro_region), so it uses the
+                        // conservative view: comment-only attribution
+                        // refinements must not move decoded structure. The
+                        // CommentRefined map for placement is built once
+                        // below, after the loop.
+                        let k2node_byte_map =
+                            crate::bytecode::k2node_byte_map::build_k2node_byte_map_conservative(
+                                &k2node_byte_map_inputs,
+                            );
+                        let event_inputs = EventDecodeInputs {
+                            asset,
+                            export_names,
+                            bytecode: &bytecode,
+                            ue5,
+                            name_table,
+                            mem_to_disk: &mem_to_disk,
+                            graph: &graph,
+                            event_ranges: &event_ranges,
+                            event_node_index: &event_node_index,
+                            node_to_reaching_events: &node_to_reaching_events,
+                            node_classes: &node_classes,
+                            node_class_names: &node_class_names,
+                            macro_names: &macro_names,
+                            k2node_byte_map: &k2node_byte_map,
+                            translated_entries: &translated_entries,
+                            event_entries_by_mem: &event_entries_by_mem,
+                        };
+                        for (event_name, ranges) in &event_ranges {
+                            let decode = std::panic::AssertUnwindSafe(|| {
+                                decode_ubergraph_event_body(&event_inputs, event_name, ranges)
+                            });
+                            let (body, plans) = match std::panic::catch_unwind(decode) {
+                                Ok(pair) => pair,
+                                Err(payload) => {
+                                    eprintln!(
+                                        "decode: event '{}' panicked during decode ({}); emitting placeholder body",
+                                        event_name,
+                                        panic_message(payload.as_ref())
+                                    );
+                                    let offset =
+                                        ranges.first().map(|range| range.start).unwrap_or(0);
+                                    (panicked_body(payload.as_ref(), offset), None)
+                                }
+                            };
+                            if let Some(plans) = plans {
+                                doonce_wrap_plans.insert(event_name.clone(), plans);
+                            }
+                            events.push(Event {
+                                name: event_name.clone(),
+                                body,
+                                export_index: event_export_indices.get(event_name).copied(),
+                            });
+                        }
+                        // The event loop's last borrow of the conservative
+                        // `k2node_byte_map` (through `event_inputs`) ends
+                        // above. Comment placement consumes the
+                        // CommentRefined view (the same-name group bijection
+                        // applied); building it here, after decode, is what
+                        // keeps comment attribution from touching structure.
+                        drop(k2node_byte_map);
+                        *ubergraph_byte_map =
+                            Some(crate::bytecode::k2node_byte_map::build_k2node_byte_map(
+                                &k2node_byte_map_inputs,
+                            ));
+                    }
+                    Err(err) => {
+                        eprintln!("decode: partition failed for {}: {}", ug_name, err);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Decode every standalone function export (class `.Function`, excluding the
+/// ubergraph dispatcher and ubergraph stubs), appending each decoded
+/// `Function` to `functions` and its K2Node-byte map to `function_byte_maps`.
+/// `ug_name_opt` is the ubergraph export's object name when present, used to
+/// skip its stub exports.
+#[allow(clippy::too_many_arguments)]
+fn decode_standalone_functions(
+    asset: &ParsedAsset,
+    export_names: &[String],
+    name_table: &NameTable,
+    ue5: i32,
+    ug_name_opt: Option<&str>,
+    functions: &mut Vec<Function>,
+    function_byte_maps: &mut BTreeMap<String, crate::bytecode::k2node_byte_map::K2NodeByteMap>,
+) {
+    // Node-class and macro-name indices are graph-agnostic (built over all
+    // asset exports), so build them once here and share across every
+    // standalone-function byte-map build below. The per-function map uses the
+    // same name/operand-correlation passes the ubergraph map does; only the
+    // event-scoped inputs differ (empty for a single function).
+    let NodeClassIndices {
+        node_classes: fn_node_classes,
+        macro_names: fn_macro_names,
+        ..
+    } = build_node_class_indices(asset, export_names);
+
+    for (export_idx, (hdr, _props)) in asset.exports.iter().enumerate() {
+        let class = resolve_index(&asset.imports, export_names, hdr.class_index);
+        if !class.ends_with(".Function") {
+            continue;
+        }
+        if hdr.object_name.starts_with(EXECUTE_UBERGRAPH_PREFIX) {
+            continue;
+        }
+        if let Some(ug_name) = ug_name_opt {
+            if is_ubergraph_stub(
+                asset,
+                export_names,
+                export_idx + 1,
+                &hdr.object_name,
+                ug_name,
+                name_table,
+                ue5,
+            ) {
+                continue;
+            }
+        }
+
+        let export_index = export_idx + 1;
+        let read_result = lookup_export_bytecode(asset, export_index, &hdr.object_name);
+        if debug_enabled() {
+            eprintln!(
+                "probe: function '{}' serial=0x{:x}+{} -> {}",
+                hdr.object_name,
+                hdr.serial_offset,
+                hdr.serial_size,
+                read_result.as_ref().map(|b| b.len()).unwrap_or(0),
+            );
+        }
+        if let Some(bytecode) = read_result {
+            // Build a per-function mem-to-disk map so jump targets within
+            // this body can be translated. Standalone function bodies use
+            // the same disk vs mem split as ubergraph bytecode whenever
+            // FName-bearing literals appear in the stream.
+            let (fn_mem_to_disk, fn_mem_disk_err) =
+                build_mem_to_disk_map(&bytecode, name_table, ue5);
+            if let Some(err) = fn_mem_disk_err {
+                if debug_enabled() {
+                    eprintln!(
+                        "decode: mem-to-disk walk for fn {}: {}",
+                        hdr.object_name, err
+                    );
+                }
+            }
+            let decode = std::panic::AssertUnwindSafe(|| {
+                decode_standalone_function_body(
+                    asset,
+                    export_names,
+                    &hdr.object_name,
+                    &bytecode,
+                    ue5,
+                    name_table,
+                    &fn_mem_to_disk,
+                    &fn_node_classes,
+                    &fn_macro_names,
+                )
+            });
+            let body = match std::panic::catch_unwind(decode) {
+                Ok((body, byte_map)) => {
+                    function_byte_maps.insert(hdr.object_name.clone(), byte_map);
+                    body
+                }
+                Err(payload) => {
+                    eprintln!(
+                        "decode: function '{}' panicked during decode ({}); emitting placeholder body",
+                        hdr.object_name,
+                        panic_message(payload.as_ref())
+                    );
+                    panicked_body(payload.as_ref(), 0)
+                }
+            };
+            functions.push(Function {
+                name: hdr.object_name.clone(),
+                body,
+                export_index: Some(export_index),
+            });
+        }
     }
 }
 

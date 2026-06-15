@@ -662,6 +662,94 @@ pub(super) struct DoOnceSequenceEvidence {
     trailing_user_body: Option<(usize, usize)>,
 }
 
+/// Evidence accumulated across the pins of one candidate DoOnce Sequence.
+/// `total_scaffold_stmts` is the running scaffold count used to reject
+/// Sequences whose only "scaffold" is a non-existent prefix; the remaining
+/// fields mirror `DoOnceSequenceEvidence`.
+#[derive(Default)]
+struct PinEvidenceAcc {
+    has_init_check: bool,
+    has_init_set: bool,
+    gate_var: Option<String>,
+    trailing_user_body: Option<(usize, usize)>,
+    total_scaffold_stmts: usize,
+}
+
+/// Fold one Sequence pin into `acc`, returning `None` (reject) on any shape
+/// that disqualifies the whole Sequence from being a DoOnce expansion.
+fn accumulate_pin_evidence(acc: &mut PinEvidenceAcc, pin_index: usize, pin: &[Stmt]) -> Option<()> {
+    let mut prefix_len = 0;
+    let mut tail_started = false;
+    for inner in pin {
+        // Scaffold-noop Branches (`if (true) {}`) sit at scaffold
+        // positions inside the Sequence pins but carry no role
+        // evidence. Treat them as scaffold for prefix purposes and
+        // skip the role dispatch entirely so they neither (a) reject
+        // the Sequence by falling into the `None` arm with
+        // `prefix_len == 0`, nor (b) satisfy init/gate proofs.
+        if is_scaffold_noop_branch(inner) {
+            if tail_started {
+                // A noop appearing AFTER the user body starts would
+                // be unusual residue. Refuse to fold so the broken
+                // shape surfaces in output rather than hiding behind
+                // a silent accept.
+                return None;
+            }
+            prefix_len += 1;
+            acc.total_scaffold_stmts += 1;
+            continue;
+        }
+        let role = classify_doonce_role(inner);
+        if tail_started {
+            // The tail belongs to the user body. Reject only when the
+            // tail contains scaffold for the SAME outer DoOnce
+            // instance (a same-suffix gate-check/set or init-check/set
+            // would indicate the outer scaffold itself leaked into the
+            // tail, which is a different broken shape we still want to
+            // surface). Tail roles for a different gate suffix are
+            // user-body content (e.g. an inline ResetDoOnce of a
+            // sibling macro), accept silently.
+            if !is_tail_role_acceptable(&role, acc.gate_var.as_deref()) {
+                return None;
+            }
+            continue;
+        }
+        match role {
+            DoOnceRole::None => {
+                // First non-scaffold stmt marks the start of the user-
+                // body tail. Reject the Sequence if any other pin has
+                // already claimed the tail slot, or if this pin has no
+                // scaffold prefix at all (a pin with NO scaffold
+                // prefix isn't a recognised gate/init pin shape).
+                if acc.trailing_user_body.is_some() || prefix_len == 0 {
+                    return None;
+                }
+                acc.trailing_user_body = Some((pin_index, prefix_len));
+                tail_started = true;
+            }
+            DoOnceRole::DoOnceSequence(_) => {
+                return None;
+            }
+            DoOnceRole::GateCheck(name) | DoOnceRole::GateSet(name) => {
+                acc.gate_var.get_or_insert(name);
+                prefix_len += 1;
+                acc.total_scaffold_stmts += 1;
+            }
+            DoOnceRole::InitCheck(_) => {
+                acc.has_init_check = true;
+                prefix_len += 1;
+                acc.total_scaffold_stmts += 1;
+            }
+            DoOnceRole::InitSet(_) => {
+                acc.has_init_set = true;
+                prefix_len += 1;
+                acc.total_scaffold_stmts += 1;
+            }
+        }
+    }
+    Some(())
+}
+
 /// Return `Some(evidence)` when `stmt` is a `Stmt::Sequence` shaped like
 /// a DoOnce expansion.
 ///
@@ -691,82 +779,9 @@ pub(super) fn classify_doonce_sequence(stmt: &Stmt) -> Option<DoOnceSequenceEvid
     let Stmt::Sequence { pins, .. } = stmt else {
         return None;
     };
-    let mut has_init_check = false;
-    let mut has_init_set = false;
-    let mut gate_var: Option<String> = None;
-    let mut trailing_user_body: Option<(usize, usize)> = None;
-    let mut total_scaffold_stmts = 0;
-
+    let mut acc = PinEvidenceAcc::default();
     for (pin_index, pin) in pins.iter().enumerate() {
-        let mut prefix_len = 0;
-        let mut tail_started = false;
-        for inner in pin {
-            // Scaffold-noop Branches (`if (true) {}`) sit at scaffold
-            // positions inside the Sequence pins but carry no role
-            // evidence. Treat them as scaffold for prefix purposes and
-            // skip the role dispatch entirely so they neither (a) reject
-            // the Sequence by falling into the `None` arm with
-            // `prefix_len == 0`, nor (b) satisfy init/gate proofs.
-            if is_scaffold_noop_branch(inner) {
-                if tail_started {
-                    // A noop appearing AFTER the user body starts would
-                    // be unusual residue. Refuse to fold so the broken
-                    // shape surfaces in output rather than hiding behind
-                    // a silent accept.
-                    return None;
-                }
-                prefix_len += 1;
-                total_scaffold_stmts += 1;
-                continue;
-            }
-            let role = classify_doonce_role(inner);
-            if tail_started {
-                // The tail belongs to the user body. Reject only when the
-                // tail contains scaffold for the SAME outer DoOnce
-                // instance (a same-suffix gate-check/set or init-check/set
-                // would indicate the outer scaffold itself leaked into the
-                // tail, which is a different broken shape we still want to
-                // surface). Tail roles for a different gate suffix are
-                // user-body content (e.g. an inline ResetDoOnce of a
-                // sibling macro), accept silently.
-                if !is_tail_role_acceptable(&role, gate_var.as_deref()) {
-                    return None;
-                }
-                continue;
-            }
-            match role {
-                DoOnceRole::None => {
-                    // First non-scaffold stmt marks the start of the user-
-                    // body tail. Reject the Sequence if any other pin has
-                    // already claimed the tail slot, or if this pin has no
-                    // scaffold prefix at all (a pin with NO scaffold
-                    // prefix isn't a recognised gate/init pin shape).
-                    if trailing_user_body.is_some() || prefix_len == 0 {
-                        return None;
-                    }
-                    trailing_user_body = Some((pin_index, prefix_len));
-                    tail_started = true;
-                }
-                DoOnceRole::DoOnceSequence(_) => {
-                    return None;
-                }
-                DoOnceRole::GateCheck(name) | DoOnceRole::GateSet(name) => {
-                    gate_var.get_or_insert(name);
-                    prefix_len += 1;
-                    total_scaffold_stmts += 1;
-                }
-                DoOnceRole::InitCheck(_) => {
-                    has_init_check = true;
-                    prefix_len += 1;
-                    total_scaffold_stmts += 1;
-                }
-                DoOnceRole::InitSet(_) => {
-                    has_init_set = true;
-                    prefix_len += 1;
-                    total_scaffold_stmts += 1;
-                }
-            }
-        }
+        accumulate_pin_evidence(&mut acc, pin_index, pin)?;
     }
 
     // A Sequence with a trailing tail must carry its own scaffold
@@ -777,15 +792,15 @@ pub(super) fn classify_doonce_sequence(stmt: &Stmt) -> Option<DoOnceSequenceEvid
     // remain droppable alongside a real adjacent scaffold; the canonical
     // shape pairs a real Sequence with leftover empty ones the partition
     // couldn't merge.
-    if trailing_user_body.is_some() && total_scaffold_stmts == 0 {
+    if acc.trailing_user_body.is_some() && acc.total_scaffold_stmts == 0 {
         return None;
     }
 
     Some(DoOnceSequenceEvidence {
-        has_init_check,
-        has_init_set,
-        gate_var,
-        trailing_user_body,
+        has_init_check: acc.has_init_check,
+        has_init_set: acc.has_init_set,
+        gate_var: acc.gate_var,
+        trailing_user_body: acc.trailing_user_body,
     })
 }
 

@@ -97,6 +97,22 @@ pub(super) fn refine_loops_vec(stmts: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
         })
         .collect();
 
+    absorb_preloop_siblings(stmts, absorb_indices, ancestors);
+}
+
+/// Walk `absorb_indices` (ForC/ForEach loop positions) in reverse, absorbing
+/// each loop's absorbable pre-loop sibling: ForEach's leaked bound-expr,
+/// a ForLoopWithBreak-promoted ForC's And-guarded head cond, and a ForC's
+/// counter-init line (hoisted into the loop's `init` field).
+///
+/// Reverse traversal is load-bearing: removing a predecessor shifts the
+/// positions of all later statements, so processing higher indices first
+/// keeps every not-yet-visited `loop_idx` valid.
+fn absorb_preloop_siblings(
+    stmts: &mut Vec<Stmt>,
+    absorb_indices: Vec<usize>,
+    ancestors: &[&[Stmt]],
+) {
     for loop_idx in absorb_indices.into_iter().rev() {
         if loop_idx == 0 {
             continue; // No predecessor possible.
@@ -216,6 +232,19 @@ pub(super) fn refine_loops_vec(stmts: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
     }
 }
 
+/// Recurse loop refinement into a loop's body and (when present) its
+/// completion block, both under the same `ancestors` scope.
+fn recurse_loop_children(
+    body: &mut Vec<Stmt>,
+    completion: &mut Option<Vec<Stmt>>,
+    ancestors: &[&[Stmt]],
+) {
+    refine_loops_vec(body, ancestors);
+    if let Some(comp) = completion {
+        refine_loops_vec(comp, ancestors);
+    }
+}
+
 fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
     match stmt {
         Stmt::Loop {
@@ -230,10 +259,7 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                 Some(expr) => expr,
                 None => {
                     // No cond to inspect; recurse into body.
-                    refine_loops_vec(body, ancestors);
-                    if let Some(comp) = completion {
-                        refine_loops_vec(comp, ancestors);
-                    }
+                    recurse_loop_children(body, completion, ancestors);
                     return;
                 }
             };
@@ -286,10 +312,7 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                     }
                     *kind = LoopKind::ForEach { item, array };
                     *cond = None;
-                    refine_loops_vec(body, ancestors);
-                    if let Some(comp) = completion {
-                        refine_loops_vec(comp, ancestors);
-                    }
+                    recurse_loop_children(body, completion, ancestors);
                     return;
                 }
 
@@ -302,10 +325,7 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                 // non-empty body and this guard does not fire.
                 if body.is_empty() {
                     *body = inc_stmts;
-                    refine_loops_vec(body, ancestors);
-                    if let Some(comp) = completion {
-                        refine_loops_vec(comp, ancestors);
-                    }
+                    recurse_loop_children(body, completion, ancestors);
                     return;
                 }
 
@@ -314,25 +334,16 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                     init: vec![],
                     increment: inc_stmts,
                 };
-                refine_loops_vec(body, ancestors);
-                if let Some(comp) = completion {
-                    refine_loops_vec(comp, ancestors);
-                }
+                recurse_loop_children(body, completion, ancestors);
             } else if try_promote_for_loop_with_break(kind, cond, body, ancestors) {
                 // Promoted a ForLoopWithBreak (And-guarded head cond plus a
                 // trailing break-flag-guard increment region) to ForC. The
                 // helper rewrote `kind`, `cond`, and `body`; recurse into the
                 // refined body and completion.
-                refine_loops_vec(body, ancestors);
-                if let Some(comp) = completion {
-                    refine_loops_vec(comp, ancestors);
-                }
+                recurse_loop_children(body, completion, ancestors);
             } else {
                 // Stays While — recurse into body.
-                refine_loops_vec(body, ancestors);
-                if let Some(comp) = completion {
-                    refine_loops_vec(comp, ancestors);
-                }
+                recurse_loop_children(body, completion, ancestors);
             }
         }
 
@@ -340,10 +351,7 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
         Stmt::Loop {
             body, completion, ..
         } => {
-            refine_loops_vec(body, ancestors);
-            if let Some(comp) = completion {
-                refine_loops_vec(comp, ancestors);
-            }
+            recurse_loop_children(body, completion, ancestors);
         }
 
         Stmt::Branch {
