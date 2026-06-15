@@ -1,0 +1,343 @@
+Blueprint: BP_DecoderTest (extends Actor)
+
+Components:
+  DefaultSceneRoot (SceneComponent)
+
+Variables:
+  bGateA: bool
+  bGateB: bool
+  bGateC: bool
+  FloatA: float
+  FloatB: float
+  SampleName: FName
+  SampleString: FString
+  ActorRef: Actor*
+  OverlappingActors: TArray<>
+  IntArray: TArray<>
+  AxisThreshold: float
+  LeftAxis: float
+  RightAxis: float
+
+Call graph:
+  OnLeftAxis → Attempt, Release
+  OnLeftReleased → Release
+  OnRightAxis → Attempt, Release
+  OnRightReleased → Release
+
+Functions:
+  // called by: OnLeftAxis, OnRightAxis
+  Attempt(bIsLeft: bool) [Public|BlueprintPure]
+    PrintString(self, BoolToString(bIsLeft), true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+
+  Cast_SuccessFail() [Public|BlueprintPure]
+    if (Cast<StaticMeshActor>(self.ActorRef) as bool) {
+        PrintString(self, "Mesh", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    } else {
+        PrintString(self, "Not-mesh", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    }
+
+  If_EmptyArms() [Public|BlueprintPure]
+    if (self.bGateA) {
+    }
+
+  If_NestedInElse() [Public|BlueprintPure]
+    if (self.bGateA) {
+        PrintString(self, "Y", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    } else {
+        if (self.bGateB) {
+            PrintString(self, "Yb", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        } else {
+            PrintString(self, "Nn", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        }
+    }
+
+  If_ThenElse() [Public|BlueprintPure]
+    if (self.bGateA) {
+        PrintString(self, "Y", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    } else {
+        PrintString(self, "N", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    }
+
+  If_ThenOnly() [Public|BlueprintPure]
+    if (self.bGateA) {
+        PrintString(self, "Yes", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    }
+
+  IsValid_InSequence() [Public|BlueprintPure]
+    // sequence [0]:
+    PrintString(self, "A", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    // sequence [1]:
+    if (IsValid(self.ActorRef)) {
+        PrintString(self, "Valid", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    } else {
+        PrintString(self, "Invalid", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    }
+    // sequence [2]:
+    PrintString(self, "C", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+
+  IsValid_Standalone() [Public|BlueprintPure]
+    if (IsValid(self.ActorRef)) {
+        PrintString(self, "Valid", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    } else {
+        PrintString(self, "Invalid", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    }
+
+  Linear_ThreeCalls() [Public|BlueprintPure]
+    PrintString(self, "A", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    PrintString(self, "B", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    PrintString(self, "C", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+
+  Loop_ForEachInt() [Public|BlueprintPure]
+    for (item in self.IntArray) {
+        PrintString(self, IntToString(item), true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    }
+
+  Loop_ForEachItemName() [Public|BlueprintPure]
+    for (GrabbedActor in GrabbedActors) {
+        PrintString(self, GetDisplayName(GrabbedActor), true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000),
+            2.0000)
+    }
+
+  Loop_ForEachNested() [Public|BlueprintPure]
+    for (OverlappingActor in self.OverlappingActors) {
+        for (item in self.IntArray) {
+            PrintString(self, IntToString(item), true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        }
+    }
+
+  Loop_ForEachWithBreak() [Public|BlueprintPure]
+    for (item in self.IntArray) {
+        if (item > 5) {
+            break
+        } else {
+            PrintString(self, IntToString(item), true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        }
+    }
+
+  Loop_ForSimple() [Public|BlueprintPure]
+    for (Temp_int_Variable = 0 to 3) {
+        PrintString(self, IntToString(Temp_int_Variable), true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000),
+            2.0000)
+    }
+    // completed:
+    PrintString(self, "Done", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+
+  Loop_ForWithBreak() [Public|BlueprintPure]
+    for (Temp_int_Variable = 0 to 9) {
+        if (Temp_int_Variable == 5) {
+            break
+        } else {
+            PrintString(self, IntToString(Temp_int_Variable), true, true,
+                MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        }
+    }
+    // completed:
+    PrintString(self, "Done", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+
+  Loop_While() [Public|BlueprintPure]
+    while (LoopCounter < 5) {
+        LoopCounter = (LoopCounter + 1)
+    }
+    // completed:
+    PrintString(self, "Done", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+
+  // called by: OnLeftAxis, OnLeftReleased, OnRightAxis, OnRightReleased
+  Release(bIsLeft: bool) [Public|BlueprintPure]
+    PrintString(self, BoolToString(bIsLeft), true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+
+  Seq_FivePin() [Public|BlueprintPure]
+    // sequence [0]:
+    PrintString(self, "A", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    // sequence [1]:
+    PrintString(self, "B", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    // sequence [2]:
+    PrintString(self, "C", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    // sequence [3]:
+    PrintString(self, "D", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    // sequence [4]:
+    PrintString(self, "E", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+
+  Seq_TwoPin() [Public|BlueprintPure]
+    // sequence [0]:
+    PrintString(self, "A", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    // sequence [1]:
+    PrintString(self, "B", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+
+  Seq_WithEmptyPin() [Public|BlueprintPure]
+    // sequence [0]:
+    PrintString(self, "A", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    // sequence [1]:
+    PrintString(self, "B", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    // sequence [2] (empty):
+    // sequence [3]:
+    PrintString(self, "D", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+
+  Switch_OnByteEnum() [Public|BlueprintPure]
+    switch (Colour) {
+        case 0:
+            PrintString(self, "Red", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        case 1:
+            PrintString(self, "Green", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        case 2:
+            PrintString(self, "Blue", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    }
+
+  Switch_OnInt() [Public|BlueprintPure]
+    Current = 2
+    switch (Current) {
+        case 0:
+            PrintString(self, "Zero", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        case 1:
+            PrintString(self, "One", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        case 2:
+            PrintString(self, "Two", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        case 3:
+            PrintString(self, "Three", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        default:
+            PrintString(self, "Default", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    }
+
+  Conv_DirectDoOnce_A():
+    DoOnce(DoOnce_3) {
+        PrintString(self, "Conv direct", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    }
+
+  Conv_DirectDoOnce_B():
+    DoOnce(DoOnce_3) {
+        PrintString(self, "Conv direct", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    }
+
+  Conv_DivergentTail_A():
+    // sequence [0]:
+    PrintString(self, "Shared mid", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    // sequence [1]:
+    PrintString(self, "A tail", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+
+  Conv_DivergentTail_B():
+    // sequence [0]:
+    PrintString(self, "Shared mid", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    // sequence [1]:
+    PrintString(self, "B tail", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+
+  Conv_SharedCall_A():
+    PrintString(self, "Shared call", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+
+  Conv_SharedCall_B():
+    PrintString(self, "Shared call", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+
+  Conv_SharedFlipFlop_A():
+    FlipFlop("Temp_bool_Variable") {
+        if (Temp_bool_Variable) {
+            PrintString(self, "Flip", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        } else {
+            PrintString(self, "Flop", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        }
+    }
+
+  Conv_SharedFlipFlop_B():
+    FlipFlop("Temp_bool_Variable") {
+        if (Temp_bool_Variable) {
+            PrintString(self, "Flip", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        } else {
+            PrintString(self, "Flop", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        }
+    }
+
+  Conv_SharedSequence_A():
+    // sequence [0]:
+    PrintString(self, "Seq 0", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    // sequence [1]:
+    PrintString(self, "Seq 1", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+
+  Conv_SharedSequence_B():
+    // sequence [0]:
+    PrintString(self, "Seq 0", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    // sequence [1]:
+    PrintString(self, "Seq 1", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+
+  Latch_DoOnce():
+    DoOnce(DoOnce_4) {
+        PrintString(self, "Once", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        // sequence [0]:
+        ResetDoOnce(DoOnce_4)
+        // sequence [1]:
+        PrintString(self, "Reset done", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    }
+
+  Latch_DoOnceInForEach():
+    for (item in self.IntArray) {
+        DoOnce(Array_Get) {
+            PrintString(self, IntToString(item), true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        }
+    }
+
+  Latch_FlipFlop():
+    FlipFlop("Temp_bool_Variable_1") {
+        if (Temp_bool_Variable_1) {
+            PrintString(self, "A", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        } else {
+            PrintString(self, "B", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+        }
+    }
+
+  Latent_OneDelay():
+    PrintString(self, "Before", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    Delay(self, 0.5000)
+    PrintString(self, "After", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+
+  Latent_TwoDelays():
+    PrintString(self, "A", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    Delay(self, 0.1000)
+    PrintString(self, "B", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    Delay(self, 0.2000)
+    PrintString(self, "C", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+
+  OnLeftAxis():
+    self.LeftAxis = $CustomEvent_Axis_1
+    if (self.LeftAxis >= self.AxisThreshold) {
+        DoOnce(Attempt) {
+            Attempt(true)
+            ResetDoOnce(Release)
+        }
+    } else {
+        ResetDoOnce(Attempt)
+        DoOnce(Release) {
+            Release(true)
+        }
+    }
+
+  OnLeftReleased():
+    DoOnce(Release) {
+        Release(true)
+    }
+
+  OnRightAxis():
+    self.RightAxis = $CustomEvent_Axis
+    if (self.RightAxis >= self.AxisThreshold) {
+        DoOnce(Attempt) {
+            Attempt(false)
+            ResetDoOnce(Release)
+        }
+    } else {
+        ResetDoOnce(Attempt)
+        DoOnce(Release) {
+            Release(false)
+        }
+    }
+
+  OnRightReleased():
+    DoOnce(Release) {
+        Release(false)
+    }
+
+  ReceiveBeginPlay():
+    PrintString(self, "Hello", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    SetActorTickEnabled(true)
+
+  ReceiveTick():
+    if (IsValid(self.ActorRef)) {
+        PrintString(self, "Valid", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    } else {
+        PrintString(self, "Invalid", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
+    }
+

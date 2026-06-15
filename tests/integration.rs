@@ -1,9 +1,7 @@
 mod common;
 
-use unreal_bp_inspect::output_diff::format_diff;
-use unreal_bp_inspect::output_json::to_json;
-use unreal_bp_inspect::output_summary::{filter_summary, format_summary};
-use unreal_bp_inspect::output_text::format_text;
+use unreal_bp_inspect::output_diff::diff_summary_texts;
+use unreal_bp_inspect::output_summary::filter_summary;
 use unreal_bp_inspect::parser::parse_asset;
 
 #[test]
@@ -26,45 +24,104 @@ fn helm_structural_checks() {
 }
 
 #[test]
-fn helm_summary_snapshot() {
+fn function_signatures_populated_for_function_exports() {
     let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
     let asset = parse_asset(&data, false).unwrap();
-    let output = format_summary(&asset);
-    common::assert_snapshot("helm_summary", &output);
+    assert!(
+        !asset.function_signatures.is_empty(),
+        "Helm_BP should expose at least one function signature"
+    );
+    for sig in asset.function_signatures.values() {
+        for param in &sig.params {
+            // CPF_PARM=0x80; every recorded entry must carry it.
+            assert!(
+                param.flags & 0x80 != 0,
+                "param {} for a recorded signature missing CPF_PARM (flags=0x{:x})",
+                param.name,
+                param.flags
+            );
+        }
+    }
+}
+
+#[test]
+fn bytecode_by_export_captures_function_bytes() {
+    let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
+    let asset = parse_asset(&data, false).unwrap();
+    use unreal_bp_inspect::resolve::resolve_index;
+    let export_names: Vec<String> = asset
+        .exports
+        .iter()
+        .map(|(hdr, _)| hdr.object_name.clone())
+        .collect();
+
+    let mut function_indices: Vec<usize> = Vec::new();
+    let mut non_function_indices: Vec<usize> = Vec::new();
+    for (idx, (hdr, _)) in asset.exports.iter().enumerate() {
+        let class = resolve_index(&asset.imports, &export_names, hdr.class_index);
+        if class.ends_with(".Function") {
+            function_indices.push(idx + 1);
+        } else {
+            non_function_indices.push(idx + 1);
+        }
+    }
+    assert!(
+        !function_indices.is_empty(),
+        "Helm_BP should expose at least one function export"
+    );
+
+    let captured_function = function_indices
+        .iter()
+        .any(|index| asset.bytecode_by_export.contains_key(index));
+    assert!(
+        captured_function,
+        "expected bytecode_by_export to contain bytes for at least one function export"
+    );
+    for index in &function_indices {
+        if let Some((bytes, mem_size)) = asset.bytecode_by_export.get(index) {
+            assert!(
+                !bytes.is_empty(),
+                "captured bytecode for export {index} is empty"
+            );
+            assert!(
+                *mem_size > 0,
+                "captured mem_size for export {index} should be positive"
+            );
+        }
+    }
+
+    for index in &non_function_indices {
+        assert!(
+            !asset.bytecode_by_export.contains_key(index),
+            "bytecode_by_export should not contain non-function export {index}"
+        );
+    }
 }
 
 #[test]
 fn helm_text_snapshot() {
     let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
-    let asset = parse_asset(&data, false).unwrap();
-    let output = format_text(&asset, &[]);
-    common::assert_snapshot("helm_text", &output);
+    common::assert_snapshot("helm_text", &common::decoded_text(&data));
 }
 
 #[test]
 fn helm_json_valid() {
     let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
-    let asset = parse_asset(&data, false).unwrap();
-    let val = to_json(&asset, &[]);
-    let s = serde_json::to_string_pretty(&val).unwrap();
-    let _: serde_json::Value = serde_json::from_str(&s).expect("JSON should round-trip");
+    let _: serde_json::Value =
+        serde_json::from_str(&common::decoded_json(&data)).expect("JSON should round-trip");
 }
 
 #[test]
 fn helm_json_snapshot() {
     let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
-    let asset = parse_asset(&data, false).unwrap();
-    let val = to_json(&asset, &[]);
-    let output = serde_json::to_string_pretty(&val).unwrap();
-    // JSON adds a trailing newline in the snapshot from the CLI
-    common::assert_snapshot("helm_json", &format!("{}\n", output));
+    // The CLI appends a trailing newline to the JSON output file.
+    common::assert_snapshot("helm_json", &format!("{}\n", common::decoded_json(&data)));
 }
 
 #[test]
 fn helm_filter_works() {
     let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
-    let asset = parse_asset(&data, false).unwrap();
-    let full = format_summary(&asset);
+    let full = common::decoded_summary(&data);
     let filtered = filter_summary(&full, &["getsteeringangle".to_string()]);
     assert!(!filtered.is_empty());
     assert!(
@@ -96,39 +153,46 @@ fn garbage_input_returns_error() {
     assert!(parse_asset(b"not a uasset file", false).is_err());
 }
 
-/// Run all three output modes multiple times and verify identical output.
-/// Each call creates fresh HashMaps with different random seeds, so this
-/// catches any HashMap iteration order nondeterminism.
+/// Run all three output modes several times and require identical output.
+/// Each helper call re-parses, so every run gets fresh HashMaps with new
+/// random seeds, catching any iteration-order nondeterminism.
 #[test]
 fn output_determinism() {
     let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
-    let asset = parse_asset(&data, false).unwrap();
-    let baseline_summary = format_summary(&asset);
-    let baseline_text = format_text(&asset, &[]);
-    let baseline_json = serde_json::to_string_pretty(&to_json(&asset, &[])).unwrap();
+    let baseline_summary = common::decoded_summary(&data);
+    let baseline_text = common::decoded_text(&data);
+    let baseline_json = common::decoded_json(&data);
     for _ in 0..4 {
         assert_eq!(
-            format_summary(&asset),
+            common::decoded_summary(&data),
             baseline_summary,
             "summary output is nondeterministic"
         );
         assert_eq!(
-            format_text(&asset, &[]),
+            common::decoded_text(&data),
             baseline_text,
             "text output is nondeterministic"
         );
         assert_eq!(
-            serde_json::to_string_pretty(&to_json(&asset, &[])).unwrap(),
+            common::decoded_json(&data),
             baseline_json,
             "json output is nondeterministic"
         );
     }
 }
 
+/// Mirror the CLI `--diff` path: emit each side's v2 summary, filter, then
+/// unified-diff the two texts.
+fn v2_diff(before: &[u8], after: &[u8], label_a: &str, label_b: &str) -> (String, bool) {
+    let before_text = filter_summary(&common::decoded_summary(before), &[]);
+    let after_text = filter_summary(&common::decoded_summary(after), &[]);
+    diff_summary_texts(&before_text, &after_text, label_a, label_b, 3)
+}
+
 #[test]
 fn diff_identical_files_produces_no_output() {
     let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
-    let (output, has_changes) = format_diff(&data, &data, "a.uasset", "b.uasset", &[], 3).unwrap();
+    let (output, has_changes) = v2_diff(&data, &data, "a.uasset", "b.uasset");
     assert!(!has_changes);
     assert!(output.is_empty());
 }
@@ -139,13 +203,11 @@ fn diff_different_versions_produces_unified_diff() {
     let ue5_path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/ue_5.5/Helm_BP.uasset");
     if !ue5_path.exists() {
-        // Skip if UE5.5 fixture not available
-        return;
+        return; // UE5.5 fixture not available locally.
     }
     let ue5 = std::fs::read(ue5_path).unwrap();
-    let (output, has_changes) =
-        format_diff(&ue4, &ue5, "ue4.uasset", "ue5.uasset", &[], 3).unwrap();
-    // Same blueprint saved in two engine versions — may or may not have textual diffs,
-    // but the diff function itself should succeed without error.
+    let (output, has_changes) = v2_diff(&ue4, &ue5, "ue4.uasset", "ue5.uasset");
+    // Same blueprint in two engine versions: the diff may or may not be empty,
+    // but the two return values must agree.
     assert!(output.is_empty() != has_changes);
 }

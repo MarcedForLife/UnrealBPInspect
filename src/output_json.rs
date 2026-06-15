@@ -90,7 +90,6 @@ fn function_to_json(index: usize, hdr: &ExportHeader, props: &[Property]) -> Val
     let sig = find_prop_str(props, "Signature").unwrap_or_else(|| format!("{}()", hdr.object_name));
     let flags = find_prop_str(props, "FunctionFlags").unwrap_or_default();
     let bytecode = find_prop(props, "BytecodeSummary")
-        .or_else(|| find_prop(props, "Bytecode"))
         .and_then(|p| match &p.value {
             PropValue::Array { items, .. } => Some(
                 items

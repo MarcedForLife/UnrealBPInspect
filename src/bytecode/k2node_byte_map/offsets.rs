@@ -1,0 +1,313 @@
+//! Call / variable-set / dynamic-cast offset indexing and attribution.
+//!
+//! Builds the member-name and target-class indices, walks the bytecode
+//! for `EX_LET*` and cast opcodes, and writes the matching
+//! `K2Node_CallFunction` / `K2Node_VariableSet` / `K2Node_DynamicCast`
+//! attributions into `partitions` and `byte_to_node`.
+
+use std::collections::{BTreeMap, HashMap};
+
+use crate::bytecode::decode::walker::{walk_opcode, FieldPath, OpcodeVisitor, WalkCtx};
+use crate::bytecode::opcodes::{
+    EX_DYNAMIC_CAST, EX_LET, EX_LET_DELEGATE, EX_LET_MULTICAST_DELEGATE,
+    EX_LET_VALUE_ON_PERSISTENT_FRAME, EX_META_CAST,
+};
+use crate::bytecode::pin_attribution::{build_callfunc_member_index, collect_call_sites};
+use crate::bytecode::resolve::resolve_bc_obj;
+use crate::prop_query::{find_prop_str, find_struct_field_str};
+use crate::resolve::{resolve_index, short_class};
+use crate::types::ParsedAsset;
+
+use super::{
+    clamp_to_event_scope, extend_owner_events, node_class, normalise_member_name,
+    owner_events_for_node, push_range, K2NodeByteMapInputs, K2NodePartition,
+};
+
+/// Attribute every call opcode to its K2Node_CallFunction node(s)
+/// via short-member-name lookup. Multiple K2Node_CallFunction exports
+/// may share a member name; all map into `byte_to_node[offset]`.
+pub(super) fn attribute_calls(
+    inputs: &K2NodeByteMapInputs<'_>,
+    partitions: &mut BTreeMap<usize, K2NodePartition>,
+    byte_to_node: &mut BTreeMap<usize, Vec<usize>>,
+) {
+    let callfunc_by_member = build_callfunc_member_index(inputs.asset, inputs.export_names);
+    let call_sites = collect_call_sites(
+        inputs.bytecode,
+        inputs.name_table,
+        inputs.ue5,
+        inputs.asset,
+        inputs.export_names,
+    );
+    for (disk_offset, callee_short) in call_sites {
+        let Some(matching_nodes) = callfunc_by_member.get(&callee_short) else {
+            continue;
+        };
+        let owners_resolved = clamp_to_event_scope(matching_nodes, disk_offset, inputs);
+        for node_id in owners_resolved {
+            let owners = owner_events_for_node(node_id, inputs);
+            let partition = partitions.entry(node_id).or_insert_with(|| {
+                K2NodePartition::new(node_id, owners.clone(), node_class(inputs, node_id), None)
+            });
+            extend_owner_events(partition, owners);
+            // Conservative single-byte range at the opcode start.
+            // The macro-scaffold pass expands to full opcode extents.
+            push_range(&mut partition.ranges, disk_offset..disk_offset + 1);
+            byte_to_node.entry(disk_offset).or_default().push(node_id);
+        }
+    }
+}
+
+/// Attribute member-var `EX_LET*` opcodes to matching
+/// `K2Node_VariableSet` export(s) via last-segment FieldPath compared
+/// against `VariableReference.MemberName`.
+pub(super) fn attribute_variable_sets(
+    inputs: &K2NodeByteMapInputs<'_>,
+    partitions: &mut BTreeMap<usize, K2NodePartition>,
+    byte_to_node: &mut BTreeMap<usize, Vec<usize>>,
+) {
+    let varset_by_member = build_variableset_member_index(inputs.asset, inputs.export_names);
+    if varset_by_member.is_empty() {
+        return;
+    }
+    let walk_ctx = WalkCtx::new(inputs.bytecode, inputs.name_table, inputs.ue5);
+    let mut visitor = LetTargetVisitor {
+        recorded: Vec::new(),
+    };
+    let mut cursor = 0usize;
+    while cursor < inputs.bytecode.len() {
+        walk_opcode(&walk_ctx, &mut cursor, &mut visitor);
+    }
+    for (disk_offset, member_name) in visitor.recorded {
+        let Some(matching_nodes) = varset_by_member.get(&member_name) else {
+            continue;
+        };
+        let owners_resolved = clamp_to_event_scope(matching_nodes, disk_offset, inputs);
+        for node_id in owners_resolved {
+            let owners = owner_events_for_node(node_id, inputs);
+            let partition = partitions.entry(node_id).or_insert_with(|| {
+                K2NodePartition::new(node_id, owners.clone(), node_class(inputs, node_id), None)
+            });
+            extend_owner_events(partition, owners);
+            push_range(&mut partition.ranges, disk_offset..disk_offset + 1);
+            byte_to_node.entry(disk_offset).or_default().push(node_id);
+        }
+    }
+}
+
+/// Attribute `EX_DynamicCast` / `EX_MetaCast` opcodes to matching
+/// `K2Node_DynamicCast` export(s). Match key is the resolved class
+/// reference operand compared against the K2Node's `TargetType`.
+pub(super) fn attribute_dynamic_casts(
+    inputs: &K2NodeByteMapInputs<'_>,
+    partitions: &mut BTreeMap<usize, K2NodePartition>,
+    byte_to_node: &mut BTreeMap<usize, Vec<usize>>,
+) {
+    let cast_by_target = build_dynamic_cast_index(inputs.asset, inputs.export_names);
+    if cast_by_target.is_empty() {
+        return;
+    }
+    let walk_ctx = WalkCtx::new(inputs.bytecode, inputs.name_table, inputs.ue5);
+    let mut visitor = CastSiteVisitor {
+        imports: &inputs.asset.imports,
+        export_names: inputs.export_names,
+        recorded: Vec::new(),
+    };
+    let mut cursor = 0usize;
+    while cursor < inputs.bytecode.len() {
+        walk_opcode(&walk_ctx, &mut cursor, &mut visitor);
+    }
+    for (disk_offset, class_ref) in visitor.recorded {
+        let Some(matching_nodes) = cast_by_target.get(&class_ref) else {
+            continue;
+        };
+        let owners_resolved = clamp_to_event_scope(matching_nodes, disk_offset, inputs);
+        for node_id in owners_resolved {
+            let owners = owner_events_for_node(node_id, inputs);
+            let partition = partitions.entry(node_id).or_insert_with(|| {
+                K2NodePartition::new(node_id, owners.clone(), node_class(inputs, node_id), None)
+            });
+            extend_owner_events(partition, owners);
+            push_range(&mut partition.ranges, disk_offset..disk_offset + 1);
+            byte_to_node.entry(disk_offset).or_default().push(node_id);
+        }
+    }
+}
+
+/// Reverse the call-site list to a per-node-id offset list so the
+/// downstream BFS unions offsets in O(1) per step.
+pub(super) fn build_offsets_by_callfunc_node(
+    inputs: &K2NodeByteMapInputs<'_>,
+) -> HashMap<usize, Vec<usize>> {
+    let callfunc_by_member = build_callfunc_member_index(inputs.asset, inputs.export_names);
+    let call_sites = collect_call_sites(
+        inputs.bytecode,
+        inputs.name_table,
+        inputs.ue5,
+        inputs.asset,
+        inputs.export_names,
+    );
+    let mut offsets: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (disk_offset, callee_short) in &call_sites {
+        if let Some(nodes) = callfunc_by_member.get(callee_short) {
+            for &node_id in nodes {
+                offsets.entry(node_id).or_default().push(*disk_offset);
+            }
+        }
+    }
+    offsets
+}
+
+/// Per-node offset list for every `K2Node_VariableSet`, derived from
+/// the same `EX_LET*` walk that `attribute_variable_sets` runs. Used
+/// by macro-instance attribution so FlipFlop pin A / pin B downstream
+/// VariableSets contribute offsets to the macro's range.
+pub(super) fn build_offsets_by_varset_node(
+    inputs: &K2NodeByteMapInputs<'_>,
+) -> HashMap<usize, Vec<usize>> {
+    let varset_by_member = build_variableset_member_index(inputs.asset, inputs.export_names);
+    if varset_by_member.is_empty() {
+        return HashMap::new();
+    }
+    let walk_ctx = WalkCtx::new(inputs.bytecode, inputs.name_table, inputs.ue5);
+    let mut visitor = LetTargetVisitor {
+        recorded: Vec::new(),
+    };
+    let mut cursor = 0usize;
+    while cursor < inputs.bytecode.len() {
+        walk_opcode(&walk_ctx, &mut cursor, &mut visitor);
+    }
+    let mut offsets: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (disk_offset, member_name) in visitor.recorded {
+        if let Some(nodes) = varset_by_member.get(&member_name) {
+            for &node_id in nodes {
+                offsets.entry(node_id).or_default().push(disk_offset);
+            }
+        }
+    }
+    offsets
+}
+
+/// Member-name to node-id index for every `K2Node_VariableSet` with
+/// a resolvable `VariableReference.MemberName`.
+fn build_variableset_member_index(
+    asset: &ParsedAsset,
+    export_names: &[String],
+) -> HashMap<String, Vec<usize>> {
+    let mut index: HashMap<String, Vec<usize>> = HashMap::new();
+    for (zero_based, (hdr, props)) in asset.exports.iter().enumerate() {
+        let one_based = zero_based + 1;
+        let class_full = resolve_index(&asset.imports, export_names, hdr.class_index);
+        if short_class(&class_full) != "K2Node_VariableSet" {
+            continue;
+        }
+        let Some(member_name) = find_struct_field_str(props, "VariableReference", "MemberName")
+        else {
+            continue;
+        };
+        index
+            .entry(normalise_member_name(&member_name))
+            .or_default()
+            .push(one_based);
+    }
+    index
+}
+
+/// Target-class to node-id index for every `K2Node_DynamicCast` with
+/// a `TargetType` property. `TargetType` is serialised as a
+/// string-rendered object reference (verified against a real UE 4.27
+/// fixture).
+fn build_dynamic_cast_index(
+    asset: &ParsedAsset,
+    export_names: &[String],
+) -> HashMap<String, Vec<usize>> {
+    let mut index: HashMap<String, Vec<usize>> = HashMap::new();
+    for (zero_based, (hdr, props)) in asset.exports.iter().enumerate() {
+        let one_based = zero_based + 1;
+        let class_full = resolve_index(&asset.imports, export_names, hdr.class_index);
+        if short_class(&class_full) != "K2Node_DynamicCast" {
+            continue;
+        }
+        let Some(target_type) = find_prop_str(props, "TargetType") else {
+            continue;
+        };
+        index.entry(target_type).or_default().push(one_based);
+    }
+    index
+}
+
+/// Visitor that records `EX_LET*` target offsets and the last segment
+/// of the target field path (the member-variable name). All other
+/// opcodes fall through to the default no-op.
+struct LetTargetVisitor {
+    recorded: Vec<(usize, String)>,
+}
+
+impl LetTargetVisitor {
+    fn push_path(&mut self, start_offset: usize, path: &FieldPath) {
+        if path.is_null() || path.display.is_empty() {
+            return;
+        }
+        let leaf = path.display.rsplit("::").next().unwrap_or(&path.display);
+        self.recorded
+            .push((start_offset, normalise_member_name(leaf)));
+    }
+}
+
+impl OpcodeVisitor for LetTargetVisitor {
+    type Result = ();
+
+    fn default_result(&mut self, _opcode: u8, _start_offset: usize) -> Self::Result {}
+
+    fn on_let_with_path(
+        &mut self,
+        opcode: u8,
+        path: FieldPath,
+        _lhs: Self::Result,
+        _rhs: Self::Result,
+        start_offset: usize,
+    ) -> Self::Result {
+        debug_assert!(
+            opcode == EX_LET || opcode == EX_LET_MULTICAST_DELEGATE || opcode == EX_LET_DELEGATE
+        );
+        self.push_path(start_offset, &path);
+    }
+
+    fn on_let_value_on_persistent_frame(
+        &mut self,
+        path: FieldPath,
+        _value: Self::Result,
+        start_offset: usize,
+    ) -> Self::Result {
+        let _ = EX_LET_VALUE_ON_PERSISTENT_FRAME;
+        self.push_path(start_offset, &path);
+    }
+}
+
+/// Visitor that records `EX_DynamicCast` / `EX_MetaCast` opcode offsets
+/// paired with their resolved class reference operand.
+struct CastSiteVisitor<'a> {
+    imports: &'a [crate::types::ImportEntry],
+    export_names: &'a [String],
+    recorded: Vec<(usize, String)>,
+}
+
+impl OpcodeVisitor for CastSiteVisitor<'_> {
+    type Result = ();
+
+    fn default_result(&mut self, _opcode: u8, _start_offset: usize) -> Self::Result {}
+
+    fn on_obj_cast(
+        &mut self,
+        opcode: u8,
+        class_obj_idx: i32,
+        _inner: Self::Result,
+        start_offset: usize,
+    ) -> Self::Result {
+        if opcode != EX_DYNAMIC_CAST && opcode != EX_META_CAST {
+            return;
+        }
+        let class_ref = resolve_bc_obj(class_obj_idx, self.imports, self.export_names);
+        self.recorded.push((start_offset, class_ref));
+    }
+}

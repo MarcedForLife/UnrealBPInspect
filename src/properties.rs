@@ -7,6 +7,7 @@ use anyhow::Result;
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::binary::*;
+use crate::property_type::{PropertyType, PROPERTY_CLASS_SUFFIX};
 use crate::types::*;
 
 /// Immutable context for property reading.
@@ -123,7 +124,7 @@ pub fn read_properties(
             break;
         };
 
-        if !type_name.ends_with("Property") {
+        if !type_name.ends_with(PROPERTY_CLASS_SUFFIX) {
             let _ = reader.seek(SeekFrom::Start(pos_before));
             break;
         }
@@ -157,9 +158,10 @@ fn read_property_value_ue4(
     size: i32,
 ) -> Result<PropValue> {
     let file_ver = ctx.ver.file_ver;
+    let property_type = PropertyType::from_fname(type_name);
 
     // BoolProperty has a unique UE4 layout: value byte before PropertyGuid
-    if type_name == "BoolProperty" {
+    if property_type == PropertyType::Bool {
         let val = read_u8(reader)? != 0;
         if file_ver >= VER_UE4_PROPERTY_GUID {
             let has_guid = read_u8(reader)?;
@@ -172,19 +174,19 @@ fn read_property_value_ue4(
 
     // Build metadata from tag-specific fields
     let mut meta = PropertyMeta::default();
-    match type_name {
-        "StructProperty" => {
+    match property_type {
+        PropertyType::Struct => {
             meta.struct_type = ctx.name_table.fname(reader)?;
             let _struct_guid = read_guid(reader)?;
         }
-        "ArrayProperty" => meta.inner_type = ctx.name_table.fname(reader)?,
-        "SetProperty" => meta.inner_type = ctx.name_table.fname(reader)?,
-        "MapProperty" => {
+        PropertyType::Array => meta.inner_type = ctx.name_table.fname(reader)?,
+        PropertyType::Set => meta.inner_type = ctx.name_table.fname(reader)?,
+        PropertyType::Map => {
             meta.key_type = ctx.name_table.fname(reader)?;
             meta.value_type = ctx.name_table.fname(reader)?;
         }
-        "EnumProperty" => meta.enum_name = ctx.name_table.fname(reader)?,
-        "ByteProperty" => meta.enum_name = ctx.name_table.fname(reader)?,
+        PropertyType::Enum => meta.enum_name = ctx.name_table.fname(reader)?,
+        PropertyType::Byte => meta.enum_name = ctx.name_table.fname(reader)?,
         _ => {}
     }
     skip_property_guid(reader, file_ver)?;
@@ -195,8 +197,8 @@ fn read_property_value_ue4(
     let value = read_value_with_meta(reader, ctx, type_name, size, &meta, value_data_end)?;
 
     // Ensure cursor is at the correct position after the value
-    match type_name {
-        "StructProperty" | "ArrayProperty" | "MapProperty" | "SetProperty" => {
+    match property_type {
+        PropertyType::Struct | PropertyType::Array | PropertyType::Map | PropertyType::Set => {
             reader.seek(SeekFrom::Start(value_data_end))?;
         }
         _ => {}
@@ -232,7 +234,7 @@ fn read_properties_ue5(reader: &mut Reader, ctx: &PropCtx, end_offset: u64) -> V
         let Ok(type_info) = read_property_type_name(reader, ctx) else {
             break;
         };
-        if !type_info.type_name.ends_with("Property") {
+        if !type_info.type_name.ends_with(PROPERTY_CLASS_SUFFIX) {
             let _ = reader.seek(SeekFrom::Start(pos_before));
             break;
         }
@@ -289,7 +291,7 @@ fn read_property_value_ue5(
     flags: u8,
 ) -> Result<PropValue> {
     // BoolProperty: value encoded in flags, no payload
-    if ti.type_name == "BoolProperty" {
+    if PropertyType::from_fname(&ti.type_name) == PropertyType::Bool {
         return Ok(PropValue::Bool(flags & TAG_BOOL_TRUE != 0));
     }
 
@@ -310,27 +312,27 @@ fn read_primitive_value(
     name_table: &NameTable,
     type_name: &str,
 ) -> Result<Option<PropValue>> {
-    match type_name {
-        "IntProperty" | "Int32Property" | "UInt32Property" => {
+    match PropertyType::from_fname(type_name) {
+        PropertyType::Int | PropertyType::Int32 | PropertyType::UInt32 => {
             Ok(Some(PropValue::Int(read_i32(reader)?)))
         }
-        "Int8Property" => Ok(Some(PropValue::Int(read_u8(reader)? as i8 as i32))),
-        "Int16Property" | "UInt16Property" => {
+        PropertyType::Int8 => Ok(Some(PropValue::Int(read_u8(reader)? as i8 as i32))),
+        PropertyType::Int16 | PropertyType::UInt16 => {
             let mut b = [0u8; 2];
             reader.read_exact(&mut b)?;
             Ok(Some(PropValue::Int(i16::from_le_bytes(b) as i32)))
         }
-        "Int64Property" | "UInt64Property" => Ok(Some(PropValue::Int64(read_i64(reader)?))),
-        "FloatProperty" => Ok(Some(PropValue::Float(read_f32(reader)?))),
-        "DoubleProperty" => Ok(Some(PropValue::Double(read_f64(reader)?))),
-        "NameProperty" => Ok(Some(PropValue::Name(name_table.fname(reader)?))),
-        "ObjectProperty" => Ok(Some(PropValue::Object(read_i32(reader)?))),
-        "SoftObjectProperty" => {
+        PropertyType::Int64 | PropertyType::UInt64 => Ok(Some(PropValue::Int64(read_i64(reader)?))),
+        PropertyType::Float => Ok(Some(PropValue::Float(read_f32(reader)?))),
+        PropertyType::Double => Ok(Some(PropValue::Double(read_f64(reader)?))),
+        PropertyType::Name => Ok(Some(PropValue::Name(name_table.fname(reader)?))),
+        PropertyType::Object => Ok(Some(PropValue::Object(read_i32(reader)?))),
+        PropertyType::SoftObject => {
             let path = read_fstring(reader)?;
             let _sub = read_fstring(reader)?;
             Ok(Some(PropValue::SoftObject(path)))
         }
-        "StrProperty" => Ok(Some(PropValue::Str(read_fstring(reader)?))),
+        PropertyType::Str => Ok(Some(PropValue::Str(read_fstring(reader)?))),
         _ => Ok(None),
     }
 }
@@ -347,17 +349,17 @@ fn read_value_with_meta(
     if let Some(val) = read_primitive_value(reader, ctx.name_table, type_name)? {
         return Ok(val);
     }
-    match type_name {
-        "TextProperty" => read_text_property(reader, size).map(PropValue::Text),
+    match PropertyType::from_fname(type_name) {
+        PropertyType::Text => read_text_property(reader, size).map(PropValue::Text),
 
-        "EnumProperty" => {
+        PropertyType::Enum => {
             let value = ctx.name_table.fname(reader)?;
             Ok(PropValue::Enum {
                 enum_name: meta.enum_name.clone(),
                 value,
             })
         }
-        "ByteProperty" => {
+        PropertyType::Byte => {
             if size == 1 {
                 Ok(PropValue::Byte {
                     enum_name: meta.enum_name.clone(),
@@ -371,7 +373,7 @@ fn read_value_with_meta(
             }
         }
 
-        "StructProperty" => {
+        PropertyType::Struct => {
             let struct_end = reader.position() + size as u64;
             let fields = read_struct_value(reader, ctx, &meta.struct_type, size, struct_end)?;
             reader.seek(SeekFrom::Start(struct_end))?;
@@ -381,7 +383,7 @@ fn read_value_with_meta(
             })
         }
 
-        "ArrayProperty" => {
+        PropertyType::Array => {
             let count = read_i32(reader)?;
             let items = read_array_items(reader, ctx, &meta.inner_type, count, value_data_end)?;
             Ok(PropValue::Array {
@@ -390,7 +392,7 @@ fn read_value_with_meta(
             })
         }
 
-        "MapProperty" => {
+        PropertyType::Map => {
             let _num_keys_to_remove = read_i32(reader)?;
             let count = read_i32(reader)?;
             let mut entries = Vec::new();
@@ -409,7 +411,7 @@ fn read_value_with_meta(
             })
         }
 
-        "SetProperty" => {
+        PropertyType::Set => {
             let _num_to_remove = read_i32(reader)?;
             let count = read_i32(reader)?;
             let items = read_array_items(reader, ctx, &meta.inner_type, count, value_data_end)?;
@@ -419,11 +421,13 @@ fn read_value_with_meta(
             })
         }
 
-        "DelegateProperty" => format_delegate_binding(reader, ctx.name_table).map(PropValue::Str),
+        PropertyType::Delegate => {
+            format_delegate_binding(reader, ctx.name_table).map(PropValue::Str)
+        }
 
-        "MulticastDelegateProperty"
-        | "MulticastInlineDelegateProperty"
-        | "MulticastSparseDelegateProperty" => {
+        PropertyType::MulticastDelegate
+        | PropertyType::MulticastInlineDelegate
+        | PropertyType::MulticastSparseDelegate => {
             let count = read_i32(reader)?;
             let mut bindings = Vec::new();
             for _ in 0..count {
@@ -457,11 +461,11 @@ fn read_typed_value(
     if let Some(val) = read_primitive_value(reader, ctx.name_table, type_name)? {
         return Ok(val);
     }
-    match type_name {
-        "BoolProperty" => Ok(PropValue::Bool(read_u8(reader)? != 0)),
-        "ByteProperty" => Ok(PropValue::Int(read_u8(reader)? as i32)),
-        "EnumProperty" => Ok(PropValue::Name(ctx.name_table.fname(reader)?)),
-        "StructProperty" => {
+    match PropertyType::from_fname(type_name) {
+        PropertyType::Bool => Ok(PropValue::Bool(read_u8(reader)? != 0)),
+        PropertyType::Byte => Ok(PropValue::Int(read_u8(reader)? as i32)),
+        PropertyType::Enum => Ok(PropValue::Name(ctx.name_table.fname(reader)?)),
+        PropertyType::Struct => {
             let fields = read_properties(reader, ctx.name_table, end_offset, ctx.ver);
             Ok(PropValue::Struct {
                 struct_type: String::new(),
