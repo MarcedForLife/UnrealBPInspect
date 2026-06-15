@@ -54,9 +54,7 @@ pub(super) fn try_promote_for_loop_with_break(
     // The guard's `Var($Not_PreBool)` cond resolves through the in-body re-eval
     // assignment, so the body must be in the scope stack.
     let body_snapshot: Vec<Stmt> = body.clone();
-    let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-    scopes.push(body_snapshot.as_slice());
-    scopes.extend(ancestors.iter().copied());
+    let scopes = visit::scope_stack(body_snapshot.as_slice(), ancestors);
 
     // The head cond must be the And-guarded `(!break_flag && (counter <= last))`
     // shape. Resolve the cond and its And operands, peel the break-flag

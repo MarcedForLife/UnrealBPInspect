@@ -54,6 +54,16 @@ pub struct ExportHeader {
     pub serial_size: i64,
 }
 
+/// A decoded tagged-property value.
+///
+/// Three sites render this enum; update each when adding a variant:
+/// - `output_text::format_value` (the `--dump` renderer) matches exhaustively,
+///   so it fails to compile until the new variant is handled.
+/// - `output_json::value_to_json` (the `--json` renderer) matches exhaustively,
+///   so it fails to compile until the new variant is handled.
+/// - `prop_query::prop_value_short` (the inline summary renderer) has a
+///   wildcard fallback, so a new variant compiles but renders as `...` until
+///   given its own arm.
 #[derive(Debug, Clone)]
 pub enum PropValue {
     Bool(bool),

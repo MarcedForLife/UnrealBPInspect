@@ -12,7 +12,7 @@ use crate::bytecode::names::K2NODE_PREFIX;
 use crate::ffield::*;
 use crate::pins::scan_for_pins;
 use crate::properties::read_properties;
-use crate::resolve::{format_func_flags, resolve_index, short_class};
+use crate::resolve::{class_of, format_func_flags, resolve_index, short_class};
 use crate::types::*;
 
 /// Package file magic number (first 4 bytes of every valid `.uasset`).
@@ -219,8 +219,6 @@ fn read_export_headers(
         let _pkg_flags = read_u32(reader)?;
         if ver.file_ver >= VER_UE4_TEMPLATE_INDEX {
             let _not_always = read_i32(reader)?;
-        }
-        if ver.file_ver >= VER_UE4_TEMPLATE_INDEX {
             let _is_asset = read_i32(reader)?;
         }
         if ver.file_ver_ue5 >= VER_UE5_OPTIONAL_RESOURCES {
@@ -331,6 +329,129 @@ struct ParsedExports {
     bytecode_by_export: BTreeMap<usize, (Vec<u8>, u32)>,
 }
 
+/// What a single export's serialized walk yields: its property stream plus the
+/// optional products that only some export kinds produce (the function call
+/// signature for Function exports, captured script bytecode, EdGraph pin data
+/// for K2Node/comment exports). The caller keys the optional products by
+/// 1-based export index.
+struct ExportProducts {
+    props: Vec<Property>,
+    signature: Option<FunctionSignature>,
+    bytecode: Option<(Vec<u8>, u32)>,
+    pin_data: Option<NodePinData>,
+}
+
+/// Read one export's serialized data: extension skip, tagged properties,
+/// UStruct header, FField children, script bytecode, and function flags.
+///
+/// `pin_scan_hint` threads the rolling pin-scan offset hint across exports, the
+/// caller carries it from one export to the next.
+fn parse_one_export(
+    reader: &mut Reader,
+    hdr: &ExportHeader,
+    pctx: &ParseCtx,
+    ver: AssetVersion,
+    pin_scan_hint: &mut Option<u64>,
+) -> Result<ExportProducts> {
+    reader.seek(SeekFrom::Start(hdr.serial_offset as u64))?;
+    let end = hdr.serial_offset as u64 + hdr.serial_size as u64;
+    let class_name = class_of(pctx.imports, pctx.export_names, hdr);
+    let kind = classify_export(&class_name);
+
+    // UE5.2+: extension byte before tagged property stream.
+    // UE source gates this on bIsUClass in SerializeVersionedTaggedProperties,
+    // but uncooked assets emit it for all exports (verified empirically).
+    if ver.has_complete_type_name() {
+        skip_serialization_extension(reader, pctx.name_table)?;
+    }
+
+    if kind == ExportKind::Other {
+        let props = read_properties(reader, pctx.name_table, end, ver);
+        let short = short_class(&class_name);
+        let mut pin_data = None;
+        if short.starts_with(K2NODE_PREFIX) || short == "EdGraphNode_Comment" {
+            // K2Node subclasses serialize additional data between the
+            // tagged property stream and the pin array. Scan forward
+            // from the current position looking for the pin data
+            // signature: deprecated_count(0) + reasonable pin_count.
+            let (pins, new_hint) = scan_for_pins(reader, pctx.name_table, end, ver, *pin_scan_hint);
+            *pin_scan_hint = new_hint;
+            if let Some(pins) = pins {
+                pin_data = Some(NodePinData { pins });
+            }
+        }
+        return Ok(ExportProducts {
+            props,
+            signature: None,
+            bytecode: None,
+            pin_data,
+        });
+    }
+
+    let is_function = kind == ExportKind::Function;
+    let props = read_properties(reader, pctx.name_table, end, ver);
+    let props_end_pos = reader.position();
+
+    let mut extra_props = props;
+
+    // UStruct header: Next, Super, Children
+    parse_ustruct_header(
+        reader,
+        pctx,
+        &mut extra_props,
+        props_end_pos,
+        end,
+        &hdr.object_name,
+    )?;
+
+    // FField children (parameters / member variables)
+    let ffield_children = parse_ffield_children(reader, pctx, end, &hdr.object_name)?;
+    let mut signature = None;
+    if is_function && !ffield_children.is_empty() {
+        extra_props.push(Property {
+            name: "Signature".into(),
+            value: PropValue::Str(format_signature(&hdr.object_name, &ffield_children)),
+        });
+        signature = Some(build_function_signature(&ffield_children));
+    }
+    if !is_function && !ffield_children.is_empty() {
+        extra_props.push(Property {
+            name: "Members".into(),
+            value: PropValue::Array {
+                inner_type: "StrProperty".into(),
+                items: ffield_children
+                    .iter()
+                    .map(|(name, ty, _)| PropValue::Str(format!("{}: {}", name, ty)))
+                    .collect(),
+            },
+        });
+    }
+
+    // Script bytecode
+    let bytecode = capture_bytecode(reader, pctx, end, &hdr.object_name)?;
+
+    // Function flags (after bytecode, only for Function exports)
+    if is_function && reader.position() + 4 <= end {
+        let func_flags = read_u32(reader)?;
+        if func_flags != 0 {
+            extra_props.push(Property {
+                name: "FunctionFlags".into(),
+                value: PropValue::Str(format_func_flags(func_flags)),
+            });
+        }
+        if func_flags & FUNC_NET != 0 && reader.position() + 4 <= end {
+            let _rep_offset = read_i32(reader)?;
+        }
+    }
+
+    Ok(ExportProducts {
+        props: extra_props,
+        signature,
+        bytecode,
+        pin_data: None,
+    })
+}
+
 /// Walk every export's serialized data, reading its tagged properties,
 /// UStruct header, FField children, and script bytecode.
 ///
@@ -358,105 +479,17 @@ fn parse_exports(
             continue;
         }
 
-        let mut captured_signature: Option<FunctionSignature> = None;
-        let mut captured_bytecode: Option<(Vec<u8>, u32)> = None;
-        let export_result: Result<Vec<Property>> = (|| {
-            reader.seek(SeekFrom::Start(hdr.serial_offset as u64))?;
-            let end = hdr.serial_offset as u64 + hdr.serial_size as u64;
-            let class_name = resolve_index(pctx.imports, pctx.export_names, hdr.class_index);
-            let kind = classify_export(&class_name);
-
-            // UE5.2+: extension byte before tagged property stream.
-            // UE source gates this on bIsUClass in SerializeVersionedTaggedProperties,
-            // but uncooked assets emit it for all exports (verified empirically).
-            if ver.has_complete_type_name() {
-                skip_serialization_extension(reader, pctx.name_table)?;
-            }
-
-            if kind == ExportKind::Other {
-                let props = read_properties(reader, pctx.name_table, end, ver);
-                let short = short_class(&class_name);
-                if short.starts_with(K2NODE_PREFIX) || short == "EdGraphNode_Comment" {
-                    // K2Node subclasses serialize additional data between the
-                    // tagged property stream and the pin array. Scan forward
-                    // from the current position looking for the pin data
-                    // signature: deprecated_count(0) + reasonable pin_count.
-                    let (pins, new_hint) =
-                        scan_for_pins(reader, pctx.name_table, end, ver, pin_scan_hint);
-                    pin_scan_hint = new_hint;
-                    if let Some(ref pins) = pins {
-                        pin_data_map.insert(ei + 1, NodePinData { pins: pins.clone() });
-                    }
-                }
-                return Ok(props);
-            }
-
-            let is_function = kind == ExportKind::Function;
-            let props = read_properties(reader, pctx.name_table, end, ver);
-            let props_end_pos = reader.position();
-
-            let mut extra_props = props;
-
-            // UStruct header: Next, Super, Children
-            parse_ustruct_header(
-                reader,
-                pctx,
-                &mut extra_props,
-                props_end_pos,
-                end,
-                &hdr.object_name,
-            )?;
-
-            // FField children (parameters / member variables)
-            let ffield_children = parse_ffield_children(reader, pctx, end, &hdr.object_name)?;
-            if is_function && !ffield_children.is_empty() {
-                extra_props.push(Property {
-                    name: "Signature".into(),
-                    value: PropValue::Str(format_signature(&hdr.object_name, &ffield_children)),
-                });
-                captured_signature = Some(build_function_signature(&ffield_children));
-            }
-            if !is_function && !ffield_children.is_empty() {
-                extra_props.push(Property {
-                    name: "Members".into(),
-                    value: PropValue::Array {
-                        inner_type: "StrProperty".into(),
-                        items: ffield_children
-                            .iter()
-                            .map(|(name, ty, _)| PropValue::Str(format!("{}: {}", name, ty)))
-                            .collect(),
-                    },
-                });
-            }
-
-            // Script bytecode
-            captured_bytecode = capture_bytecode(reader, pctx, end, &hdr.object_name)?;
-
-            // Function flags (after bytecode, only for Function exports)
-            if is_function && reader.position() + 4 <= end {
-                let func_flags = read_u32(reader)?;
-                if func_flags != 0 {
-                    extra_props.push(Property {
-                        name: "FunctionFlags".into(),
-                        value: PropValue::Str(format_func_flags(func_flags)),
-                    });
-                }
-                if func_flags & FUNC_NET != 0 && reader.position() + 4 <= end {
-                    let _rep_offset = read_i32(reader)?;
-                }
-            }
-
-            Ok(extra_props)
-        })();
-
-        match export_result {
-            Ok(props) => {
-                exports.push((hdr.clone(), props));
-                if let Some(sig) = captured_signature {
+        match parse_one_export(reader, hdr, pctx, ver, &mut pin_scan_hint) {
+            Ok(products) => {
+                exports.push((hdr.clone(), products.props));
+                if let Some(sig) = products.signature {
                     function_signatures.insert(hdr.object_name.clone(), sig);
                 }
-                if let Some(bytecode) = captured_bytecode {
+                if let Some(bytecode) = products.bytecode {
                     bytecode_by_export.insert(ei + 1, bytecode);
+                }
+                if let Some(pin_data) = products.pin_data {
+                    pin_data_map.insert(ei + 1, pin_data);
                 }
             }
             Err(e) => {
@@ -481,8 +514,6 @@ fn parse_exports(
 /// every entry with `CPF_PARM`. Member variables (no `CPF_PARM`) are
 /// skipped, the signature is for the function call ABI.
 fn build_function_signature(children: &[(String, String, u64)]) -> FunctionSignature {
-    const CPF_PARM: u64 = 0x80;
-    const CPF_RETURN_PARM: u64 = 0x200;
     let mut params = Vec::new();
     let mut return_type = None;
     for (name, type_name, flags) in children {

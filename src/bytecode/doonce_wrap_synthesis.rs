@@ -322,61 +322,79 @@ pub(crate) fn plan_doonce_wrap_synthesis(
 
     let mut plans = Vec::new();
     for feature in &features {
-        // Discriminator.
-        //
-        // The base survivor is a body-before-scaffold candidate whose gate-SETs
-        // all lie OUTSIDE the event's owned ranges (the cross-body-unreachable
-        // signature the byte recognizer cannot reach).
-        //
-        // Two corrections handle a gate-collision event, where two
-        // body-before-scaffold candidates decode the same flow-order call:
-        //
-        // - A MIS-DECODER (out-of-range, flow/disk decodes DISAGREE) read its
-        //   own guarded call wrong: its flow-order read crossed a shared flow
-        //   frame into a co-located macro's body. It is the shared macro
-        //   instance (its flow-order and disk-order calls differ, gate out of
-        //   range). It must NOT wrap on its flow call; instead it emits a
-        //   RE-KEY directive that moves the byte-shape fold's provisionally
-        //   gate-bound latch onto its real gate, vacating the foreign gate.
-        //
-        // - A PROMOTED TWIN (in-range, flow/disk AGREE) is the genuine macro
-        //   whose CALL precedes its in-range scaffold, so the byte recognizer
-        //   can't wrap it and the base out-of-range gate rejects it. Promoted
-        //   ONLY when a same-event mis-decoder shares its flow target (the
-        //   displaced twin on the vacated gate).
-        //
-        // Every other candidate keeps the base decision, so the change is
-        // scoped to the one event with a mis-decoder pair. The apply-step
-        // `locate_doonce` skip still excludes any candidate the byte recognizer
-        // already wrapped on its gate.
-        let base_survives = feature.out_of_range && feature.bbs;
-        let is_misdecoder = feature.out_of_range && feature.bbs && !feature.flow_disk_agree;
-        let is_promoted_twin = !feature.out_of_range
-            && feature.bbs
-            && feature.flow_disk_agree
-            && misdecoded_targets.contains(&feature.target_name);
-
-        if is_misdecoder {
-            plans.push(SynthWrapPlan {
+        match classify_candidate(feature, &misdecoded_targets) {
+            CandidateDecision::Skip => continue,
+            CandidateDecision::Rekey => plans.push(SynthWrapPlan {
                 gate_var: feature.gate_var.clone(),
                 target_name: feature.target_name.clone(),
                 sibling_reset_name: feature.sibling_reset_name.clone(),
                 rekey_latch_named: feature.sibling_reset_name.clone(),
-            });
-            continue;
+            }),
+            CandidateDecision::Wrap => plans.push(SynthWrapPlan {
+                gate_var: feature.gate_var.clone(),
+                target_name: feature.target_name.clone(),
+                sibling_reset_name: feature.sibling_reset_name.clone(),
+                rekey_latch_named: None,
+            }),
         }
-        if !((base_survives && !is_misdecoder) || is_promoted_twin) {
-            continue;
-        }
-
-        plans.push(SynthWrapPlan {
-            gate_var: feature.gate_var.clone(),
-            target_name: feature.target_name.clone(),
-            sibling_reset_name: feature.sibling_reset_name.clone(),
-            rekey_latch_named: None,
-        });
     }
     plans
+}
+
+/// The discriminator outcome for one candidate: skip it, re-key a foreign
+/// gate, or synthesize a wrap. See `classify_candidate` for the rules.
+enum CandidateDecision {
+    Skip,
+    Rekey,
+    Wrap,
+}
+
+/// Decide a candidate's fate from its features and the event's mis-decoder set.
+///
+/// The base survivor is a body-before-scaffold candidate whose gate-SETs
+/// all lie OUTSIDE the event's owned ranges (the cross-body-unreachable
+/// signature the byte recognizer cannot reach).
+///
+/// Two corrections handle a gate-collision event, where two
+/// body-before-scaffold candidates decode the same flow-order call:
+///
+/// - A MIS-DECODER (out-of-range, flow/disk decodes DISAGREE) read its
+///   own guarded call wrong: its flow-order read crossed a shared flow
+///   frame into a co-located macro's body. It is the shared macro
+///   instance (its flow-order and disk-order calls differ, gate out of
+///   range). It must NOT wrap on its flow call; instead it emits a
+///   RE-KEY directive that moves the byte-shape fold's provisionally
+///   gate-bound latch onto its real gate, vacating the foreign gate.
+///
+/// - A PROMOTED TWIN (in-range, flow/disk AGREE) is the genuine macro
+///   whose CALL precedes its in-range scaffold, so the byte recognizer
+///   can't wrap it and the base out-of-range gate rejects it. Promoted
+///   ONLY when a same-event mis-decoder shares its flow target (the
+///   displaced twin on the vacated gate).
+///
+/// Every other candidate keeps the base decision, so the change is
+/// scoped to the one event with a mis-decoder pair. The apply-step
+/// `locate_doonce` skip still excludes any candidate the byte recognizer
+/// already wrapped on its gate.
+fn classify_candidate(
+    feature: &CandidateFeatures,
+    misdecoded_targets: &BTreeSet<String>,
+) -> CandidateDecision {
+    let base_survives = feature.out_of_range && feature.bbs;
+    let is_misdecoder = feature.out_of_range && feature.bbs && !feature.flow_disk_agree;
+    let is_promoted_twin = !feature.out_of_range
+        && feature.bbs
+        && feature.flow_disk_agree
+        && misdecoded_targets.contains(&feature.target_name);
+
+    if is_misdecoder {
+        return CandidateDecision::Rekey;
+    }
+    if (base_survives && !is_misdecoder) || is_promoted_twin {
+        CandidateDecision::Wrap
+    } else {
+        CandidateDecision::Skip
+    }
 }
 
 /// Apply the planned graph-identity DoOnce wraps to one event's fully

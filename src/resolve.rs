@@ -42,6 +42,13 @@ pub fn resolve_index(imports: &[ImportEntry], export_names: &[String], index: i3
     }
 }
 
+/// Resolve an export header's `class_index` to its full class path. Thin
+/// wrapper over [`resolve_index`] for the common "what is this export's class"
+/// lookup repeated across the output modes.
+pub fn class_of(imports: &[ImportEntry], export_names: &[String], hdr: &ExportHeader) -> String {
+    resolve_index(imports, export_names, hdr.class_index)
+}
+
 pub fn short_class(full: &str) -> String {
     full.rsplit('.').next().unwrap_or(full).to_string()
 }

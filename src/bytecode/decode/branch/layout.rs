@@ -137,11 +137,9 @@ fn c2_region_bounded_layout(
     Some(BranchLayout {
         then_range: (body_start_disk, then_end),
         else_range: (else_start, else_range_end),
-        then_event_call: None,
-        else_event_call: None,
         resume_disk: then_end,
-        body_owner: None,
         else_trailing_break: else_break,
+        ..Default::default()
     })
 }
 
@@ -202,6 +200,11 @@ pub(crate) fn decode_branch(pos: &mut usize, range_end: usize, ctx: &DecodeCtx) 
 /// Per-shape layout describing the slice ranges to decode for then and
 /// else bodies plus the post-construct resume point. Computed once,
 /// then handed to `decode_branch_bodies` for the actual recursion.
+///
+/// `Default` lets each construction site spell out only the fields that
+/// diverge from the empty/`None` baseline and fill the rest with
+/// `..Default::default()`.
+#[derive(Default)]
 struct BranchLayout {
     /// Range to decode for the then-body. May be empty (start == end)
     /// when the conditional flows directly into the else-target.
@@ -368,11 +371,9 @@ fn try_tail_jin_arm_layout(
                 return Some(BranchLayout {
                     then_range: arms.then_range,
                     else_range: arms.else_range,
-                    then_event_call: None,
-                    else_event_call: None,
                     resume_disk: range_end,
                     body_owner: Some(owner),
-                    else_trailing_break: None,
+                    ..Default::default()
                 });
             }
         }
@@ -442,11 +443,9 @@ fn try_backward_isvalid_layout(
                 return Some(BranchLayout {
                     then_range: (then_target_disk, seg_end),
                     else_range: (else_disk, else_end),
-                    then_event_call: None,
-                    else_event_call: None,
                     resume_disk: range_end,
                     body_owner: Some(owner),
-                    else_trailing_break: None,
+                    ..Default::default()
                 });
             }
         }
@@ -458,11 +457,9 @@ fn try_backward_isvalid_layout(
         // structural EX_POP that returns to the caller's frame.
         then_range: (body_start_disk, range_end),
         else_range: (else_disk, else_end),
-        then_event_call: None,
-        else_event_call: None,
         resume_disk: range_end,
         body_owner: Some(owner),
-        else_trailing_break: None,
+        ..Default::default()
     })
 }
 
@@ -522,11 +519,8 @@ fn decide_forward_branch_layout(
             Some(BranchLayout {
                 then_range: (then_disk, convergence),
                 else_range: (else_disk, convergence),
-                then_event_call: None,
-                else_event_call: None,
                 resume_disk: convergence,
-                body_owner: None,
-                else_trailing_break: None,
+                ..Default::default()
             })
         }
 
@@ -537,12 +531,9 @@ fn decide_forward_branch_layout(
             let then_end = range_end;
             Some(BranchLayout {
                 then_range: (body_start_disk, then_end),
-                else_range: (0, 0),
-                then_event_call: None,
                 else_event_call: Some((event_name, mem)),
                 resume_disk: then_end,
-                body_owner: None,
-                else_trailing_break: None,
+                ..Default::default()
             })
         }
 
@@ -554,128 +545,129 @@ fn decide_forward_branch_layout(
                 mem: _else_mem,
             },
             None,
-        ) => {
-            // When the else target lives in a later owned range, the
-            // inline then-body still ends inside the current range; only
-            // expand `then_terminator_end` to look up to the current
-            // range's end in that case rather than into the gap.
-            let then_terminator_end = if else_disk > range_end {
-                range_end
-            } else {
-                else_disk
-            };
-            let then_terminator =
-                scan_for_terminating_jump(ctx, body_start_disk, then_terminator_end);
-
-            // Multi-break loop-body shape: the then-arm contains a
-            // loop-break guard whose body the SESE region tree bounds
-            // strictly before the terminating jump the scan picks up. The
-            // scan-bounded then-arm over-runs that convergence and pulls the
-            // guard (a sibling) inside the then-body, dropping the else arm.
-            // When the region tree's then-extent ends before the scan jump,
-            // bound the arms by the region extents and resume at the
-            // convergence so the guard emits as a sibling.
-            if let Some(layout) = c2_region_bounded_layout(
-                ctx,
-                construct_offset,
-                body_start_disk,
-                else_disk,
-                then_terminator.as_ref().map(|jump| jump.jump_pos),
-            ) {
-                return Some(layout);
-            }
-
-            match then_terminator {
-                Some(TerminatingJump {
-                    jump_pos,
-                    target_mem,
-                    after_jump_disk: _,
-                }) => {
-                    let then_range_end = jump_pos;
-                    // Cross-range post-else may live in a later owned range,
-                    // so widen the classification scan; but a target that
-                    // resolves backward (before the else-body) means the
-                    // terminator's jump is NOT the construct's exit, it's
-                    // a back-edge or unrelated jump picked up by the wider
-                    // window. Fall back to `range_end.max(else_disk)` in
-                    // that case so resume_disk stays forward-monotonic and
-                    // `else_range` never inverts. Without the `.max`, a
-                    // cross-range layout with `else_disk > range_end` and a
-                    // backward terminator target would set
-                    // `post_else = range_end < else_disk` and feed an
-                    // inverted (start > end) range into `decode_subrange`,
-                    // which silently drops the else body.
-                    let post_else_scan = event_scan_end(range_end, ctx);
-                    let fallback_post_else = range_end.max(else_disk);
-                    let post_else =
-                        match classify_target(target_mem, body_start_disk, post_else_scan, ctx) {
-                            JumpTarget::InRange { disk, .. } if disk > else_disk => disk,
-                            JumpTarget::InRange { .. } => fallback_post_else,
-                            JumpTarget::OutOfRange | JumpTarget::Unresolved => fallback_post_else,
-                            JumpTarget::EventEntry { .. } => fallback_post_else,
-                        };
-                    Some(BranchLayout {
-                        then_range: (body_start_disk, then_range_end),
-                        else_range: (else_disk, post_else),
-                        then_event_call: None,
-                        else_event_call: None,
-                        resume_disk: post_else,
-                        body_owner: None,
-                        else_trailing_break: None,
-                    })
-                }
-                None => {
-                    // When else_disk lives in a different owned range
-                    // than the JIN itself AND the body at else_disk
-                    // matches the canonical ResetDoOnce gate-reset
-                    // shape, pull that body in as the construct's
-                    // else_body. The narrow body-shape check keeps the
-                    // pull from firing on regular forward jumps to
-                    // convergence points.
-                    if let Some((else_start, else_end)) = disjoint_else_arm_for_jin(
-                        construct_offset,
-                        body_start_disk,
-                        range_end,
-                        else_disk,
-                        ctx,
-                    ) {
-                        let owner = OwnerId::DisjointJumpTarget {
-                            jump_disk: construct_offset,
-                        };
-                        // The prescan registered the same claim; this
-                        // re-mark is a no-op for matching tuples and
-                        // protects against decode contexts where the
-                        // prescan didn't run.
-                        mark_claimed(ctx, else_start, else_end, owner);
-                        let then_end = body_start_disk.max(else_disk).min(range_end);
-                        return Some(BranchLayout {
-                            then_range: (body_start_disk, then_end),
-                            else_range: (else_start, else_end),
-                            then_event_call: None,
-                            else_event_call: None,
-                            resume_disk: then_end,
-                            body_owner: Some(owner),
-                            else_trailing_break: None,
-                        });
-                    }
-                    // No terminating EX_JUMP -> then-body falls through
-                    // naturally. Empty else.
-                    Some(BranchLayout {
-                        then_range: (body_start_disk, else_disk),
-                        else_range: (0, 0),
-                        then_event_call: None,
-                        else_event_call: None,
-                        resume_disk: else_disk,
-                        body_owner: None,
-                        else_trailing_break: None,
-                    })
-                }
-            }
-        }
+        ) => classic_if_else_layout(ctx, construct_offset, body_start_disk, range_end, else_disk),
 
         // Out-of-range or unresolved target: caller falls back to
         // decoding the remainder linearly.
         _ => None,
+    }
+}
+
+/// Decide the layout for the classic if/else shape (and the displaced-else
+/// structural variant): an inline then-body whose `EX_JUMP_IF_NOT` target
+/// `else_disk` is the else entry.
+fn classic_if_else_layout(
+    ctx: &DecodeCtx,
+    construct_offset: usize,
+    body_start_disk: usize,
+    range_end: usize,
+    else_disk: usize,
+) -> Option<BranchLayout> {
+    // When the else target lives in a later owned range, the
+    // inline then-body still ends inside the current range; only
+    // expand `then_terminator_end` to look up to the current
+    // range's end in that case rather than into the gap.
+    let then_terminator_end = if else_disk > range_end {
+        range_end
+    } else {
+        else_disk
+    };
+    let then_terminator = scan_for_terminating_jump(ctx, body_start_disk, then_terminator_end);
+
+    // Multi-break loop-body shape: the then-arm contains a
+    // loop-break guard whose body the SESE region tree bounds
+    // strictly before the terminating jump the scan picks up. The
+    // scan-bounded then-arm over-runs that convergence and pulls the
+    // guard (a sibling) inside the then-body, dropping the else arm.
+    // When the region tree's then-extent ends before the scan jump,
+    // bound the arms by the region extents and resume at the
+    // convergence so the guard emits as a sibling.
+    if let Some(layout) = c2_region_bounded_layout(
+        ctx,
+        construct_offset,
+        body_start_disk,
+        else_disk,
+        then_terminator.as_ref().map(|jump| jump.jump_pos),
+    ) {
+        return Some(layout);
+    }
+
+    match then_terminator {
+        Some(TerminatingJump {
+            jump_pos,
+            target_mem,
+            after_jump_disk: _,
+        }) => {
+            let then_range_end = jump_pos;
+            // Cross-range post-else may live in a later owned range,
+            // so widen the classification scan; but a target that
+            // resolves backward (before the else-body) means the
+            // terminator's jump is NOT the construct's exit, it's
+            // a back-edge or unrelated jump picked up by the wider
+            // window. Fall back to `range_end.max(else_disk)` in
+            // that case so resume_disk stays forward-monotonic and
+            // `else_range` never inverts. Without the `.max`, a
+            // cross-range layout with `else_disk > range_end` and a
+            // backward terminator target would set
+            // `post_else = range_end < else_disk` and feed an
+            // inverted (start > end) range into `decode_subrange`,
+            // which silently drops the else body.
+            let post_else_scan = event_scan_end(range_end, ctx);
+            let fallback_post_else = range_end.max(else_disk);
+            let post_else = match classify_target(target_mem, body_start_disk, post_else_scan, ctx)
+            {
+                JumpTarget::InRange { disk, .. } if disk > else_disk => disk,
+                JumpTarget::InRange { .. } => fallback_post_else,
+                JumpTarget::OutOfRange | JumpTarget::Unresolved => fallback_post_else,
+                JumpTarget::EventEntry { .. } => fallback_post_else,
+            };
+            Some(BranchLayout {
+                then_range: (body_start_disk, then_range_end),
+                else_range: (else_disk, post_else),
+                resume_disk: post_else,
+                ..Default::default()
+            })
+        }
+        None => {
+            // When else_disk lives in a different owned range
+            // than the JIN itself AND the body at else_disk
+            // matches the canonical ResetDoOnce gate-reset
+            // shape, pull that body in as the construct's
+            // else_body. The narrow body-shape check keeps the
+            // pull from firing on regular forward jumps to
+            // convergence points.
+            if let Some((else_start, else_end)) = disjoint_else_arm_for_jin(
+                construct_offset,
+                body_start_disk,
+                range_end,
+                else_disk,
+                ctx,
+            ) {
+                let owner = OwnerId::DisjointJumpTarget {
+                    jump_disk: construct_offset,
+                };
+                // The prescan registered the same claim; this
+                // re-mark is a no-op for matching tuples and
+                // protects against decode contexts where the
+                // prescan didn't run.
+                mark_claimed(ctx, else_start, else_end, owner);
+                let then_end = body_start_disk.max(else_disk).min(range_end);
+                return Some(BranchLayout {
+                    then_range: (body_start_disk, then_end),
+                    else_range: (else_start, else_end),
+                    resume_disk: then_end,
+                    body_owner: Some(owner),
+                    ..Default::default()
+                });
+            }
+            // No terminating EX_JUMP -> then-body falls through
+            // naturally. Empty else.
+            Some(BranchLayout {
+                then_range: (body_start_disk, else_disk),
+                resume_disk: else_disk,
+                ..Default::default()
+            })
+        }
     }
 }
 

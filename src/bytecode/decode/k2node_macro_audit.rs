@@ -15,7 +15,7 @@ use crate::bytecode::asset::Event;
 use crate::bytecode::names::{MacroKind, K2NODE_MACRO_INSTANCE};
 use crate::bytecode::stmt::{LatchKind, Stmt};
 use crate::prop_query::find_prop;
-use crate::resolve::{resolve_index, short_class};
+use crate::resolve::{class_of, resolve_index, short_class};
 use crate::types::{ParsedAsset, PropValue};
 
 /// Log path is fixed relative to the project root. Created if absent;
@@ -62,7 +62,7 @@ fn count_graph_doonce_macros(asset: &ParsedAsset) -> usize {
     let mut count = 0usize;
     for (export_idx_zero, (hdr, props)) in asset.exports.iter().enumerate() {
         let export_index_one_based = export_idx_zero + 1;
-        let class_full = resolve_index(&asset.imports, &export_names, hdr.class_index);
+        let class_full = class_of(&asset.imports, &export_names, hdr);
         if short_class(&class_full) != K2NODE_MACRO_INSTANCE {
             continue;
         }

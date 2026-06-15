@@ -13,6 +13,7 @@ use crate::bytecode::asset::DecodedAsset;
 use crate::bytecode::emit::summary::is_latent_function;
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::Stmt;
+use crate::bytecode::transforms::visit::walk_expr;
 
 /// Latent-call resume continuations keyed by the originating call's disk
 /// offset, threaded through the statement walk so a latent call's resume
@@ -91,6 +92,9 @@ fn collect_stmt_calls(
     visited: &mut BTreeSet<usize>,
     out: &mut BTreeSet<String>,
 ) {
+    // Bespoke per-variant handling: the call/event name insertion, the
+    // latent-resume descent (an external `resume_bodies` map, not a child
+    // body), and the expression positions feeding `collect_expr_calls`.
     match stmt {
         Stmt::Call { func, args, offset } => {
             if let Some(name) = callee_name_from_expr(func) {
@@ -116,76 +120,22 @@ fn collect_stmt_calls(
             collect_expr_calls(rhs, out);
         }
 
-        Stmt::Branch {
-            cond,
-            then_body,
-            else_body,
-            ..
-        } => {
+        Stmt::Branch { cond, .. } => {
             collect_expr_calls(cond, out);
-            for stmt in then_body {
-                collect_stmt_calls(stmt, resume_bodies, visited, out);
-            }
-            for stmt in else_body {
-                collect_stmt_calls(stmt, resume_bodies, visited, out);
-            }
         }
 
-        Stmt::Sequence { pins, .. } => {
-            for pin_body in pins {
-                for stmt in pin_body {
-                    collect_stmt_calls(stmt, resume_bodies, visited, out);
-                }
-            }
-        }
-
-        Stmt::Loop {
-            cond,
-            body,
-            completion,
-            ..
-        } => {
+        Stmt::Loop { cond, .. } => {
             if let Some(cond_expr) = cond {
                 collect_expr_calls(cond_expr, out);
             }
-            for stmt in body {
-                collect_stmt_calls(stmt, resume_bodies, visited, out);
-            }
-            if let Some(completion_body) = completion {
-                for stmt in completion_body {
-                    collect_stmt_calls(stmt, resume_bodies, visited, out);
-                }
-            }
         }
 
-        Stmt::Switch {
-            expr,
-            cases,
-            default,
-            ..
-        } => {
+        Stmt::Switch { expr, cases, .. } => {
             collect_expr_calls(expr, out);
             for case in cases {
                 for value in &case.values {
                     collect_expr_calls(value, out);
                 }
-                for stmt in &case.body {
-                    collect_stmt_calls(stmt, resume_bodies, visited, out);
-                }
-            }
-            if let Some(default_body) = default {
-                for stmt in default_body {
-                    collect_stmt_calls(stmt, resume_bodies, visited, out);
-                }
-            }
-        }
-
-        Stmt::Latch { init, body, .. } => {
-            for stmt in init {
-                collect_stmt_calls(stmt, resume_bodies, visited, out);
-            }
-            for stmt in body {
-                collect_stmt_calls(stmt, resume_bodies, visited, out);
             }
         }
 
@@ -195,99 +145,34 @@ fn collect_stmt_calls(
             }
         }
 
-        Stmt::Break { .. } | Stmt::Unknown { .. } => {}
+        Stmt::Sequence { .. } | Stmt::Latch { .. } | Stmt::Break { .. } | Stmt::Unknown { .. } => {}
+    }
+
+    // Generic body recursion. `child_bodies` covers Branch then/else,
+    // Sequence pins, Loop body/completion, Switch case bodies/default, and
+    // Latch init/body, omitting ForC init/increment (which carry no nested
+    // statements). Leaf variants own no child bodies.
+    for child_body in stmt.child_bodies() {
+        for child_stmt in child_body {
+            collect_stmt_calls(child_stmt, resume_bodies, visited, out);
+        }
     }
 }
 
 /// Collect callee names from call-bearing expression positions.
 ///
-/// Handles `Expr::Call` and `Expr::MethodCall` directly, and descends
-/// into sub-expressions inside compound forms (Binary, Unary, Cast, etc.)
-/// so that calls nested in argument chains are not missed.
+/// Pre-order walks the whole expression tree via [`walk_expr`] and inserts
+/// the name at every `Expr::Call` and `Expr::MethodCall` node, so calls
+/// nested in argument chains and compound forms (Binary, Unary, Cast, etc.)
+/// are not missed. The recursion lives in `walk_expr`; this only owns the
+/// name extraction.
 fn collect_expr_calls(expr: &Expr, out: &mut BTreeSet<String>) {
-    match expr {
-        Expr::Call { name, args } => {
+    walk_expr(expr, &mut |node| match node {
+        Expr::Call { name, .. } | Expr::MethodCall { name, .. } => {
             out.insert(name.clone());
-            for arg in args {
-                collect_expr_calls(arg, out);
-            }
         }
-
-        Expr::MethodCall { recv, name, args } => {
-            out.insert(name.clone());
-            collect_expr_calls(recv, out);
-            for arg in args {
-                collect_expr_calls(arg, out);
-            }
-        }
-
-        Expr::Binary { lhs, rhs, .. } => {
-            collect_expr_calls(lhs, out);
-            collect_expr_calls(rhs, out);
-        }
-
-        Expr::Unary { operand, .. } => {
-            collect_expr_calls(operand, out);
-        }
-
-        Expr::Cast { inner, .. } => {
-            collect_expr_calls(inner, out);
-        }
-
-        Expr::Index { recv, idx } => {
-            collect_expr_calls(recv, out);
-            collect_expr_calls(idx, out);
-        }
-
-        Expr::FieldAccess { recv, .. } => {
-            collect_expr_calls(recv, out);
-        }
-
-        Expr::ArrayLit(items) => {
-            for item in items {
-                collect_expr_calls(item, out);
-            }
-        }
-
-        Expr::Ternary {
-            cond,
-            then_expr,
-            else_expr,
-        } => {
-            collect_expr_calls(cond, out);
-            collect_expr_calls(then_expr, out);
-            collect_expr_calls(else_expr, out);
-        }
-
-        Expr::Switch {
-            index,
-            cases,
-            default,
-        } => {
-            collect_expr_calls(index, out);
-            for case in cases {
-                collect_expr_calls(&case.value, out);
-                collect_expr_calls(&case.body, out);
-            }
-            collect_expr_calls(default, out);
-        }
-
-        Expr::Out(inner) | Expr::Interface(inner) | Expr::Persistent(inner) => {
-            collect_expr_calls(inner, out);
-        }
-
-        Expr::Resume { inner, .. } => {
-            collect_expr_calls(inner, out);
-        }
-
-        Expr::StructConstruct { fields, .. } => {
-            for (_field_name, field_expr) in fields {
-                collect_expr_calls(field_expr, out);
-            }
-        }
-
-        Expr::Literal(_) | Expr::Var(_) | Expr::Unknown { .. } => {}
-    }
+        _ => {}
+    });
 }
 
 /// Extract a callee name string from the function-position expression of a

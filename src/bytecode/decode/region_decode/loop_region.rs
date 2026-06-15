@@ -78,10 +78,15 @@ pub(crate) fn try_dispatch_loop_body_region_at(
     }
 
     let idom = compute_dominators(cfg);
+    let walk = RegionWalkCtx {
+        cfg,
+        ctx,
+        idom: &idom,
+    };
     let region = &region_tree.regions[target_id];
     let region_exit = region.exit;
     let (emitted, _continuation) =
-        try_emit_ifthenelse_region(region, target_id, cfg, ctx, &idom, Some(region_tree))?;
+        try_emit_ifthenelse_region(region, target_id, walk, Some(region_tree))?;
 
     // Advance past every byte the dispatched region's arms cover. The
     // region's transitive `block_to_region` byte ranges are unreliable
@@ -180,6 +185,11 @@ pub(crate) fn try_dispatch_loop_body_loop_region_at(
         .map(|(region_id, _)| region_id)?;
 
     let idom = compute_dominators(cfg);
+    let walk = RegionWalkCtx {
+        cfg,
+        ctx,
+        idom: &idom,
+    };
     let region = &region_tree.regions[target];
     // `try_emit_loop_region` self-installs `with_loop_completion_region(target)`
     // around its own `try_decode_loop`, so the inner loop's body decode gets
@@ -192,7 +202,7 @@ pub(crate) fn try_dispatch_loop_body_loop_region_at(
     // flow-pop bypass fires for the inner loop and nothing else.
     let emitted = {
         let _relaxed = ctx.with_loop_dispatch_relaxed();
-        try_emit_loop_region(region, target, cfg, ctx, &idom)?
+        try_emit_loop_region(region, target, walk)?
     };
 
     // Part (ii): record the dispatched region so the later sibling
@@ -496,10 +506,9 @@ fn loop_transitive_coverage(
 pub(super) fn try_emit_loop_region(
     region: &Region,
     region_id: RegionId,
-    cfg: &ControlFlowGraph,
-    ctx: &DecodeCtx,
-    _idom: &BTreeMap<BlockId, BlockId>,
+    walk: RegionWalkCtx,
 ) -> Option<Vec<Stmt>> {
+    let RegionWalkCtx { cfg, ctx, idom: _ } = walk;
     if region.kind != RegionKind::Loop {
         return None;
     }
@@ -733,10 +742,9 @@ pub(super) fn has_earlier_pop_flow_if_not(
 pub(super) fn try_emit_switch_region(
     region: &Region,
     region_id: RegionId,
-    cfg: &ControlFlowGraph,
-    ctx: &DecodeCtx,
-    _idom: &BTreeMap<BlockId, BlockId>,
+    walk: RegionWalkCtx,
 ) -> Option<Vec<Stmt>> {
+    let RegionWalkCtx { cfg, ctx, idom: _ } = walk;
     if region.kind != RegionKind::Switch {
         return None;
     }

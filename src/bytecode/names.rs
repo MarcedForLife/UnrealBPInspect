@@ -13,31 +13,43 @@ pub(crate) const LATENT_FUNCTIONS: &[&str] = &[
     "MoveComponentTo",
 ];
 
+/// Number of hex characters in a compiler-generated GUID suffix.
+const GUID_HEX_LEN: usize = 32;
+/// Shortest name that can carry a `_<digits>_<32 hex chars>` suffix and
+/// still leave a non-empty base: one base char, two `_` separators, one
+/// disambiguator digit, and the GUID hex run.
+const MIN_GUID_SUFFIX_NAME_LEN: usize = GUID_HEX_LEN + "_X_".len() + 1;
+
 /// Strip UE compiler-generated GUID suffixes: `VarName_42_A1B2C3D4E5F6...` -> `VarName`.
 /// The compiler appends `_<digits>_<32 hex chars>` to disambiguate generated names.
 pub fn strip_guid_suffix(name: &str) -> &str {
     let bytes = name.as_bytes();
-    if bytes.len() < 36 {
+    if bytes.len() < MIN_GUID_SUFFIX_NAME_LEN {
         return name;
     }
-    let hex_start = bytes.len() - 32;
+    let hex_start = bytes.len() - GUID_HEX_LEN;
     if !bytes[hex_start..].iter().all(|b| b.is_ascii_hexdigit()) {
         return name;
     }
-    if bytes[hex_start - 1] != b'_' {
+    // Byte before the hex run is the `_` separating it from the digits.
+    let hex_separator = hex_start - 1;
+    if bytes[hex_separator] != b'_' {
         return name;
     }
-    let mut i = hex_start - 2;
-    if !bytes[i].is_ascii_digit() {
+    // Walk the digit run backwards from the last digit (just before the
+    // hex separator) to its first digit.
+    let mut digits_start = hex_separator - 1;
+    if !bytes[digits_start].is_ascii_digit() {
         return name;
     }
-    while i > 0 && bytes[i - 1].is_ascii_digit() {
-        i -= 1;
+    while digits_start > 0 && bytes[digits_start - 1].is_ascii_digit() {
+        digits_start -= 1;
     }
-    if i == 0 || bytes[i - 1] != b'_' {
+    // A `_` must separate the base name from the digit run.
+    if digits_start == 0 || bytes[digits_start - 1] != b'_' {
         return name;
     }
-    &name[..i - 1]
+    &name[..digits_start - 1]
 }
 
 /// FName prefix shared by all K2Node Blueprint graph-node classes.
@@ -137,24 +149,24 @@ fn strip_return_value_suffix(name: &str) -> String {
 /// Normalize UE5 LWC (Large World Coordinates) name variants back to UE4 equivalents
 /// for clean cross-version diffs.
 pub fn normalize_lwc_name(name: &str) -> String {
-    let mut s = name.to_string();
+    let mut normalized = name.to_string();
     // Binary math ops: _DoubleDouble -> _FloatFloat
-    s = s.replace("_DoubleDouble", "_FloatFloat");
+    normalized = normalized.replace("_DoubleDouble", "_FloatFloat");
     // Standalone function renames
-    s = s.replace("SelectDouble", "SelectFloat");
+    normalized = normalized.replace("SelectDouble", "SelectFloat");
     // Strip UE5 implicit cast intermediary suffixes, these are transparent
     // pass-through assignments that clutter output and block temp inlining.
-    if let Some(base) = s.strip_suffix("_ImplicitCast") {
-        s = base.to_string();
-    } else if let Some(pos) = s.rfind("_ImplicitCast_") {
+    if let Some(base) = normalized.strip_suffix("_ImplicitCast") {
+        normalized = base.to_string();
+    } else if let Some(pos) = normalized.rfind("_ImplicitCast_") {
         // _ImplicitCast_N suffix (numbered variant)
-        let suffix = &s[pos + "_ImplicitCast_".len()..];
+        let suffix = &normalized[pos + "_ImplicitCast_".len()..];
         if suffix.chars().all(|c| c.is_ascii_digit()) {
             // Keep the _N disambiguator but drop _ImplicitCast
-            s = format!("{}_{}", &s[..pos], suffix);
+            normalized = format!("{}_{}", &normalized[..pos], suffix);
         }
     }
-    s
+    normalized
 }
 
 #[cfg(test)]

@@ -23,15 +23,14 @@ mod shared;
 // `transforms::latch_recognition::X` resolving unchanged for external
 // consumers (decode/mod.rs, k2node_byte_map, region_decode doc refs).
 pub use doonce::{rewrite_asset_wide_reset_doonce_names, rewrite_reset_doonce_names};
-#[allow(unused_imports)]
-pub(crate) use shared::{stmt_call_display_name, LIBRARY_FUNC_PREFIXES};
+pub(crate) use shared::LIBRARY_FUNC_PREFIXES;
 pub(crate) use shared::{
     DOONCE_CALL_NAME, DOONCE_GATE_PREFIX, DOONCE_INIT_PREFIX, FLIPFLOP_TOGGLE_PREFIX,
     RESET_DOONCE_CALL_NAME,
 };
 
 use crate::bytecode::stmt::Stmt;
-use crate::bytecode::transforms::visit::{walk_bodies_with_ancestors_mut, walk_stmt_children_mut};
+use crate::bytecode::transforms::visit::descend_into_children;
 use cross_event::{try_rewrite_cross_event_doonce_in_sequence, try_rewrite_multi_sequence_doonce};
 use doonce::{
     absorb_post_chain_reset_into_else, try_rewrite_compound_doonce, try_rewrite_cross_arm_doonce,
@@ -55,15 +54,21 @@ pub fn recognize_latches(body: &mut Vec<Stmt>) {
     recognize_in_body(body, &[]);
 }
 
+/// When `slot` is a freshly-wrapped `Stmt::Latch`, re-run recognition on its
+/// body so DoOnce/FlipFlop nested inside the folded user content also folds.
+fn recurse_wrapped_latch(slot: &mut Stmt, ancestors: &[&[Stmt]]) {
+    if let Stmt::Latch { body: inner, .. } = slot {
+        recognize_in_body(inner, ancestors);
+    }
+}
+
 /// `ancestors` is innermost-first: each slice is the preceding-siblings
 /// view at one outer nesting level. FlipFlop chain resolution searches
 /// the current body plus ancestors so a toggle's chained def in a parent
 /// scope still resolves.
 fn recognize_in_body(body: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
-    walk_bodies_with_ancestors_mut(body, ancestors, &mut |stmt, child_ancestors| {
-        walk_stmt_children_mut(stmt, &mut |sub_body| {
-            recognize_in_body(sub_body, child_ancestors)
-        });
+    descend_into_children(body, ancestors, &mut |sub_body, child_ancestors| {
+        recognize_in_body(sub_body, child_ancestors)
     });
 
     // Cross-Sequence compound DoOnce: when the BP compiler splits the
@@ -77,9 +82,7 @@ fn recognize_in_body(body: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
         // Re-run recursion on any newly-wrapped Latch bodies so nested
         // DoOnce/FlipFlop inside the folded user-body content also folds.
         for stmt in body.iter_mut() {
-            if let Stmt::Latch { body: inner, .. } = stmt {
-                recognize_in_body(inner, ancestors);
-            }
+            recurse_wrapped_latch(stmt, ancestors);
         }
     }
 
@@ -110,9 +113,7 @@ fn recognize_in_body(body: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
         // Recurse into newly-wrapped Latch bodies so any nested
         // DoOnce/FlipFlop in the user call also folds.
         for stmt in body.iter_mut() {
-            if let Stmt::Latch { body: inner, .. } = stmt {
-                recognize_in_body(inner, ancestors);
-            }
+            recurse_wrapped_latch(stmt, ancestors);
         }
     }
 
@@ -132,8 +133,8 @@ fn recognize_in_body(body: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
     if try_rewrite_compound_doonce(body) {
         // Recurse into the wrapping Latch's body so nested
         // DoOnce/FlipFlop inside the user's content also folds.
-        if let Some(Stmt::Latch { body: inner, .. }) = body.last_mut() {
-            recognize_in_body(inner, ancestors);
+        if let Some(slot) = body.last_mut() {
+            recurse_wrapped_latch(slot, ancestors);
         }
     }
 
@@ -157,29 +158,47 @@ fn recognize_in_body(body: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
             else {
                 continue;
             };
-            if let Some(Stmt::Latch { body: inner, .. }) = then_body.last_mut() {
-                recognize_in_body(inner, ancestors);
+            if let Some(slot) = then_body.last_mut() {
+                recurse_wrapped_latch(slot, ancestors);
             }
-            if let Some(Stmt::Latch { body: inner, .. }) = else_body.last_mut() {
-                recognize_in_body(inner, ancestors);
+            if let Some(slot) = else_body.last_mut() {
+                recurse_wrapped_latch(slot, ancestors);
             }
         }
     }
 
     // Single-Branch DoOnce. Structural match, no chain resolution needed.
-    let mut idx = 0;
-    while idx < body.len() {
-        if let Some(rewritten) = try_rewrite_doonce(&mut body[idx]) {
-            body[idx] = rewritten;
-            if let Stmt::Latch { body: inner, .. } = &mut body[idx] {
-                recognize_in_body(inner, ancestors);
-            }
+    for stmt in body.iter_mut() {
+        if let Some(rewritten) = try_rewrite_doonce(stmt) {
+            *stmt = rewritten;
+            recurse_wrapped_latch(stmt, ancestors);
         }
-        idx += 1;
     }
 
-    // FlipFlop: walk forward, on a match drain the toggle assignments
-    // and replace the Branch slot with a Stmt::Latch.
+    recognize_flipflops_in_body(body, ancestors);
+
+    // Alt-path scaffold cleanup. The region-decode path can leave DoOnce
+    // scaffolding partially-folded as a Sequence wrapper
+    // around a real Latch and emit a phantom `Latch::DoOnce` whose
+    // gate is actually the macro's init guard. Strip the noise so the
+    // remaining Latch matches the expected shape.
+    strip_phantom_init_doonce(body);
+    unwrap_scaffold_sequence_around_latch(body);
+    // Peel init/gate-check Branch wrappers whose then-arm holds a
+    // recognised `Stmt::Latch::DoOnce` and whose else-arm is empty or
+    // pure scaffold. These appear when an outer compound DoOnce wraps
+    // an inner DoOnce whose own init-check Branch survived as the
+    // inner body's wrapper. Without peeling, the outer Latch renders
+    // with a stray `if (Temp_bool_Has_Been_Initd_Variable)` around the
+    // inner DoOnce in the final output.
+    peel_init_check_around_doonce(body);
+}
+
+/// Walk `body` forward, rewriting each detected FlipFlop into a `Stmt::Latch`.
+/// On a match the toggle scaffold is drained and the Branch slot replaced; the
+/// per-variant index arithmetic accounts for the statements removed before/after
+/// the Branch so the walk resumes just past the new Latch.
+fn recognize_flipflops_in_body(body: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
     let mut idx = 0;
     while idx < body.len() {
         match detect_flipflop_at(body, idx, ancestors) {
@@ -188,9 +207,7 @@ fn recognize_in_body(body: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
                 let start = idx - consumed_before;
                 body.drain(start..idx);
                 body[start] = rewritten;
-                if let Stmt::Latch { body: inner, .. } = &mut body[start] {
-                    recognize_in_body(inner, ancestors);
-                }
+                recurse_wrapped_latch(&mut body[start], ancestors);
                 idx = start + 1;
             }
             Some(FlipFlopMatch::Embedded(consumer_count)) => {
@@ -200,9 +217,7 @@ fn recognize_in_body(body: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
                 let branch_idx = start;
                 let rewritten = build_embedded_flipflop_latch(&mut body[branch_idx], consumers);
                 body[branch_idx] = rewritten;
-                if let Stmt::Latch { body: inner, .. } = &mut body[branch_idx] {
-                    recognize_in_body(inner, ancestors);
-                }
+                recurse_wrapped_latch(&mut body[branch_idx], ancestors);
                 idx = branch_idx + 1;
             }
             Some(FlipFlopMatch::SharedArms {
@@ -222,9 +237,7 @@ fn recognize_in_body(body: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
                 let rewritten = build_shared_arms_flipflop_latch(&mut body[idx], absorbed);
                 body.drain(start..idx);
                 body[start] = rewritten;
-                if let Stmt::Latch { body: inner, .. } = &mut body[start] {
-                    recognize_in_body(inner, ancestors);
-                }
+                recurse_wrapped_latch(&mut body[start], ancestors);
                 idx = start + 1;
             }
             Some(FlipFlopMatch::TrailingToggle {
@@ -239,9 +252,7 @@ fn recognize_in_body(body: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
                 let absorbed: Vec<Stmt> = body.drain((idx + 1)..absorbed_end).collect();
                 let rewritten = build_shared_arms_flipflop_latch(&mut body[idx], absorbed);
                 body[idx] = rewritten;
-                if let Stmt::Latch { body: inner, .. } = &mut body[idx] {
-                    recognize_in_body(inner, ancestors);
-                }
+                recurse_wrapped_latch(&mut body[idx], ancestors);
                 idx += 1;
             }
             None => {
@@ -249,20 +260,4 @@ fn recognize_in_body(body: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
             }
         }
     }
-
-    // Alt-path scaffold cleanup. The region-decode path can leave DoOnce
-    // scaffolding partially-folded as a Sequence wrapper
-    // around a real Latch and emit a phantom `Latch::DoOnce` whose
-    // gate is actually the macro's init guard. Strip the noise so the
-    // remaining Latch matches the expected shape.
-    strip_phantom_init_doonce(body);
-    unwrap_scaffold_sequence_around_latch(body);
-    // Peel init/gate-check Branch wrappers whose then-arm holds a
-    // recognised `Stmt::Latch::DoOnce` and whose else-arm is empty or
-    // pure scaffold. These appear when an outer compound DoOnce wraps
-    // an inner DoOnce whose own init-check Branch survived as the
-    // inner body's wrapper. Without peeling, the outer Latch renders
-    // with a stray `if (Temp_bool_Has_Been_Initd_Variable)` around the
-    // inner DoOnce in the final output.
-    peel_init_check_around_doonce(body);
 }

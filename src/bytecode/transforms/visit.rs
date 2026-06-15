@@ -156,6 +156,19 @@ pub(crate) fn walk_stmt_children<F: FnMut(&[Stmt])>(stmt: &Stmt, visit: &mut F) 
     }
 }
 
+/// Build the innermost-first chain-resolution scope stack for a transform
+/// site: `prefix` (the site's own scope, typically the body or its
+/// preceding siblings) as the innermost slice, then `ancestors` unchanged.
+/// Several chain-resolving passes share this `push(prefix);
+/// extend(ancestors)` idiom before calling [`resolve_var_chain`] /
+/// [`resolve_expr_chain`].
+pub(crate) fn scope_stack<'a>(prefix: &'a [Stmt], ancestors: &[&'a [Stmt]]) -> Vec<&'a [Stmt]> {
+    let mut scopes: Vec<&'a [Stmt]> = Vec::with_capacity(ancestors.len() + 1);
+    scopes.push(prefix);
+    scopes.extend(ancestors.iter().copied());
+    scopes
+}
+
 /// Walk each statement of `body` in order, building the per-statement
 /// ancestor scope stack and handing `(stmt, child_ancestors)` to `visit`.
 ///
@@ -182,6 +195,27 @@ pub(crate) fn walk_bodies_with_ancestors_mut<F: FnMut(&mut Stmt, &[&[Stmt]])>(
         child_ancestors.extend(ancestors.iter().copied());
         visit(stmt, &child_ancestors);
     }
+}
+
+/// A transform's recursion callback: invoked on a nested sub-body together
+/// with that sub-body's innermost-first ancestor scope stack.
+pub(crate) type DescendFn<'a> = dyn FnMut(&mut Vec<Stmt>, &[&[Stmt]]) + 'a;
+
+/// Recurse a transform into every nested sub-body of `body`, threading the
+/// per-statement ancestor scope stack. For each statement, `recurse` is
+/// invoked on each of its direct sub-bodies (via [`walk_stmt_children_mut`])
+/// with that statement's `child_ancestors`. Captures the
+/// `walk_bodies_with_ancestors_mut` + `walk_stmt_children_mut` nesting that
+/// `fold_in_body`, `recognize_in_body`, and `lower_in_body` share to descend
+/// after handling the current body level.
+pub(crate) fn descend_into_children(
+    body: &mut [Stmt],
+    ancestors: &[&[Stmt]],
+    recurse: &mut DescendFn,
+) {
+    walk_bodies_with_ancestors_mut(body, ancestors, &mut |stmt, child_ancestors| {
+        walk_stmt_children_mut(stmt, &mut |sub_body| recurse(sub_body, child_ancestors));
+    });
 }
 
 /// Returns `true` if any node in the expression tree is `Expr::Unknown`.

@@ -3,7 +3,27 @@
 //! Works on `&[u8]` + `&mut usize` (not `Cursor`). Returns defaults on
 //! truncation rather than erroring; bytecode parsing is best-effort.
 
+use std::collections::BTreeMap;
+
 use crate::binary::NameTable;
+
+/// Shared low-level read context for the partition and structure scanners.
+///
+/// Bundles the four inputs the opcode-length and successor scanners thread
+/// together: the bytecode slice, the name table (for FName reads), the UE5
+/// version gate (`0` for UE4, `1000+` for UE5), and the memory-to-disk jump
+/// target translation. Passing one `&BytecodeView` collapses the repeated
+/// `(bytecode, name_table, ue5, mem_to_disk)` quartet that the scanners would
+/// otherwise forward individually through every layer.
+///
+/// Functions taking a subset of the four still accept the whole view and read
+/// only the fields they need; the bundle stays homogeneous across the pipeline.
+pub(crate) struct BytecodeView<'a> {
+    pub bytecode: &'a [u8],
+    pub name_table: &'a NameTable,
+    pub ue5: i32,
+    pub mem_to_disk: &'a BTreeMap<usize, usize>,
+}
 
 macro_rules! read_bc_num {
     ($name:ident, $ty:ty, $default:expr) => {
@@ -95,14 +115,14 @@ pub fn read_bc_fname_with_adj(
 }
 
 pub fn read_bc_string(bytecode: &[u8], pos: &mut usize) -> String {
-    let mut s = Vec::new();
+    let mut bytes = Vec::new();
     while *pos < bytecode.len() {
         let byte = bytecode[*pos];
         *pos += 1;
         if byte == 0 {
             break;
         }
-        s.push(byte);
+        bytes.push(byte);
     }
-    String::from_utf8_lossy(&s).to_string()
+    String::from_utf8_lossy(&bytes).to_string()
 }

@@ -56,7 +56,7 @@
 use crate::bytecode::expr::{BinaryOp, Expr};
 use crate::bytecode::stmt::{LoopKind, Stmt};
 use crate::bytecode::transforms::visit::{
-    resolve_var_chain, walk_bodies_with_ancestors_mut, walk_stmt_children_mut,
+    resolve_var_chain, scope_stack, walk_bodies_with_ancestors_mut, walk_stmt_children_mut,
 };
 
 /// Walk `stmts` and demote any While whose cond is a bare `Expr::Var`
@@ -102,9 +102,7 @@ fn demote_in_stmt(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
     // Build the scope stack used for alias-chain hops: loop body
     // innermost, then the loop's ancestors. The mutation check itself
     // stays body-local (see helper docs).
-    let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-    scopes.push(body.as_slice());
-    scopes.extend(ancestors.iter().copied());
+    let scopes = scope_stack(body.as_slice(), ancestors);
     // Classify the chain's terminal expression. Comparison/logical Binary
     // shapes (Lt/Le/Gt/Ge/Eq/Ne/And/Or) are real iteration conds by
     // construction: their operands (counter, array length, etc.) change
