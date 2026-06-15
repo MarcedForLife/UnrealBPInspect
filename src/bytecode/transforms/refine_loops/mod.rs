@@ -23,7 +23,7 @@
 
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::{LoopKind, Stmt};
-use crate::bytecode::transforms::visit::walk_bodies_with_ancestors_mut;
+use crate::bytecode::transforms::visit::{scope_stack, walk_bodies_with_ancestors_mut};
 
 mod cond_recompute;
 mod for_break;
@@ -97,6 +97,22 @@ pub(super) fn refine_loops_vec(stmts: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
         })
         .collect();
 
+    absorb_preloop_siblings(stmts, absorb_indices, ancestors);
+}
+
+/// Walk `absorb_indices` (ForC/ForEach loop positions) in reverse, absorbing
+/// each loop's absorbable pre-loop sibling: ForEach's leaked bound-expr,
+/// a ForLoopWithBreak-promoted ForC's And-guarded head cond, and a ForC's
+/// counter-init line (hoisted into the loop's `init` field).
+///
+/// Reverse traversal is load-bearing: removing a predecessor shifts the
+/// positions of all later statements, so processing higher indices first
+/// keeps every not-yet-visited `loop_idx` valid.
+fn absorb_preloop_siblings(
+    stmts: &mut Vec<Stmt>,
+    absorb_indices: Vec<usize>,
+    ancestors: &[&[Stmt]],
+) {
     for loop_idx in absorb_indices.into_iter().rev() {
         if loop_idx == 0 {
             continue; // No predecessor possible.
@@ -113,9 +129,7 @@ pub(super) fn refine_loops_vec(stmts: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
                 ..
             }
         ) {
-            let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-            scopes.push(stmts.as_slice());
-            scopes.extend(ancestors.iter().copied());
+            let scopes = scope_stack(stmts.as_slice(), ancestors);
             let Stmt::Loop {
                 kind: LoopKind::ForEach { array, .. },
                 ..
@@ -139,9 +153,7 @@ pub(super) fn refine_loops_vec(stmts: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
         // generic transitive `$`-temp closure sweep from `leak_idx`.
         let mut loop_idx = loop_idx;
         {
-            let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-            scopes.push(stmts.as_slice());
-            scopes.extend(ancestors.iter().copied());
+            let scopes = scope_stack(stmts.as_slice(), ancestors);
             if is_for_break_bound_leak(&stmts[loop_idx - 1], &scopes) {
                 let before = stmts.len();
                 drop_foreach_bound_expr_leak(stmts, loop_idx - 1);
@@ -220,6 +232,19 @@ pub(super) fn refine_loops_vec(stmts: &mut Vec<Stmt>, ancestors: &[&[Stmt]]) {
     }
 }
 
+/// Recurse loop refinement into a loop's body and (when present) its
+/// completion block, both under the same `ancestors` scope.
+fn recurse_loop_children(
+    body: &mut Vec<Stmt>,
+    completion: &mut Option<Vec<Stmt>>,
+    ancestors: &[&[Stmt]],
+) {
+    refine_loops_vec(body, ancestors);
+    if let Some(comp) = completion {
+        refine_loops_vec(comp, ancestors);
+    }
+}
+
 fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
     match stmt {
         Stmt::Loop {
@@ -234,10 +259,7 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                 Some(expr) => expr,
                 None => {
                     // No cond to inspect; recurse into body.
-                    refine_loops_vec(body, ancestors);
-                    if let Some(comp) = completion {
-                        refine_loops_vec(comp, ancestors);
-                    }
+                    recurse_loop_children(body, completion, ancestors);
                     return;
                 }
             };
@@ -266,9 +288,7 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                         .map(|aliases| {
                             let alias_refs: Vec<&str> =
                                 aliases.iter().map(String::as_str).collect();
-                            let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-                            scopes.push(body.as_slice());
-                            scopes.extend(ancestors.iter().copied());
+                            let scopes = scope_stack(body.as_slice(), ancestors);
                             find_item_binding_in_stmts(body, &alias_refs, &array, &scopes).is_none()
                         })
                         .unwrap_or(false);
@@ -292,10 +312,7 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                     }
                     *kind = LoopKind::ForEach { item, array };
                     *cond = None;
-                    refine_loops_vec(body, ancestors);
-                    if let Some(comp) = completion {
-                        refine_loops_vec(comp, ancestors);
-                    }
+                    recurse_loop_children(body, completion, ancestors);
                     return;
                 }
 
@@ -308,10 +325,7 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                 // non-empty body and this guard does not fire.
                 if body.is_empty() {
                     *body = inc_stmts;
-                    refine_loops_vec(body, ancestors);
-                    if let Some(comp) = completion {
-                        refine_loops_vec(comp, ancestors);
-                    }
+                    recurse_loop_children(body, completion, ancestors);
                     return;
                 }
 
@@ -320,25 +334,16 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                     init: vec![],
                     increment: inc_stmts,
                 };
-                refine_loops_vec(body, ancestors);
-                if let Some(comp) = completion {
-                    refine_loops_vec(comp, ancestors);
-                }
+                recurse_loop_children(body, completion, ancestors);
             } else if try_promote_for_loop_with_break(kind, cond, body, ancestors) {
                 // Promoted a ForLoopWithBreak (And-guarded head cond plus a
                 // trailing break-flag-guard increment region) to ForC. The
                 // helper rewrote `kind`, `cond`, and `body`; recurse into the
                 // refined body and completion.
-                refine_loops_vec(body, ancestors);
-                if let Some(comp) = completion {
-                    refine_loops_vec(comp, ancestors);
-                }
+                recurse_loop_children(body, completion, ancestors);
             } else {
                 // Stays While — recurse into body.
-                refine_loops_vec(body, ancestors);
-                if let Some(comp) = completion {
-                    refine_loops_vec(comp, ancestors);
-                }
+                recurse_loop_children(body, completion, ancestors);
             }
         }
 
@@ -346,10 +351,7 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
         Stmt::Loop {
             body, completion, ..
         } => {
-            refine_loops_vec(body, ancestors);
-            if let Some(comp) = completion {
-                refine_loops_vec(comp, ancestors);
-            }
+            recurse_loop_children(body, completion, ancestors);
         }
 
         Stmt::Branch {
@@ -424,9 +426,7 @@ pub(super) fn extract_increment(
     // walk: loop body innermost, then ancestors. The chain may hop through
     // a temp def in the parent body (e.g. real for-loop scaffold emitting
     // `$Less_IntInt = i < n` as a sibling of the Loop).
-    let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-    scopes.push(body.as_slice());
-    scopes.extend(ancestors.iter().copied());
+    let scopes = scope_stack(body.as_slice(), ancestors);
     if !expr_references_var_chain(cond, &last_lhs_name, &scopes) {
         return None;
     }

@@ -125,7 +125,7 @@ pub(super) fn walk_region(
     consumed: &mut Vec<Range<usize>>,
     visited_blocks: &mut BTreeSet<BlockId>,
 ) {
-    let RegionWalkCtx { cfg, ctx, idom } = walk;
+    let RegionWalkCtx { cfg, ctx, idom: _ } = walk;
     // When the loop-body dispatch helper already emitted this
     // Loop region during the active loop's displaced-body decode, skip it
     // here so the sibling walk doesn't re-emit a duplicate `Stmt::Loop`. The
@@ -151,9 +151,7 @@ pub(super) fn walk_region(
         region,
         region_id,
         region_tree,
-        cfg,
-        ctx,
-        idom,
+        walk,
         !defer_to_inner_sibling,
     ) {
         if matches!(matched, MatchedEmitter::SequenceChain) {

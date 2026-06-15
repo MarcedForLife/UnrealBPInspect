@@ -13,7 +13,7 @@ use crate::binary::NameTable;
 use crate::bytecode::opcodes::EX_JUMP_IF_NOT;
 use crate::bytecode::partition::{opcode_length_at, EventEntry, OpcodeGraph};
 use crate::bytecode::structure::{build_skeleton, StructureSkeleton};
-use crate::resolve::resolve_index;
+use crate::resolve::{class_of, resolve_index};
 use crate::types::ParsedAsset;
 
 use super::block::decode_linear;
@@ -207,7 +207,7 @@ pub(super) fn collect_event_entries(
     let mut seen_offsets = std::collections::BTreeSet::new();
 
     for (export_idx, (hdr, _props)) in asset.exports.iter().enumerate() {
-        let class = resolve_index(&asset.imports, export_names, hdr.class_index);
+        let class = class_of(&asset.imports, export_names, hdr);
         if !class.ends_with(".Function") {
             continue;
         }
@@ -272,7 +272,7 @@ pub(crate) fn build_event_node_index(
     // directly gives the ubergraph event function name.
     for (zero_based, (hdr, props)) in asset.exports.iter().enumerate() {
         let one_based = zero_based + 1;
-        let class_full = resolve_index(&asset.imports, export_names, hdr.class_index);
+        let class_full = class_of(&asset.imports, export_names, hdr);
         let class = short_class(&class_full);
         let event_name = match class.as_str() {
             "K2Node_CustomEvent" | "K2Node_InputAxisEvent" | "K2Node_ComponentBoundEvent" => {
@@ -307,7 +307,7 @@ pub(crate) fn build_event_node_index(
         .iter()
         .enumerate()
         .filter_map(|(zero_based, (hdr, props))| {
-            let class_full = resolve_index(&asset.imports, export_names, hdr.class_index);
+            let class_full = class_of(&asset.imports, export_names, hdr);
             if short_class(&class_full) != "K2Node_InputAction" {
                 return None;
             }
@@ -324,7 +324,7 @@ pub(crate) fn build_event_node_index(
 
     if !action_node_ids.is_empty() {
         for (hdr, _) in &asset.exports {
-            let class_full = resolve_index(&asset.imports, export_names, hdr.class_index);
+            let class_full = class_of(&asset.imports, export_names, hdr);
             if !class_full.ends_with(".Function") {
                 continue;
             }
@@ -365,7 +365,7 @@ pub(super) fn build_node_class_names(
     let mut names = std::collections::HashMap::with_capacity(asset.exports.len());
     for (zero_based, (hdr, _)) in asset.exports.iter().enumerate() {
         let one_based = zero_based + 1;
-        let class_full = resolve_index(&asset.imports, export_names, hdr.class_index);
+        let class_full = class_of(&asset.imports, export_names, hdr);
         names.insert(one_based, short_class(&class_full));
     }
     names
@@ -385,7 +385,7 @@ pub(super) fn build_macro_names(
     let mut macro_names = std::collections::HashMap::new();
     for (zero_based, (hdr, props)) in asset.exports.iter().enumerate() {
         let one_based = zero_based + 1;
-        let class_full = resolve_index(&asset.imports, export_names, hdr.class_index);
+        let class_full = class_of(&asset.imports, export_names, hdr);
         if short_class(&class_full) != K2NODE_MACRO_INSTANCE {
             continue;
         }

@@ -30,13 +30,13 @@ pub struct SwitchValueCase<R> {
 }
 
 /// Resolved FFieldPath operand. The walker exposes both the rendered
-/// path (segment names joined by `"::"`, empty for null paths) and the
-/// segment count, so visitors that need to compute disk/memory drift
-/// can do so without re-parsing the byte stream.
+/// path (segment names joined by `"."`) and the segment count, so
+/// visitors that need to compute disk/memory drift can do so without
+/// re-parsing the byte stream.
 #[derive(Clone, Default)]
 pub struct FieldPath {
-    /// Rendered path (`Owner::Path0::Path1::...`) or an empty string for
-    /// a null path (`path_num <= 0`).
+    /// Rendered path (`Path0.Path1...`), `"null"` for a null path
+    /// (`path_num <= 0`), or `"???"` for a corrupt/over-deep operand.
     pub display: String,
     /// Number of name segments. Zero for null paths. Useful for drift
     /// arithmetic: disk size of a non-null path is `4 + segments*8 + 4`.

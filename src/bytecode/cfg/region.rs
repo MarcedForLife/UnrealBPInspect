@@ -21,8 +21,7 @@
 //! terminator opcode and successor shape: `IfThenElse`, `IfThen`,
 //! `Switch`, `Loop`, `Linear`, `SequenceChain`, `DoOnceGate`, or `Trivial`.
 //!
-//! Linear-merge invariant
-//! ----------------------
+//! Linear-merge invariant.
 //! `build_region_tree_with_linear_merges` runs after the SESE tree is built
 //! and synthesises a Linear sibling for any merge block that would otherwise
 //! sit under a byte-sliced descendant region. Without this pass, a merge

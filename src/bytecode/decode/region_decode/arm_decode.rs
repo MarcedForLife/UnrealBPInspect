@@ -27,24 +27,14 @@ pub(super) fn decode_arm_body(
     sibling_arm_entry: Option<BlockId>,
     region: &Region,
     region_id: RegionId,
-    cfg: &ControlFlowGraph,
-    ctx: &DecodeCtx,
-    idom: &BTreeMap<BlockId, BlockId>,
+    walk: RegionWalkCtx,
 ) -> Vec<Stmt> {
     if arm_entry == region.exit {
         return Vec::new();
     }
-    match arm_byte_slice(
-        arm_entry,
-        sibling_arm_entry,
-        region,
-        region_id,
-        cfg,
-        ctx,
-        idom,
-    ) {
-        Some(segments) => decode_arm_segments(&segments, ctx),
-        None => decode_arm_body_via_dominance(arm_entry, region.exit, cfg, ctx, idom),
+    match arm_byte_slice(arm_entry, sibling_arm_entry, region, region_id, walk) {
+        Some(segments) => decode_arm_segments(&segments, walk.ctx),
+        None => decode_arm_body_via_dominance(arm_entry, region.exit, walk),
     }
 }
 
@@ -58,10 +48,9 @@ pub(super) fn arm_byte_slice(
     sibling_arm_entry: Option<BlockId>,
     region: &Region,
     region_id: RegionId,
-    cfg: &ControlFlowGraph,
-    ctx: &DecodeCtx,
-    idom: &BTreeMap<BlockId, BlockId>,
+    walk: RegionWalkCtx,
 ) -> Option<Vec<Range<usize>>> {
+    let RegionWalkCtx { cfg, ctx, idom } = walk;
     let region_ranges = ctx.region_byte_ranges?.get(&region_id)?;
     let arm_stops = ctx.arm_descent_stops.borrow();
     let reachable = reachable_blocks_in_arm(
@@ -410,10 +399,9 @@ pub(super) fn stmt_offset_exclude_set(stmts: &[Stmt]) -> Vec<Range<usize>> {
 fn decode_arm_body_via_dominance(
     arm_entry: BlockId,
     region_exit: BlockId,
-    cfg: &ControlFlowGraph,
-    ctx: &DecodeCtx,
-    idom: &BTreeMap<BlockId, BlockId>,
+    walk: RegionWalkCtx,
 ) -> Vec<Stmt> {
+    let RegionWalkCtx { cfg, ctx, idom } = walk;
     let mut stmts: Vec<Stmt> = Vec::new();
     let mut consumed: Vec<Range<usize>> = Vec::new();
     let mut visited_blocks: BTreeSet<BlockId> = BTreeSet::new();

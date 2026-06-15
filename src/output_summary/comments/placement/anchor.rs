@@ -32,51 +32,26 @@ pub(super) fn anchor_via_exec_follow(
 ) -> Classification {
     let contained_set: BTreeSet<usize> = contained.iter().copied().collect();
     // Seed with the entry points (already tried by the direct cascade).
-    let mut visited: BTreeSet<usize> = contained
+    // Collect into a BTreeSet first so the walk's `visited` evolution and the
+    // first frontier round stay in export-index order.
+    let seed: BTreeSet<usize> = contained
         .iter()
         .copied()
         .filter(|&node| node_has_external_exec_input(node, &contained_set, context.parsed))
         .collect();
-    let mut frontier: Vec<usize> = visited.iter().copied().collect();
-    let mut depth = 0usize;
-    while !frontier.is_empty() {
-        depth += 1;
-        let mut next: Vec<usize> = Vec::new();
-        for &node in &frontier {
-            let Some(pin_data) = context.parsed.pin_data.get(&node) else {
-                continue;
-            };
-            for link in pin_data
-                .pins
-                .iter()
-                .filter(|pin| pin.is_exec_output())
-                .flat_map(|pin| pin.linked_to.iter())
-            {
-                if contained_set.contains(&link.node) && visited.insert(link.node) {
-                    next.push(link.node);
-                }
-            }
-        }
-        next.sort_unstable();
-        for &candidate in &next {
-            if let placed @ Classification::Placed(_) = anchor_to_node(
-                comment,
-                page,
-                candidate,
-                Strategy::ExecFollow,
-                context,
-                recorder,
-            ) {
-                recorder.record_depth(depth);
-                return placed;
-            }
-        }
-        frontier = next;
-    }
-    // The walk exhausted the contained set without an anchor. Overwrite any
-    // transient per-candidate drop reason with the walk-level verdict.
-    recorder.record(Strategy::Dropped(DropReason::PinFollowDeadEnd));
-    Classification::Unanchored
+    let start: Vec<usize> = seed.into_iter().collect();
+    anchor_via_link_follow(
+        comment,
+        page,
+        &start,
+        Strategy::ExecFollow,
+        context,
+        recorder,
+        LinkWalk {
+            follow_pin: EdGraphPin::is_exec_output,
+            contained_set: Some(&contained_set),
+        },
+    )
 }
 
 /// Last-resort anchor: follow data-output pin links outward from `start`,
@@ -103,7 +78,10 @@ pub(super) fn anchor_via_pin_follow(
         strategy,
         context,
         recorder,
-        EdGraphPin::is_data_output,
+        LinkWalk {
+            follow_pin: EdGraphPin::is_data_output,
+            contained_set: None,
+        },
     )
 }
 
@@ -132,17 +110,31 @@ pub(super) fn anchor_via_exec_follow_outward(
         Strategy::BubbleExecFollow,
         context,
         recorder,
-        EdGraphPin::is_exec_output,
+        LinkWalk {
+            follow_pin: EdGraphPin::is_exec_output,
+            contained_set: None,
+        },
     )
 }
 
-/// Breadth-first walk over `follow_pin`-selected output links from `start`,
+/// Walk policy for [`anchor_via_link_follow`]: which output pins to follow and
+/// whether to stay inside a box.
+struct LinkWalk<'a> {
+    follow_pin: fn(&EdGraphPin) -> bool,
+    contained_set: Option<&'a BTreeSet<usize>>,
+}
+
+/// Breadth-first walk over `walk.follow_pin`-selected output links from `start`,
 /// trying each reached node as an anchor. The walk is bounded by graph
 /// reachability: a node enters the `visited` set once, so the frontier empties
 /// after at most as many rounds as there are reachable nodes, with no fitted
 /// depth cap. Candidates at one depth are tried in export-index order, so the
 /// nearest match wins deterministically. `strategy` tags the audit trace for
 /// the winning anchor; the depth reached is recorded on success.
+///
+/// `walk.contained_set` bounds the walk: `None` follows every reachable link
+/// (graph-reachability only), `Some(set)` follows only links whose target is
+/// in `set`, keeping the walk inside a box.
 fn anchor_via_link_follow(
     comment: &CommentBox,
     page: &str,
@@ -150,8 +142,12 @@ fn anchor_via_link_follow(
     strategy: Strategy,
     context: &ClassifyContext,
     recorder: &TraceRecorder,
-    follow_pin: fn(&EdGraphPin) -> bool,
+    walk: LinkWalk,
 ) -> Classification {
+    let LinkWalk {
+        follow_pin,
+        contained_set,
+    } = walk;
     let mut visited: BTreeSet<usize> = start.iter().copied().collect();
     let mut frontier: Vec<usize> = start.to_vec();
     let mut depth = 0usize;
@@ -168,7 +164,8 @@ fn anchor_via_link_follow(
                 .filter(|pin| follow_pin(pin))
                 .flat_map(|pin| pin.linked_to.iter())
             {
-                if visited.insert(link.node) {
+                let in_bounds = contained_set.is_none_or(|set| set.contains(&link.node));
+                if in_bounds && visited.insert(link.node) {
                     next.push(link.node);
                 }
             }

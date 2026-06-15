@@ -49,6 +49,55 @@ fn field_extra(class: &str) -> FieldExtra {
     }
 }
 
+/// Values retained from the FieldExtra block for the resolve path. Variants without
+/// retained values (`TwoRefs`, `Bool`, `OneChild`, `TwoChildren`) map to a fixed
+/// display string; the resolve path never inspects their consumed bytes.
+enum FieldExtraData {
+    None,
+    OneRef { ref_idx: i32 },
+    TwoRefs,
+    Bool,
+    OneChild,
+    TwoChildren,
+}
+
+/// Consume the FieldExtra block, advancing the reader, and return the retained values.
+/// Single source of the byte-read layout for both the skip and resolve paths.
+fn read_field_extra(
+    class: &str,
+    reader: &mut Reader,
+    name_table: &NameTable,
+    end: u64,
+) -> Result<FieldExtraData> {
+    Ok(match field_extra(class) {
+        FieldExtra::None => FieldExtraData::None,
+        FieldExtra::OneRef => {
+            let ref_idx = read_i32(reader)?;
+            FieldExtraData::OneRef { ref_idx }
+        }
+        FieldExtra::TwoRefs => {
+            read_i32(reader)?;
+            read_i32(reader)?;
+            FieldExtraData::TwoRefs
+        }
+        FieldExtra::Bool => {
+            for _ in 0..6 {
+                read_u8(reader)?;
+            }
+            FieldExtraData::Bool
+        }
+        FieldExtra::OneChild => {
+            skip_ffield_child(reader, name_table, end)?;
+            FieldExtraData::OneChild
+        }
+        FieldExtra::TwoChildren => {
+            skip_ffield_child(reader, name_table, end)?;
+            skip_ffield_child(reader, name_table, end)?;
+            FieldExtraData::TwoChildren
+        }
+    })
+}
+
 /// Skip past one serialized FField child without extracting type information.
 fn skip_ffield_extra(
     class: &str,
@@ -56,28 +105,7 @@ fn skip_ffield_extra(
     name_table: &NameTable,
     end: u64,
 ) -> Result<()> {
-    match field_extra(class) {
-        FieldExtra::None => {}
-        FieldExtra::OneRef => {
-            read_i32(reader)?;
-        }
-        FieldExtra::TwoRefs => {
-            read_i32(reader)?;
-            read_i32(reader)?;
-        }
-        FieldExtra::Bool => {
-            for _ in 0..6 {
-                read_u8(reader)?;
-            }
-        }
-        FieldExtra::OneChild => {
-            skip_ffield_child(reader, name_table, end)?;
-        }
-        FieldExtra::TwoChildren => {
-            skip_ffield_child(reader, name_table, end)?;
-            skip_ffield_child(reader, name_table, end)?;
-        }
-    }
+    read_field_extra(class, reader, name_table, end)?;
     Ok(())
 }
 
@@ -100,6 +128,43 @@ pub fn skip_ffield_child(reader: &mut Reader, name_table: &NameTable, end: u64) 
     let _rep_func = name_table.fname(reader)?;
     let _bp_rep = read_u8(reader)?;
     skip_ffield_extra(&field_class, reader, name_table, end)
+}
+
+/// Resolve a `OneRef` field's already-read reference index to a display type.
+/// Handles object/weak/lazy/soft-object/interface (`T*`, `UObject*` when null),
+/// struct (`T`), byte/enum (`T`, `byte` when null), and delegate variants.
+fn resolve_one_ref_type(
+    property_type: PropertyType,
+    ref_idx: i32,
+    imports: &[ImportEntry],
+    export_names: &[String],
+) -> String {
+    match property_type {
+        PropertyType::Object
+        | PropertyType::WeakObject
+        | PropertyType::LazyObject
+        | PropertyType::SoftObject
+        | PropertyType::Interface => {
+            if ref_idx != 0 {
+                format!(
+                    "{}*",
+                    short_class(&resolve_index(imports, export_names, ref_idx))
+                )
+            } else {
+                "UObject*".into()
+            }
+        }
+        PropertyType::Struct => short_class(&resolve_index(imports, export_names, ref_idx)),
+        PropertyType::Byte | PropertyType::Enum => {
+            if ref_idx != 0 {
+                short_class(&resolve_index(imports, export_names, ref_idx))
+            } else {
+                "byte".into()
+            }
+        }
+        // Delegate variants
+        _ => "Delegate".into(),
+    }
 }
 
 pub fn resolve_ffield_type(
@@ -131,65 +196,24 @@ pub fn resolve_ffield_type(
         return Ok(name.into());
     }
 
-    // Types that need extra bytes read. Use field_extra() for the read layout,
-    // then interpret the values per field class.
-    match field_extra(field_class) {
-        FieldExtra::Bool => {
-            for _ in 0..6 {
-                read_u8(reader)?;
-            }
-            Ok("bool".into())
-        }
-        FieldExtra::TwoRefs => {
-            read_i32(reader)?;
-            read_i32(reader)?;
-            Ok("UClass*".into())
-        }
-        FieldExtra::OneRef => {
-            let ref_idx = read_i32(reader)?;
-            match property_type {
-                PropertyType::Object
-                | PropertyType::WeakObject
-                | PropertyType::LazyObject
-                | PropertyType::SoftObject
-                | PropertyType::Interface => {
-                    if ref_idx != 0 {
-                        Ok(format!(
-                            "{}*",
-                            short_class(&resolve_index(imports, export_names, ref_idx))
-                        ))
-                    } else {
-                        Ok("UObject*".into())
-                    }
-                }
-                PropertyType::Struct => {
-                    Ok(short_class(&resolve_index(imports, export_names, ref_idx)))
-                }
-                PropertyType::Byte | PropertyType::Enum => {
-                    if ref_idx != 0 {
-                        Ok(short_class(&resolve_index(imports, export_names, ref_idx)))
-                    } else {
-                        Ok("byte".into())
-                    }
-                }
-                // Delegate variants
-                _ => Ok("Delegate".into()),
-            }
-        }
-        FieldExtra::OneChild => {
-            skip_ffield_child(reader, name_table, end)?;
-            Ok(if property_type == PropertyType::Set {
-                "TSet<>".into()
-            } else {
-                "TArray<>".into()
-            })
-        }
-        FieldExtra::TwoChildren => {
-            skip_ffield_child(reader, name_table, end)?;
-            skip_ffield_child(reader, name_table, end)?;
-            Ok("TMap<>".into())
-        }
-        FieldExtra::None => Ok(property_type
+    // Types that need extra bytes read. read_field_extra() consumes the block per
+    // the shared layout; interpret the retained values per field class here.
+    match read_field_extra(field_class, reader, name_table, end)? {
+        FieldExtraData::Bool => Ok("bool".into()),
+        FieldExtraData::TwoRefs => Ok("UClass*".into()),
+        FieldExtraData::OneRef { ref_idx } => Ok(resolve_one_ref_type(
+            property_type,
+            ref_idx,
+            imports,
+            export_names,
+        )),
+        FieldExtraData::OneChild => Ok(if property_type == PropertyType::Set {
+            "TSet<>".into()
+        } else {
+            "TArray<>".into()
+        }),
+        FieldExtraData::TwoChildren => Ok("TMap<>".into()),
+        FieldExtraData::None => Ok(property_type
             .as_str()
             .strip_suffix(PROPERTY_CLASS_SUFFIX)
             .unwrap_or(field_class)
@@ -198,9 +222,9 @@ pub fn resolve_ffield_type(
 }
 
 // UE property flags used to classify function parameters
-const CPF_PARM: u64 = 0x80;
+pub(crate) const CPF_PARM: u64 = 0x80;
 const CPF_OUT_PARM: u64 = 0x100;
-const CPF_RETURN_PARM: u64 = 0x200;
+pub(crate) const CPF_RETURN_PARM: u64 = 0x200;
 
 pub fn format_signature(func_name: &str, params: &[(String, String, u64)]) -> String {
     let mut inputs = Vec::new();

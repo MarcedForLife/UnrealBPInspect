@@ -31,7 +31,7 @@
 use crate::bytecode::expr::{BinaryOp, Expr};
 use crate::bytecode::stmt::{Stmt, SwitchCase};
 use crate::bytecode::transforms::visit::{
-    resolve_expr_chain, resolve_var_chain, walk_bodies_with_ancestors_mut, walk_stmt_children_mut,
+    descend_into_children, resolve_expr_chain, resolve_var_chain, scope_stack,
 };
 
 /// Walk a statement body, rewriting `if (X == c1) {} else if (X == c2) {} ...`
@@ -65,9 +65,7 @@ fn fold_in_body(body: &mut [Stmt], ancestors: &[&[Stmt]]) {
         // referenced from `body[idx]`'s cond may resolve to defs in any of
         // those scopes.
         let head: &[Stmt] = &body[..idx];
-        let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-        scopes.push(head);
-        scopes.extend(ancestors.iter().copied());
+        let scopes = scope_stack(head, ancestors);
 
         if let Some(common_lhs) = probe_cascade_head(&body[idx], &scopes) {
             // If the head Branch's cond is a chain-resolved Var, capture
@@ -90,10 +88,8 @@ fn fold_in_body(body: &mut [Stmt], ancestors: &[&[Stmt]]) {
     // sub-body inherits the parent's preceding siblings (`body[..i]`)
     // as its innermost ancestor, so chain resolution from inside a
     // then-body or case body can walk back to defs at the parent level.
-    walk_bodies_with_ancestors_mut(body, ancestors, &mut |stmt, child_ancestors| {
-        walk_stmt_children_mut(stmt, &mut |sub_body| {
-            fold_in_body(sub_body, child_ancestors)
-        });
+    descend_into_children(body, ancestors, &mut |sub_body, child_ancestors| {
+        fold_in_body(sub_body, child_ancestors)
     });
 }
 

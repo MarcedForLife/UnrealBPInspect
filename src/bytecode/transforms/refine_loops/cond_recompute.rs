@@ -1,7 +1,9 @@
 use super::{lhs_var_name, stmt_assignment_lhs_name};
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::Stmt;
-use crate::bytecode::transforms::visit::{walk_expr, walk_stmt_exprs, walk_stmt_exprs_mut, Action};
+use crate::bytecode::transforms::visit::{
+    scope_stack, walk_expr, walk_stmt_exprs, walk_stmt_exprs_mut, Action,
+};
 
 /// Strip the trailing run of cond-recomputation statements from `body`.
 ///
@@ -58,9 +60,7 @@ pub(crate) fn strip_trailing_cond_recomputation(
         // itself simply produces no entry, so the strip can't fire on it.
         let head_len = body.len() - 1;
         let head_slice: &[Stmt] = &body[..head_len];
-        let mut scopes: Vec<&[Stmt]> = Vec::with_capacity(ancestors.len() + 1);
-        scopes.push(head_slice);
-        scopes.extend(ancestors.iter().copied());
+        let scopes = scope_stack(head_slice, ancestors);
         let recomp = collect_cond_recomputation_defs(cond, &scopes);
         if recomp.is_empty() {
             break;
