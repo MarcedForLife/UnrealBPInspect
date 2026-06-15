@@ -10,11 +10,10 @@ use super::*;
 pub(super) fn try_emit_ifthen_region(
     region: &Region,
     region_id: RegionId,
-    cfg: &ControlFlowGraph,
-    ctx: &DecodeCtx,
-    idom: &BTreeMap<BlockId, BlockId>,
+    walk: RegionWalkCtx,
     region_tree: Option<&RegionTree>,
 ) -> Option<Vec<Stmt>> {
+    let RegionWalkCtx { cfg, ctx, idom: _ } = walk;
     if region.kind != RegionKind::IfThen {
         return None;
     }
@@ -76,14 +75,12 @@ pub(super) fn try_emit_ifthen_region(
                 None,
                 region,
                 region_id,
-                RegionWalkCtx { cfg, ctx, idom },
+                walk,
                 tree,
                 None,
             )
         })
-        .unwrap_or_else(|| {
-            decode_arm_body(body_arm_entry, None, region, region_id, cfg, ctx, idom)
-        });
+        .unwrap_or_else(|| decode_arm_body(body_arm_entry, None, region, region_id, walk));
     let final_cond = if negate {
         Expr::Unary {
             op: crate::bytecode::expr::UnaryOp::Not,

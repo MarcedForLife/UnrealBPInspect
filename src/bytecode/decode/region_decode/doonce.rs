@@ -22,10 +22,9 @@ use crate::bytecode::transforms::latch_recognition::{DOONCE_GATE_PREFIX, DOONCE_
 pub(super) fn try_emit_doonce_region(
     region: &Region,
     region_id: RegionId,
-    cfg: &ControlFlowGraph,
-    ctx: &DecodeCtx,
-    idom: &BTreeMap<BlockId, BlockId>,
+    walk: RegionWalkCtx,
 ) -> Option<Vec<Stmt>> {
+    let RegionWalkCtx { cfg, ctx, idom: _ } = walk;
     if region.kind != RegionKind::DoOnceGate {
         return None;
     }
@@ -54,7 +53,7 @@ pub(super) fn try_emit_doonce_region(
     // cleanly.
     let preamble = decode_entry_preamble(entry_block, terminator_addr, entry_block.end, ctx);
 
-    let mut body = decode_arm_body(gate_open_arm, None, region, region_id, cfg, ctx, idom);
+    let mut body = decode_arm_body(gate_open_arm, None, region, region_id, walk);
     // Drop the gate-self-set assignment so the Latch wrapper makes it
     // implicit. The Blueprint compiler emits `gate_var = true` somewhere
     // along the gate-open arm; disk order vs CFG-BFS order may place it

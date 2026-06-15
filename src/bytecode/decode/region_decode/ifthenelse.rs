@@ -28,11 +28,10 @@ use super::*;
 pub(super) fn try_emit_ifthenelse_region(
     region: &Region,
     region_id: RegionId,
-    cfg: &ControlFlowGraph,
-    ctx: &DecodeCtx,
-    idom: &BTreeMap<BlockId, BlockId>,
+    walk: RegionWalkCtx,
     region_tree: Option<&RegionTree>,
 ) -> Option<(Vec<Stmt>, Option<RegionId>)> {
+    let RegionWalkCtx { cfg, ctx, idom } = walk;
     if region.kind != RegionKind::IfThenElse {
         return None;
     }
@@ -117,7 +116,7 @@ pub(super) fn try_emit_ifthenelse_region(
         else_block_id,
         region,
         region_id,
-        RegionWalkCtx { cfg, ctx, idom },
+        walk,
         region_tree,
         hoist_join,
     );
@@ -186,8 +185,7 @@ pub(super) fn try_emit_ifthenelse_region(
         if let Some(tree) = region_tree {
             if let Some(continuation_id) = find_merge_continuation_region(region_id, tree) {
                 if !region_body_is_only_return(continuation_id, cfg, ctx) {
-                    let continuation_stmts =
-                        emit_continuation_region(continuation_id, tree, cfg, ctx, idom);
+                    let continuation_stmts = emit_continuation_region(continuation_id, tree, walk);
                     if !continuation_stmts.is_empty() {
                         // Both-arms post-dominator join: when the else-arm
                         // carries content and both arms reach the exit, the
@@ -448,10 +446,9 @@ fn arms_reach_exit(
 fn emit_continuation_region(
     region_id: RegionId,
     region_tree: &RegionTree,
-    cfg: &ControlFlowGraph,
-    ctx: &DecodeCtx,
-    idom: &BTreeMap<BlockId, BlockId>,
+    walk: RegionWalkCtx,
 ) -> Vec<Stmt> {
+    let RegionWalkCtx { cfg, ctx, idom: _ } = walk;
     let region = &region_tree.regions[region_id];
     // Per-kind emitters return only the structured stmts derived from
     // the region's entry block + arm bodies. When the continuation
@@ -468,7 +465,7 @@ fn emit_continuation_region(
         stmts
     };
     if let Some((emitted, _continuation, _matched)) =
-        dispatch_region_emitters(region, region_id, region_tree, cfg, ctx, idom, true)
+        dispatch_region_emitters(region, region_id, region_tree, walk, true)
     {
         return append_own_exit(emitted);
     }
@@ -523,25 +520,9 @@ fn decode_ifthenelse_arms(
     region_tree: Option<&RegionTree>,
     hoist_join: Option<BlockId>,
 ) -> (Vec<Stmt>, Vec<Stmt>, Option<RegionId>) {
-    let RegionWalkCtx { cfg, ctx, idom } = walk;
-    let then_segments = arm_byte_slice(
-        then_block_id,
-        Some(else_block_id),
-        region,
-        region_id,
-        cfg,
-        ctx,
-        idom,
-    );
-    let else_segments = arm_byte_slice(
-        else_block_id,
-        Some(then_block_id),
-        region,
-        region_id,
-        cfg,
-        ctx,
-        idom,
-    );
+    let RegionWalkCtx { cfg, ctx, idom: _ } = walk;
+    let then_segments = arm_byte_slice(then_block_id, Some(else_block_id), region, region_id, walk);
+    let else_segments = arm_byte_slice(else_block_id, Some(then_block_id), region, region_id, walk);
 
     if let Some(result) = try_full_arm_delegation(
         then_block_id,
@@ -661,24 +642,8 @@ fn decode_ifthenelse_arms(
         return (walker_then, walker_else, None);
     }
 
-    let legacy_then = decode_arm_body(
-        then_block_id,
-        Some(else_block_id),
-        region,
-        region_id,
-        cfg,
-        ctx,
-        idom,
-    );
-    let legacy_else = decode_arm_body(
-        else_block_id,
-        Some(then_block_id),
-        region,
-        region_id,
-        cfg,
-        ctx,
-        idom,
-    );
+    let legacy_then = decode_arm_body(then_block_id, Some(else_block_id), region, region_id, walk);
+    let legacy_else = decode_arm_body(else_block_id, Some(then_block_id), region, region_id, walk);
     (legacy_then, legacy_else, None)
 }
 
@@ -699,7 +664,7 @@ fn try_full_arm_delegation(
     else_segments: Option<&[Range<usize>]>,
     walk: RegionWalkCtx,
 ) -> Option<(Vec<Stmt>, Vec<Stmt>, Option<RegionId>)> {
-    let RegionWalkCtx { cfg, ctx, idom } = walk;
+    let ctx = walk.ctx;
     // `find_full_arm_ifthenelse_child` only returns Some when `region_tree` is
     // Some, so this pair-match can't drop the path; it avoids an expect.
     let (Some(child_id), Some(tree)) = (
@@ -708,18 +673,10 @@ fn try_full_arm_delegation(
     ) else {
         return None;
     };
-    let then_body = emit_continuation_region(child_id, tree, cfg, ctx, idom);
+    let then_body = emit_continuation_region(child_id, tree, walk);
     let else_body = match else_segments {
         Some(else_segs) => decode_arm_segments(else_segs, ctx),
-        None => decode_arm_body(
-            else_block_id,
-            Some(then_block_id),
-            region,
-            region_id,
-            cfg,
-            ctx,
-            idom,
-        ),
+        None => decode_arm_body(else_block_id, Some(then_block_id), region, region_id, walk),
     };
     Some((then_body, else_body, Some(child_id)))
 }
@@ -749,7 +706,7 @@ fn try_coverage_full_then_delegation(
     else_segments: Option<&[Range<usize>]>,
     walk: RegionWalkCtx,
 ) -> Option<(Vec<Stmt>, Vec<Stmt>, Option<RegionId>)> {
-    let RegionWalkCtx { cfg, ctx, idom } = walk;
+    let ctx = walk.ctx;
     let then_segs = then_segments?;
     // `find_coverage_full_then_arm_child` only returns Some when
     // `region_tree` is Some, so the pair-match can't drop the path.
@@ -766,22 +723,13 @@ fn try_coverage_full_then_delegation(
     // own-exit content (R1.exit is owned by R1 and the inner
     // IfThenElse emitter already absorbs it via the
     // `arms_reach_exit` dispatch).
-    let then_body =
-        match try_emit_ifthenelse_region(child_region, child_id, cfg, ctx, idom, Some(tree)) {
-            Some((emitted, _)) => emitted,
-            None => emit_continuation_region(child_id, tree, cfg, ctx, idom),
-        };
+    let then_body = match try_emit_ifthenelse_region(child_region, child_id, walk, Some(tree)) {
+        Some((emitted, _)) => emitted,
+        None => emit_continuation_region(child_id, tree, walk),
+    };
     let else_body = match else_segments {
         Some(else_segs) => decode_arm_segments(else_segs, ctx),
-        None => decode_arm_body(
-            else_block_id,
-            Some(then_block_id),
-            region,
-            region_id,
-            cfg,
-            ctx,
-            idom,
-        ),
+        None => decode_arm_body(else_block_id, Some(then_block_id), region, region_id, walk),
     };
     Some((then_body, else_body, Some(child_id)))
 }
@@ -850,15 +798,7 @@ pub(super) fn decode_arm_via_region_dispatch(
     // `decode_block_opcodes` (so multi-block constructs widen their jump
     // target window the same way the byte-slice path does) and as the
     // signal that the arm is computable. Absent in synthetic contexts.
-    let arm_ranges = arm_byte_slice(
-        arm_entry,
-        sibling_arm_entry,
-        region,
-        region_id,
-        cfg,
-        ctx,
-        idom,
-    )?;
+    let arm_ranges = arm_byte_slice(arm_entry, sibling_arm_entry, region, region_id, walk)?;
 
     // Sibling-arm entry doubles as the dispatched child region's
     // arm-descent stop set so its arm slicer cannot over-walk into the
@@ -901,15 +841,9 @@ pub(super) fn decode_arm_via_region_dispatch(
             continue;
         }
 
-        if let Some((emitted, consumed_ids)) = dispatch_child_region_at(
-            block_id,
-            region_id,
-            region_tree,
-            cfg,
-            ctx,
-            idom,
-            &sibling_stops,
-        ) {
+        if let Some((emitted, consumed_ids)) =
+            dispatch_child_region_at(block_id, region_id, region_tree, walk, &sibling_stops)
+        {
             stmts.extend(emitted);
             for &consumed_id in &consumed_ids {
                 mark_region_consumed(

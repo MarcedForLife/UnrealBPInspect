@@ -20,6 +20,7 @@ use std::ops::Range;
 use crate::binary::NameTable;
 use crate::bytecode::decode::walker::{walk_opcode, OpcodeVisitor, SwitchValueCase, WalkCtx};
 use crate::bytecode::opcodes::*;
+use crate::bytecode::readers::BytecodeView;
 
 /// An event entry point into the ubergraph bytecode.
 ///
@@ -362,13 +363,8 @@ pub(crate) struct OpcodeScan {
 /// reads them. The fallthrough address appended below is always a disk
 /// offset and is left untranslated. Pass an empty map for synthetic
 /// streams or UE4-uncooked assets where the two coordinate spaces coincide.
-pub(crate) fn scan_one_opcode_full(
-    bytecode: &[u8],
-    pos: &mut usize,
-    ue5: i32,
-    name_table: &NameTable,
-    mem_to_disk: &BTreeMap<usize, usize>,
-) -> OpcodeScan {
+pub(crate) fn scan_one_opcode_full(view: &BytecodeView, pos: &mut usize) -> OpcodeScan {
+    let bytecode = view.bytecode;
     let start = *pos;
     if start >= bytecode.len() {
         return OpcodeScan {
@@ -378,8 +374,8 @@ pub(crate) fn scan_one_opcode_full(
     }
 
     let opcode_byte = bytecode[start];
-    let ctx = WalkCtx::new(bytecode, name_table, ue5);
-    let mut visitor = LengthVisitor::new(mem_to_disk);
+    let ctx = WalkCtx::new(bytecode, view.name_table, view.ue5);
+    let mut visitor = LengthVisitor::new(view.mem_to_disk);
     walk_opcode(&ctx, pos, &mut visitor);
 
     if *pos == start {
@@ -424,7 +420,13 @@ pub(crate) fn scan_one_opcode(
     name_table: &NameTable,
     mem_to_disk: &BTreeMap<usize, usize>,
 ) -> Vec<usize> {
-    scan_one_opcode_full(bytecode, pos, ue5, name_table, mem_to_disk).successors
+    let view = BytecodeView {
+        bytecode,
+        name_table,
+        ue5,
+        mem_to_disk,
+    };
+    scan_one_opcode_full(&view, pos).successors
 }
 
 /// Byte length of the opcode at `offset`, measured by [`scan_one_opcode`].
@@ -501,12 +503,18 @@ pub(crate) fn build_opcode_graph_with_resume(
     let mut opcodes: BTreeMap<usize, u8> = BTreeMap::new();
     let mut latent_resumes: BTreeMap<usize, usize> = BTreeMap::new();
     let mut pos = 0;
+    let view = BytecodeView {
+        bytecode,
+        name_table,
+        ue5,
+        mem_to_disk,
+    };
 
     while pos < bytecode.len() {
         let opcode_start = pos;
         boundaries.insert(opcode_start);
         opcodes.insert(opcode_start, bytecode[opcode_start]);
-        let scan = scan_one_opcode_full(bytecode, &mut pos, ue5, name_table, mem_to_disk);
+        let scan = scan_one_opcode_full(&view, &mut pos);
         successors.insert(opcode_start, scan.successors);
         // A latent call carries at most one resume target, but
         // defensively record the first non-conflicting one. Conflicting
