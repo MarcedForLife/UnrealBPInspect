@@ -9,13 +9,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::ops::Range;
 
-use crate::binary::NameTable;
 use crate::bytecode::decode::cross_event_inline::K2NodeClass;
 use crate::bytecode::names::MacroKind;
 use crate::bytecode::names::K2NODE_EXECUTION_SEQUENCE;
 use crate::bytecode::opcodes::{
     EX_INSTRUMENTATION_EVENT, EX_PUSH_EXECUTION_FLOW, EX_TRACEPOINT, EX_WIRE_TRACEPOINT,
 };
+use crate::bytecode::readers::BytecodeView;
 use crate::resolve::{resolve_index, short_class};
 use crate::types::{NodePinData, PIN_DIRECTION_OUTPUT, PIN_TYPE_EXEC};
 
@@ -289,15 +289,14 @@ pub(super) fn attribute_enclosing_scope_fallback(
         let Some(&entry_disk) = inputs.event_entries.get(event_name) else {
             continue;
         };
-        let (cfg, region_tree, _region_byte_ranges) = build_fallback_event_cfg_and_region_tree(
-            entry_disk,
-            event_ranges,
-            graph,
-            inputs.bytecode,
-            inputs.ue5,
-            inputs.name_table,
-            inputs.mem_to_disk,
-        );
+        let view = BytecodeView {
+            bytecode: inputs.bytecode,
+            name_table: inputs.name_table,
+            ue5: inputs.ue5,
+            mem_to_disk: inputs.mem_to_disk,
+        };
+        let (cfg, region_tree, _region_byte_ranges) =
+            build_fallback_event_cfg_and_region_tree(entry_disk, event_ranges, graph, &view);
         let event_node = inputs.event_node_index.get(event_name).copied();
         for unassigned_offset in unassigned {
             let inherited_node =
@@ -629,10 +628,7 @@ fn build_fallback_event_cfg_and_region_tree(
     entry: usize,
     event_ranges: &[Range<usize>],
     graph: &crate::bytecode::partition::OpcodeGraph,
-    bytecode: &[u8],
-    ue5: i32,
-    name_table: &NameTable,
-    mem_to_disk: &BTreeMap<usize, usize>,
+    view: &BytecodeView,
 ) -> (
     crate::bytecode::cfg::ControlFlowGraph,
     crate::bytecode::cfg::region::RegionTree,
@@ -645,10 +641,10 @@ fn build_fallback_event_cfg_and_region_tree(
     let idom = compute_dominators(&cfg);
     let ipostdom = compute_postdominators(&cfg);
     let region_ctx = RegionContext {
-        bytecode,
-        ue5,
-        name_table,
-        mem_to_disk: Some(mem_to_disk),
+        bytecode: view.bytecode,
+        ue5: view.ue5,
+        name_table: view.name_table,
+        mem_to_disk: Some(view.mem_to_disk),
     };
     let region_tree =
         build_region_tree_with_linear_merges(&cfg, &idom, &ipostdom, graph, Some(region_ctx));

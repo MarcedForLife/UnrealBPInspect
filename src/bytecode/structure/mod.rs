@@ -24,7 +24,7 @@ use crate::bytecode::partition::{
     build_opcode_graph, opcode_length_at, partition_seeds_with_stack, OpcodeGraph, PartitionCtx,
     StackSeed,
 };
-use crate::bytecode::readers::read_bc_u32;
+use crate::bytecode::readers::{read_bc_u32, BytecodeView};
 
 /// Operand width for `EX_PUSH_EXECUTION_FLOW` targets.
 const PUSH_TARGET_BYTES: usize = 4;
@@ -115,6 +115,12 @@ pub fn build_skeleton(
         graph,
         arm_boundaries,
     };
+    let view = BytecodeView {
+        bytecode,
+        name_table,
+        ue5,
+        mem_to_disk,
+    };
 
     let mut push_chains: BTreeMap<usize, PushChainNode> = BTreeMap::new();
     let mut consumed_by_run: BTreeSet<usize> = BTreeSet::new();
@@ -129,22 +135,14 @@ pub fn build_skeleton(
         if bytecode.get(offset) != Some(&EX_PUSH_EXECUTION_FLOW) {
             continue;
         }
-        if let Some(node) = build_chain_node(
-            offset,
-            bytecode,
-            ue5,
-            name_table,
-            mem_to_disk,
-            &ctx,
-            &owner_range,
-        ) {
+        if let Some(node) = build_chain_node(offset, &view, &ctx, &owner_range) {
             // Mark every push-opcode boundary consumed by this chain's
             // own push run so we don't re-anchor on the second push of
             // a grouped chain. We re-walk the chain head-to-after_chain
             // via `opcode_length_at` to find each push offset; pin
             // bodies live past `after_chain` and remain available for
             // nested-chain detection.
-            mark_chain_run_consumed(&node, bytecode, ue5, name_table, &mut consumed_by_run);
+            mark_chain_run_consumed(&node, &view, &mut consumed_by_run);
             push_chains.insert(offset, node);
         }
     }
@@ -161,17 +159,16 @@ pub fn build_skeleton(
 /// can't be a push chain head themselves.
 fn mark_chain_run_consumed(
     node: &PushChainNode,
-    bytecode: &[u8],
-    ue5: i32,
-    name_table: &NameTable,
+    view: &BytecodeView,
     consumed: &mut BTreeSet<usize>,
 ) {
+    let bytecode = view.bytecode;
     let mut cursor = node.head;
     while cursor < node.after_chain {
         if bytecode.get(cursor) == Some(&EX_PUSH_EXECUTION_FLOW) {
             consumed.insert(cursor);
         }
-        let length = opcode_length_at(cursor, bytecode, ue5, name_table);
+        let length = opcode_length_at(cursor, bytecode, view.ue5, view.name_table);
         if length == 0 {
             break;
         }
@@ -184,13 +181,12 @@ fn mark_chain_run_consumed(
 /// can't be partitioned cleanly.
 fn build_chain_node(
     head: usize,
-    bytecode: &[u8],
-    ue5: i32,
-    name_table: &NameTable,
-    mem_to_disk: &BTreeMap<usize, usize>,
+    view: &BytecodeView,
     ctx: &PartitionCtx<'_>,
     owner_range: &Range<usize>,
 ) -> Option<PushChainNode> {
+    let bytecode = view.bytecode;
+    let mem_to_disk = view.mem_to_disk;
     let graph = ctx.graph;
     if bytecode.get(head) != Some(&EX_PUSH_EXECUTION_FLOW) {
         return None;
@@ -200,8 +196,8 @@ fn build_chain_node(
         head,
         owner_range.end,
         bytecode,
-        ue5,
-        name_table,
+        view.ue5,
+        view.name_table,
         mem_to_disk,
     )?;
     if chain.push_targets_mem.is_empty() {
@@ -233,15 +229,9 @@ fn build_chain_node(
     // inline pin (pin 0) ahead of the pushed pins; the two seeding
     // helpers differ only in how the flow stack is reconstructed per pin.
     let seeds = if interleaved {
-        seed_interleaved_pins(&chain, &chain_pushes_disk, bytecode, mem_to_disk, graph)?
+        seed_interleaved_pins(&chain, &chain_pushes_disk, view, graph)?
     } else {
-        seed_grouped_pins(
-            &chain,
-            &chain_pushes_disk,
-            owner_range.end,
-            bytecode,
-            mem_to_disk,
-        )?
+        seed_grouped_pins(&chain, &chain_pushes_disk, owner_range.end, view)?
     };
 
     // `push_targets` mirrors each seed's address in seeding order.
@@ -254,8 +244,15 @@ fn build_chain_node(
         return None;
     }
 
-    let pin_partitions =
-        partition_seeds_with_stack(bytecode, &seeds, ctx, boundary, ue5, name_table, head);
+    let pin_partitions = partition_seeds_with_stack(
+        bytecode,
+        &seeds,
+        ctx,
+        boundary,
+        view.ue5,
+        view.name_table,
+        head,
+    );
 
     if pin_partitions.iter().any(|segments| segments.is_empty()) {
         return None;
@@ -277,15 +274,15 @@ fn build_chain_node(
 fn seed_interleaved_pins(
     chain: &ChainShape,
     chain_pushes_disk: &[usize],
-    bytecode: &[u8],
-    mem_to_disk: &BTreeMap<usize, usize>,
+    view: &BytecodeView,
     graph: &OpcodeGraph,
 ) -> Option<Vec<StackSeed>> {
+    let bytecode = view.bytecode;
     let mut seeds: Vec<StackSeed> = Vec::with_capacity(chain_pushes_disk.len() + 1);
     for (push_index, &cont_disk) in chain_pushes_disk.iter().enumerate() {
         let body_mem =
             chain.body_targets_mem[push_index].expect("interleaved => every push has a JUMP body");
-        let body_disk = *mem_to_disk.get(&body_mem)?;
+        let body_disk = *view.mem_to_disk.get(&body_mem)?;
         if body_disk >= bytecode.len() {
             return None;
         }
@@ -327,9 +324,9 @@ fn seed_grouped_pins(
     chain: &ChainShape,
     chain_pushes_disk: &[usize],
     range_end: usize,
-    bytecode: &[u8],
-    mem_to_disk: &BTreeMap<usize, usize>,
+    view: &BytecodeView,
 ) -> Option<Vec<StackSeed>> {
+    let bytecode = view.bytecode;
     let mut seeds: Vec<StackSeed> = Vec::with_capacity(chain_pushes_disk.len() + 1);
     seeds.push(StackSeed {
         seed: chain.after_chain_disk,
@@ -338,13 +335,8 @@ fn seed_grouped_pins(
     });
     for popped_index in (0..chain_pushes_disk.len()).rev() {
         let body_disk = match chain.body_targets_mem[popped_index] {
-            Some(body_mem) => *mem_to_disk.get(&body_mem)?,
-            None => follow_push_stub(
-                chain_pushes_disk[popped_index],
-                range_end,
-                bytecode,
-                mem_to_disk,
-            ),
+            Some(body_mem) => *view.mem_to_disk.get(&body_mem)?,
+            None => follow_push_stub(chain_pushes_disk[popped_index], range_end, view),
         };
         if body_disk >= bytecode.len() {
             return None;
@@ -440,6 +432,12 @@ fn scan_push_chain_shape(
     name_table: &NameTable,
     mem_to_disk: &BTreeMap<usize, usize>,
 ) -> Option<ChainShape> {
+    let view = BytecodeView {
+        bytecode,
+        name_table,
+        ue5,
+        mem_to_disk,
+    };
     let mut push_targets_mem: Vec<usize> = Vec::new();
     let mut body_targets_mem: Vec<Option<usize>> = Vec::new();
     let mut cursor = start;
@@ -491,7 +489,7 @@ fn scan_push_chain_shape(
             // compiler always pairs each PUSH with a JUMP that
             // immediately enters the pin body; the JUMP target is the
             // body head.
-            let body_mem = lookahead_jump_body(peek, range_end, bytecode, ue5, name_table);
+            let body_mem = lookahead_jump_body(peek, range_end, &view);
             body_targets_mem.push(body_mem);
             cursor = peek;
             last_push_end = cursor;
@@ -499,7 +497,7 @@ fn scan_push_chain_shape(
             continue;
         }
 
-        if !is_followed_by_more_push(cursor, range_end, bytecode, ue5, name_table) {
+        if !is_followed_by_more_push(cursor, range_end, &view) {
             break;
         }
 
@@ -524,13 +522,8 @@ fn scan_push_chain_shape(
 /// way. Returns the JUMP operand (memory coords) when found, or `None`
 /// when another PUSH or any other control-flow opcode appears first
 /// (the canonical grouped form puts the pin body inline with no JUMP).
-fn lookahead_jump_body(
-    start: usize,
-    range_end: usize,
-    bytecode: &[u8],
-    ue5: i32,
-    name_table: &NameTable,
-) -> Option<usize> {
+fn lookahead_jump_body(start: usize, range_end: usize, view: &BytecodeView) -> Option<usize> {
+    let bytecode = view.bytecode;
     let mut cursor = start;
     while cursor < range_end {
         let opcode = *bytecode.get(cursor)?;
@@ -551,7 +544,7 @@ fn lookahead_jump_body(
         {
             return None;
         }
-        let length = opcode_length_at(cursor, bytecode, ue5, name_table);
+        let length = opcode_length_at(cursor, bytecode, view.ue5, view.name_table);
         if length == 0 {
             return None;
         }
@@ -563,13 +556,8 @@ fn lookahead_jump_body(
 /// Look ahead from `cursor` (a non-push opcode) to determine whether
 /// another push appears before the first pop or the end of range.
 /// Mirrors `decode/sequence.rs::is_followed_by_more_push`.
-fn is_followed_by_more_push(
-    cursor: usize,
-    range_end: usize,
-    bytecode: &[u8],
-    ue5: i32,
-    name_table: &NameTable,
-) -> bool {
+fn is_followed_by_more_push(cursor: usize, range_end: usize, view: &BytecodeView) -> bool {
+    let bytecode = view.bytecode;
     let mut scan = cursor;
     while scan < range_end {
         let opcode = match bytecode.get(scan) {
@@ -582,7 +570,7 @@ fn is_followed_by_more_push(
         if opcode == EX_POP_EXECUTION_FLOW {
             return false;
         }
-        let length = opcode_length_at(scan, bytecode, ue5, name_table);
+        let length = opcode_length_at(scan, bytecode, view.ue5, view.name_table);
         if length == 0 {
             return false;
         }
@@ -596,12 +584,8 @@ fn is_followed_by_more_push(
 /// return `target_disk` unchanged. Mirrors
 /// `decode/sequence.rs::follow_push_stub` for the skeleton's own seed
 /// derivation.
-fn follow_push_stub(
-    target_disk: usize,
-    range_end: usize,
-    bytecode: &[u8],
-    mem_to_disk: &BTreeMap<usize, usize>,
-) -> usize {
+fn follow_push_stub(target_disk: usize, range_end: usize, view: &BytecodeView) -> usize {
+    let bytecode = view.bytecode;
     if target_disk + JUMP_INSTR_BYTES > range_end {
         return target_disk;
     }
@@ -610,7 +594,7 @@ fn follow_push_stub(
     }
     let mut cursor = target_disk + 1;
     let jump_target_mem = read_bc_u32(bytecode, &mut cursor) as usize;
-    match mem_to_disk.get(&jump_target_mem) {
+    match view.mem_to_disk.get(&jump_target_mem) {
         Some(&disk) if disk >= target_disk && disk < range_end => disk,
         _ => target_disk,
     }

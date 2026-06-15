@@ -22,40 +22,33 @@ pub(super) enum MatchedEmitter {
 /// `try_ifthenelse` is false only for the dual-role IsValid defer case
 /// (`walk_region`), where the outer IfThenElse emit is skipped so the
 /// disk-order walk reaches the inner sibling sharing its entry block.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn dispatch_region_emitters(
     region: &Region,
     region_id: RegionId,
     region_tree: &RegionTree,
-    cfg: &ControlFlowGraph,
-    ctx: &DecodeCtx,
-    idom: &BTreeMap<BlockId, BlockId>,
+    walk: RegionWalkCtx,
     try_ifthenelse: bool,
 ) -> Option<(Vec<Stmt>, Option<RegionId>, MatchedEmitter)> {
     if try_ifthenelse {
         if let Some((emitted, continuation)) =
-            try_emit_ifthenelse_region(region, region_id, cfg, ctx, idom, Some(region_tree))
+            try_emit_ifthenelse_region(region, region_id, walk, Some(region_tree))
         {
             return Some((emitted, continuation, MatchedEmitter::IfThenElse));
         }
     }
-    if let Some(emitted) =
-        try_emit_ifthen_region(region, region_id, cfg, ctx, idom, Some(region_tree))
-    {
+    if let Some(emitted) = try_emit_ifthen_region(region, region_id, walk, Some(region_tree)) {
         return Some((emitted, None, MatchedEmitter::IfThen));
     }
-    if let Some(emitted) = try_emit_doonce_region(region, region_id, cfg, ctx, idom) {
+    if let Some(emitted) = try_emit_doonce_region(region, region_id, walk) {
         return Some((emitted, None, MatchedEmitter::DoOnce));
     }
-    if let Some(emitted) =
-        try_emit_sequencechain_region(region, region_id, cfg, ctx, idom, region_tree)
-    {
+    if let Some(emitted) = try_emit_sequencechain_region(region, region_id, walk, region_tree) {
         return Some((emitted, None, MatchedEmitter::SequenceChain));
     }
-    if let Some(emitted) = try_emit_loop_region(region, region_id, cfg, ctx, idom) {
+    if let Some(emitted) = try_emit_loop_region(region, region_id, walk) {
         return Some((emitted, None, MatchedEmitter::Loop));
     }
-    if let Some(emitted) = try_emit_switch_region(region, region_id, cfg, ctx, idom) {
+    if let Some(emitted) = try_emit_switch_region(region, region_id, walk) {
         return Some((emitted, None, MatchedEmitter::Switch));
     }
     None
@@ -130,9 +123,7 @@ pub(super) fn decode_pin_body(
             block_id,
             parent_region_id,
             region_tree,
-            cfg,
-            ctx,
-            idom,
+            walk,
             other_pin_entries,
         ) {
             stmts.extend(emitted);
@@ -285,9 +276,7 @@ pub(super) fn dispatch_child_region_at(
     block_id: BlockId,
     parent_region_id: RegionId,
     region_tree: &RegionTree,
-    cfg: &ControlFlowGraph,
-    ctx: &DecodeCtx,
-    idom: &BTreeMap<BlockId, BlockId>,
+    walk: RegionWalkCtx,
     other_pin_entries: &BTreeSet<BlockId>,
 ) -> Option<(Vec<Stmt>, Vec<RegionId>)> {
     let child_id = find_outermost_descendant_region_at(block_id, parent_region_id, region_tree)?;
@@ -297,9 +286,9 @@ pub(super) fn dispatch_child_region_at(
     }
     // Hold the sibling-pin boundary set live for the dispatched region's
     // arm decode, so its arm slicer cannot over-walk into a sibling pin.
-    let _stops_guard = ctx.with_arm_descent_stops(other_pin_entries.clone());
+    let _stops_guard = walk.ctx.with_arm_descent_stops(other_pin_entries.clone());
     let (emitted, continuation, _matched) =
-        dispatch_region_emitters(child, child_id, region_tree, cfg, ctx, idom, true)?;
+        dispatch_region_emitters(child, child_id, region_tree, walk, true)?;
     let mut consumed_ids = vec![child_id];
     if let Some(cont_id) = continuation {
         consumed_ids.push(cont_id);

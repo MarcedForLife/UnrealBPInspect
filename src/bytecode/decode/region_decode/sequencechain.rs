@@ -25,11 +25,10 @@ use super::*;
 pub(super) fn try_emit_sequencechain_region(
     region: &Region,
     region_id: RegionId,
-    cfg: &ControlFlowGraph,
-    ctx: &DecodeCtx,
-    idom: &BTreeMap<BlockId, BlockId>,
+    walk: RegionWalkCtx,
     region_tree: &RegionTree,
 ) -> Option<Vec<Stmt>> {
+    let RegionWalkCtx { cfg, ctx, idom: _ } = walk;
     if region.kind != RegionKind::SequenceChain {
         return None;
     }
@@ -126,7 +125,7 @@ pub(super) fn try_emit_sequencechain_region(
                     *pin_entry,
                     region.exit,
                     &other_pins,
-                    RegionWalkCtx { cfg, ctx, idom },
+                    walk,
                     region_tree,
                     region_id,
                     &chain_node.pin_partitions[pin_idx],
