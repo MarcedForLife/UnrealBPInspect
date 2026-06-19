@@ -81,14 +81,14 @@ fn faithful_sequence_mask(decoded_pin_count: usize) -> Option<Vec<bool>> {
     .flatten()
 }
 
-/// Emit summary pseudocode for a decoded Blueprint (Unreal Blueprint) asset.
-///
-/// This renders only the function and event bodies in the decoder's
-/// native pseudocode shape. The full summary (Blueprint header,
-/// Components, Variables, Call graph, Functions header) is produced by
-/// [`emit_summary_with_asset`] which threads the original `ParsedAsset`
-/// through to the section formatters.
-pub fn emit_summary(asset: &DecodedAsset) -> String {
+/// Render only the function and event bodies in the decoder's native
+/// pseudocode shape, without the Blueprint (Unreal Blueprint) header
+/// sections. Test-only: the unit suite asserts against this body-shape
+/// output directly. The CLI path uses [`emit_summary_with_asset`], which
+/// threads the original `ParsedAsset` through to the section formatters
+/// for the full summary (header, Components, Variables, Call graph).
+#[cfg(test)]
+pub(crate) fn emit_summary(asset: &DecodedAsset) -> String {
     let resume_bodies = &asset.resume_bodies;
     let mut output = String::new();
     for function in &asset.functions {
@@ -256,6 +256,9 @@ fn emit_event_block(
     });
 }
 
+/// Test-only: the bare `function {`/`event {` header for [`emit_summary`].
+/// The CLI path emits richer headers via the section formatters.
+#[cfg(test)]
 fn emit_block_header(output: &mut String, kind: &str, name: &str) {
     output.push_str(kind);
     output.push(' ');

@@ -218,53 +218,64 @@ pub(crate) fn descend_into_children(
     });
 }
 
-/// Returns `true` if any node in the expression tree is `Expr::Unknown`.
-/// Used by transforms (inliner, dead-stmt, struct-fold, ternary-fold) to
-/// reject candidates whose RHS contains an unrecognised opcode.
-pub(crate) fn expr_contains_unknown(expr: &Expr) -> bool {
-    if matches!(expr, Expr::Unknown { .. }) {
-        return true;
-    }
+/// Returns `true` as soon as any node in the expression tree (the root
+/// included, pre-order) satisfies `pred`, short-circuiting on the first
+/// match. Read-only early-exit counterpart of the mutable family's
+/// [`Action::Stop`], so a presence check can drop its own full `Expr`
+/// match in favour of one predicate.
+pub(crate) fn any_expr<F: FnMut(&Expr) -> bool>(expr: &Expr, pred: &mut F) -> bool {
+    pred(expr) || any_expr_children(expr, pred)
+}
+
+/// Short-circuiting scan of an expression's immediate children, each via
+/// the full [`any_expr`] (so every child subtree is checked pre-order),
+/// skipping the root. Holds the exhaustive `Expr` arm list for the
+/// early-exit read-only direction; `walk_expr_covers_every_variant` in the
+/// tests guards it against drift from [`walk_expr_children`].
+fn any_expr_children<F: FnMut(&Expr) -> bool>(expr: &Expr, pred: &mut F) -> bool {
     match expr {
-        Expr::Call { args, .. } => args.iter().any(expr_contains_unknown),
+        Expr::Literal(_) | Expr::Var(_) | Expr::Unknown { .. } => false,
+        Expr::Call { args, .. } => args.iter().any(|arg| any_expr(arg, pred)),
         Expr::MethodCall { recv, args, .. } => {
-            expr_contains_unknown(recv) || args.iter().any(expr_contains_unknown)
+            any_expr(recv, pred) || args.iter().any(|arg| any_expr(arg, pred))
         }
-        Expr::FieldAccess { recv, .. } => expr_contains_unknown(recv),
-        Expr::Index { recv, idx } => expr_contains_unknown(recv) || expr_contains_unknown(idx),
-        Expr::Binary { lhs, rhs, .. } => expr_contains_unknown(lhs) || expr_contains_unknown(rhs),
-        Expr::Unary { operand, .. } => expr_contains_unknown(operand),
-        Expr::Cast { inner, .. } => expr_contains_unknown(inner),
-        Expr::ArrayLit(items) => items.iter().any(expr_contains_unknown),
+        Expr::FieldAccess { recv, .. } => any_expr(recv, pred),
+        Expr::Index { recv, idx } => any_expr(recv, pred) || any_expr(idx, pred),
+        Expr::Binary { lhs, rhs, .. } => any_expr(lhs, pred) || any_expr(rhs, pred),
+        Expr::Unary { operand, .. } => any_expr(operand, pred),
+        Expr::Cast { inner, .. } => any_expr(inner, pred),
+        Expr::ArrayLit(items) => items.iter().any(|item| any_expr(item, pred)),
         Expr::Ternary {
             cond,
             then_expr,
             else_expr,
-        } => {
-            expr_contains_unknown(cond)
-                || expr_contains_unknown(then_expr)
-                || expr_contains_unknown(else_expr)
-        }
+        } => any_expr(cond, pred) || any_expr(then_expr, pred) || any_expr(else_expr, pred),
         Expr::Out(inner) | Expr::Interface(inner) | Expr::Persistent(inner) => {
-            expr_contains_unknown(inner)
+            any_expr(inner, pred)
         }
-        Expr::Resume { inner, .. } => expr_contains_unknown(inner),
+        Expr::Resume { inner, .. } => any_expr(inner, pred),
         Expr::StructConstruct { fields, .. } => {
-            fields.iter().any(|(_, value)| expr_contains_unknown(value))
+            fields.iter().any(|(_, value)| any_expr(value, pred))
         }
         Expr::Switch {
             index,
             cases,
             default,
         } => {
-            expr_contains_unknown(index)
-                || cases.iter().any(|case| {
-                    expr_contains_unknown(&case.value) || expr_contains_unknown(&case.body)
-                })
-                || expr_contains_unknown(default)
+            any_expr(index, pred)
+                || cases
+                    .iter()
+                    .any(|case| any_expr(&case.value, pred) || any_expr(&case.body, pred))
+                || any_expr(default, pred)
         }
-        Expr::Literal(_) | Expr::Var(_) | Expr::Unknown { .. } => false,
     }
+}
+
+/// Returns `true` if any node in the expression tree is `Expr::Unknown`.
+/// Used by transforms (inliner, dead-stmt, struct-fold, ternary-fold) to
+/// reject candidates whose RHS contains an unrecognised opcode.
+pub(crate) fn expr_contains_unknown(expr: &Expr) -> bool {
+    any_expr(expr, &mut |node| matches!(node, Expr::Unknown { .. }))
 }
 
 /// Walk `Var($X)` through one or more `$X = $Y; $Y = $Z; ...` temp-assignment
