@@ -1165,6 +1165,9 @@ fn decode_owner_event_body(
         )
     };
     let mut body = super::region_decode::decode_region_tree(&region_tree, &cfg, &synth_ctx);
+    // Latch subset of the main transform stack, run directly here and in the
+    // same relative order the stack uses (asserted by transform_stack's
+    // recognize_latches_before_flipflop_naming test).
     crate::bytecode::transforms::latch_recognition::recognize_latches(&mut body);
     crate::bytecode::transforms::flipflop_naming::derive_flipflop_names(&mut body);
     Some(body)
