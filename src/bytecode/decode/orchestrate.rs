@@ -1234,7 +1234,7 @@ fn first_latch_matching(
                 return Some(stmt);
             }
         }
-        for slice in stmt.child_bodies() {
+        for slice in stmt.child_bodies_structural() {
             if let Some(found) = first_latch_matching(slice, kind_pred) {
                 return Some(found);
             }

@@ -37,122 +37,28 @@ pub(crate) fn negated_operand(expr: &Expr) -> Option<&Expr> {
     }
 }
 
-/// Apply `visit` to every direct sub-body inside `stmt`. Sub-bodies are
-/// the `Vec<Stmt>` slots a statement owns: branch then/else, sequence
-/// pins, loop body/completion, ForC init/increment, switch case
-/// bodies/default, latch init/body. Leaf variants (Assignment, Call,
-/// Return, EventCall, Unknown) have no sub-bodies and are no-ops.
+/// Apply `visit` to every direct sub-body inside `stmt`, in the slot order
+/// of [`Stmt::child_bodies_all_mut`]: branch then/else, sequence pins, loop
+/// body/completion then ForC init/increment, switch case bodies/default,
+/// latch init/body. Leaf variants (Assignment, Call, Return, Break,
+/// EventCall, Unknown) own no sub-bodies and are no-ops.
 ///
-/// `stmt` itself is NOT visited; callers handle their own statement
-/// before or after invoking this helper.
+/// `stmt` itself is NOT visited; callers handle their own statement before
+/// or after invoking this helper. ForC init/increment are included so
+/// post-`refine_loops` rewrite passes reach the loop counter slots.
 pub(crate) fn walk_stmt_children_mut<F: FnMut(&mut Vec<Stmt>)>(stmt: &mut Stmt, visit: &mut F) {
-    match stmt {
-        Stmt::Branch {
-            then_body,
-            else_body,
-            ..
-        } => {
-            visit(then_body);
-            visit(else_body);
-        }
-        Stmt::Sequence { pins, .. } => {
-            for pin_body in pins.iter_mut() {
-                visit(pin_body);
-            }
-        }
-        Stmt::Loop {
-            body,
-            completion,
-            kind,
-            ..
-        } => {
-            visit(body);
-            if let Some(comp) = completion {
-                visit(comp);
-            }
-            // ForC carries init and increment sub-bodies. Pre-`refine_loops`
-            // passes never observe ForC by pipeline construction, so the
-            // recursion is dormant for them. Post-refine passes
-            // (`inline_single_use_temps`, `dead_stmt`) need the slots visited.
-            if let LoopKind::ForC { init, increment } = kind {
-                visit(init);
-                visit(increment);
-            }
-        }
-        Stmt::Switch { cases, default, .. } => {
-            for case in cases.iter_mut() {
-                visit(&mut case.body);
-            }
-            if let Some(default_body) = default {
-                visit(default_body);
-            }
-        }
-        Stmt::Latch { init, body, .. } => {
-            visit(init);
-            visit(body);
-        }
-        Stmt::Assignment { .. }
-        | Stmt::Call { .. }
-        | Stmt::Return { .. }
-        | Stmt::Break { .. }
-        | Stmt::EventCall { .. }
-        | Stmt::Unknown { .. } => {}
+    for sub_body in stmt.child_bodies_all_mut() {
+        visit(sub_body);
     }
 }
 
-/// Read-only counterpart of [`walk_stmt_children_mut`]. Applies `visit`
-/// to every direct sub-body inside `stmt` with the same variant coverage
-/// and child order: branch then/else, sequence pins, loop
-/// body/completion/ForC-init/increment, switch case bodies/default, latch
-/// init/body. `stmt` itself is NOT visited; leaf variants are no-ops.
+/// Read-only counterpart of [`walk_stmt_children_mut`]. Applies `visit` to
+/// every direct sub-body inside `stmt` in [`Stmt::child_bodies_all`] slot
+/// order (same variant coverage, ForC init/increment included). `stmt`
+/// itself is NOT visited; leaf variants are no-ops.
 pub(crate) fn walk_stmt_children<F: FnMut(&[Stmt])>(stmt: &Stmt, visit: &mut F) {
-    match stmt {
-        Stmt::Branch {
-            then_body,
-            else_body,
-            ..
-        } => {
-            visit(then_body);
-            visit(else_body);
-        }
-        Stmt::Sequence { pins, .. } => {
-            for pin_body in pins.iter() {
-                visit(pin_body);
-            }
-        }
-        Stmt::Loop {
-            body,
-            completion,
-            kind,
-            ..
-        } => {
-            visit(body);
-            if let Some(comp) = completion {
-                visit(comp);
-            }
-            if let LoopKind::ForC { init, increment } = kind {
-                visit(init);
-                visit(increment);
-            }
-        }
-        Stmt::Switch { cases, default, .. } => {
-            for case in cases.iter() {
-                visit(&case.body);
-            }
-            if let Some(default_body) = default {
-                visit(default_body);
-            }
-        }
-        Stmt::Latch { init, body, .. } => {
-            visit(init);
-            visit(body);
-        }
-        Stmt::Assignment { .. }
-        | Stmt::Call { .. }
-        | Stmt::Return { .. }
-        | Stmt::Break { .. }
-        | Stmt::EventCall { .. }
-        | Stmt::Unknown { .. } => {}
+    for sub_body in stmt.child_bodies_all() {
+        visit(sub_body);
     }
 }
 
