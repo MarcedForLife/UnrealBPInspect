@@ -24,7 +24,7 @@ use crate::types::ParsedAsset;
 /// the per-function emit pass. Built once per asset.
 pub(crate) struct EmitCtx {
     /// `caller_name -> [callee_name, ...]` keyed by display-normalised
-    /// caller. This is what backs `// called by:` trailers. BTreeMap so
+    /// caller. This is what backs `// Called by:` trailers. BTreeMap so
     /// the key set is deterministic even though current consumers only do
     /// keyed lookups.
     pub callers_map: BTreeMap<String, Vec<String>>,
@@ -92,7 +92,7 @@ pub(crate) fn emit_prefix_sections(
     // event-name suffix numbers, so input order is irrelevant.
     let action_key_events = compute_action_key_events(&event_names);
 
-    // Caller-name normalisation so `// called by:` trailers
+    // Caller-name normalisation so `// Called by:` trailers
     // and the call graph use the same display form.
     for callers in callers_map.values_mut() {
         for caller in callers.iter_mut() {
@@ -173,7 +173,7 @@ fn collect_sequence_masks(
 /// Edges are filtered to real local functions (drops macro/intrinsic callees)
 /// and non-self, matching the attribution the displayed call graph expects.
 /// Because the typed callee/caller sets are `BTreeSet`-ordered, the resulting
-/// caller lists (which back the unsorted `// called by:` trailers) are sorted.
+/// caller lists (which back the unsorted `// Called by:` trailers) are sorted.
 fn build_call_graph(
     decoded: &DecodedAsset,
     local_functions: &HashSet<String>,

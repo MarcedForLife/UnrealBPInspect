@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn extract_func_name_skips_comments() {
-        let block = vec!["  // called by: X", "  MyFunc(a: int):"];
+        let block = vec!["  // Called by: X", "  MyFunc(a: int):"];
         assert_eq!(extract_func_name(&block), Some("MyFunc"));
     }
 

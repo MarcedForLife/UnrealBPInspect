@@ -49,7 +49,7 @@ Functions:
             false, $SetWorldRotation_SweepHitResult, true)
     }
 
-  // called by: UpdateAudio
+  // Called by: UpdateAudio
   GetSteeringAngle(out SteeringAngle: float) [Public|HasOutParms|BlueprintPure|Const]
     // "Ugh, bit of a hack but I'm"
     // "struggling to get the constraint"
@@ -57,15 +57,15 @@ Functions:
     // "and buffering it here"
     out SteeringAngle = FClamp((self.TotalRotation / (self.MaxRotation - 5.0000)), -1.0000, 1.0000)
 
-  // called by: UpdateAudio
+  // Called by: UpdateAudio
   GetWheelVelocity(out Velocity: float) [Public|HasOutParms|BlueprintPure|Const]
     BreakVector(InverseTransformDirection(self.Stand.GetComponentToWorld(),
         self.Wheel.GetPhysicsAngularVelocityInDegrees('None')), $X, $Y, $Z)
     out Velocity = Abs($X)
 
-  // called by: ReceiveTick
+  // Called by: ReceiveTick
   UpdateAudio() [Public|BlueprintPure]
-    // sequence [0]:
+    // Sequence [0]:
     GetWheelVelocity(out $Velocity)
     $Divide_FloatFloat_1 = ($Velocity / 150.0000)
     // "Play wheel rotation audio"
@@ -82,7 +82,7 @@ Functions:
             self.WheelRotationAudioComponent.Stop()
         }
     }
-    // sequence [1]:
+    // Sequence [1]:
     GetSteeringAngle(out $SteeringAngle)
     if (NearlyEqual_FloatFloat(Abs($SteeringAngle), 1.0000, 0.0200) && self.WheelHitPlayable) {
         // "Play hit audio when the wheel hits max rotation"
@@ -97,7 +97,7 @@ Functions:
         self.WheelHitPlayable = (Abs($SteeringAngle) <= self.WheeMaxRotationCueReset)
     }
 
-  // called by: ReceiveTick
+  // Called by: ReceiveTick
   UpdateWheelRotation() [Public|BlueprintPure]
     $GetCurrentTwist = self.VREPhysicsConstraint.GetCurrentTwist()
     // "Capture the change in rotation since last update"
@@ -143,9 +143,9 @@ Functions:
 
   // "On wheel gripped"
   BndEvt__Helm_BP_Wheel_K2Node_ComponentBoundEvent_1_VROnGripSignature__DelegateSignature():
-    // sequence [0]:
+    // Sequence [0]:
     SetActorTickEnabled(false)
-    // sequence [1]:
+    // Sequence [1]:
     Delay(self, 0.0000)
     // "The twist doesn't change until the next tick."
     // "So, wait exactly one tick/frame"
