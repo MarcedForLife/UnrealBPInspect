@@ -27,7 +27,7 @@ thread_local! {
     /// multiple `K2Node_ExecutionSequence` nodes). Set by
     /// [`emit_function_block`] / [`emit_event_block`] around each block's
     /// body so the `Stmt::Sequence` arm can render disconnected then-pins
-    /// as `// sequence [N] (empty):` headers with faithful editor-index
+    /// as `// Sequence [N] (empty):` headers with faithful editor-index
     /// numbering, without threading the mask through every Stmt variant.
     /// The mask is stored by value (cloned in at scope entry) so the consult
     /// path holds no borrow.
@@ -170,7 +170,7 @@ fn section_separator(output: &mut String, emitted: &mut usize) {
     *emitted += 1;
 }
 
-/// Emit one regular function block: optional `// called by:` line,
+/// Emit one regular function block: optional `// Called by:` line,
 /// signature header (`  Name(args) [flags]`), then the body indented by
 /// one extra level. Falls back to `<name>()` when the export's
 /// `Signature` property is missing.
@@ -182,7 +182,7 @@ fn emit_function_block(
     resume_bodies: &BTreeMap<usize, Vec<Stmt>>,
 ) {
     if let Some(callers) = ctx.callers_map.get(name) {
-        output.push_str("  // called by: ");
+        output.push_str("  // Called by: ");
         output.push_str(&callers.join(", "));
         output.push('\n');
     }
@@ -220,7 +220,7 @@ fn emit_comment_lines(output: &mut String, lines: Option<&[String]>) {
     }
 }
 
-/// Emit one ubergraph event block: optional `// called by:` line,
+/// Emit one ubergraph event block: optional `// Called by:` line,
 /// header (`  EventName():` or `  InputAxis_X(AxisValue: float):`), then
 /// the body indented by one extra level. Event names are normalised
 /// through `clean_event_header` so `InpActEvt_*` sections render as
@@ -234,7 +234,7 @@ fn emit_event_block(
 ) {
     let display_name = clean_event_header(raw_name, &ctx.action_key_events);
     if let Some(callers) = ctx.callers_map.get(raw_name) {
-        output.push_str("  // called by: ");
+        output.push_str("  // Called by: ");
         output.push_str(&callers.join(", "));
         output.push('\n');
     }
@@ -423,12 +423,12 @@ fn emit_stmt(
 
 /// Render a `Stmt::Sequence`'s pin bodies inline at the parent indent.
 ///
-/// The `// sequence [N]:` comment is a legibility aid for the human reader,
+/// The `// Sequence [N]:` comment is a legibility aid for the human reader,
 /// no consumer parses it. Two numbering modes:
 ///
 /// - Faithful editor numbering (when [`faithful_sequence_mask`] resolves
 ///   for this block): walk the editor then-pins in order. A disconnected
-///   pin emits an explicit `// sequence [N] (empty):` header with no body;
+///   pin emits an explicit `// Sequence [N] (empty):` header with no body;
 ///   a connected pin consumes the next decoded body and keeps the existing
 ///   suppression (labelled only when there is more than one decoded pin and
 ///   the body is non-empty). This recovers the editor pin index across gaps
@@ -460,12 +460,12 @@ fn emit_sequence(
                     cursor += 1;
                     if multi_pin && !pin.is_empty() {
                         output.push_str(&indent);
-                        output.push_str(&format!("// sequence [{editor_index}]:\n"));
+                        output.push_str(&format!("// Sequence [{editor_index}]:\n"));
                     }
                     emit_body(output, pin, indent_level, resume_bodies);
                 } else {
                     output.push_str(&indent);
-                    output.push_str(&format!("// sequence [{editor_index}] (empty):\n"));
+                    output.push_str(&format!("// Sequence [{editor_index}] (empty):\n"));
                 }
             }
             return;
@@ -474,7 +474,7 @@ fn emit_sequence(
         for (pin_index, pin) in pins.iter().enumerate() {
             if multi_pin && !pin.is_empty() {
                 output.push_str(&indent);
-                output.push_str(&format!("// sequence [{pin_index}]:\n"));
+                output.push_str(&format!("// Sequence [{pin_index}]:\n"));
             }
             emit_body(output, pin, indent_level, resume_bodies);
         }
@@ -493,7 +493,7 @@ fn emit_sequence(
 /// - `ForEach` -> `for (item in array) { ... }`
 ///
 /// `completion` (currently only populated by ForEach) renders as a
-/// trailing `// completed:` block beneath the loop body.
+/// trailing `// Completed:` block beneath the loop body.
 fn emit_loop(
     output: &mut String,
     kind: &LoopKind,
@@ -550,7 +550,7 @@ fn emit_loop(
     if let Some(stmts) = completion {
         if !stmts.is_empty() {
             output.push_str(&indent);
-            output.push_str("// completed:\n");
+            output.push_str("// Completed:\n");
             emit_body(output, stmts, indent_level, resume_bodies);
         }
     }
@@ -622,7 +622,7 @@ fn emit_latch(
     let indent = indent_str(indent_level);
     if !init.is_empty() {
         output.push_str(&indent);
-        output.push_str("// init:\n");
+        output.push_str("// Init:\n");
         emit_body(output, init, indent_level, resume_bodies);
     }
     match kind {
