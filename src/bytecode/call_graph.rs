@@ -152,7 +152,7 @@ fn collect_stmt_calls(
     // Sequence pins, Loop body/completion, Switch case bodies/default, and
     // Latch init/body, omitting ForC init/increment (which carry no nested
     // statements). Leaf variants own no child bodies.
-    for child_body in stmt.child_bodies() {
+    for child_body in stmt.child_bodies_structural() {
         for child_stmt in child_body {
             collect_stmt_calls(child_stmt, resume_bodies, visited, out);
         }

@@ -619,77 +619,15 @@ pub(super) fn extra_consumed_ranges(stmt: &Stmt, before: usize, pos: usize) -> V
 }
 
 /// Recursively gather the disk offset of `stmt` and every nested
-/// statement (branch arms, sequence pins, loop bodies, switch cases,
-/// latch init/body) into `out`.
+/// statement (branch arms, sequence pins, loop body/completion, switch
+/// cases, latch init/body) into `out`. ForC init/increment sub-bodies are
+/// excluded, matching [`Stmt::child_bodies_structural`].
 pub(super) fn collect_stmt_offsets(stmt: &Stmt, out: &mut Vec<usize>) {
-    match stmt {
-        Stmt::Assignment { offset, .. }
-        | Stmt::Call { offset, .. }
-        | Stmt::Return { offset, .. }
-        | Stmt::Break { offset }
-        | Stmt::EventCall { offset, .. } => out.push(*offset),
-        Stmt::Branch {
-            offset,
-            then_body,
-            else_body,
-            ..
-        } => {
-            out.push(*offset);
-            for inner in then_body.iter().chain(else_body.iter()) {
-                collect_stmt_offsets(inner, out);
-            }
+    out.push(stmt.offset());
+    for body in stmt.child_bodies_structural() {
+        for inner in body {
+            collect_stmt_offsets(inner, out);
         }
-        Stmt::Sequence { offset, pins } => {
-            out.push(*offset);
-            for pin in pins {
-                for inner in pin {
-                    collect_stmt_offsets(inner, out);
-                }
-            }
-        }
-        Stmt::Loop {
-            offset,
-            body,
-            completion,
-            ..
-        } => {
-            out.push(*offset);
-            for inner in body {
-                collect_stmt_offsets(inner, out);
-            }
-            if let Some(completion_body) = completion {
-                for inner in completion_body {
-                    collect_stmt_offsets(inner, out);
-                }
-            }
-        }
-        Stmt::Switch {
-            offset,
-            cases,
-            default,
-            ..
-        } => {
-            out.push(*offset);
-            for case in cases {
-                for inner in &case.body {
-                    collect_stmt_offsets(inner, out);
-                }
-            }
-            if let Some(default_body) = default {
-                for inner in default_body {
-                    collect_stmt_offsets(inner, out);
-                }
-            }
-        }
-        Stmt::Latch {
-            offset, init, body, ..
-        } => {
-            out.push(*offset);
-            for inner in init.iter().chain(body.iter()) {
-                collect_stmt_offsets(inner, out);
-            }
-        }
-        Stmt::Unknown { offset, .. } => out.push(*offset),
     }
 }
 

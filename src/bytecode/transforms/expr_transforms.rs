@@ -15,8 +15,8 @@ use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::Stmt;
 use crate::bytecode::transforms::name_shape::is_compiler_temp_name;
 use crate::bytecode::transforms::visit::{
-    expr_contains_unknown, walk_body_exprs, walk_body_exprs_mut, walk_stmt_children_mut,
-    walk_stmt_exprs_mut, Action,
+    expr_contains_unknown, walk_body_exprs, walk_body_exprs_mut, walk_stmt_children,
+    walk_stmt_children_mut, walk_stmt_exprs_mut, Action,
 };
 
 // Maximum fixed-point iterations before giving up, to guard against
@@ -190,62 +190,10 @@ fn count_call_handle_uses_in_stmt(stmt: &Stmt, name: &str) -> usize {
         } if handle == name => 1,
         _ => 0,
     };
-    visit_stmt_children(stmt, &mut |inner| {
+    walk_stmt_children(stmt, &mut |inner| {
         total += count_call_handle_uses(inner, name, usize::MAX);
     });
     total
-}
-
-fn visit_stmt_children<F: FnMut(&[Stmt])>(stmt: &Stmt, visit: &mut F) {
-    use crate::bytecode::stmt::LoopKind;
-    match stmt {
-        Stmt::Branch {
-            then_body,
-            else_body,
-            ..
-        } => {
-            visit(then_body);
-            visit(else_body);
-        }
-        Stmt::Sequence { pins, .. } => {
-            for pin in pins {
-                visit(pin);
-            }
-        }
-        Stmt::Loop {
-            kind,
-            body,
-            completion,
-            ..
-        } => {
-            visit(body);
-            if let Some(comp) = completion {
-                visit(comp);
-            }
-            if let LoopKind::ForC { init, increment } = kind {
-                visit(init);
-                visit(increment);
-            }
-        }
-        Stmt::Switch { cases, default, .. } => {
-            for case in cases {
-                visit(&case.body);
-            }
-            if let Some(body) = default {
-                visit(body);
-            }
-        }
-        Stmt::Latch { init, body, .. } => {
-            visit(init);
-            visit(body);
-        }
-        Stmt::Assignment { .. }
-        | Stmt::Call { .. }
-        | Stmt::Return { .. }
-        | Stmt::Break { .. }
-        | Stmt::EventCall { .. }
-        | Stmt::Unknown { .. } => {}
-    }
 }
 
 /// Replace every `Stmt::Call::func` that is `Var(name)` with a clone of
@@ -444,7 +392,7 @@ fn collect_assigned_names(body: &[Stmt]) -> BTreeSet<String> {
         {
             names.insert(name.clone());
         }
-        visit_stmt_children(stmt, &mut |children| {
+        walk_stmt_children(stmt, &mut |children| {
             names.extend(collect_assigned_names(children));
         });
     }
@@ -491,7 +439,7 @@ fn collect_uniform_param_defs(
                 }
             }
         }
-        visit_stmt_children(stmt, &mut |children| {
+        walk_stmt_children(stmt, &mut |children| {
             collect_uniform_param_defs(children, assigned, src_of, def_counts);
         });
     }
