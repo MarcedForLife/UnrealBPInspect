@@ -264,7 +264,7 @@ fn decode_one(pos: &mut usize, ctx: &DecodeCtx) -> Result<Option<Stmt>, Box<Stmt
             Err(Box::new(make_unknown_len(
                 offset,
                 ctx,
-                "phase 1a: opcode not yet recognised",
+                "opcode not recognised by statement decoder",
                 opcode_len,
             )))
         }

@@ -17,7 +17,7 @@
 
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::{LoopKind, Stmt};
-use crate::bytecode::transforms::visit::{expr_contains_unknown, walk_expr, walk_stmt_exprs};
+use crate::bytecode::transforms::visit::{any_expr, expr_contains_unknown, walk_stmt_exprs};
 
 /// Walk a statement body and drop dead `Stmt::Assignment` statements.
 /// Recurses into every nested body so nested dead assignments are
@@ -194,21 +194,20 @@ fn pure_dead_assignment_name(stmt: &Stmt, idx: usize, body: &[Stmt]) -> Option<S
 }
 
 /// Returns `true` if the expression tree contains any node whose
-/// evaluation has observable side effects (function/method calls,
-/// out-parameter wrappers, persistent/resume markers, or Unknown).
+/// evaluation has observable side effects: function/method calls,
+/// out-parameter wrappers, or persistent/resume markers. (`Unknown`
+/// operands are rejected separately, upstream, via `expr_contains_unknown`.)
 fn expr_has_side_effects(expr: &Expr) -> bool {
-    let mut found = false;
-    walk_expr(expr, &mut |node| match node {
-        Expr::Call { .. }
-        | Expr::MethodCall { .. }
-        | Expr::Out(_)
-        | Expr::Persistent(_)
-        | Expr::Resume { .. } => {
-            found = true;
-        }
-        _ => {}
-    });
-    found
+    any_expr(expr, &mut |node| {
+        matches!(
+            node,
+            Expr::Call { .. }
+                | Expr::MethodCall { .. }
+                | Expr::Out(_)
+                | Expr::Persistent(_)
+                | Expr::Resume { .. }
+        )
+    })
 }
 
 /// Returns `true` if any expression USE node in `stmt` is `Expr::Var(name)`.

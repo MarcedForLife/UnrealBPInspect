@@ -23,20 +23,6 @@ pub fn resolve_bc_obj(index: i32, imports: &[ImportEntry], export_names: &[Strin
         .unwrap_or(name)
 }
 
-/// Read a UObject* reference from serialized bytecode (int32 FPackageIndex)
-pub fn read_bc_obj_ref(
-    bytecode: &[u8],
-    pos: &mut usize,
-    imports: &[ImportEntry],
-    export_names: &[String],
-    mem_adj: &mut i32,
-) -> String {
-    let index = read_bc_i32(bytecode, pos);
-    // Object references are int32 (FPackageIndex) on disk but 8-byte pointers in memory
-    *mem_adj += 4;
-    resolve_bc_obj(index, imports, export_names)
-}
-
 /// Maximum FFieldPath depth. UE's field paths are typically 1-3 levels deep
 /// (e.g. Struct.Member). 16 is generous enough for any real asset while catching
 /// corrupt data that would read garbage FNames.
@@ -68,18 +54,6 @@ pub fn read_bc_field_path(
     }
     let _owner = read_bc_i32(bytecode, pos);
     names.join(".")
-}
-
-/// Read EX_Context/EX_ClassContext r-value info
-/// Format: uint32 skip (in-memory) + FFieldPath r-value property (no size byte)
-pub fn read_bc_context_rvalue(
-    bytecode: &[u8],
-    pos: &mut usize,
-    name_table: &NameTable,
-    mem_adj: &mut i32,
-) {
-    let _skip = read_bc_u32(bytecode, pos);
-    let _rvalue = read_bc_field_path(bytecode, pos, name_table, mem_adj);
 }
 
 // Inline tests: read_bc_field_path is private and needs direct access to test

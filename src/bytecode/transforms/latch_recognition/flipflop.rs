@@ -702,22 +702,17 @@ fn stmt_refs_any_alias(stmt: &Stmt, aliases: &BTreeSet<String>) -> bool {
 }
 
 /// Return `true` when `expr` contains any `Var(name)` matching a member of
-/// `aliases`. Walks the full expression tree via the shared `walk_expr`,
+/// `aliases`. Walks the full expression tree via the shared `any_expr`,
 /// so every variant is covered, including Cast, Ternary, StructConstruct,
 /// Switch, ArrayLit, and the transparent Out/Interface/Persistent/Resume
 /// wrappers. The previous hand-rolled walk stopped at `_ => false` and
 /// silently missed an alias referenced through any of those, undercounting
 /// alias consumers.
 fn expr_refs_any_alias(expr: &Expr, aliases: &BTreeSet<String>) -> bool {
-    let mut found = false;
-    visit::walk_expr(expr, &mut |node| {
-        if let Expr::Var(name) = node {
-            if aliases.contains(name) {
-                found = true;
-            }
-        }
-    });
-    found
+    visit::any_expr(
+        expr,
+        &mut |node| matches!(node, Expr::Var(name) if aliases.contains(name)),
+    )
 }
 
 /// Build a FlipFlop `Stmt::Latch` from an embedded-flip branch.
