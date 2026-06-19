@@ -4,9 +4,9 @@
 
 use super::test_fixtures::{lit, var};
 use super::visit::{
-    walk_body_exprs, walk_body_exprs_mut, walk_body_exprs_mut_visit_lhs, walk_body_exprs_visit_lhs,
-    walk_expr, walk_expr_mut, walk_stmt_exprs, walk_stmt_exprs_mut, walk_stmt_exprs_mut_visit_lhs,
-    walk_stmt_exprs_visit_lhs, Action,
+    any_expr, walk_body_exprs, walk_body_exprs_mut, walk_body_exprs_mut_visit_lhs,
+    walk_body_exprs_visit_lhs, walk_expr, walk_expr_mut, walk_stmt_exprs, walk_stmt_exprs_mut,
+    walk_stmt_exprs_mut_visit_lhs, walk_stmt_exprs_visit_lhs, Action,
 };
 use crate::bytecode::expr::{BinaryOp, CastKind, Expr, SwitchExprCase, UnaryOp};
 use crate::bytecode::stmt::{LatchKind, LoopKind, Stmt, SwitchCase};
@@ -16,6 +16,69 @@ fn binary(op: BinaryOp, lhs: Expr, rhs: Expr) -> Expr {
         op,
         lhs: Box::new(lhs),
         rhs: Box::new(rhs),
+    }
+}
+
+/// A single nested Expr that exercises every Expr variant with children
+/// (Call, MethodCall, FieldAccess, Index, Binary, Unary, Cast, ArrayLit,
+/// Ternary, Out, Interface, Persistent, Resume, StructConstruct, Switch).
+/// Each leaf is a uniquely-named `Var`, so a walker that skips any variant
+/// drops that variant's leaf. Shared by the `walk_expr` and `any_expr`
+/// coverage tests; its leaf names match the `leaves` list in
+/// `walk_expr_covers_every_variant`.
+fn every_variant_expr() -> Expr {
+    Expr::Call {
+        name: "Outer".to_string(),
+        args: vec![
+            var("L_CALL"),
+            Expr::MethodCall {
+                recv: Box::new(var("L_METHOD_R")),
+                name: "M".to_string(),
+                args: vec![var("L_METHOD_A")],
+            },
+            Expr::FieldAccess {
+                recv: Box::new(var("L_FIELD")),
+                field: "f".to_string(),
+            },
+            Expr::Index {
+                recv: Box::new(var("L_IDX_R")),
+                idx: Box::new(var("L_IDX_I")),
+            },
+            binary(BinaryOp::Add, var("L_BIN_L"), var("L_BIN_R")),
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                operand: Box::new(var("L_UNARY")),
+            },
+            Expr::Cast {
+                kind: CastKind::ToBool,
+                inner: Box::new(var("L_CAST")),
+            },
+            Expr::ArrayLit(vec![var("L_ARR_0"), var("L_ARR_1")]),
+            Expr::Ternary {
+                cond: Box::new(var("L_TERN_C")),
+                then_expr: Box::new(var("L_TERN_T")),
+                else_expr: Box::new(var("L_TERN_E")),
+            },
+            Expr::Out(Box::new(var("L_OUT"))),
+            Expr::Interface(Box::new(var("L_IFACE"))),
+            Expr::Persistent(Box::new(var("L_PERSIST"))),
+            Expr::Resume {
+                inner: Box::new(var("L_RESUME")),
+                target: 0,
+            },
+            Expr::StructConstruct {
+                type_name: "S".to_string(),
+                fields: vec![("a".to_string(), var("L_STRUCT"))],
+            },
+            Expr::Switch {
+                index: Box::new(var("L_SW_INDEX")),
+                cases: vec![SwitchExprCase {
+                    value: var("L_SW_CASE_V"),
+                    body: var("L_SW_CASE_B"),
+                }],
+                default: Box::new(var("L_SW_DEFAULT")),
+            },
+        ],
     }
 }
 
@@ -469,59 +532,7 @@ fn walk_expr_covers_every_variant() {
         "L_SW_CASE_B",
         "L_SW_DEFAULT",
     ];
-    let expr = Expr::Call {
-        name: "Outer".to_string(),
-        args: vec![
-            var("L_CALL"),
-            Expr::MethodCall {
-                recv: Box::new(var("L_METHOD_R")),
-                name: "M".to_string(),
-                args: vec![var("L_METHOD_A")],
-            },
-            Expr::FieldAccess {
-                recv: Box::new(var("L_FIELD")),
-                field: "f".to_string(),
-            },
-            Expr::Index {
-                recv: Box::new(var("L_IDX_R")),
-                idx: Box::new(var("L_IDX_I")),
-            },
-            binary(BinaryOp::Add, var("L_BIN_L"), var("L_BIN_R")),
-            Expr::Unary {
-                op: UnaryOp::Neg,
-                operand: Box::new(var("L_UNARY")),
-            },
-            Expr::Cast {
-                kind: CastKind::ToBool,
-                inner: Box::new(var("L_CAST")),
-            },
-            Expr::ArrayLit(vec![var("L_ARR_0"), var("L_ARR_1")]),
-            Expr::Ternary {
-                cond: Box::new(var("L_TERN_C")),
-                then_expr: Box::new(var("L_TERN_T")),
-                else_expr: Box::new(var("L_TERN_E")),
-            },
-            Expr::Out(Box::new(var("L_OUT"))),
-            Expr::Interface(Box::new(var("L_IFACE"))),
-            Expr::Persistent(Box::new(var("L_PERSIST"))),
-            Expr::Resume {
-                inner: Box::new(var("L_RESUME")),
-                target: 0,
-            },
-            Expr::StructConstruct {
-                type_name: "S".to_string(),
-                fields: vec![("a".to_string(), var("L_STRUCT"))],
-            },
-            Expr::Switch {
-                index: Box::new(var("L_SW_INDEX")),
-                cases: vec![SwitchExprCase {
-                    value: var("L_SW_CASE_V"),
-                    body: var("L_SW_CASE_B"),
-                }],
-                default: Box::new(var("L_SW_DEFAULT")),
-            },
-        ],
-    };
+    let expr = every_variant_expr();
 
     let mut got = Vec::new();
     let mut visit = |expr: &Expr| {
@@ -681,4 +692,52 @@ fn visit_lhs_walker_recurses_into_nested_bodies() {
     assert!(names.iter().any(|name| name == "LHS"));
     assert!(names.iter().any(|name| name == "LHS_LATCH_INIT"));
     assert!(names.iter().any(|name| name == "LHS_INIT"));
+}
+
+/// `any_expr` reaches every node `walk_expr` does. For each Var the full
+/// walk visits, the early-exit scan must also find it; otherwise
+/// `any_expr_children` has drifted from `walk_expr_children` (e.g. a new
+/// Expr variant added to one arm list but not the other).
+#[test]
+fn any_expr_matches_walk_expr_coverage() {
+    let expr = every_variant_expr();
+    let mut all_vars = Vec::new();
+    walk_expr(&expr, &mut |node| {
+        if let Expr::Var(name) = node {
+            all_vars.push(name.clone());
+        }
+    });
+    assert!(!all_vars.is_empty());
+    for name in &all_vars {
+        assert!(
+            any_expr(
+                &expr,
+                &mut |node| matches!(node, Expr::Var(found) if found == name)
+            ),
+            "any_expr failed to find `{name}` that walk_expr visited"
+        );
+    }
+    assert!(!any_expr(&expr, &mut |node| matches!(
+        node,
+        Expr::Var(name) if name == "ABSENT"
+    )));
+}
+
+/// `any_expr` halts at the first match: nodes after the matching one are
+/// never handed to the predicate.
+#[test]
+fn any_expr_short_circuits_on_first_match() {
+    let expr = Expr::Call {
+        name: "Outer".to_string(),
+        args: vec![var("FIRST"), var("SECOND"), var("THIRD")],
+    };
+    let mut seen = Vec::new();
+    let found = any_expr(&expr, &mut |node| {
+        if let Expr::Var(name) = node {
+            seen.push(name.clone());
+        }
+        matches!(node, Expr::Var(name) if name == "SECOND")
+    });
+    assert!(found);
+    assert_eq!(seen, vec!["FIRST".to_string(), "SECOND".to_string()]);
 }

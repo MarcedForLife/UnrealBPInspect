@@ -43,7 +43,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::{LoopKind, Stmt};
 use crate::bytecode::transforms::visit::{
-    walk_expr, walk_expr_children, walk_expr_children_mut, walk_expr_mut, Action,
+    any_expr, walk_expr, walk_expr_children, walk_expr_children_mut, walk_expr_mut, Action,
 };
 
 /// Hard iteration cap for the cross-scope hoist fixpoint. Mirrors the
@@ -532,9 +532,8 @@ fn is_eligible(expr: &Expr) -> bool {
 /// and `ArrayLit` are inert leaves and may appear inside an allowlisted
 /// host (e.g. `Binary { lhs: Var, rhs: Literal }` is fine).
 fn contains_disallowed(expr: &Expr) -> bool {
-    let mut found = false;
-    walk_expr(expr, &mut |node| {
-        if matches!(
+    any_expr(expr, &mut |node| {
+        matches!(
             node,
             Expr::Call { .. }
                 | Expr::MethodCall { .. }
@@ -543,11 +542,8 @@ fn contains_disallowed(expr: &Expr) -> bool {
                 | Expr::Persistent(_)
                 | Expr::Interface(_)
                 | Expr::Unknown { .. }
-        ) {
-            found = true;
-        }
-    });
-    found
+        )
+    })
 }
 
 /// Three-tier name derivation. Returns `None` when no clean name can be

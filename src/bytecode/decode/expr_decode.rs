@@ -108,7 +108,7 @@ impl ExprVisitor<'_> {
         let end = (start_offset + length).min(self.bytecode.len());
         let raw_bytes = self.bytecode[start_offset..end].to_vec();
         Expr::Unknown {
-            reason: format!("phase 1b: opcode 0x{:02x} not decoded", opcode),
+            reason: format!("opcode 0x{:02x} not decoded", opcode),
             raw_bytes,
             offset: start_offset,
         }

@@ -1,6 +1,6 @@
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::{LoopKind, Stmt};
-use crate::bytecode::transforms::visit::{peel_transparent, resolve_var_chain, walk_expr};
+use crate::bytecode::transforms::visit::{any_expr, peel_transparent, resolve_var_chain};
 
 /// True for the literal `1`.
 pub(super) fn is_one_literal(expr: &Expr) -> bool {
@@ -176,11 +176,8 @@ pub(super) fn expr_references_var_chain(expr: &Expr, name: &str, scopes: &[&[Stm
 
 /// Recursively walk `expr` checking whether any `Var` or `FieldAccess` matches `name`.
 fn expr_references_var(expr: &Expr, name: &str) -> bool {
-    let mut found = false;
-    walk_expr(expr, &mut |inner: &Expr| match inner {
-        Expr::Var(other) if other == name => found = true,
-        Expr::FieldAccess { field, .. } if field == name => found = true,
-        _ => {}
-    });
-    found
+    any_expr(expr, &mut |inner| {
+        matches!(inner, Expr::Var(other) if other == name)
+            || matches!(inner, Expr::FieldAccess { field, .. } if field == name)
+    })
 }
