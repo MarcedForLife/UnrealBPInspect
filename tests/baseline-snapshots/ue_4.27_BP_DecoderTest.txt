@@ -25,7 +25,7 @@ Call graph:
   OnRightReleased → Release
 
 Functions:
-  // called by: OnLeftAxis, OnRightAxis
+  // Called by: OnLeftAxis, OnRightAxis
   Attempt(bIsLeft: bool) [Public|BlueprintPure]
     PrintString(self, BoolToString(bIsLeft), true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
@@ -68,15 +68,15 @@ Functions:
 
   IsValid_InSequence() [Public|BlueprintPure]
     // "An IsValid wired as the middle pin of a Sequence, with prints before and after"
-    // sequence [0]:
+    // Sequence [0]:
     PrintString(self, "A", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
-    // sequence [1]:
+    // Sequence [1]:
     if (IsValid(self.ActorRef)) {
         PrintString(self, "Valid", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
     } else {
         PrintString(self, "Invalid", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
     }
-    // sequence [2]:
+    // Sequence [2]:
     PrintString(self, "C", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
   IsValid_Standalone() [Public|BlueprintPure]
@@ -130,7 +130,7 @@ Functions:
         PrintString(self, IntToString(Temp_int_Variable), true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000),
             2.0000)
     }
-    // completed:
+    // Completed:
     PrintString(self, "Done", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
   Loop_ForWithBreak() [Public|BlueprintPure]
@@ -143,7 +143,7 @@ Functions:
                 MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
         }
     }
-    // completed:
+    // Completed:
     PrintString(self, "Done", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
   Loop_While() [Public|BlueprintPure]
@@ -151,41 +151,41 @@ Functions:
     while (LoopCounter < 5) {
         LoopCounter = (LoopCounter + 1)
     }
-    // completed:
+    // Completed:
     PrintString(self, "Done", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
-  // called by: OnLeftAxis, OnLeftReleased, OnRightAxis, OnRightReleased
+  // Called by: OnLeftAxis, OnLeftReleased, OnRightAxis, OnRightReleased
   Release(bIsLeft: bool) [Public|BlueprintPure]
     PrintString(self, BoolToString(bIsLeft), true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
   Seq_FivePin() [Public|BlueprintPure]
     // "A five-pin Sequence"
-    // sequence [0]:
+    // Sequence [0]:
     PrintString(self, "A", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
-    // sequence [1]:
+    // Sequence [1]:
     PrintString(self, "B", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
-    // sequence [2]:
+    // Sequence [2]:
     PrintString(self, "C", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
-    // sequence [3]:
+    // Sequence [3]:
     PrintString(self, "D", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
-    // sequence [4]:
+    // Sequence [4]:
     PrintString(self, "E", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
   Seq_TwoPin() [Public|BlueprintPure]
     // "A two-pin Sequence"
-    // sequence [0]:
+    // Sequence [0]:
     PrintString(self, "A", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
-    // sequence [1]:
+    // Sequence [1]:
     PrintString(self, "B", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
   Seq_WithEmptyPin() [Public|BlueprintPure]
     // "A four-pin Sequence with the third pin left disconnected"
-    // sequence [0]:
+    // Sequence [0]:
     PrintString(self, "A", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
-    // sequence [1]:
+    // Sequence [1]:
     PrintString(self, "B", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
-    // sequence [2] (empty):
-    // sequence [3]:
+    // Sequence [2] (empty):
+    // Sequence [3]:
     PrintString(self, "D", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
   Switch_OnByteEnum() [Public|BlueprintPure]
@@ -230,15 +230,15 @@ Functions:
   // "Two events each run their own Sequence whose then-0 converges on one shared node, then whose
   //  then-1 continues to event-specific content"
   Conv_DivergentTail_A():
-    // sequence [0]:
+    // Sequence [0]:
     PrintString(self, "Shared mid", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
-    // sequence [1]:
+    // Sequence [1]:
     PrintString(self, "A tail", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
   Conv_DivergentTail_B():
-    // sequence [0]:
+    // Sequence [0]:
     PrintString(self, "Shared mid", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
-    // sequence [1]:
+    // Sequence [1]:
     PrintString(self, "B tail", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
   // "Two events converging on one shared call, no gate or macro between them"
@@ -269,15 +269,15 @@ Functions:
 
   // "Two events converging on one shared two-pin Sequence"
   Conv_SharedSequence_A():
-    // sequence [0]:
+    // Sequence [0]:
     PrintString(self, "Seq 0", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
-    // sequence [1]:
+    // Sequence [1]:
     PrintString(self, "Seq 1", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
   Conv_SharedSequence_B():
-    // sequence [0]:
+    // Sequence [0]:
     PrintString(self, "Seq 0", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
-    // sequence [1]:
+    // Sequence [1]:
     PrintString(self, "Seq 1", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
   // "Latches and delays"
@@ -285,9 +285,9 @@ Functions:
   Latch_DoOnce():
     DoOnce(DoOnce_4) {
         PrintString(self, "Once", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
-        // sequence [0]:
+        // Sequence [0]:
         ResetDoOnce(DoOnce_4)
-        // sequence [1]:
+        // Sequence [1]:
         PrintString(self, "Reset done", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
     }
 

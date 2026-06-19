@@ -2,7 +2,7 @@
 //!
 //! The marker syntax is `<indent>// "<text>"`, a line comment whose payload
 //! is the quoted comment text. This is distinct from the structural markers
-//! (`// called by:`, `// sequence [N]:`) which are never quoted, so a reader
+//! (`// Called by:`, `// Sequence [N]:`) which are never quoted, so a reader
 //! can tell an authored annotation from a generated legibility aid.
 //!
 //! Each source paragraph wraps independently at [`COMMENT_WRAP_WIDTH`]

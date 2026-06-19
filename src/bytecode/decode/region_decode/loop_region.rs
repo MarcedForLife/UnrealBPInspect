@@ -254,7 +254,7 @@ pub(crate) fn try_dispatch_loop_body_loop_region_at(
     // dispatched Loop region. The inner loop's displaced body R6 is carved
     // as a sibling of R4 (both children of the function root), so without
     // suppressing R6 the walker re-emits the inner body a second time after
-    // `// completed:`. Record R6 (and any other region inside the
+    // `// Completed:`. Record R6 (and any other region inside the
     // footprint) so `walk_region` skips them at its top.
     {
         let mut dispatched = ctx.dispatched_loop_regions.borrow_mut();

@@ -56,7 +56,7 @@ pub(crate) fn compute_action_key_events(section_names: &[&str]) -> HashMap<Strin
 /// - `InpAxisEvt_MouseX_..._0` -> `InputAxis_MouseX`
 /// - Other events (custom, regular) pass through.
 ///
-/// Used by call graph and `// called by:` trailers; see [`clean_event_header`]
+/// Used by call graph and `// Called by:` trailers; see [`clean_event_header`]
 /// for the signature-carrying variant.
 pub(crate) fn display_event_name(
     raw_name: &str,
