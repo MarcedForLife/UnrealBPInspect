@@ -35,7 +35,7 @@ fn decoder_test_emit() -> &'static str {
 
 /// Return the body lines of a function or event by name: everything after the
 /// `  <name>(...)` header up to the next top-level header (a line indented
-/// exactly two spaces whose first character is a letter). `// called by:`
+/// exactly two spaces whose first character is a letter). `// Called by:`
 /// comment lines (indent two spaces, then `/`) are not treated as headers.
 fn function_body(emit: &str, name: &str) -> String {
     let lines: Vec<&str> = emit.lines().collect();
@@ -134,8 +134,8 @@ fn finding3_seq_twopin_no_trailing_duplicate() {
 
 /// Finding 4 (RESOLVED): a 4-pin Sequence with pin 2 disconnected preserves
 /// faithful editor pin numbering. The disconnected pin emits an explicit
-/// `// sequence [2] (empty):` header with no body, and the wired pin 3 stays
-/// `// sequence [3]:`. Faithful numbering comes from emit-time EdGraph
+/// `// Sequence [2] (empty):` header with no body, and the wired pin 3 stays
+/// `// Sequence [3]:`. Faithful numbering comes from emit-time EdGraph
 /// then-pin correlation (no IR change); see `emit_sequence` in
 /// `bytecode/emit/summary.rs`.
 #[test]
@@ -143,15 +143,15 @@ fn finding4_seq_withemptypin_faithful_numbering() {
     let emit = decoder_test_emit();
     let body = function_body(emit, "Seq_WithEmptyPin");
     assert!(
-        body.contains("// sequence [2] (empty):"),
+        body.contains("// Sequence [2] (empty):"),
         "Seq_WithEmptyPin should render the disconnected pin 2 as an empty slot \
-         `// sequence [2] (empty):`.\nbody:\n{}",
+         `// Sequence [2] (empty):`.\nbody:\n{}",
         body
     );
     assert!(
-        body.contains("// sequence [3]:"),
+        body.contains("// Sequence [3]:"),
         "Seq_WithEmptyPin should keep the disconnected pin 2's slot so the wired \
-         pin 3 stays `// sequence [3]:`.\nbody:\n{}",
+         pin 3 stays `// Sequence [3]:`.\nbody:\n{}",
         body
     );
 }
@@ -212,9 +212,9 @@ fn conv_divergenttail_b_renders_shared_then_own_tail() {
     // (no bytecode push chain exists for the non-owner, so this is graph-identity
     // synthesis). Locks in the wrapper, not just the content.
     assert!(
-        body.contains("// sequence [0]:") && body.contains("// sequence [1]:"),
+        body.contains("// Sequence [0]:") && body.contains("// Sequence [1]:"),
         "divergent-tail boundary: Conv_DivergentTail_B should wrap its shared then-0 and own \
-         then-1 in a two-pin Sequence (`// sequence [0]:` / `// sequence [1]:`) to match the \
+         then-1 in a two-pin Sequence (`// Sequence [0]:` / `// Sequence [1]:`) to match the \
          owner `Conv_DivergentTail_A`.\nbody:\n{}",
         body
     );
@@ -226,7 +226,7 @@ fn conv_divergenttail_b_renders_shared_then_own_tail() {
 /// dual-role dispatched loops). `Loop_ForEachInt`/`Loop_ForEachItemName` leak a
 /// trailing `$Array_Get_Item = <array>[0]` plus its Print; `Loop_ForSimple`
 /// leaks a third `PrintString` (body + Done + spurious); `Loop_While` leaks a
-/// second copy of its sole increment after `// completed:`.
+/// second copy of its sole increment after `// Completed:`.
 #[test]
 fn g1_no_trailing_loop_body_redecode() {
     let emit = decoder_test_emit();
@@ -255,7 +255,7 @@ fn g1_no_trailing_loop_body_redecode() {
         for_simple_prints, 2,
         "EXPECTED-FAIL (finding G1): Loop_ForSimple has {} PrintString calls, \
          should be 2 (body + Done). The loop body re-decode leaks a third copy \
-         of the body Print after `// completed:`.\nbody:\n{}",
+         of the body Print after `// Completed:`.\nbody:\n{}",
         for_simple_prints, for_simple
     );
 
@@ -267,7 +267,7 @@ fn g1_no_trailing_loop_body_redecode() {
         loop_while_increments, 1,
         "EXPECTED-FAIL (finding G1): Loop_While has {} `LoopCounter = (LoopCounter + 1)` \
          lines, should be 1 (the body increment only). The loop body re-decode \
-         leaks a second copy after `// completed:`.\nbody:\n{}",
+         leaks a second copy after `// Completed:`.\nbody:\n{}",
         loop_while_increments, loop_while
     );
 }
@@ -308,7 +308,7 @@ fn g2_foreach_no_leading_bound_expr() {
 /// `while (LoopCounter < 5) { LoopCounter = (LoopCounter + 1) }`, not an
 /// empty-body `for`.
 ///
-/// The trailing duplicate increment after `// completed:` is the separate
+/// The trailing duplicate increment after `// Completed:` is the separate
 /// finding G1 (loop-body re-decode), covered by
 /// `g1_no_trailing_loop_body_redecode`; this tracker is scoped to the
 /// while/ForC classification only.
@@ -361,7 +361,7 @@ fn g4_nested_outer_foreach() {
 
 /// Return the substring of `body` that sits inside the first loop construct: the
 /// indented block opened by the first line containing `for (` or `while (`,
-/// up to (but not including) the loop's `// completed:` marker or the first
+/// up to (but not including) the loop's `// Completed:` marker or the first
 /// line dedented back to the loop-header indent. Used by the G3 trackers to
 /// assert the break/else live INSIDE the loop rather than ejected after it.
 fn first_loop_inner(body: &str) -> String {
@@ -657,11 +657,11 @@ fn l3_onleftaxis_else_single_attempt_reset() {
 
 /// Finding L4: `OnLeftAxis` calls `Attempt(true)` and `Release(true)` in its
 /// body but is absent from the call graph (and from `Attempt`/`Release`'s
-/// `// called by:` attributions). The re-export's new OnLeftAxis structure (else
+/// `// Called by:` attributions). The re-export's new OnLeftAxis structure (else
 /// Sequence + within-event Knot fan-in from OnLeftReleased) trips the call-graph
 /// builder's ownership traversal; the pre-ingest baseline listed it. It must
 /// reappear as `OnLeftAxis → Attempt, Release` with OnLeftAxis back in both
-/// callees' `called by:` lines.
+/// callees' `Called by:` lines.
 #[test]
 fn l4_onleftaxis_in_call_graph() {
     let emit = decoder_test_emit();
@@ -687,16 +687,16 @@ fn l4_onleftaxis_in_call_graph() {
         emit
     );
     // Both callees (Attempt and Release) must name OnLeftAxis in their
-    // `// called by:` line, so at least two such lines mention it.
+    // `// Called by:` line, so at least two such lines mention it.
     let called_by_left = emit
         .lines()
         .filter(|line| {
-            line.trim_start().starts_with("// called by:") && line.contains("OnLeftAxis")
+            line.trim_start().starts_with("// Called by:") && line.contains("OnLeftAxis")
         })
         .count();
     assert!(
         called_by_left >= 2,
-        "EXPECTED-FAIL (finding L4): only {} `// called by:` line(s) name OnLeftAxis; \
+        "EXPECTED-FAIL (finding L4): only {} `// Called by:` line(s) name OnLeftAxis; \
          both Attempt and Release should attribute the call to OnLeftAxis.\n{}",
         called_by_left,
         emit
