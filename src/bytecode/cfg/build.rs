@@ -10,7 +10,7 @@ use std::ops::Range;
 use crate::bytecode::opcodes::{
     EX_JUMP, EX_POP_EXECUTION_FLOW, EX_POP_FLOW_IF_NOT, EX_PUSH_EXECUTION_FLOW,
 };
-use crate::bytecode::partition::OpcodeGraph;
+use crate::bytecode::partition::{step_successors, OpcodeGraph};
 
 use super::{BasicBlock, BlockId, ControlFlowGraph};
 
@@ -177,6 +177,26 @@ fn bfs_reachable_flow_stack(
     entry: usize,
     owned: &BTreeSet<usize>,
 ) -> BTreeSet<usize> {
+    // Branch-by-abstraction: run the inline VM and the shared-transition one,
+    // assert they agree, return the inline result. Proves the cutover to
+    // `partition::step_successors` on every fixture before the inline copy
+    // is deleted.
+    let inline = bfs_reachable_flow_stack_inline(graph, entry, owned);
+    let via_step = bfs_reachable_flow_stack_via_step(graph, entry, owned);
+    assert_eq!(
+        inline, via_step,
+        "flow-stack delegation diverged from inline at entry {entry}"
+    );
+    inline
+}
+
+/// Inline flow-stack VM, superseded by `bfs_reachable_flow_stack_via_step`.
+/// Retained only for the branch-by-abstraction equivalence assert above.
+fn bfs_reachable_flow_stack_inline(
+    graph: &OpcodeGraph,
+    entry: usize,
+    owned: &BTreeSet<usize>,
+) -> BTreeSet<usize> {
     let mut reached = BTreeSet::new();
     if !owned.contains(&entry) {
         return reached;
@@ -230,6 +250,46 @@ fn bfs_reachable_flow_stack(
                     queue.push_back((succ, stack.clone()));
                 }
             }
+        }
+    }
+    reached
+}
+
+/// Flow-stack reachability via `partition::step_successors`, the shared
+/// transition model partition's scope-aware BFS already uses. Only the
+/// per-opcode stack transition is delegated; the visited-key dedup and the
+/// `owned` filter stay here. `baseline_depth` is 0 (a fresh BFS with no
+/// pending continuation floor), and the admit closure pushes every
+/// successor, mirroring the inline walk's admit-all-then-filter-`owned`-at-pop
+/// discipline (the only transition difference being PUSH's positional vs
+/// value-based skip of the deferred target, equivalent for the length-2
+/// distinct PUSH successor lists BP bytecode emits).
+fn bfs_reachable_flow_stack_via_step(
+    graph: &OpcodeGraph,
+    entry: usize,
+    owned: &BTreeSet<usize>,
+) -> BTreeSet<usize> {
+    let mut reached = BTreeSet::new();
+    if !owned.contains(&entry) {
+        return reached;
+    }
+    let mut visited: BTreeSet<(usize, usize, Option<usize>)> = BTreeSet::new();
+    let mut queue: VecDeque<(usize, Vec<usize>)> = VecDeque::new();
+    queue.push_back((entry, Vec::new()));
+    let admit =
+        |_from: usize, succ: usize, stack: &[usize], queue: &mut VecDeque<(usize, Vec<usize>)>| {
+            queue.push_back((succ, stack.to_vec()));
+        };
+    while let Some((addr, stack)) = queue.pop_front() {
+        if !visited.insert((addr, stack.len(), stack.last().copied())) {
+            continue;
+        }
+        if !owned.contains(&addr) {
+            continue;
+        }
+        reached.insert(addr);
+        if let Some(&opcode) = graph.opcodes.get(&addr) {
+            step_successors(addr, opcode, &stack, graph, 0, &admit, &mut queue);
         }
     }
     reached
