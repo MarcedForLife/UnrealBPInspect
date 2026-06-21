@@ -276,9 +276,20 @@ enum ExprRole {
     Other,
 }
 
-/// Top-level expressions a single statement contributes to its OWN scope.
-/// Returns the expressions that belong to this statement itself, excluding
-/// every Vec<Stmt> sub-body (those are nested scopes).
+/// Untagged view of [`scope_root_exprs_tagged`]: the top-level expressions a
+/// statement contributes to its OWN scope, with the [`ExprRole`] tag dropped.
+/// See `scope_root_exprs_tagged` for which expressions each statement yields.
+fn scope_root_exprs(stmt: &Stmt) -> Vec<&Expr> {
+    scope_root_exprs_tagged(stmt)
+        .into_iter()
+        .map(|(expr, _role)| expr)
+        .collect()
+}
+
+/// Top-level expressions a single statement contributes to its OWN scope,
+/// each tagged with the [`ExprRole`] it plays. Excludes every `Vec<Stmt>`
+/// sub-body (those are nested scopes). This is the single source of the
+/// statement-to-root-exprs mapping; [`scope_root_exprs`] is the untagged view.
 ///
 /// Branch::cond, Loop::cond, Switch::expr, and ForEach's array expression
 /// are part of the enclosing scope because they execute before any nested
@@ -288,51 +299,10 @@ enum ExprRole {
 /// Assignment lhs is included because compound lhs shapes
 /// (`FieldAccess { recv: <projection>, .. }`, `Index { recv: <projection>, .. }`)
 /// host pure projections at their `recv` position, and those projections
-/// must participate in CSE counting and substitution. Bare `Var` lhs is
-/// not matched anyway because bare `Var` is not eligible for hoisting.
-fn scope_root_exprs(stmt: &Stmt) -> Vec<&Expr> {
-    let mut out: Vec<&Expr> = Vec::new();
-    match stmt {
-        Stmt::Assignment { lhs, rhs, .. } => {
-            out.push(lhs);
-            out.push(rhs);
-        }
-        Stmt::Call { func, args, .. } => {
-            out.push(func);
-            out.extend(args.iter());
-        }
-        Stmt::Return { value, .. } => {
-            if let Some(expr) = value {
-                out.push(expr);
-            }
-        }
-        Stmt::Branch { cond, .. } => out.push(cond),
-        Stmt::Loop { kind, cond, .. } => {
-            if let Some(cond_expr) = cond {
-                out.push(cond_expr);
-            }
-            if let LoopKind::ForEach { array, .. } = kind {
-                out.push(array);
-            }
-        }
-        Stmt::Switch { expr, cases, .. } => {
-            out.push(expr);
-            for case in cases.iter() {
-                out.extend(case.values.iter());
-            }
-        }
-        Stmt::Sequence { .. }
-        | Stmt::Latch { .. }
-        | Stmt::Break { .. }
-        | Stmt::EventCall { .. }
-        | Stmt::Unknown { .. } => {}
-    }
-    out
-}
-
-/// Like [`scope_root_exprs`] but tags each entry with the [`ExprRole`] it
-/// plays in its owning statement. Lets callers distinguish Assignment lhs
-/// (a def, walked excluding the root) from rhs (a use, walked normally).
+/// must participate in CSE counting and substitution. The [`ExprRole`] tag
+/// lets callers distinguish lhs (a def, walked excluding the root) from rhs
+/// (a use, walked normally). Bare `Var` lhs is not matched anyway because
+/// bare `Var` is not eligible for hoisting.
 fn scope_root_exprs_tagged(stmt: &Stmt) -> Vec<(&Expr, ExprRole)> {
     let mut out: Vec<(&Expr, ExprRole)> = Vec::new();
     match stmt {
