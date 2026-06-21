@@ -518,7 +518,7 @@ fn rekey_doonce_latch(body: &mut [Stmt], latch_name: &str, new_gate_var: &str) -
                 return Some(old_gate);
             }
         }
-        for child in stmt.child_bodies_mut() {
+        for child in stmt.child_bodies_structural_mut() {
             if let Some(old_gate) = rekey_doonce_latch(child, latch_name, new_gate_var) {
                 return Some(old_gate);
             }
@@ -544,7 +544,7 @@ fn doonce_name_on_gate(body: &[Stmt], gate_var: &str) -> Option<String> {
                 return Some(name.clone());
             }
         }
-        for slice in stmt.child_bodies() {
+        for slice in stmt.child_bodies_structural() {
             if let Some(found) = doonce_name_on_gate(slice, gate_var) {
                 return Some(found);
             }
@@ -578,7 +578,7 @@ fn repoint_sibling_resets_beside_latch(body: &mut [Stmt], old_name: &str, new_na
         }
     }
     for stmt in body.iter_mut() {
-        for child in stmt.child_bodies_mut() {
+        for child in stmt.child_bodies_structural_mut() {
             repoint_sibling_resets_beside_latch(child, old_name, new_name);
         }
     }
@@ -618,7 +618,7 @@ fn collect_doonce_latch_names(body: &[Stmt], out: &mut Vec<(String, String)>) {
         {
             out.push((gate_var.clone(), name.clone()));
         }
-        for slice in stmt.child_bodies() {
+        for slice in stmt.child_bodies_structural() {
             collect_doonce_latch_names(slice, out);
         }
     }
@@ -641,7 +641,7 @@ fn wrap_flat_doonce_anywhere(
         return Some(name);
     }
     for stmt in body.iter_mut() {
-        for child in stmt.child_bodies_mut() {
+        for child in stmt.child_bodies_structural_mut() {
             if let Some(name) =
                 wrap_flat_doonce_anywhere(child, target_name, gate_var, sibling_name)
             {
@@ -806,7 +806,7 @@ fn first_guarded_call_name(body: &[Stmt]) -> Option<String> {
                 }
             }
         }
-        for slice in stmt.child_bodies() {
+        for slice in stmt.child_bodies_structural() {
             if let Some(name) = first_guarded_call_name(slice) {
                 return Some(name);
             }

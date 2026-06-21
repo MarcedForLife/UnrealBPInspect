@@ -112,9 +112,32 @@ impl Stmt {
     /// slices: branch then/else, sequence pins, loop body/completion,
     /// switch case bodies/default, latch init/body. Leaf variants
     /// (Assignment, Call, Return, Break, EventCall, Unknown) own none.
-    /// ForC init/increment sub-bodies are intentionally not included;
-    /// callers that need those use the expression/child walkers.
-    pub fn child_bodies(&self) -> Vec<&[Stmt]> {
+    ///
+    /// ForC init/increment sub-bodies are intentionally NOT included.
+    /// Callers that walk the construct's region structure (offset
+    /// collection, DoOnce scans, K2Node carry) want them excluded; the
+    /// expression/rewrite walkers that must reach the loop counter's init
+    /// and increment use [`child_bodies_all`](Self::child_bodies_all).
+    pub fn child_bodies_structural(&self) -> Vec<&[Stmt]> {
+        self.child_bodies_impl(false)
+    }
+
+    /// [`child_bodies_structural`](Self::child_bodies_structural) plus a
+    /// ForC loop's `init` and `increment` sub-bodies, appended after
+    /// `body`/`completion`. This is the coverage the rewrite walkers
+    /// ([`walk_stmt_children`](crate::bytecode::transforms::visit::walk_stmt_children))
+    /// need so the loop counter's init and increment are visited once
+    /// `refine_loops` has populated them.
+    pub(crate) fn child_bodies_all(&self) -> Vec<&[Stmt]> {
+        self.child_bodies_impl(true)
+    }
+
+    /// Single immutable child-body skeleton behind
+    /// [`child_bodies_structural`] and [`child_bodies_all`]. `include_forc`
+    /// toggles only the ForC loop's init/increment slots; every other
+    /// variant is independent of it. Slot order per variant is fixed and
+    /// asserted by the `child_bodies_*` unit tests.
+    fn child_bodies_impl(&self, include_forc: bool) -> Vec<&[Stmt]> {
         match self {
             Stmt::Branch {
                 then_body,
@@ -123,11 +146,20 @@ impl Stmt {
             } => vec![then_body.as_slice(), else_body.as_slice()],
             Stmt::Sequence { pins, .. } => pins.iter().map(Vec::as_slice).collect(),
             Stmt::Loop {
-                body, completion, ..
+                body,
+                completion,
+                kind,
+                ..
             } => {
                 let mut bodies = vec![body.as_slice()];
                 if let Some(comp) = completion {
                     bodies.push(comp.as_slice());
+                }
+                if include_forc {
+                    if let LoopKind::ForC { init, increment } = kind {
+                        bodies.push(init.as_slice());
+                        bodies.push(increment.as_slice());
+                    }
                 }
                 bodies
             }
@@ -144,10 +176,22 @@ impl Stmt {
         }
     }
 
-    /// Mutable counterpart of [`child_bodies`](Self::child_bodies), for
-    /// in-place rewrite recursion. Same variant coverage and the same
-    /// intentional omission of ForC init/increment sub-bodies.
-    pub fn child_bodies_mut(&mut self) -> Vec<&mut Vec<Stmt>> {
+    /// Mutable counterpart of [`child_bodies_structural`], for in-place
+    /// rewrite recursion. Same variant coverage and the same ForC exclusion.
+    pub(crate) fn child_bodies_structural_mut(&mut self) -> Vec<&mut Vec<Stmt>> {
+        self.child_bodies_impl_mut(false)
+    }
+
+    /// Mutable counterpart of [`child_bodies_all`]: structural slots plus a
+    /// ForC loop's init/increment.
+    pub(crate) fn child_bodies_all_mut(&mut self) -> Vec<&mut Vec<Stmt>> {
+        self.child_bodies_impl_mut(true)
+    }
+
+    /// Single mutable child-body skeleton behind
+    /// [`child_bodies_structural_mut`] and [`child_bodies_all_mut`]. Mirrors
+    /// [`child_bodies_impl`](Self::child_bodies_impl) slot-for-slot.
+    fn child_bodies_impl_mut(&mut self, include_forc: bool) -> Vec<&mut Vec<Stmt>> {
         match self {
             Stmt::Branch {
                 then_body,
@@ -156,11 +200,20 @@ impl Stmt {
             } => vec![then_body, else_body],
             Stmt::Sequence { pins, .. } => pins.iter_mut().collect(),
             Stmt::Loop {
-                body, completion, ..
+                body,
+                completion,
+                kind,
+                ..
             } => {
                 let mut bodies = vec![body];
                 if let Some(comp) = completion {
                     bodies.push(comp);
+                }
+                if include_forc {
+                    if let LoopKind::ForC { init, increment } = kind {
+                        bodies.push(init);
+                        bodies.push(increment);
+                    }
                 }
                 bodies
             }
@@ -226,4 +279,136 @@ pub enum LatchKind {
 pub struct SwitchCase {
     pub values: Vec<Expr>,
     pub body: Vec<Stmt>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A one-statement sub-body tagged by its `Break` offset, so a test can
+    /// identify which slot a `child_bodies_*` entry came from by its offset.
+    fn marker(offset: usize) -> Vec<Stmt> {
+        vec![Stmt::Break { offset }]
+    }
+
+    fn first_offsets(bodies: &[&[Stmt]]) -> Vec<usize> {
+        bodies.iter().map(|body| body[0].offset()).collect()
+    }
+
+    fn forc_loop() -> Stmt {
+        Stmt::Loop {
+            kind: LoopKind::ForC {
+                init: marker(3),
+                increment: marker(4),
+            },
+            cond: None,
+            body: marker(1),
+            completion: Some(marker(2)),
+            offset: 0,
+        }
+    }
+
+    #[test]
+    fn structural_excludes_forc_init_increment() {
+        assert_eq!(
+            first_offsets(&forc_loop().child_bodies_structural()),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn all_appends_forc_init_then_increment_after_body_and_completion() {
+        assert_eq!(
+            first_offsets(&forc_loop().child_bodies_all()),
+            vec![1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn branch_yields_then_then_else_with_no_forc_difference() {
+        let branch = Stmt::Branch {
+            cond: Expr::Literal("true".to_string()),
+            then_body: marker(1),
+            else_body: marker(2),
+            offset: 0,
+        };
+        assert_eq!(first_offsets(&branch.child_bodies_structural()), vec![1, 2]);
+        assert_eq!(first_offsets(&branch.child_bodies_all()), vec![1, 2]);
+    }
+
+    #[test]
+    fn latch_yields_init_then_body() {
+        let latch = Stmt::Latch {
+            kind: LatchKind::DoOnce {
+                name: "DoOnce_0".to_string(),
+                gate_var: "g".to_string(),
+            },
+            init: marker(1),
+            body: marker(2),
+            offset: 0,
+        };
+        assert_eq!(first_offsets(&latch.child_bodies_structural()), vec![1, 2]);
+    }
+
+    #[test]
+    fn switch_yields_cases_in_order_then_default() {
+        let switch = Stmt::Switch {
+            expr: Expr::Var("x".to_string()),
+            cases: vec![
+                SwitchCase {
+                    values: vec![Expr::Literal("0".to_string())],
+                    body: marker(1),
+                },
+                SwitchCase {
+                    values: vec![Expr::Literal("1".to_string())],
+                    body: marker(2),
+                },
+            ],
+            default: Some(marker(3)),
+            offset: 0,
+        };
+        assert_eq!(
+            first_offsets(&switch.child_bodies_structural()),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn sequence_yields_pins_in_order() {
+        let sequence = Stmt::Sequence {
+            pins: vec![marker(1), marker(2), marker(3)],
+            offset: 0,
+        };
+        assert_eq!(
+            first_offsets(&sequence.child_bodies_structural()),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn leaf_variants_own_no_child_bodies() {
+        let leaf = Stmt::Return {
+            value: None,
+            offset: 0,
+        };
+        assert!(leaf.child_bodies_structural().is_empty());
+        assert!(leaf.child_bodies_all().is_empty());
+    }
+
+    #[test]
+    fn mutable_skeletons_match_immutable_slot_order() {
+        let all: Vec<usize> = forc_loop()
+            .child_bodies_all_mut()
+            .iter()
+            .map(|body| body[0].offset())
+            .collect();
+        assert_eq!(all, vec![1, 2, 3, 4]);
+
+        let structural: Vec<usize> = forc_loop()
+            .child_bodies_structural_mut()
+            .iter()
+            .map(|body| body[0].offset())
+            .collect();
+        assert_eq!(structural, vec![1, 2]);
+    }
 }

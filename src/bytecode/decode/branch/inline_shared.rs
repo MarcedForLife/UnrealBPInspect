@@ -458,7 +458,7 @@ fn first_call_func_name(stmts: &[Stmt]) -> Option<String> {
         {
             return Some(name.clone());
         }
-        for slice in stmt.child_bodies() {
+        for slice in stmt.child_bodies_structural() {
             if let Some(name) = first_call_func_name(slice) {
                 return Some(name);
             }

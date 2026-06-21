@@ -366,7 +366,7 @@ fn pick_user_call_at_or_after(stmts: &[Stmt], anchor_offset: usize) -> Option<St
                 return Some(name);
             }
         }
-        for slice in stmt.child_bodies() {
+        for slice in stmt.child_bodies_structural() {
             if let Some(name) = pick_user_call_at_or_after(slice, anchor_offset) {
                 return Some(name);
             }
@@ -381,7 +381,7 @@ fn pick_first_user_call(stmts: &[Stmt]) -> Option<String> {
         if let Some(name) = direct.filter(|name| !is_library_prefix(name)) {
             return Some(name);
         }
-        for slice in stmt.child_bodies() {
+        for slice in stmt.child_bodies_structural() {
             if let Some(name) = pick_first_user_call(slice) {
                 return Some(name);
             }

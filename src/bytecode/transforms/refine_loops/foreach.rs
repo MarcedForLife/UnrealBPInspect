@@ -329,7 +329,7 @@ fn find_item_binding_nested(
     scopes: &[&[Stmt]],
 ) -> Option<String> {
     for stmt in stmts {
-        for child in stmt.child_bodies() {
+        for child in stmt.child_bodies_structural() {
             if let Some(item) = find_item_binding_in_stmts(child, alias_refs, array_expr, scopes) {
                 return Some(item);
             }
