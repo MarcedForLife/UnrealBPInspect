@@ -115,8 +115,7 @@ pub(super) fn try_emit_ifthen_region(
     // folding the match in here can't drop the path, just avoids an expect.
     if let (true, Some(tree)) = (own_exit && !parent_pulls_same_exit, region_tree) {
         let tail = decode_post_merge_continuation(region_id, tree, cfg, ctx);
-        let tail_is_bare_return = matches!(tail.as_slice(), [Stmt::Return { value: None, .. }]);
-        if !tail.is_empty() && !tail_is_bare_return {
+        if !tail_is_droppable(&tail) {
             let mut out = preamble;
             out.push(Stmt::Branch {
                 cond: final_cond,

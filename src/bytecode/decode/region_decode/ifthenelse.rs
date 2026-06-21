@@ -281,8 +281,7 @@ fn distribute_own_exit_tail(
     then_body: &mut Vec<Stmt>,
     else_body: &mut Vec<Stmt>,
 ) -> Option<Vec<Stmt>> {
-    let tail_is_bare_return = matches!(tail.as_slice(), [Stmt::Return { value: None, .. }]);
-    if tail.is_empty() || tail_is_bare_return {
+    if tail_is_droppable(&tail) {
         return None;
     }
     let (then_reaches, else_reaches) =
@@ -890,9 +889,7 @@ pub(super) fn decode_arm_via_region_dispatch(
                 && parent_owns_or_absorbs_exit(last_consumed, region_tree, cfg)
             {
                 let mut tail = decode_post_merge_continuation(last_consumed, region_tree, cfg, ctx);
-                let tail_is_bare_return =
-                    matches!(tail.as_slice(), [Stmt::Return { value: None, .. }]);
-                if !tail.is_empty() && !tail_is_bare_return {
+                if !tail_is_droppable(&tail) {
                     stmts.append(&mut tail);
                 }
             }

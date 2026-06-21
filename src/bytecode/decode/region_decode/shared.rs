@@ -266,6 +266,14 @@ pub(super) fn region_body_is_only_return(
     matches!(stmts.as_slice(), [Stmt::Return { value: None, .. }])
 }
 
+/// True when a region's own-exit continuation tail carries nothing worth
+/// appending: it is empty, or it is just a bare `Return { None }`. The
+/// per-kind emitters drop such a tail rather than re-emitting a redundant
+/// trailing return after the region's structured statements.
+pub(super) fn tail_is_droppable(tail: &[Stmt]) -> bool {
+    tail.is_empty() || matches!(tail, [Stmt::Return { value: None, .. }])
+}
+
 /// Complement to the sibling merge-continuation case. True when
 /// `region_id`'s exit block is NOT the synthetic sink, IS owned by the
 /// region itself (`block_to_region[exit] == region_id`), AND carries
