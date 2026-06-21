@@ -43,6 +43,7 @@ use crate::bytecode::partition::OpcodeGraph;
 use crate::bytecode::readers::{read_bc_fname, read_bc_i32};
 use crate::bytecode::transforms::latch_recognition::{DOONCE_GATE_PREFIX, DOONCE_INIT_PREFIX};
 
+use super::dom::DomChain;
 use super::{reachable_bounded, BlockId, BoundedReach, ControlFlowGraph};
 
 /// Names beginning with any of these prefixes are synthetic gate booleans
@@ -424,35 +425,21 @@ fn strictly_dominates(
     if ancestor == node {
         return false;
     }
+    // The entry dominates every other reachable node, including ones absent
+    // from the idom map (unreachable / no ipostdom); the chain walk alone
+    // would miss those, so keep the shortcut.
     if ancestor == cfg.entry {
         return true;
     }
-    let mut cursor = node;
-    while let Some(&parent) = idom.get(&cursor) {
-        if parent == ancestor {
-            return true;
-        }
-        if parent == cursor {
-            return false;
-        }
-        cursor = parent;
-    }
-    false
+    DomChain(idom)
+        .ancestors(node)
+        .any(|parent| parent == ancestor)
 }
 
 /// Distance from the entry block to `node` along the dominator chain.
 /// Entry is depth 0.
 fn dom_depth(idom: &BTreeMap<BlockId, BlockId>, node: BlockId) -> usize {
-    let mut depth = 0usize;
-    let mut cursor = node;
-    while let Some(&parent) = idom.get(&cursor) {
-        if parent == cursor {
-            break;
-        }
-        depth += 1;
-        cursor = parent;
-    }
-    depth
+    DomChain(idom).ancestors(node).count()
 }
 
 /// Construct the final `RegionTree` from candidates + nesting metadata,

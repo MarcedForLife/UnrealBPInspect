@@ -12,9 +12,36 @@
 //! - `compute_postdominators` reverses the CFG and runs the same
 //!   algorithm starting from the synthetic sink (`cfg.sink`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{BlockId, ControlFlowGraph};
+
+/// Borrow-only view over an immediate-dominator (or immediate-post-dominator)
+/// map for walking a node's ancestor chain.
+///
+/// `compute_dominators` / `compute_postdominators` return the chain with the
+/// root excluded (the root self-map is stripped), so [`DomChain::ancestors`]
+/// terminates on the first absent key. It additionally guards against a
+/// self-map (`parent == node`) and any repeated node, so a malformed map
+/// cannot spin forever.
+pub(crate) struct DomChain<'a>(pub &'a BTreeMap<BlockId, BlockId>);
+
+impl DomChain<'_> {
+    /// Strict ancestors of `node`, innermost first, excluding `node`.
+    /// Empty when `node` is the root or absent from the map.
+    pub(crate) fn ancestors(&self, node: BlockId) -> impl Iterator<Item = BlockId> + '_ {
+        let mut cursor = node;
+        let mut seen = BTreeSet::from([node]);
+        std::iter::from_fn(move || {
+            let &parent = self.0.get(&cursor)?;
+            if parent == cursor || !seen.insert(parent) {
+                return None;
+            }
+            cursor = parent;
+            Some(parent)
+        })
+    }
+}
 
 /// Compute the immediate-dominator map for `cfg`.
 ///
@@ -200,4 +227,36 @@ fn intersect(
         }
     }
     finger_a
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ancestors_yields_innermost_first_excluding_node() {
+        // 3 -> 2 -> 1 -> 0(root, absent).
+        let idom = BTreeMap::from([(1, 0), (2, 1), (3, 2)]);
+        let chain = DomChain(&idom);
+        assert_eq!(chain.ancestors(3).collect::<Vec<_>>(), vec![2, 1, 0]);
+        assert_eq!(chain.ancestors(3).count(), 3);
+    }
+
+    #[test]
+    fn ancestors_of_root_or_absent_node_is_empty() {
+        let idom = BTreeMap::from([(1, 0)]);
+        let chain = DomChain(&idom);
+        assert_eq!(chain.ancestors(0).count(), 0); // root, absent from map
+        assert_eq!(chain.ancestors(42).count(), 0); // unreachable, absent
+    }
+
+    #[test]
+    fn ancestors_terminates_on_self_map_and_cycle() {
+        // Self-map at the root yields nothing past it.
+        let self_map = BTreeMap::from([(1, 1)]);
+        assert_eq!(DomChain(&self_map).ancestors(1).count(), 0);
+        // A malformed 2-cycle stops once the repeat is seen, never spins.
+        let cycle = BTreeMap::from([(1, 2), (2, 1)]);
+        assert_eq!(DomChain(&cycle).ancestors(1).collect::<Vec<_>>(), vec![2]);
+    }
 }
