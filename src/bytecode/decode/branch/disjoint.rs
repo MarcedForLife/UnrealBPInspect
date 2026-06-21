@@ -13,7 +13,7 @@ use crate::bytecode::transforms::latch_recognition::{DOONCE_GATE_PREFIX, DOONCE_
 use super::super::ctx::{DecodeCtx, OwnerId};
 use super::super::expr_decode::decode_expr;
 use super::inline_shared::try_cross_event_inline;
-use super::layout::{arm_region_owner, scan_for_terminating_jump};
+use super::layout::{arm_last_end, arm_region_owner, scan_for_terminating_jump};
 use super::subrange::decode_subrange;
 use super::target::{classify_target, read_jump_target, skip_instrumentation, JumpTarget};
 
@@ -103,7 +103,7 @@ pub(crate) fn disjoint_jump_target_extent(
     // owned-range end.
     let body_walk_limit = ctx
         .region_arm_extents_for(jump_offset, &[target_disk])
-        .and_then(|extents| extents.first().and_then(|arm| arm.last()).map(|r| r.end))
+        .and_then(|extents| arm_last_end(&extents, 0))
         .filter(|end| *end > target_disk)
         .unwrap_or(target_range.1);
     let body_end = disjoint_body_extent(target_disk, body_walk_limit, ctx)?;
@@ -302,7 +302,7 @@ pub(crate) fn disjoint_else_arm_for_jin(
     // we fall back to the owned-range end.
     let body_walk_limit = ctx
         .region_arm_extents_for(jin_offset, &[else_target_disk])
-        .and_then(|extents| extents.first().and_then(|arm| arm.last()).map(|r| r.end))
+        .and_then(|extents| arm_last_end(&extents, 0))
         .filter(|end| *end > else_target_disk)
         .unwrap_or(target_range.1);
     let body_end = disjoint_body_extent(else_target_disk, body_walk_limit, ctx)?;
