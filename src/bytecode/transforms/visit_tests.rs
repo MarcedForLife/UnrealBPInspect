@@ -4,10 +4,10 @@
 
 use super::test_fixtures::{assign, call, lit, stmt_kind, var};
 use super::visit::{
-    any_expr, rewrite_stmts_postorder, rewrite_stmts_preorder, walk_body_exprs,
+    any_expr, for_each_sub_body, rewrite_stmts_postorder, rewrite_stmts_preorder, walk_body_exprs,
     walk_body_exprs_mut, walk_body_exprs_mut_visit_lhs, walk_body_exprs_visit_lhs, walk_expr,
-    walk_expr_mut, walk_stmt_exprs, walk_stmt_exprs_mut, walk_stmt_exprs_mut_visit_lhs,
-    walk_stmt_exprs_visit_lhs, Action,
+    walk_expr_mut, walk_stmt_children, walk_stmt_exprs, walk_stmt_exprs_mut,
+    walk_stmt_exprs_mut_visit_lhs, walk_stmt_exprs_visit_lhs, Action,
 };
 use crate::bytecode::expr::{BinaryOp, CastKind, Expr, SwitchExprCase, UnaryOp};
 use crate::bytecode::stmt::{LatchKind, LoopKind, Stmt, SwitchCase};
@@ -807,4 +807,35 @@ fn preorder_descends_into_the_mutated_node_not_a_snapshot() {
     assert_eq!(order, vec!["branch", "after"]);
     assert!(!order.iter().any(|label| label.starts_with("then")));
     assert!(matches!(body[0], Stmt::Assignment { .. }));
+}
+
+/// The slot-addressed walker yields exactly the sub-bodies the unslotted
+/// canonical walker does, in the same order. `for_each_sub_body` is just
+/// `walk_stmt_children` plus a `ScopeSlot` tag; dropping the tag must
+/// recover an identical sequence of sub-body slices. Identity (pointer +
+/// length) comparison proves both walkers reference the same slices in the
+/// same order without needing `Stmt: PartialEq`. Run against every variant
+/// of `synthetic_tree` so any slot the canonical walker covers but the
+/// slotted one drops (or vice versa) trips the assertion.
+#[test]
+fn slotted_walker_matches_walk_stmt_children() {
+    let body = synthetic_tree();
+    for stmt in &body {
+        let mut unslotted: Vec<(*const Stmt, usize)> = Vec::new();
+        walk_stmt_children(stmt, &mut |sub_body: &[Stmt]| {
+            unslotted.push((sub_body.as_ptr(), sub_body.len()));
+        });
+
+        let mut slotted: Vec<(*const Stmt, usize)> = Vec::new();
+        for_each_sub_body(stmt, |_slot, sub_body: &[Stmt]| {
+            slotted.push((sub_body.as_ptr(), sub_body.len()));
+        });
+
+        assert_eq!(
+            unslotted,
+            slotted,
+            "for_each_sub_body must yield the same sub-bodies as walk_stmt_children for {}",
+            stmt_kind(stmt)
+        );
+    }
 }
