@@ -48,6 +48,17 @@ impl FieldPath {
     pub fn is_null(&self) -> bool {
         self.segments == 0
     }
+
+    /// The member leaf: the segment after the last `::`, or the whole
+    /// display when there is no `::`. `None` for null/corrupt paths
+    /// (`is_null`) and empty-display operands. Raw and un-normalised;
+    /// callers apply their own canonicalisation (e.g. `normalise_member_name`).
+    pub fn leaf_member(&self) -> Option<&str> {
+        if self.is_null() || self.display.is_empty() {
+            return None;
+        }
+        Some(self.display.rsplit("::").next().unwrap_or(&self.display))
+    }
 }
 
 /// `EX_TextConst` payload variants. The text-const opcode prefixes a
