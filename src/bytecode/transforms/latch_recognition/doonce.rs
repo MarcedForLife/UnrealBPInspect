@@ -1119,9 +1119,12 @@ fn collect_asset_wide_doonce_names(
             collect_asset_wide_doonce_names(inner, out);
             continue;
         }
-        // Recurse into every Vec<Stmt> sub-body. Manual descent (rather
-        // than walk_stmt_children_mut) lets the immutable collect pass
-        // borrow `body` shared.
+        // Recurse structural children by hand. This deliberately omits a
+        // FlipFlop latch's init/body: the DoOnce arm above already handled
+        // and `continue`d DoOnce latches, so only FlipFlop reaches here, and
+        // the asset-wide DoOnce-name scan does not descend FlipFlop bodies.
+        // That is why it cannot delegate to `child_bodies_structural` /
+        // `walk_stmt_children`, both of which include Latch sub-bodies.
         match stmt {
             Stmt::Branch {
                 then_body,

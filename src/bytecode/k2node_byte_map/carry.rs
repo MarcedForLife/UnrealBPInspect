@@ -116,7 +116,7 @@ fn body_offset_span(body: &[Stmt]) -> Option<(usize, usize)> {
     };
     for stmt in body {
         merge(stmt.offset(), stmt.offset());
-        for child in stmt.child_bodies() {
+        for child in stmt.child_bodies_structural() {
             if let Some((child_lo, child_hi)) = body_offset_span(child) {
                 merge(child_lo, child_hi);
             }
@@ -145,7 +145,7 @@ pub(crate) fn covering_statement(body: &[Stmt], target: usize) -> Option<&Stmt> 
             _ => best = Some(stmt),
         }
         // Descend: a child body may hold a tighter covering statement.
-        for child in stmt.child_bodies() {
+        for child in stmt.child_bodies_structural() {
             if let Some(nested) = covering_statement(child, target) {
                 if nested.offset() >= best.map(Stmt::offset).unwrap_or(0) {
                     best = Some(nested);
@@ -343,7 +343,7 @@ mod tests {
         let mut out = Vec::new();
         for stmt in body {
             out.push(stmt.offset());
-            for child in stmt.child_bodies() {
+            for child in stmt.child_bodies_structural() {
                 out.extend(collect_offsets(child));
             }
         }
