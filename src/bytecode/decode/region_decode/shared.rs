@@ -274,6 +274,33 @@ pub(super) fn tail_is_droppable(tail: &[Stmt]) -> bool {
     tail.is_empty() || matches!(tail, [Stmt::Return { value: None, .. }])
 }
 
+/// Shared region-emitter prologue. Returns the region's entry block and the
+/// disk address of its terminator (the entry block's last opcode) when the
+/// region is of `expected_kind`, has an entry block, and that block's
+/// terminator opcode equals `expected_op`. Returns `None` otherwise.
+///
+/// The five `try_emit_*` emitters open with this same ritual, each pairing a
+/// `RegionKind` with the terminator opcode it requires
+/// (`EX_JUMP_IF_NOT` for IfThen/IfThenElse/DoOnceGate/Loop,
+/// `EX_PUSH_EXECUTION_FLOW` for SequenceChain).
+pub(super) fn region_entry_terminator<'a>(
+    region: &Region,
+    expected_kind: RegionKind,
+    expected_op: u8,
+    cfg: &'a ControlFlowGraph,
+    ctx: &DecodeCtx,
+) -> Option<(&'a BasicBlock, usize)> {
+    if region.kind != expected_kind {
+        return None;
+    }
+    let entry_block = cfg.blocks.get(region.entry)?;
+    let terminator_addr = *entry_block.opcodes.last()?;
+    if *ctx.bytecode.get(terminator_addr)? != expected_op {
+        return None;
+    }
+    Some((entry_block, terminator_addr))
+}
+
 /// Complement to the sibling merge-continuation case. True when
 /// `region_id`'s exit block is NOT the synthetic sink, IS owned by the
 /// region itself (`block_to_region[exit] == region_id`), AND carries

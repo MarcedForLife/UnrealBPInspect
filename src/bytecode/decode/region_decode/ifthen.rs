@@ -24,13 +24,16 @@ pub(super) fn try_emit_ifthen_region(
     if let Some(stmt) = try_emit_jumpifnot_cascade_region(region, region_id, cfg, ctx) {
         return Some(vec![stmt]);
     }
-    let entry_block = cfg.blocks.get(region.entry)?;
-    let terminator_addr = *entry_block.opcodes.last()?;
-    if *ctx.bytecode.get(terminator_addr)? != EX_JUMP_IF_NOT {
+    // The kind check stays above the cascade probe; the helper re-checks it
+    // redundantly. A terminator miss here routes to the pop_flow fallback,
+    // not a bail, so consume the Option instead of `?`.
+    let Some((entry_block, terminator_addr)) =
+        region_entry_terminator(region, RegionKind::IfThen, EX_JUMP_IF_NOT, cfg, ctx)
+    else {
         // See try_emit_ifthenelse_region for the naked-if-with-latent-
         // call shape this fallback handles.
         return try_emit_pop_flow_if_not_branch_region(region, region_id, cfg, ctx);
-    }
+    };
 
     // Nested-naked-if shape: see `try_emit_ifthenelse_region` for the
     // byte-layout. Same dispatch into the pop_flow_if_not helper so

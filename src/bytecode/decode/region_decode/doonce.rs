@@ -25,14 +25,8 @@ pub(super) fn try_emit_doonce_region(
     walk: RegionWalkCtx,
 ) -> Option<Vec<Stmt>> {
     let RegionWalkCtx { cfg, ctx, idom: _ } = walk;
-    if region.kind != RegionKind::DoOnceGate {
-        return None;
-    }
-    let entry_block = cfg.blocks.get(region.entry)?;
-    let terminator_addr = *entry_block.opcodes.last()?;
-    if *ctx.bytecode.get(terminator_addr)? != EX_JUMP_IF_NOT {
-        return None;
-    }
+    let (entry_block, terminator_addr) =
+        region_entry_terminator(region, RegionKind::DoOnceGate, EX_JUMP_IF_NOT, cfg, ctx)?;
 
     let cond = decode_jin_cond(terminator_addr, ctx)?;
     let gate_var_name = match &cond {
