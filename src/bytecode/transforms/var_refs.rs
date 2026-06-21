@@ -25,7 +25,9 @@
 
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::{LoopKind, Stmt};
-use crate::bytecode::transforms::visit::{walk_body_exprs, walk_body_exprs_visit_lhs, walk_expr};
+use crate::bytecode::transforms::visit::{
+    walk_body_exprs, walk_body_exprs_visit_lhs, walk_expr, walk_stmt_exprs_mut_visit_lhs, Action,
+};
 use std::collections::BTreeMap;
 
 /// How far a var-ref query descends.
@@ -150,6 +152,35 @@ fn count_in_expr(expr: &Expr, name: &str) -> usize {
     count
 }
 
+/// Rename every `Expr::Var(old)` to `new` in a single statement, including
+/// nested sub-bodies and the `LoopKind::ForEach::item` slot (a `String`
+/// outside the `Expr` tree, so the visitor cannot reach it). Visits
+/// `Assignment` left-hand sides, so a loop counter's `i = i + 1` increment is
+/// renamed on both the read and the write.
+///
+/// This is the universal rename. `flipflop_naming`'s rename deliberately
+/// diverges (it skips the lhs and the item slot to preserve the gate-var
+/// alias definition) and keeps its own helper.
+pub(crate) fn rename_var_in_stmt(stmt: &mut Stmt, old: &str, new: &str) {
+    if let Stmt::Loop {
+        kind: LoopKind::ForEach { item, .. },
+        ..
+    } = stmt
+    {
+        if item == old {
+            *item = new.to_string();
+        }
+    }
+    walk_stmt_exprs_mut_visit_lhs(stmt, &mut |expr: &mut Expr| {
+        if let Expr::Var(name) = expr {
+            if name == old {
+                *name = new.to_string();
+            }
+        }
+        Action::Continue
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +273,52 @@ mod tests {
         );
         // Deep: all four occurrences.
         assert_eq!(count_var(&body, "t", VarScope::Deep, Defs::SkipLhs), 4);
+    }
+
+    #[test]
+    fn rename_var_in_stmt_covers_lhs_and_foreach_item() {
+        // `i = i` -- both the lhs and rhs occurrences must rename, or a
+        // renamed loop counter would read a different name than it writes.
+        let mut stmt = assign("i", var("i"));
+        rename_var_in_stmt(&mut stmt, "i", "Index");
+        assert_eq!(
+            count_var(
+                std::slice::from_ref(&stmt),
+                "i",
+                VarScope::Deep,
+                Defs::VisitLhs
+            ),
+            0
+        );
+        assert_eq!(
+            count_var(
+                std::slice::from_ref(&stmt),
+                "Index",
+                VarScope::Deep,
+                Defs::VisitLhs
+            ),
+            2
+        );
+
+        // The ForEach item slot is a String outside the Expr tree; rename it.
+        let mut loop_stmt = Stmt::Loop {
+            kind: LoopKind::ForEach {
+                item: "Elem".to_string(),
+                array: var("arr"),
+            },
+            cond: None,
+            body: vec![],
+            completion: None,
+            offset: 0,
+        };
+        rename_var_in_stmt(&mut loop_stmt, "Elem", "Renamed");
+        let Stmt::Loop {
+            kind: LoopKind::ForEach { item, .. },
+            ..
+        } = &loop_stmt
+        else {
+            panic!("expected ForEach loop");
+        };
+        assert_eq!(item, "Renamed");
     }
 }

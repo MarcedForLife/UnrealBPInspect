@@ -24,7 +24,8 @@ use std::collections::BTreeMap;
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::{LoopKind, Stmt};
 use crate::bytecode::transforms::cse_projections::collect_var_names_deep;
-use crate::bytecode::transforms::visit::{peel_transparent, walk_stmt_exprs_mut_visit_lhs, Action};
+use crate::bytecode::transforms::var_refs;
+use crate::bytecode::transforms::visit::peel_transparent;
 
 /// Prefixes used by the Blueprint compiler for integer loop counter temporaries.
 ///
@@ -112,7 +113,7 @@ fn normalize_body(body: &mut [Stmt], loop_depth: &mut usize) {
                 if let Some(new) = new_name {
                     let old = old_name.unwrap();
                     // Rename within this loop statement only (scoped).
-                    rename_in_stmt(&mut body[idx], &old, &new);
+                    var_refs::rename_var_in_stmt(&mut body[idx], &old, &new);
                 }
 
                 // Recurse into nested bodies at increased depth.
@@ -133,7 +134,7 @@ fn normalize_body(body: &mut [Stmt], loop_depth: &mut usize) {
                 let old_name = item.clone();
                 if old_name.starts_with('$') {
                     let new_name = derive_foreach_item_name(array, loop_body);
-                    rename_in_stmt(&mut body[idx], &old_name, &new_name);
+                    var_refs::rename_var_in_stmt(&mut body[idx], &old_name, &new_name);
                 }
 
                 *loop_depth += 1;
@@ -275,7 +276,7 @@ fn collect_struct_renames(body: &[Stmt]) -> BTreeMap<String, String> {
 fn apply_renames_to_body(body: &mut [Stmt], renames: &BTreeMap<String, String>) {
     for stmt in body.iter_mut() {
         for (old, new) in renames {
-            rename_in_stmt(stmt, old, new);
+            var_refs::rename_var_in_stmt(stmt, old, new);
         }
     }
 }
@@ -335,28 +336,4 @@ fn recurse_stmt_bodies(stmt: &mut Stmt, loop_depth: &mut usize) {
         | Stmt::EventCall { .. }
         | Stmt::Unknown { .. } => {}
     }
-}
-
-/// Rename all `Expr::Var(old)` occurrences to `new` within a single statement,
-/// including expressions and nested sub-bodies. Also renames the
-/// `LoopKind::ForEach::item` slot (a String, not an Expr, so it isn't
-/// reachable through the visitor).
-fn rename_in_stmt(stmt: &mut Stmt, old: &str, new: &str) {
-    if let Stmt::Loop {
-        kind: LoopKind::ForEach { item, .. },
-        ..
-    } = stmt
-    {
-        if item == old {
-            *item = new.to_string();
-        }
-    }
-    walk_stmt_exprs_mut_visit_lhs(stmt, &mut |expr: &mut Expr| {
-        if let Expr::Var(name) = expr {
-            if name == old {
-                *name = new.to_string();
-            }
-        }
-        Action::Continue
-    });
 }
