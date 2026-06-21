@@ -2,7 +2,9 @@
 //! gate/init/toggle name prefixes, the DoOnce role classifier, and the
 //! display-name derivation used for DoOnce / ResetDoOnce naming.
 
-use super::doonce::{classify_doonce_sequence, doonce_var_suffix, DoOnceSequenceEvidence};
+use super::doonce::{
+    classify_doonce_sequence, doonce_var_suffix, is_synthetic_reset_doonce, DoOnceSequenceEvidence,
+};
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::{LatchKind, Stmt};
 
@@ -102,6 +104,18 @@ pub(super) enum DoOnceRole {
 }
 
 impl DoOnceRole {
+    /// True for the four flat gate/init scaffold roles. `None` and
+    /// `DoOnceSequence` are not flat scaffold.
+    pub(super) fn is_scaffold(&self) -> bool {
+        matches!(
+            self,
+            DoOnceRole::GateCheck(_)
+                | DoOnceRole::GateSet(_)
+                | DoOnceRole::InitCheck(_)
+                | DoOnceRole::InitSet(_)
+        )
+    }
+
     /// The trimmed DoOnce instance suffix this role carries (`""` for the
     /// first, unnumbered instance, `"4"` for `..._4`, etc.). Strips the gate
     /// prefix for gate roles and the init prefix for init roles, folding that
@@ -143,6 +157,37 @@ pub(super) fn classify_doonce_role(stmt: &Stmt) -> DoOnceRole {
         return DoOnceRole::DoOnceSequence(evidence);
     }
     DoOnceRole::None
+}
+
+/// A single statement's role inside a DoOnce-expansion pin. Layers the three
+/// scaffold tests the pin-purity predicates share so each predicate can spell
+/// its own accept-set over one classification instead of re-deriving it.
+/// Checked in order: scaffold no-op branch, then synthetic `ResetDoOnce` call,
+/// then the statement's `DoOnceRole`; anything else is user body.
+pub(super) enum PinClass {
+    /// A DoOnce role (the inner role tells gate/init/sequence apart;
+    /// `DoOnceSequence` is kept distinguishable and is not flat scaffold).
+    Scaffold(DoOnceRole),
+    /// A scaffold no-op `Branch { cond: true, [], [] }` from pop_flow collapse.
+    Noop,
+    /// The synthetic `Call(ResetDoOnce(DoOnce_*))` produced by reset-pair folding.
+    SyntheticReset,
+    /// Anything that is not DoOnce scaffold.
+    UserBody,
+}
+
+/// Classify one statement's pin role (see [`PinClass`] for the layer order).
+pub(super) fn classify_pin_stmt(stmt: &Stmt) -> PinClass {
+    if is_scaffold_noop_branch(stmt) {
+        return PinClass::Noop;
+    }
+    if is_synthetic_reset_doonce(stmt) {
+        return PinClass::SyntheticReset;
+    }
+    match classify_doonce_role(stmt) {
+        DoOnceRole::None => PinClass::UserBody,
+        role => PinClass::Scaffold(role),
+    }
 }
 
 /// Match `Branch{cond: Var(name), <arms pure DoOnce scaffold>}` where at
