@@ -301,6 +301,57 @@ pub(super) fn region_entry_terminator<'a>(
     Some((entry_block, terminator_addr))
 }
 
+/// Decode the single opcode at `opcode_addr`, skipping it when it is inside
+/// a `consumed` span, claim-protected, or past the end of the bytecode.
+/// On a successful decode the produced `Stmt` is pushed and the consumed
+/// byte spans (the cursor advance plus any out-of-cursor ranges the
+/// recogniser touched) are recorded.
+///
+/// `range_end` bounds the inner `decode_one_or_branch` cursor. The two
+/// block-decode loops differ only in what they pass here: the disk-order
+/// sweep passes the block's own end, while the arm-body walk passes the
+/// enclosing pin/arm range end so multi-block constructs classify their
+/// jump targets as in-range.
+pub(super) fn decode_opcode_at(
+    opcode_addr: usize,
+    range_end: usize,
+    ctx: &DecodeCtx,
+    stmts: &mut Vec<Stmt>,
+    consumed: &mut Vec<Range<usize>>,
+) {
+    if address_in_consumed(consumed, opcode_addr) {
+        return;
+    }
+    if claimed_end_for_disk_sweep(ctx, opcode_addr).is_some() {
+        return;
+    }
+    if opcode_addr >= ctx.bytecode.len() {
+        return;
+    }
+    let mut pos = opcode_addr;
+    let before = pos;
+    match decode_one_or_branch(&mut pos, range_end, ctx) {
+        Ok(Some(stmt)) => {
+            consumed.extend(extra_consumed_ranges(&stmt, before, pos));
+            stmts.push(stmt);
+            if pos > before {
+                consumed.push(before..pos);
+            }
+        }
+        Ok(None) => {
+            if pos > before {
+                consumed.push(before..pos);
+            }
+        }
+        Err(unknown) => {
+            stmts.push(*unknown);
+            if pos > before {
+                consumed.push(before..pos);
+            }
+        }
+    }
+}
+
 /// Complement to the sibling merge-continuation case. True when
 /// `region_id`'s exit block is NOT the synthetic sink, IS owned by the
 /// region itself (`block_to_region[exit] == region_id`), AND carries

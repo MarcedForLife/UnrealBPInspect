@@ -532,37 +532,7 @@ fn decode_region_block_if_unclaimed(
 
     let block_end = block.end;
     for &opcode_addr in &block.opcodes {
-        if address_in_consumed(consumed, opcode_addr) {
-            continue;
-        }
-        if claimed_end_for_disk_sweep(ctx, opcode_addr).is_some() {
-            continue;
-        }
-        if opcode_addr >= ctx.bytecode.len() {
-            continue;
-        }
-        let mut pos = opcode_addr;
-        let before = pos;
-        match decode_one_or_branch(&mut pos, block_end, ctx) {
-            Ok(Some(stmt)) => {
-                consumed.extend(extra_consumed_ranges(&stmt, before, pos));
-                stmts.push(stmt);
-                if pos > before {
-                    consumed.push(before..pos);
-                }
-            }
-            Ok(None) => {
-                if pos > before {
-                    consumed.push(before..pos);
-                }
-            }
-            Err(unknown) => {
-                stmts.push(*unknown);
-                if pos > before {
-                    consumed.push(before..pos);
-                }
-            }
-        }
+        decode_opcode_at(opcode_addr, block_end, ctx, stmts, consumed);
     }
 }
 
