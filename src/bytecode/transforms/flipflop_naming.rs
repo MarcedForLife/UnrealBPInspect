@@ -17,7 +17,7 @@
 
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::{LatchKind, Stmt};
-use crate::bytecode::transforms::visit::{walk_body_exprs_mut, walk_stmt_children_mut, Action};
+use crate::bytecode::transforms::visit::{rewrite_stmts_postorder, walk_body_exprs_mut, Action};
 
 /// Suffix appended to the derived display name when renaming gate-var
 /// references inside a FlipFlop body. The `$FlipFlop_<name>_IsA`
@@ -33,14 +33,12 @@ const IS_A_SUFFIX: &str = "_IsA";
 /// init/body) so FlipFlops nested inside other constructs are handled
 /// alongside top-level ones.
 pub fn derive_flipflop_names(body: &mut [Stmt]) {
-    for stmt in body.iter_mut() {
-        derive_in_stmt(stmt);
-    }
+    // Bottom-up: name nested FlipFlops before their enclosing one, so a
+    // FlipFlop's alias-set scan sees inner names already settled.
+    rewrite_stmts_postorder(body, &mut |stmt| derive_in_stmt(stmt));
 }
 
 fn derive_in_stmt(stmt: &mut Stmt) {
-    walk_stmt_children_mut(stmt, &mut |sub_body| derive_flipflop_names(sub_body));
-
     if let Stmt::Latch {
         kind: LatchKind::FlipFlop { gate_var, names },
         body,
