@@ -464,7 +464,7 @@ fn emit_continuation_region(
         }
         stmts
     };
-    if let Some((emitted, _continuation, _matched)) =
+    if let Some((emitted, _continuation, _is_sequence_chain)) =
         dispatch_region_emitters(region, region_id, region_tree, walk, true)
     {
         return append_own_exit(emitted);

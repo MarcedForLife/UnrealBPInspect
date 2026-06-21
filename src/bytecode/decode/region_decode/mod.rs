@@ -147,14 +147,14 @@ pub(super) fn walk_region(
     // merge continuation handled inside try_emit_ifthenelse_region.
     let defer_to_inner_sibling = region.kind == RegionKind::IfThenElse
         && find_same_entry_inner_sibling(region_id, region_tree).is_some();
-    if let Some((emitted, pulled_continuation, matched)) = dispatch_region_emitters(
+    if let Some((emitted, pulled_continuation, is_sequence_chain)) = dispatch_region_emitters(
         region,
         region_id,
         region_tree,
         walk,
         !defer_to_inner_sibling,
     ) {
-        if matches!(matched, MatchedEmitter::SequenceChain) {
+        if is_sequence_chain {
             // The SequenceChain emit decodes each pin body, including
             // pin-0's after-chain fallthrough block, which SESE often
             // assigns to an ANCESTOR region rather than this one.
