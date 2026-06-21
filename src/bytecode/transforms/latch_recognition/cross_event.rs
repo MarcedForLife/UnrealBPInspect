@@ -478,13 +478,7 @@ fn user_body_sequence_has_open(body: &[Stmt], location: &UserBodyLocation) -> bo
                 kind: LatchKind::DoOnce { .. },
                 ..
             }
-        ) || matches!(
-            classify_doonce_role(stmt),
-            DoOnceRole::GateCheck(_)
-                | DoOnceRole::GateSet(_)
-                | DoOnceRole::InitCheck(_)
-                | DoOnceRole::InitSet(_)
-        )
+        ) || matches!(classify_pin_stmt(stmt), PinClass::Scaffold(role) if role.is_scaffold())
     })
 }
 
