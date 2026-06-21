@@ -7,9 +7,9 @@ use super::doonce::{
     match_doonce_reset_halves, synthetic_reset_doonce_suffix,
 };
 use super::shared::{
-    classify_doonce_role, fallback_name_from_gate, first_user_call_name, is_reset_doonce_call_stmt,
-    is_scaffold_noop_branch, match_var_assigned_literal, DoOnceRole, DOONCE_GATE_PREFIX,
-    DOONCE_INIT_PREFIX,
+    classify_doonce_role, classify_pin_stmt, fallback_name_from_gate, first_user_call_name,
+    is_reset_doonce_call_stmt, is_scaffold_noop_branch, match_var_assigned_literal, DoOnceRole,
+    PinClass, DOONCE_GATE_PREFIX, DOONCE_INIT_PREFIX,
 };
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::{LatchKind, Stmt};
@@ -640,17 +640,14 @@ fn outer_sequence_consumable(pins: &[Vec<Stmt>], target_pin: usize) -> bool {
 /// by `Pass -1`. Used to validate that a sibling pin of the user-body
 /// Sequence's container is safe to discard.
 fn pin_is_pure_scaffold_any_suffix(pin: &[Stmt]) -> bool {
-    pin.iter().all(|stmt| {
-        if is_scaffold_noop_branch(stmt) || is_synthetic_reset_doonce(stmt) {
-            return true;
-        }
-        match classify_doonce_role(stmt) {
-            DoOnceRole::GateCheck(_)
-            | DoOnceRole::GateSet(_)
-            | DoOnceRole::InitCheck(_)
-            | DoOnceRole::InitSet(_) => true,
-            DoOnceRole::None | DoOnceRole::DoOnceSequence(_) => false,
-        }
+    // Roles + Noop + SyntheticReset. This WIDER accept-set (vs init_check's
+    // roles-only pin_is_pure_doonce_scaffold) is the load-bearing divergence:
+    // a discardable sibling pin may legitimately contain a folded ResetDoOnce
+    // or a pop_flow no-op, which a pure-scaffold pin here is allowed to carry.
+    pin.iter().all(|stmt| match classify_pin_stmt(stmt) {
+        PinClass::Scaffold(role) => role.is_scaffold(),
+        PinClass::Noop | PinClass::SyntheticReset => true,
+        PinClass::UserBody => false,
     })
 }
 
