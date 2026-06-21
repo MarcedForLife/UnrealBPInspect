@@ -366,27 +366,14 @@ fn ctx_with_owned_ranges<'a>(
     ctx: &'a DecodeCtx<'a>,
     owned: &'a [std::ops::Range<usize>],
 ) -> DecodeCtx<'a> {
+    // Sequence sub-scope keeps the parent's claim set and owner; only the
+    // owned-range slice narrows. child() copies the shared refs and resets
+    // claimed/decoding_owner, so re-set both to the parent's here.
     DecodeCtx {
-        mem_to_disk: ctx.mem_to_disk,
-        event_entries: ctx.event_entries,
-        function_signatures: ctx.function_signatures,
         owned_ranges: Some(owned),
-        skeleton: ctx.skeleton,
         claimed: ctx.claimed,
         decoding_owner: std::cell::Cell::new(ctx.decoding_owner.get()),
-        graph: ctx.graph,
-        cfg: ctx.cfg,
-        region_tree: ctx.region_tree,
-        region_byte_ranges: ctx.region_byte_ranges,
-        cross_event_inline: ctx.cross_event_inline,
-        k2node_byte_map: ctx.k2node_byte_map,
-        ..DecodeCtx::new(
-            ctx.bytecode,
-            ctx.name_table,
-            ctx._imports,
-            ctx._export_names,
-            ctx.ue5,
-        )
+        ..ctx.child()
     }
 }
 
