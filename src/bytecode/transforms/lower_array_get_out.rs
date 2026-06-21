@@ -16,7 +16,7 @@
 
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::Stmt;
-use crate::bytecode::transforms::visit::walk_stmt_children_mut;
+use crate::bytecode::transforms::visit::rewrite_stmts_preorder;
 
 /// Function names recognised as single-OUT array-get macros. The OUT
 /// parameter is the last argument and represents the assignment lhs.
@@ -24,20 +24,16 @@ const ARRAY_GET_OUT_FUNCTIONS: &[&str] = &["Array_Get", "GetArrayItem"];
 
 /// Rewrite recognised OUT-parameter array-get calls into assignments.
 pub fn lower_array_get_out_to_assignment(body: &mut [Stmt]) {
-    rewrite_in_place(body);
-    for stmt in body.iter_mut() {
-        walk_stmt_children_mut(stmt, &mut |sub_body| {
-            lower_array_get_out_to_assignment(sub_body)
-        });
-    }
-}
-
-fn rewrite_in_place(body: &mut [Stmt]) {
-    for stmt in body.iter_mut() {
+    // Preorder. try_rewrite only matches single-OUT array-get Call statements,
+    // which carry no child bodies, so interleaving the rewrite with the
+    // descent is byte-identical to rewriting the whole level then recursing:
+    // both a rewritten node (now an Assignment) and the original Call have no
+    // sub-bodies to revisit, and statements that DO have children never match.
+    rewrite_stmts_preorder(body, &mut |stmt| {
         if let Some(replacement) = try_rewrite(stmt) {
             *stmt = replacement;
         }
-    }
+    });
 }
 
 /// Attempt to rewrite `stmt` if it is a recognised OUT-parameter
