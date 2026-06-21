@@ -319,17 +319,12 @@ fn sibling_participates_in_pass_minus_one_pair(body: &[Stmt], idx: usize) -> boo
 /// Extract `(suffix, optional gate_var_name)` from a sibling-stmt role.
 /// Returns `None` for `DoOnceRole::None` and `DoOnceRole::DoOnceSequence`.
 fn role_suffix_and_gate_var(role: &DoOnceRole) -> Option<(String, Option<String>)> {
-    match role {
-        DoOnceRole::None | DoOnceRole::DoOnceSequence(_) => None,
-        DoOnceRole::GateCheck(name) | DoOnceRole::GateSet(name) => Some((
-            doonce_var_suffix(name, DOONCE_GATE_PREFIX).to_string(),
-            Some(name.clone()),
-        )),
-        DoOnceRole::InitCheck(name) | DoOnceRole::InitSet(name) => Some((
-            doonce_var_suffix(name, DOONCE_INIT_PREFIX).to_string(),
-            None,
-        )),
-    }
+    let suffix = role.suffix()?.to_string();
+    let gate_var = match role {
+        DoOnceRole::GateCheck(name) | DoOnceRole::GateSet(name) => Some(name.clone()),
+        _ => None,
+    };
+    Some((suffix, gate_var))
 }
 
 /// Per-Sequence summary used by the inventory builder.

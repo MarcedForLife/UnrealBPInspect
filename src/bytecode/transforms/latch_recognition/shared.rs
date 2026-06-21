@@ -2,7 +2,7 @@
 //! gate/init/toggle name prefixes, the DoOnce role classifier, and the
 //! display-name derivation used for DoOnce / ResetDoOnce naming.
 
-use super::doonce::{classify_doonce_sequence, DoOnceSequenceEvidence};
+use super::doonce::{classify_doonce_sequence, doonce_var_suffix, DoOnceSequenceEvidence};
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::{LatchKind, Stmt};
 
@@ -99,6 +99,25 @@ pub(super) enum DoOnceRole {
     InitCheck(String),
     InitSet(String),
     DoOnceSequence(DoOnceSequenceEvidence),
+}
+
+impl DoOnceRole {
+    /// The trimmed DoOnce instance suffix this role carries (`""` for the
+    /// first, unnumbered instance, `"4"` for `..._4`, etc.). Strips the gate
+    /// prefix for gate roles and the init prefix for init roles, folding that
+    /// gate-vs-init prefix choice into one place. `None` for `None` and
+    /// `DoOnceSequence` (which carry no single gate/init variable).
+    pub(super) fn suffix(&self) -> Option<&str> {
+        match self {
+            DoOnceRole::GateCheck(name) | DoOnceRole::GateSet(name) => {
+                Some(doonce_var_suffix(name, DOONCE_GATE_PREFIX))
+            }
+            DoOnceRole::InitCheck(name) | DoOnceRole::InitSet(name) => {
+                Some(doonce_var_suffix(name, DOONCE_INIT_PREFIX))
+            }
+            DoOnceRole::None | DoOnceRole::DoOnceSequence(_) => None,
+        }
+    }
 }
 
 pub(super) fn classify_doonce_role(stmt: &Stmt) -> DoOnceRole {
