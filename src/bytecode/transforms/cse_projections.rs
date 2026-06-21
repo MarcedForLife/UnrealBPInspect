@@ -43,8 +43,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::{LoopKind, Stmt};
 use crate::bytecode::transforms::visit::{
-    any_expr, descend_mut, descend_ref, for_each_sub_body, walk_expr, walk_expr_children,
-    walk_expr_children_mut, walk_expr_mut, Action, ScopeSlot, ScopeStep,
+    any_expr, descend_mut, descend_ref, for_each_sub_body, for_each_sub_body_mut, walk_expr,
+    walk_expr_children, walk_expr_children_mut, walk_expr_mut, Action, ScopeStep,
 };
 
 /// Hard iteration cap for the cross-scope hoist fixpoint. Mirrors the
@@ -811,56 +811,4 @@ fn substitute_in_stmt_subtree(
             substitute_in_stmt_subtree(child, key, replacement, multi_def_names);
         }
     });
-}
-
-/// Mutable counterpart of `for_each_sub_body`.
-fn for_each_sub_body_mut<F: FnMut(ScopeSlot, &mut Vec<Stmt>)>(stmt: &mut Stmt, mut visit: F) {
-    match stmt {
-        Stmt::Branch {
-            then_body,
-            else_body,
-            ..
-        } => {
-            visit(ScopeSlot::BranchThen, then_body);
-            visit(ScopeSlot::BranchElse, else_body);
-        }
-        Stmt::Sequence { pins, .. } => {
-            for (pin_idx, pin_body) in pins.iter_mut().enumerate() {
-                visit(ScopeSlot::SequencePin(pin_idx), pin_body);
-            }
-        }
-        Stmt::Loop {
-            body,
-            completion,
-            kind,
-            ..
-        } => {
-            visit(ScopeSlot::LoopBody, body);
-            if let Some(comp) = completion {
-                visit(ScopeSlot::LoopCompletion, comp);
-            }
-            if let LoopKind::ForC { init, increment } = kind {
-                visit(ScopeSlot::LoopForcInit, init);
-                visit(ScopeSlot::LoopForcIncrement, increment);
-            }
-        }
-        Stmt::Switch { cases, default, .. } => {
-            for (case_idx, case) in cases.iter_mut().enumerate() {
-                visit(ScopeSlot::SwitchCase(case_idx), &mut case.body);
-            }
-            if let Some(default_body) = default {
-                visit(ScopeSlot::SwitchDefault, default_body);
-            }
-        }
-        Stmt::Latch { init, body, .. } => {
-            visit(ScopeSlot::LatchInit, init);
-            visit(ScopeSlot::LatchBody, body);
-        }
-        Stmt::Assignment { .. }
-        | Stmt::Call { .. }
-        | Stmt::Return { .. }
-        | Stmt::Break { .. }
-        | Stmt::EventCall { .. }
-        | Stmt::Unknown { .. } => {}
-    }
 }

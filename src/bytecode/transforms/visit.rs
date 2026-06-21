@@ -181,6 +181,61 @@ pub(crate) fn for_each_sub_body<F: FnMut(ScopeSlot, &[Stmt])>(stmt: &Stmt, mut v
     }
 }
 
+/// Mutable counterpart of [`for_each_sub_body`]; same slot order.
+pub(crate) fn for_each_sub_body_mut<F: FnMut(ScopeSlot, &mut Vec<Stmt>)>(
+    stmt: &mut Stmt,
+    mut visit: F,
+) {
+    match stmt {
+        Stmt::Branch {
+            then_body,
+            else_body,
+            ..
+        } => {
+            visit(ScopeSlot::BranchThen, then_body);
+            visit(ScopeSlot::BranchElse, else_body);
+        }
+        Stmt::Sequence { pins, .. } => {
+            for (pin_idx, pin_body) in pins.iter_mut().enumerate() {
+                visit(ScopeSlot::SequencePin(pin_idx), pin_body);
+            }
+        }
+        Stmt::Loop {
+            body,
+            completion,
+            kind,
+            ..
+        } => {
+            visit(ScopeSlot::LoopBody, body);
+            if let Some(comp) = completion {
+                visit(ScopeSlot::LoopCompletion, comp);
+            }
+            if let LoopKind::ForC { init, increment } = kind {
+                visit(ScopeSlot::LoopForcInit, init);
+                visit(ScopeSlot::LoopForcIncrement, increment);
+            }
+        }
+        Stmt::Switch { cases, default, .. } => {
+            for (case_idx, case) in cases.iter_mut().enumerate() {
+                visit(ScopeSlot::SwitchCase(case_idx), &mut case.body);
+            }
+            if let Some(default_body) = default {
+                visit(ScopeSlot::SwitchDefault, default_body);
+            }
+        }
+        Stmt::Latch { init, body, .. } => {
+            visit(ScopeSlot::LatchInit, init);
+            visit(ScopeSlot::LatchBody, body);
+        }
+        Stmt::Assignment { .. }
+        | Stmt::Call { .. }
+        | Stmt::Return { .. }
+        | Stmt::Break { .. }
+        | Stmt::EventCall { .. }
+        | Stmt::Unknown { .. } => {}
+    }
+}
+
 /// Descend from the root `body` along `path` and return a mutable
 /// reference to the target scope's `Vec<Stmt>`. Returns `None` if any
 /// step does not match the encoded slot (defensive, shouldn't happen
