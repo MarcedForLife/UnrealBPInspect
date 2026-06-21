@@ -1196,7 +1196,11 @@ fn walk_text_const<V: OpcodeVisitor>(
 /// joined by `"."`) plus the segment count for drift arithmetic.
 /// Bounds-checked against `MAX_FIELD_PATH_DEPTH` so corrupt streams
 /// don't trigger unbounded reads.
-fn read_field_path(bytecode: &[u8], pos: &mut usize, name_table: &NameTable) -> FieldPath {
+pub(crate) fn read_field_path(
+    bytecode: &[u8],
+    pos: &mut usize,
+    name_table: &NameTable,
+) -> FieldPath {
     /// Maximum FFieldPath depth. UE field paths are typically 1-3 levels
     /// deep; 16 is generous enough for any real asset while catching
     /// corrupt operands that would otherwise read garbage FNames.
@@ -1244,4 +1248,90 @@ fn read_unicode_string(bytecode: &[u8], pos: &mut usize) -> Vec<u16> {
         units.push(u16::from_le_bytes([low, high]));
     }
     units
+}
+
+#[cfg(test)]
+mod field_path_tests {
+    use super::read_field_path;
+    use crate::binary::NameTable;
+
+    fn make_name_table(names: &[&str]) -> NameTable {
+        NameTable::from_names(names.iter().map(|s| s.to_string()).collect())
+    }
+
+    fn put_i32(buf: &mut Vec<u8>, value: i32) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_fname(buf: &mut Vec<u8>, name_idx: i32) {
+        put_i32(buf, name_idx); // name index
+        put_i32(buf, 0); // instance number
+    }
+
+    #[test]
+    fn field_path_normal() {
+        let name_table = make_name_table(&["MyVar"]);
+        let mut bytecode = Vec::new();
+        put_i32(&mut bytecode, 1); // path_num = 1
+        put_fname(&mut bytecode, 0); // FName index 0 = "MyVar"
+        put_i32(&mut bytecode, 0); // owner
+        let mut pos = 0;
+        assert_eq!(
+            read_field_path(&bytecode, &mut pos, &name_table).display,
+            "MyVar"
+        );
+    }
+
+    #[test]
+    fn field_path_zero() {
+        let name_table = make_name_table(&["X"]);
+        let mut bytecode = Vec::new();
+        put_i32(&mut bytecode, 0); // path_num = 0
+        put_i32(&mut bytecode, 0); // owner
+        let mut pos = 0;
+        assert_eq!(
+            read_field_path(&bytecode, &mut pos, &name_table).display,
+            "null"
+        );
+    }
+
+    #[test]
+    fn field_path_negative() {
+        let name_table = make_name_table(&["X"]);
+        let mut bytecode = Vec::new();
+        put_i32(&mut bytecode, -1); // path_num = -1
+        put_i32(&mut bytecode, 0); // owner
+        let mut pos = 0;
+        assert_eq!(
+            read_field_path(&bytecode, &mut pos, &name_table).display,
+            "null"
+        );
+    }
+
+    #[test]
+    fn field_path_truncated() {
+        let name_table = make_name_table(&["X"]);
+        let mut bytecode = Vec::new();
+        put_i32(&mut bytecode, 1); // path_num = 1
+                                   // Need 1*8 + 4 = 12 more bytes, only provide 11
+        bytecode.extend_from_slice(&[0u8; 11]);
+        let mut pos = 0;
+        assert_eq!(
+            read_field_path(&bytecode, &mut pos, &name_table).display,
+            "???"
+        );
+    }
+
+    #[test]
+    fn field_path_too_many() {
+        let name_table = make_name_table(&["X"]);
+        let mut bytecode = Vec::new();
+        put_i32(&mut bytecode, 17); // path_num = 17 (exceeds limit of 16)
+        put_i32(&mut bytecode, 0); // owner (read by error path)
+        let mut pos = 0;
+        assert_eq!(
+            read_field_path(&bytecode, &mut pos, &name_table).display,
+            "???"
+        );
+    }
 }

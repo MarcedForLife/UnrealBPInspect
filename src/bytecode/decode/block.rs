@@ -24,6 +24,7 @@ use super::loop_decode::try_decode_loop;
 use super::naked_if::try_decode_naked_if;
 use super::sequence::try_decode_sequence;
 use super::switch_decode::try_decode_switch;
+use super::walker::read_field_path;
 
 /// Decode a single opcode at `*pos`, recognising both flat statement
 /// shapes (Assignment, Call, Return) and control-flow shapes (Branch,
@@ -291,13 +292,7 @@ pub(super) fn decode_assignment(pos: &mut usize, ctx: &DecodeCtx) -> Stmt {
     match opcode {
         EX_LET | EX_LET_MULTICAST_DELEGATE | EX_LET_DELEGATE => {
             // field-path (lhs property descriptor) + lhs expr + rhs expr
-            let mut dummy_adj: i32 = 0;
-            let field_name = crate::bytecode::resolve::read_bc_field_path(
-                ctx.bytecode,
-                pos,
-                ctx.name_table,
-                &mut dummy_adj,
-            );
+            let field_name = read_field_path(ctx.bytecode, pos, ctx.name_table).display;
             let lhs_expr = decode_expr(pos, ctx);
             let rhs = decode_expr(pos, ctx);
             // Prefer the decoded lhs_expr; use field_name as fallback Var if Unknown.
@@ -314,13 +309,7 @@ pub(super) fn decode_assignment(pos: &mut usize, ctx: &DecodeCtx) -> Stmt {
         }
         EX_LET_VALUE_ON_PERSISTENT_FRAME => {
             // field-path names the persistent slot, rhs is the value.
-            let mut dummy_adj: i32 = 0;
-            let field_name = crate::bytecode::resolve::read_bc_field_path(
-                ctx.bytecode,
-                pos,
-                ctx.name_table,
-                &mut dummy_adj,
-            );
+            let field_name = read_field_path(ctx.bytecode, pos, ctx.name_table).display;
             let rhs_expr = decode_expr(pos, ctx);
             let lhs = Expr::Var(field_name);
             let rhs = Expr::Persistent(Box::new(rhs_expr));
