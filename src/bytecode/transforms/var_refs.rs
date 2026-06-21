@@ -181,6 +181,15 @@ pub(crate) fn rename_var_in_stmt(stmt: &mut Stmt, old: &str, new: &str) {
     });
 }
 
+/// A structural key for `expr`, used by the CSE (common subexpression
+/// elimination) passes to bucket equal subexpressions in a `BTreeMap`/`BTreeSet`
+/// of `String`. `None` (a swallowed serialize error) means "not a CSE
+/// candidate", matching the prior `serde_json::to_string(..).ok()` behaviour.
+/// `Expr` derives only `PartialEq` (no `Eq`/`Hash`), so keying is string-based.
+pub(crate) fn expr_key(expr: &Expr) -> Option<String> {
+    serde_json::to_string(expr).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
