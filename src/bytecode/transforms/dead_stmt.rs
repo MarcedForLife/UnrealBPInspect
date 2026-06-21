@@ -17,7 +17,8 @@
 
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::{LoopKind, Stmt};
-use crate::bytecode::transforms::visit::{any_expr, expr_contains_unknown, walk_stmt_exprs};
+use crate::bytecode::transforms::var_refs::{self, Defs, VarScope};
+use crate::bytecode::transforms::visit::{any_expr, expr_contains_unknown};
 
 /// Walk a statement body and drop dead `Stmt::Assignment` statements.
 /// Recurses into every nested body so nested dead assignments are
@@ -215,15 +216,12 @@ fn expr_has_side_effects(expr: &Expr) -> bool {
 /// they are defs not uses; a later `name = ...` does not keep the
 /// earlier dead assignment alive.
 fn stmt_references_var(stmt: &Stmt, name: &str) -> bool {
-    let mut found = false;
-    walk_stmt_exprs(stmt, &mut |expr| {
-        if let Expr::Var(other) = expr {
-            if other == name {
-                found = true;
-            }
-        }
-    });
-    found
+    var_refs::count_var(
+        std::slice::from_ref(stmt),
+        name,
+        VarScope::Deep,
+        Defs::SkipLhs,
+    ) > 0
 }
 
 /// Names eligible for dead-stmt elimination. Shares the temp inliner's
