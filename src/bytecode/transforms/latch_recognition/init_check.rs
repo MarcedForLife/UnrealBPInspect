@@ -4,8 +4,8 @@
 //! init-guard latches.
 
 use super::shared::{
-    classify_doonce_role, is_doonce_latch, is_doonce_scaffold_assignment, is_reset_doonce_call,
-    DoOnceRole, DOONCE_GATE_PREFIX, DOONCE_INIT_PREFIX,
+    classify_pin_stmt, is_doonce_latch, is_doonce_scaffold_assignment, is_reset_doonce_call,
+    PinClass, DOONCE_GATE_PREFIX, DOONCE_INIT_PREFIX,
 };
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::{LatchKind, Stmt};
@@ -198,14 +198,13 @@ fn pin_is_pure_doonce_scaffold(pin: &[Stmt]) -> bool {
     if pin.is_empty() {
         return true;
     }
-    pin.iter().all(|stmt| {
-        matches!(
-            classify_doonce_role(stmt),
-            DoOnceRole::GateCheck(_)
-                | DoOnceRole::GateSet(_)
-                | DoOnceRole::InitCheck(_)
-                | DoOnceRole::InitSet(_)
-        )
+    // Roles only. A Noop, SyntheticReset, or user-body statement is NOT
+    // accepted here: reset pins are routed separately via
+    // pin_is_reset_doonce_scaffold and preserved as leading siblings, so
+    // widening this accept-set to include them would drop a ResetDoOnce.
+    pin.iter().all(|stmt| match classify_pin_stmt(stmt) {
+        PinClass::Scaffold(role) => role.is_scaffold(),
+        PinClass::Noop | PinClass::SyntheticReset | PinClass::UserBody => false,
     })
 }
 
