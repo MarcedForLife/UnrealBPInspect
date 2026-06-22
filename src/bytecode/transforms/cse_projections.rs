@@ -43,7 +43,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::{LoopKind, Stmt};
 use crate::bytecode::transforms::visit::{
-    any_expr, walk_expr, walk_expr_children, walk_expr_children_mut, walk_expr_mut, Action,
+    any_expr, descend_mut, descend_ref, for_each_sub_body, for_each_sub_body_mut, walk_expr,
+    walk_expr_children, walk_expr_children_mut, walk_expr_mut, Action, ScopeStep,
 };
 
 /// Hard iteration cap for the cross-scope hoist fixpoint. Mirrors the
@@ -134,33 +135,6 @@ struct UseLocation {
     /// Path from the root body down to the scope containing this use.
     /// Empty path means the use is in the root scope itself.
     scope_path: Vec<ScopeStep>,
-}
-
-/// One step on a scope path: which top-level statement of the parent
-/// scope owns the nested sub-body, and which sub-body slot.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct ScopeStep {
-    stmt_idx: usize,
-    slot: ScopeSlot,
-}
-
-/// Sub-body slots a `Stmt` may own. Variants are ordered so derived
-/// `PartialOrd`/`Ord` give a deterministic comparison; ordering among
-/// siblings inside the same `Stmt` is irrelevant since two distinct
-/// sub-bodies under the same parent are never visited as the same step.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum ScopeSlot {
-    BranchThen,
-    BranchElse,
-    LoopBody,
-    LoopCompletion,
-    LoopForcInit,
-    LoopForcIncrement,
-    SequencePin(usize),
-    SwitchCase(usize),
-    SwitchDefault,
-    LatchInit,
-    LatchBody,
 }
 
 /// Walk the entire body and tally every eligible sub-expression's uses
@@ -302,64 +276,20 @@ enum ExprRole {
     Other,
 }
 
-/// Invoke `visit` once per owned sub-body of `stmt`, passing the matching
-/// `ScopeSlot` and an immutable slice of the sub-body. Mirrors the
-/// dispatch in `walk_stmt_children_mut` but exposes the slot identity so
-/// scope paths can encode which sub-body a use lives in.
-fn for_each_sub_body<F: FnMut(ScopeSlot, &[Stmt])>(stmt: &Stmt, mut visit: F) {
-    match stmt {
-        Stmt::Branch {
-            then_body,
-            else_body,
-            ..
-        } => {
-            visit(ScopeSlot::BranchThen, then_body);
-            visit(ScopeSlot::BranchElse, else_body);
-        }
-        Stmt::Sequence { pins, .. } => {
-            for (pin_idx, pin_body) in pins.iter().enumerate() {
-                visit(ScopeSlot::SequencePin(pin_idx), pin_body);
-            }
-        }
-        Stmt::Loop {
-            body,
-            completion,
-            kind,
-            ..
-        } => {
-            visit(ScopeSlot::LoopBody, body);
-            if let Some(comp) = completion {
-                visit(ScopeSlot::LoopCompletion, comp);
-            }
-            if let LoopKind::ForC { init, increment } = kind {
-                visit(ScopeSlot::LoopForcInit, init);
-                visit(ScopeSlot::LoopForcIncrement, increment);
-            }
-        }
-        Stmt::Switch { cases, default, .. } => {
-            for (case_idx, case) in cases.iter().enumerate() {
-                visit(ScopeSlot::SwitchCase(case_idx), &case.body);
-            }
-            if let Some(default_body) = default {
-                visit(ScopeSlot::SwitchDefault, default_body);
-            }
-        }
-        Stmt::Latch { init, body, .. } => {
-            visit(ScopeSlot::LatchInit, init);
-            visit(ScopeSlot::LatchBody, body);
-        }
-        Stmt::Assignment { .. }
-        | Stmt::Call { .. }
-        | Stmt::Return { .. }
-        | Stmt::Break { .. }
-        | Stmt::EventCall { .. }
-        | Stmt::Unknown { .. } => {}
-    }
+/// Untagged view of [`scope_root_exprs_tagged`]: the top-level expressions a
+/// statement contributes to its OWN scope, with the [`ExprRole`] tag dropped.
+/// See `scope_root_exprs_tagged` for which expressions each statement yields.
+fn scope_root_exprs(stmt: &Stmt) -> Vec<&Expr> {
+    scope_root_exprs_tagged(stmt)
+        .into_iter()
+        .map(|(expr, _role)| expr)
+        .collect()
 }
 
-/// Top-level expressions a single statement contributes to its OWN scope.
-/// Returns the expressions that belong to this statement itself, excluding
-/// every Vec<Stmt> sub-body (those are nested scopes).
+/// Top-level expressions a single statement contributes to its OWN scope,
+/// each tagged with the [`ExprRole`] it plays. Excludes every `Vec<Stmt>`
+/// sub-body (those are nested scopes). This is the single source of the
+/// statement-to-root-exprs mapping; [`scope_root_exprs`] is the untagged view.
 ///
 /// Branch::cond, Loop::cond, Switch::expr, and ForEach's array expression
 /// are part of the enclosing scope because they execute before any nested
@@ -369,51 +299,10 @@ fn for_each_sub_body<F: FnMut(ScopeSlot, &[Stmt])>(stmt: &Stmt, mut visit: F) {
 /// Assignment lhs is included because compound lhs shapes
 /// (`FieldAccess { recv: <projection>, .. }`, `Index { recv: <projection>, .. }`)
 /// host pure projections at their `recv` position, and those projections
-/// must participate in CSE counting and substitution. Bare `Var` lhs is
-/// not matched anyway because bare `Var` is not eligible for hoisting.
-fn scope_root_exprs(stmt: &Stmt) -> Vec<&Expr> {
-    let mut out: Vec<&Expr> = Vec::new();
-    match stmt {
-        Stmt::Assignment { lhs, rhs, .. } => {
-            out.push(lhs);
-            out.push(rhs);
-        }
-        Stmt::Call { func, args, .. } => {
-            out.push(func);
-            out.extend(args.iter());
-        }
-        Stmt::Return { value, .. } => {
-            if let Some(expr) = value {
-                out.push(expr);
-            }
-        }
-        Stmt::Branch { cond, .. } => out.push(cond),
-        Stmt::Loop { kind, cond, .. } => {
-            if let Some(cond_expr) = cond {
-                out.push(cond_expr);
-            }
-            if let LoopKind::ForEach { array, .. } = kind {
-                out.push(array);
-            }
-        }
-        Stmt::Switch { expr, cases, .. } => {
-            out.push(expr);
-            for case in cases.iter() {
-                out.extend(case.values.iter());
-            }
-        }
-        Stmt::Sequence { .. }
-        | Stmt::Latch { .. }
-        | Stmt::Break { .. }
-        | Stmt::EventCall { .. }
-        | Stmt::Unknown { .. } => {}
-    }
-    out
-}
-
-/// Like [`scope_root_exprs`] but tags each entry with the [`ExprRole`] it
-/// plays in its owning statement. Lets callers distinguish Assignment lhs
-/// (a def, walked excluding the root) from rhs (a use, walked normally).
+/// must participate in CSE counting and substitution. The [`ExprRole`] tag
+/// lets callers distinguish lhs (a def, walked excluding the root) from rhs
+/// (a use, walked normally). Bare `Var` lhs is not matched anyway because
+/// bare `Var` is not eligible for hoisting.
 fn scope_root_exprs_tagged(stmt: &Stmt) -> Vec<(&Expr, ExprRole)> {
     let mut out: Vec<(&Expr, ExprRole)> = Vec::new();
     match stmt {
@@ -757,54 +646,6 @@ fn longest_common_prefix(uses: &[UseLocation]) -> Vec<ScopeStep> {
     first[..prefix_len].to_vec()
 }
 
-/// Descend from the root `body` along `path` and return a mutable
-/// reference to the target scope's `Vec<Stmt>`. Returns `None` if any
-/// step does not match the encoded slot (defensive, shouldn't happen
-/// with paths produced by `collect_in_body`).
-fn descend_mut<'body>(
-    body: &'body mut Vec<Stmt>,
-    path: &[ScopeStep],
-) -> Option<&'body mut Vec<Stmt>> {
-    let mut cursor: &mut Vec<Stmt> = body;
-    for step in path {
-        let stmt = cursor.get_mut(step.stmt_idx)?;
-        cursor = sub_body_mut(stmt, &step.slot)?;
-    }
-    Some(cursor)
-}
-
-/// Mutable accessor for the `Vec<Stmt>` inside `stmt` matching `slot`.
-fn sub_body_mut<'stmt>(stmt: &'stmt mut Stmt, slot: &ScopeSlot) -> Option<&'stmt mut Vec<Stmt>> {
-    match (stmt, slot) {
-        (Stmt::Branch { then_body, .. }, ScopeSlot::BranchThen) => Some(then_body),
-        (Stmt::Branch { else_body, .. }, ScopeSlot::BranchElse) => Some(else_body),
-        (Stmt::Sequence { pins, .. }, ScopeSlot::SequencePin(pin_idx)) => pins.get_mut(*pin_idx),
-        (Stmt::Loop { body, .. }, ScopeSlot::LoopBody) => Some(body),
-        (Stmt::Loop { completion, .. }, ScopeSlot::LoopCompletion) => completion.as_mut(),
-        (
-            Stmt::Loop {
-                kind: LoopKind::ForC { init, .. },
-                ..
-            },
-            ScopeSlot::LoopForcInit,
-        ) => Some(init),
-        (
-            Stmt::Loop {
-                kind: LoopKind::ForC { increment, .. },
-                ..
-            },
-            ScopeSlot::LoopForcIncrement,
-        ) => Some(increment),
-        (Stmt::Switch { cases, .. }, ScopeSlot::SwitchCase(case_idx)) => {
-            cases.get_mut(*case_idx).map(|case| &mut case.body)
-        }
-        (Stmt::Switch { default, .. }, ScopeSlot::SwitchDefault) => default.as_mut(),
-        (Stmt::Latch { init, .. }, ScopeSlot::LatchInit) => Some(init),
-        (Stmt::Latch { body, .. }, ScopeSlot::LatchBody) => Some(body),
-        _ => None,
-    }
-}
-
 /// Locate the earliest top-level `stmt_idx` within the DCA scope that
 /// contains the key in any of its scope-root expressions OR anywhere in
 /// its sub-bodies. Insertion goes BEFORE that statement so the synthetic
@@ -867,54 +708,6 @@ fn first_use_offset_at(body: &[Stmt], dca_path: &[ScopeStep], key: &str) -> Opti
         .iter()
         .position(|stmt| stmt_subtree_contains_key(stmt, key))?;
     Some(scope[idx].offset())
-}
-
-/// Read-only counterpart of `descend_mut`.
-fn descend_ref<'body>(body: &'body [Stmt], path: &[ScopeStep]) -> Option<&'body [Stmt]> {
-    let mut cursor: &[Stmt] = body;
-    for step in path {
-        let stmt = cursor.get(step.stmt_idx)?;
-        cursor = sub_body_ref(stmt, &step.slot)?;
-    }
-    Some(cursor)
-}
-
-/// Read-only accessor for the `Vec<Stmt>` inside `stmt` matching `slot`.
-fn sub_body_ref<'stmt>(stmt: &'stmt Stmt, slot: &ScopeSlot) -> Option<&'stmt [Stmt]> {
-    match (stmt, slot) {
-        (Stmt::Branch { then_body, .. }, ScopeSlot::BranchThen) => Some(then_body.as_slice()),
-        (Stmt::Branch { else_body, .. }, ScopeSlot::BranchElse) => Some(else_body.as_slice()),
-        (Stmt::Sequence { pins, .. }, ScopeSlot::SequencePin(pin_idx)) => {
-            pins.get(*pin_idx).map(|body| body.as_slice())
-        }
-        (Stmt::Loop { body, .. }, ScopeSlot::LoopBody) => Some(body.as_slice()),
-        (Stmt::Loop { completion, .. }, ScopeSlot::LoopCompletion) => {
-            completion.as_ref().map(|body| body.as_slice())
-        }
-        (
-            Stmt::Loop {
-                kind: LoopKind::ForC { init, .. },
-                ..
-            },
-            ScopeSlot::LoopForcInit,
-        ) => Some(init.as_slice()),
-        (
-            Stmt::Loop {
-                kind: LoopKind::ForC { increment, .. },
-                ..
-            },
-            ScopeSlot::LoopForcIncrement,
-        ) => Some(increment.as_slice()),
-        (Stmt::Switch { cases, .. }, ScopeSlot::SwitchCase(case_idx)) => {
-            cases.get(*case_idx).map(|case| case.body.as_slice())
-        }
-        (Stmt::Switch { default, .. }, ScopeSlot::SwitchDefault) => {
-            default.as_ref().map(|body| body.as_slice())
-        }
-        (Stmt::Latch { init, .. }, ScopeSlot::LatchInit) => Some(init.as_slice()),
-        (Stmt::Latch { body, .. }, ScopeSlot::LatchBody) => Some(body.as_slice()),
-        _ => None,
-    }
 }
 
 /// Substitute every sub-expression matching `key` with `Var(replacement)`
@@ -988,56 +781,4 @@ fn substitute_in_stmt_subtree(
             substitute_in_stmt_subtree(child, key, replacement, multi_def_names);
         }
     });
-}
-
-/// Mutable counterpart of `for_each_sub_body`.
-fn for_each_sub_body_mut<F: FnMut(ScopeSlot, &mut Vec<Stmt>)>(stmt: &mut Stmt, mut visit: F) {
-    match stmt {
-        Stmt::Branch {
-            then_body,
-            else_body,
-            ..
-        } => {
-            visit(ScopeSlot::BranchThen, then_body);
-            visit(ScopeSlot::BranchElse, else_body);
-        }
-        Stmt::Sequence { pins, .. } => {
-            for (pin_idx, pin_body) in pins.iter_mut().enumerate() {
-                visit(ScopeSlot::SequencePin(pin_idx), pin_body);
-            }
-        }
-        Stmt::Loop {
-            body,
-            completion,
-            kind,
-            ..
-        } => {
-            visit(ScopeSlot::LoopBody, body);
-            if let Some(comp) = completion {
-                visit(ScopeSlot::LoopCompletion, comp);
-            }
-            if let LoopKind::ForC { init, increment } = kind {
-                visit(ScopeSlot::LoopForcInit, init);
-                visit(ScopeSlot::LoopForcIncrement, increment);
-            }
-        }
-        Stmt::Switch { cases, default, .. } => {
-            for (case_idx, case) in cases.iter_mut().enumerate() {
-                visit(ScopeSlot::SwitchCase(case_idx), &mut case.body);
-            }
-            if let Some(default_body) = default {
-                visit(ScopeSlot::SwitchDefault, default_body);
-            }
-        }
-        Stmt::Latch { init, body, .. } => {
-            visit(ScopeSlot::LatchInit, init);
-            visit(ScopeSlot::LatchBody, body);
-        }
-        Stmt::Assignment { .. }
-        | Stmt::Call { .. }
-        | Stmt::Return { .. }
-        | Stmt::Break { .. }
-        | Stmt::EventCall { .. }
-        | Stmt::Unknown { .. } => {}
-    }
 }
