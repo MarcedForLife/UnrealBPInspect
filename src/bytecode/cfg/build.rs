@@ -7,10 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Range;
 
-use crate::bytecode::opcodes::{
-    EX_JUMP, EX_POP_EXECUTION_FLOW, EX_POP_FLOW_IF_NOT, EX_PUSH_EXECUTION_FLOW,
-};
-use crate::bytecode::partition::OpcodeGraph;
+use crate::bytecode::opcodes::{EX_JUMP, EX_POP_EXECUTION_FLOW};
+use crate::bytecode::partition::{step_successors, OpcodeGraph};
 
 use super::{BasicBlock, BlockId, ControlFlowGraph};
 
@@ -162,11 +160,18 @@ fn collect_owned_addresses(graph: &OpcodeGraph, owned: &[Range<usize>]) -> BTree
 /// Flow-stack-aware reachability matching the decoder's push/pop
 /// discipline. Unlike `bfs_reachable_owned` (which follows every successor
 /// of `EX_PUSH_EXECUTION_FLOW` eagerly), this simulates the execution-flow
-/// stack: at PUSH, defer the pushed target onto the stack and follow only
-/// the fallthrough; at `EX_POP_EXECUTION_FLOW`, resume the stack top; at
-/// `EX_POP_FLOW_IF_NOT`, follow the fallthrough plus the pop branch when the
-/// stack is non-empty. The visited key includes the stack top and depth so a
-/// re-visit through a different push/pop path can still be enqueued.
+/// stack: at PUSH, defer the pushed target and follow only the fallthrough;
+/// at `EX_POP_EXECUTION_FLOW`, resume the stack top; at `EX_POP_FLOW_IF_NOT`,
+/// follow the fallthrough plus the pop branch when the stack is non-empty.
+/// The visited key includes the stack top and depth so a re-visit through a
+/// different push/pop path can still be enqueued.
+///
+/// The per-opcode stack transition is delegated to
+/// `partition::step_successors`, the same model partition's scope-aware BFS
+/// uses; only the visited-key dedup and the `owned` filter live here.
+/// `baseline_depth` is 0 (a fresh BFS, no pending continuation floor) and
+/// the admit closure pushes every successor, so the `owned` filter applies
+/// at pop.
 ///
 /// Used only by `build_cfg_flow_reachable` for the cross-event inline body
 /// decode, where a flow-unaware reach would admit non-flow-reachable
@@ -184,6 +189,10 @@ fn bfs_reachable_flow_stack(
     let mut visited: BTreeSet<(usize, usize, Option<usize>)> = BTreeSet::new();
     let mut queue: VecDeque<(usize, Vec<usize>)> = VecDeque::new();
     queue.push_back((entry, Vec::new()));
+    let admit =
+        |_from: usize, succ: usize, stack: &[usize], queue: &mut VecDeque<(usize, Vec<usize>)>| {
+            queue.push_back((succ, stack.to_vec()));
+        };
     while let Some((addr, stack)) = queue.pop_front() {
         if !visited.insert((addr, stack.len(), stack.last().copied())) {
             continue;
@@ -192,44 +201,8 @@ fn bfs_reachable_flow_stack(
             continue;
         }
         reached.insert(addr);
-        let opcode = graph.opcodes.get(&addr).copied();
-        let Some(succs) = graph.successors.get(&addr) else {
-            continue;
-        };
-        match opcode {
-            Some(EX_PUSH_EXECUTION_FLOW) => {
-                // Successors of PUSH are [pushed_target, fallthrough].
-                // Defer the pushed target on the simulated stack and follow
-                // only the fallthrough.
-                if let Some(&pushed_target) = succs.first() {
-                    let mut new_stack = stack.clone();
-                    new_stack.push(pushed_target);
-                    for &succ in succs.iter().skip(1) {
-                        queue.push_back((succ, new_stack.clone()));
-                    }
-                }
-            }
-            Some(EX_POP_EXECUTION_FLOW) => {
-                let mut new_stack = stack.clone();
-                if let Some(resume) = new_stack.pop() {
-                    queue.push_back((resume, new_stack));
-                }
-            }
-            Some(EX_POP_FLOW_IF_NOT) => {
-                for &succ in succs {
-                    queue.push_back((succ, stack.clone()));
-                }
-                if let Some(&top) = stack.last() {
-                    let mut new_stack = stack.clone();
-                    new_stack.pop();
-                    queue.push_back((top, new_stack));
-                }
-            }
-            _ => {
-                for &succ in succs {
-                    queue.push_back((succ, stack.clone()));
-                }
-            }
+        if let Some(&opcode) = graph.opcodes.get(&addr) {
+            step_successors(addr, opcode, &stack, graph, 0, &admit, &mut queue);
         }
     }
     reached
@@ -542,5 +515,68 @@ fn empty_cfg(entry: usize) -> ControlFlowGraph {
         predecessors,
         entry: 0,
         sink: 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use crate::bytecode::opcodes::{EX_NOTHING, EX_POP_EXECUTION_FLOW, EX_PUSH_EXECUTION_FLOW};
+    use crate::bytecode::partition::OpcodeGraph;
+
+    use super::bfs_reachable_flow_stack;
+
+    fn graph(opcodes: &[(usize, u8)], edges: &[(usize, Vec<usize>)]) -> OpcodeGraph {
+        OpcodeGraph {
+            boundaries: opcodes.iter().map(|&(addr, _)| addr).collect(),
+            successors: edges.iter().cloned().collect(),
+            opcodes: opcodes.iter().copied().collect(),
+            flow_frames: Vec::new(),
+        }
+    }
+
+    /// Locks the flow-stack discipline the `step_successors` delegation relies
+    /// on: a PUSH defers its pushed target (successor index 0) and follows
+    /// only the fallthrough, so the deferred body is reached only once a
+    /// matching POP resumes it. This is also the length-2-distinct PUSH
+    /// invariant that makes the positional-skip and value-skip transitions
+    /// equivalent; a future opcode-classification change that broke the
+    /// PUSH-successor shape would fail here.
+    #[test]
+    fn push_defers_pushed_target_until_a_matching_pop() {
+        let owned: BTreeSet<usize> = [0, 10, 20].into_iter().collect();
+
+        // PUSH at 0 has successors [pushed_target = 20, fallthrough = 10].
+        let no_pop = graph(
+            &[
+                (0, EX_PUSH_EXECUTION_FLOW),
+                (10, EX_NOTHING),
+                (20, EX_NOTHING),
+            ],
+            &[(0, vec![20, 10]), (10, vec![]), (20, vec![])],
+        );
+        assert_eq!(no_pop.successors[&0].len(), 2);
+        assert_ne!(no_pop.successors[&0][0], no_pop.successors[&0][1]);
+        assert_eq!(
+            bfs_reachable_flow_stack(&no_pop, 0, &owned),
+            BTreeSet::from([0, 10]),
+            "with no POP, the deferred pushed target must stay unreached"
+        );
+
+        // A POP at 10 resumes the stack, so the deferred body at 20 is reached.
+        let with_pop = graph(
+            &[
+                (0, EX_PUSH_EXECUTION_FLOW),
+                (10, EX_POP_EXECUTION_FLOW),
+                (20, EX_NOTHING),
+            ],
+            &[(0, vec![20, 10]), (10, vec![]), (20, vec![])],
+        );
+        assert_eq!(
+            bfs_reachable_flow_stack(&with_pop, 0, &owned),
+            BTreeSet::from([0, 10, 20]),
+            "the matching POP must resume the deferred pushed target"
+        );
     }
 }

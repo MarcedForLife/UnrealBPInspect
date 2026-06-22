@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::bytecode::cfg::dom::DomChain;
+
 /// Decode the body of one arm of a branch-like region by collecting
 /// every CFG block reachable from `arm_entry` within the parent
 /// region's SESE bounds, converting that block set to merged disk
@@ -458,17 +460,9 @@ pub(super) fn is_strictly_dominated_by(
     if block == dominator {
         return false;
     }
-    let mut cursor = block;
-    while let Some(&parent) = idom.get(&cursor) {
-        if parent == dominator {
-            return true;
-        }
-        if parent == cursor {
-            return false;
-        }
-        cursor = parent;
-    }
-    false
+    DomChain(idom)
+        .ancestors(block)
+        .any(|parent| parent == dominator)
 }
 
 /// Decode the opcodes of one basic block, skipping addresses inside a
