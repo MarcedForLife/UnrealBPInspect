@@ -283,27 +283,18 @@ fn decode_inline_region_body(
     let inline_claimed: std::cell::RefCell<
         std::collections::BTreeMap<usize, super::super::ctx::Claim>,
     > = std::cell::RefCell::new(std::collections::BTreeMap::new());
+    // Inline body decodes a freshly-built local CFG with its own claim set
+    // and the inlined owner. child() copies the shared refs (including
+    // cross_event_inline); override the scope refs and set the owner.
     let inline_ctx = DecodeCtx {
-        mem_to_disk: ctx.mem_to_disk,
-        event_entries: ctx.event_entries,
-        function_signatures: ctx.function_signatures,
         owned_ranges: Some(inline_ranges_slice),
         skeleton: Some(&inline_skeleton),
         claimed: Some(&inline_claimed),
         decoding_owner: std::cell::Cell::new(Some(owner)),
-        graph: ctx.graph,
         cfg: Some(&cfg),
         region_tree: Some(&region_tree),
         region_byte_ranges: Some(&region_byte_ranges),
-        cross_event_inline: ctx.cross_event_inline,
-        k2node_byte_map: ctx.k2node_byte_map,
-        ..DecodeCtx::new(
-            ctx.bytecode,
-            ctx.name_table,
-            ctx._imports,
-            ctx._export_names,
-            ctx.ue5,
-        )
+        ..ctx.child()
     };
     decode_region_body(&region_tree, &cfg, &inline_ctx)
 }
