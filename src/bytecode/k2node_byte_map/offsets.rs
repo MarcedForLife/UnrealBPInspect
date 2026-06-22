@@ -355,11 +355,7 @@ struct LetTargetVisitor {
 
 impl LetTargetVisitor {
     fn leaf_member(path: &FieldPath) -> Option<String> {
-        if path.is_null() || path.display.is_empty() {
-            return None;
-        }
-        let leaf = path.display.rsplit("::").next().unwrap_or(&path.display);
-        Some(normalise_member_name(leaf))
+        path.leaf_member().map(normalise_member_name)
     }
 
     fn push_path(&mut self, start_offset: usize, path: &FieldPath) {
