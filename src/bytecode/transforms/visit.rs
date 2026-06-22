@@ -52,6 +52,37 @@ pub(crate) fn walk_stmt_children_mut<F: FnMut(&mut Vec<Stmt>)>(stmt: &mut Stmt, 
     }
 }
 
+/// Apply `visit` to every statement in the tree rooted at `body`, parent
+/// BEFORE its children (top-down). Each statement is visited, THEN the walk
+/// descends into that statement AS MUTATED by the visit (not a pre-visit
+/// snapshot of its children). This ordering is load-bearing: a visit that
+/// rewrites a statement into a leaf (e.g. a Branch folded to an Assignment)
+/// leaves no children to descend into, exactly as a hand-rolled
+/// act-then-recurse loop would. Use preorder when an outer match must run
+/// before inner rewrites could change the shape it matches on.
+pub(crate) fn rewrite_stmts_preorder<F: FnMut(&mut Stmt)>(body: &mut [Stmt], visit: &mut F) {
+    for stmt in body.iter_mut() {
+        visit(stmt);
+        walk_stmt_children_mut(stmt, &mut |sub_body| {
+            rewrite_stmts_preorder(sub_body, visit)
+        });
+    }
+}
+
+/// Apply `visit` to every statement in the tree rooted at `body`, children
+/// BEFORE their parent (bottom-up). The walk descends into each statement's
+/// sub-bodies first, then visits the statement itself. Use postorder when a
+/// visit consumes already-processed inner results (e.g. naming a construct
+/// from names its nested bodies have settled).
+pub(crate) fn rewrite_stmts_postorder<F: FnMut(&mut Stmt)>(body: &mut [Stmt], visit: &mut F) {
+    for stmt in body.iter_mut() {
+        walk_stmt_children_mut(stmt, &mut |sub_body| {
+            rewrite_stmts_postorder(sub_body, visit)
+        });
+        visit(stmt);
+    }
+}
+
 /// Read-only counterpart of [`walk_stmt_children_mut`]. Applies `visit` to
 /// every direct sub-body inside `stmt` in [`Stmt::child_bodies_all`] slot
 /// order (same variant coverage, ForC init/increment included). `stmt`
