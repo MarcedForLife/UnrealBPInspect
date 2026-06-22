@@ -932,7 +932,7 @@ pub(crate) fn bfs_reachable_with_scope(
 /// the fallthrough and additionally the conditional pop, and every other
 /// opcode follows graph successors with the stack unchanged.
 #[allow(clippy::too_many_arguments)]
-fn step_successors(
+pub(crate) fn step_successors(
     addr: usize,
     opcode: u8,
     stack: &[usize],
