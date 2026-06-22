@@ -266,6 +266,92 @@ pub(super) fn region_body_is_only_return(
     matches!(stmts.as_slice(), [Stmt::Return { value: None, .. }])
 }
 
+/// True when a region's own-exit continuation tail carries nothing worth
+/// appending: it is empty, or it is just a bare `Return { None }`. The
+/// per-kind emitters drop such a tail rather than re-emitting a redundant
+/// trailing return after the region's structured statements.
+pub(super) fn tail_is_droppable(tail: &[Stmt]) -> bool {
+    tail.is_empty() || matches!(tail, [Stmt::Return { value: None, .. }])
+}
+
+/// Shared region-emitter prologue. Returns the region's entry block and the
+/// disk address of its terminator (the entry block's last opcode) when the
+/// region is of `expected_kind`, has an entry block, and that block's
+/// terminator opcode equals `expected_op`. Returns `None` otherwise.
+///
+/// The five `try_emit_*` emitters open with this same ritual, each pairing a
+/// `RegionKind` with the terminator opcode it requires
+/// (`EX_JUMP_IF_NOT` for IfThen/IfThenElse/DoOnceGate/Loop,
+/// `EX_PUSH_EXECUTION_FLOW` for SequenceChain).
+pub(super) fn region_entry_terminator<'a>(
+    region: &Region,
+    expected_kind: RegionKind,
+    expected_op: u8,
+    cfg: &'a ControlFlowGraph,
+    ctx: &DecodeCtx,
+) -> Option<(&'a BasicBlock, usize)> {
+    if region.kind != expected_kind {
+        return None;
+    }
+    let entry_block = cfg.blocks.get(region.entry)?;
+    let terminator_addr = *entry_block.opcodes.last()?;
+    if *ctx.bytecode.get(terminator_addr)? != expected_op {
+        return None;
+    }
+    Some((entry_block, terminator_addr))
+}
+
+/// Decode the single opcode at `opcode_addr`, skipping it when it is inside
+/// a `consumed` span, claim-protected, or past the end of the bytecode.
+/// On a successful decode the produced `Stmt` is pushed and the consumed
+/// byte spans (the cursor advance plus any out-of-cursor ranges the
+/// recogniser touched) are recorded.
+///
+/// `range_end` bounds the inner `decode_one_or_branch` cursor. The two
+/// block-decode loops differ only in what they pass here: the disk-order
+/// sweep passes the block's own end, while the arm-body walk passes the
+/// enclosing pin/arm range end so multi-block constructs classify their
+/// jump targets as in-range.
+pub(super) fn decode_opcode_at(
+    opcode_addr: usize,
+    range_end: usize,
+    ctx: &DecodeCtx,
+    stmts: &mut Vec<Stmt>,
+    consumed: &mut Vec<Range<usize>>,
+) {
+    if address_in_consumed(consumed, opcode_addr) {
+        return;
+    }
+    if claimed_end_for_disk_sweep(ctx, opcode_addr).is_some() {
+        return;
+    }
+    if opcode_addr >= ctx.bytecode.len() {
+        return;
+    }
+    let mut pos = opcode_addr;
+    let before = pos;
+    match decode_one_or_branch(&mut pos, range_end, ctx) {
+        Ok(Some(stmt)) => {
+            consumed.extend(extra_consumed_ranges(&stmt, before, pos));
+            stmts.push(stmt);
+            if pos > before {
+                consumed.push(before..pos);
+            }
+        }
+        Ok(None) => {
+            if pos > before {
+                consumed.push(before..pos);
+            }
+        }
+        Err(unknown) => {
+            stmts.push(*unknown);
+            if pos > before {
+                consumed.push(before..pos);
+            }
+        }
+    }
+}
+
 /// Complement to the sibling merge-continuation case. True when
 /// `region_id`'s exit block is NOT the synthetic sink, IS owned by the
 /// region itself (`block_to_region[exit] == region_id`), AND carries
