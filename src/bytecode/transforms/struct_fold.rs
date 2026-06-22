@@ -35,9 +35,9 @@ use std::collections::BTreeMap;
 
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::Stmt;
+use crate::bytecode::transforms::var_refs::{self, Defs, VarScope};
 use crate::bytecode::transforms::visit::{
-    expr_contains_unknown, walk_body_exprs, walk_stmt_children_mut, walk_stmt_exprs_mut,
-    walk_stmt_exprs_visit_lhs, Action,
+    expr_contains_unknown, walk_stmt_children_mut, walk_stmt_exprs_mut, Action,
 };
 
 /// Placeholder used as `StructConstruct::type_name` when the temp name
@@ -100,18 +100,8 @@ pub fn fold_struct_constructions(body: &mut Vec<Stmt>) {
     // inline-Make/field-by-field mismatch. Restrict the fold to genuine
     // single-use scratch temps. Read-only: field-write lhs is skipped, so
     // only true uses count.
-    let read_counts = count_var_reads(body);
+    let read_counts = var_refs::count_all_var_uses(body);
     fold_in_body(body, &read_counts);
-}
-
-fn count_var_reads(body: &[Stmt]) -> BTreeMap<String, usize> {
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    walk_body_exprs(body, &mut |expr: &Expr| {
-        if let Expr::Var(name) = expr {
-            *counts.entry(name.clone()).or_insert(0) += 1;
-        }
-    });
-    counts
 }
 
 fn fold_in_body(body: &mut Vec<Stmt>, read_counts: &BTreeMap<String, usize>) {
@@ -232,15 +222,12 @@ fn try_fold_at(
 /// later `Var(temp_name)` appearing inside an `Assignment::lhs::FieldAccess`
 /// (a field-write into the same temp) counts as a use, blocking the fold.
 fn count_var_uses_in_stmt(stmt: &Stmt, name: &str) -> usize {
-    let mut count = 0usize;
-    walk_stmt_exprs_visit_lhs(stmt, &mut |expr: &Expr| {
-        if let Expr::Var(other) = expr {
-            if other == name {
-                count += 1;
-            }
-        }
-    });
-    count
+    var_refs::count_var(
+        std::slice::from_ref(stmt),
+        name,
+        VarScope::Deep,
+        Defs::VisitLhs,
+    )
 }
 
 /// Substitute the first occurrence of `Expr::Var(name)` in a statement

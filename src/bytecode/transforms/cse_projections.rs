@@ -42,6 +42,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::{LoopKind, Stmt};
+use crate::bytecode::transforms::var_refs;
 use crate::bytecode::transforms::visit::{
     any_expr, descend_mut, descend_ref, for_each_sub_body, for_each_sub_body_mut, walk_expr,
     walk_expr_children, walk_expr_children_mut, walk_expr_mut, Action, ScopeStep,
@@ -239,7 +240,7 @@ fn collect_in_body(
                 if !is_eligible(node) {
                     return;
                 }
-                let Ok(key) = serde_json::to_string(node) else {
+                let Some(key) = var_refs::expr_key(node) else {
                     return;
                 };
                 let entry = buckets
@@ -686,7 +687,7 @@ fn scope_root_contains_key(stmt: &Stmt, key: &str) -> bool {
             if hit {
                 return;
             }
-            if let Ok(node_key) = serde_json::to_string(node) {
+            if let Some(node_key) = var_refs::expr_key(node) {
                 if node_key == key {
                     hit = true;
                 }
@@ -760,7 +761,7 @@ fn substitute_in_stmt_subtree(
             continue;
         }
         let mut visit = |node: &mut Expr| {
-            if let Ok(node_key) = serde_json::to_string(node) {
+            if let Some(node_key) = var_refs::expr_key(node) {
                 if node_key == key {
                     *node = Expr::Var(replacement.to_string());
                     return Action::Continue;

@@ -34,6 +34,7 @@ pub mod strip_scaffold_residue;
 pub mod struct_fold;
 pub mod ternary_fold;
 pub mod var_names;
+pub mod var_refs;
 pub mod visit;
 
 #[cfg(test)]

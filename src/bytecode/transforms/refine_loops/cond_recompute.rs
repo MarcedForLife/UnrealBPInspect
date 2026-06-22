@@ -1,6 +1,7 @@
 use super::{lhs_var_name, stmt_assignment_lhs_name};
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::Stmt;
+use crate::bytecode::transforms::var_refs::{self, Defs, VarScope};
 use crate::bytecode::transforms::visit::{
     scope_stack, walk_expr, walk_stmt_exprs, walk_stmt_exprs_mut, Action,
 };
@@ -244,23 +245,7 @@ fn pick_substitution_candidate(increment: &[Stmt], body: &[Stmt]) -> Option<Stri
 /// Used to decide whether substituting a temp is safe (zero remaining uses
 /// means the only consumer was the just-extracted increment).
 pub(super) fn count_body_var_uses(body: &[Stmt], name: &str) -> usize {
-    let mut count = 0;
-    for stmt in body {
-        count += count_var_uses_in_stmt(stmt, name);
-    }
-    count
-}
-
-fn count_var_uses_in_stmt(stmt: &Stmt, name: &str) -> usize {
-    let mut count = 0usize;
-    walk_stmt_exprs(stmt, &mut |expr: &Expr| {
-        if let Expr::Var(other) = expr {
-            if other == name {
-                count += 1;
-            }
-        }
-    });
-    count
+    var_refs::count_var(body, name, VarScope::Deep, Defs::SkipLhs)
 }
 
 /// Collect every `Var(name)` reference appearing inside `stmt` into `out`.

@@ -134,6 +134,10 @@ fn name_from_lhs(lhs: &Expr) -> Option<String> {
 /// definition source for the alias-set, so its lhs occurrences (the
 /// `<lhs> = Var(gate_var)` itself) are not consumers and preserving them
 /// is intentional.
+///
+/// This deliberately diverges from the universal
+/// `var_refs::rename_var_in_stmt` (which visits the lhs and renames the
+/// `ForEach` item slot). The two must stay separate.
 fn rename_var_in_stmts(stmts: &mut [Stmt], old: &str, new: &str) {
     walk_body_exprs_mut(stmts, &mut |expr: &mut Expr| {
         if let Expr::Var(name) = expr {
