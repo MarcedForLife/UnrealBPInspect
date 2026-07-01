@@ -1144,6 +1144,10 @@ fn decode_owner_event_body(
         return None;
     }
     let claimed: RefCell<BTreeMap<usize, super::ctx::Claim>> = RefCell::new(BTreeMap::new());
+    // Built explicitly, NOT via base_ctx.child(): re-decoding a whole event
+    // from scratch must keep cross_event_inline None (child() would copy the
+    // parent's Some, flipping the synth jump path from drop to cross-event
+    // inline). Omitting it here defaults it to None via DecodeCtx::new.
     let synth_ctx = DecodeCtx {
         mem_to_disk: base_ctx.mem_to_disk,
         event_entries: base_ctx.event_entries,

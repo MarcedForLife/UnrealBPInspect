@@ -479,10 +479,7 @@ impl OpcodeVisitor for ScaffoldOpcodeVisitor {
         path: FieldPath,
         _start_offset: usize,
     ) -> Self::Result {
-        if path.is_null() || path.display.is_empty() {
-            return None;
-        }
-        let leaf = path.display.rsplit("::").next().unwrap_or(&path.display);
+        let leaf = path.leaf_member()?;
         Some(normalise_member_name(leaf))
     }
 
@@ -497,10 +494,7 @@ impl OpcodeVisitor for ScaffoldOpcodeVisitor {
         debug_assert!(
             opcode == EX_LET || opcode == EX_LET_MULTICAST_DELEGATE || opcode == EX_LET_DELEGATE
         );
-        if path.is_null() || path.display.is_empty() {
-            return None;
-        }
-        let leaf = path.display.rsplit("::").next().unwrap_or(&path.display);
+        let leaf = path.leaf_member()?;
         self.record_let_if_gate(start_offset, leaf, rhs.as_deref());
         None
     }
@@ -528,10 +522,7 @@ impl OpcodeVisitor for ScaffoldOpcodeVisitor {
         start_offset: usize,
     ) -> Self::Result {
         let _ = EX_LET_VALUE_ON_PERSISTENT_FRAME;
-        if path.is_null() || path.display.is_empty() {
-            return None;
-        }
-        let leaf = path.display.rsplit("::").next().unwrap_or(&path.display);
+        let leaf = path.leaf_member()?;
         self.record_let_if_gate(start_offset, leaf, value.as_deref());
         None
     }

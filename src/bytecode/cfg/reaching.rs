@@ -21,6 +21,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::dom::DomChain;
 use super::region::{RegionKind, RegionTree};
 use super::{BlockId, ControlFlowGraph};
 
@@ -395,19 +396,10 @@ fn forward_edges(
 /// True if `target` dominates `source` (so `source -> target` closes a
 /// natural loop). Walks the immediate-dominator chain up from `source`.
 fn is_back_edge(source: BlockId, target: BlockId, idom: &BTreeMap<BlockId, BlockId>) -> bool {
-    if source == target {
-        return true;
-    }
-    let mut current = source;
-    loop {
-        if current == target {
-            return true;
-        }
-        match idom.get(&current) {
-            Some(&parent) if parent != current => current = parent,
-            _ => return false,
-        }
-    }
+    source == target
+        || DomChain(idom)
+            .ancestors(source)
+            .any(|parent| parent == target)
 }
 
 /// Kahn topological order over the forward DAG. Returns `None` if a cycle

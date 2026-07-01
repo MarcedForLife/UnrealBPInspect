@@ -29,14 +29,13 @@ pub(super) fn try_emit_sequencechain_region(
     region_tree: &RegionTree,
 ) -> Option<Vec<Stmt>> {
     let RegionWalkCtx { cfg, ctx, idom: _ } = walk;
-    if region.kind != RegionKind::SequenceChain {
-        return None;
-    }
-    let entry_block = cfg.blocks.get(region.entry)?;
-    let terminator_addr = *entry_block.opcodes.last()?;
-    if *ctx.bytecode.get(terminator_addr)? != EX_PUSH_EXECUTION_FLOW {
-        return None;
-    }
+    let (entry_block, terminator_addr) = region_entry_terminator(
+        region,
+        RegionKind::SequenceChain,
+        EX_PUSH_EXECUTION_FLOW,
+        cfg,
+        ctx,
+    )?;
     let skeleton = ctx.skeleton?;
     // Push-to-epilogue dedup: when the entry-block PUSH has no chain
     // node of its own, the skeleton keyed the chain at an INNER push whose

@@ -35,6 +35,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::Stmt;
+use crate::bytecode::transforms::var_refs;
 use crate::bytecode::transforms::visit::{walk_stmt_children, walk_stmt_children_mut};
 
 /// Entry point. Walks the entire body cross-scope, picks the first
@@ -181,7 +182,7 @@ fn classify_assignment(lhs: &Expr, rhs: &Expr) -> Option<(PureShape, String, Opt
     if !lhs_is_pure_shape(lhs_name, call_name) {
         return None;
     }
-    let key = serde_json::to_string(rhs).ok()?;
+    let key = var_refs::expr_key(rhs)?;
     Some((PureShape::Assignment, key, Some(lhs_name.clone())))
 }
 
@@ -204,7 +205,7 @@ fn classify_bare_call(func: &Expr, args: &[Expr]) -> Option<(PureShape, String, 
         name: call_name.clone(),
         args: args.to_vec(),
     };
-    let key = serde_json::to_string(&canon).ok()?;
+    let key = var_refs::expr_key(&canon)?;
     Some((PureShape::BareCall, key, None))
 }
 

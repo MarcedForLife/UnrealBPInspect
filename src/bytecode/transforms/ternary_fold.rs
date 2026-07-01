@@ -31,7 +31,7 @@
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::Stmt;
 use crate::bytecode::transforms::visit::{
-    expr_contains_unknown, walk_body_exprs_mut, walk_stmt_children_mut, Action,
+    expr_contains_unknown, rewrite_stmts_preorder, walk_body_exprs_mut, Action,
 };
 
 /// Walk a statement body and fold `Branch` statements whose two arms
@@ -40,7 +40,13 @@ use crate::bytecode::transforms::visit::{
 /// nested body so independent ternaries fold inside branches,
 /// sequences, loops, switches, and latches.
 pub fn fold_ternaries(body: &mut [Stmt]) {
-    fold_in_body(body);
+    // Top-down: fold each statement before recursing into its children. If we
+    // recursed first, an inner ternary could collapse into a single
+    // Assignment, then the outer Branch would no longer match the "single
+    // Assignment per arm" shape. `rewrite_stmts_preorder` visits a node then
+    // descends into it as mutated, so a Branch folded to a leaf has no arms
+    // left to revisit.
+    rewrite_stmts_preorder(body, &mut |stmt| try_fold_branch_into_ternary(stmt));
 }
 
 /// Rewrite expression-position `EX_SwitchValue` shapes whose index is a
@@ -113,17 +119,6 @@ fn bool_literal_value(expr: &Expr) -> Option<bool> {
         Expr::Literal(text) if text == "true" => Some(true),
         Expr::Literal(text) if text == "false" => Some(false),
         _ => None,
-    }
-}
-
-fn fold_in_body(body: &mut [Stmt]) {
-    // Top-down: try to fold each statement at this level before
-    // recursing into its children. If we recursed first, an inner
-    // ternary could collapse into a single Assignment, then the outer
-    // Branch wouldn't match the "single Assignment per arm" shape.
-    for stmt in body.iter_mut() {
-        try_fold_branch_into_ternary(stmt);
-        walk_stmt_children_mut(stmt, &mut |sub_body| fold_in_body(sub_body));
     }
 }
 
