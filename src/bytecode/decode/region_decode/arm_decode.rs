@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::bytecode::cfg::dom::DomChain;
+
 /// Decode the body of one arm of a branch-like region by collecting
 /// every CFG block reachable from `arm_entry` within the parent
 /// region's SESE bounds, converting that block set to merged disk
@@ -458,17 +460,9 @@ pub(super) fn is_strictly_dominated_by(
     if block == dominator {
         return false;
     }
-    let mut cursor = block;
-    while let Some(&parent) = idom.get(&cursor) {
-        if parent == dominator {
-            return true;
-        }
-        if parent == cursor {
-            return false;
-        }
-        cursor = parent;
-    }
-    false
+    DomChain(idom)
+        .ancestors(block)
+        .any(|parent| parent == dominator)
 }
 
 /// Decode the opcodes of one basic block, skipping addresses inside a
@@ -492,38 +486,8 @@ pub(super) fn decode_block_opcodes(
         return;
     }
     for &opcode_addr in &block.opcodes {
-        if address_in_consumed(consumed, opcode_addr) {
-            continue;
-        }
-        if claimed_end_for_disk_sweep(ctx, opcode_addr).is_some() {
-            continue;
-        }
-        if opcode_addr >= ctx.bytecode.len() {
-            continue;
-        }
         let range_end = enclosing_range_end(enclosing_ranges, opcode_addr).unwrap_or(block.end);
-        let mut pos = opcode_addr;
-        let before = pos;
-        match decode_one_or_branch(&mut pos, range_end, ctx) {
-            Ok(Some(stmt)) => {
-                consumed.extend(extra_consumed_ranges(&stmt, before, pos));
-                stmts.push(stmt);
-                if pos > before {
-                    consumed.push(before..pos);
-                }
-            }
-            Ok(None) => {
-                if pos > before {
-                    consumed.push(before..pos);
-                }
-            }
-            Err(unknown) => {
-                stmts.push(*unknown);
-                if pos > before {
-                    consumed.push(before..pos);
-                }
-            }
-        }
+        decode_opcode_at(opcode_addr, range_end, ctx, stmts, consumed);
     }
 }
 

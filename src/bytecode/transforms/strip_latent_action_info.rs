@@ -25,7 +25,7 @@
 use crate::bytecode::expr::Expr;
 use crate::bytecode::names::LATENT_FUNCTIONS;
 use crate::bytecode::stmt::Stmt;
-use crate::bytecode::transforms::visit::{walk_body_exprs_mut, walk_stmt_children_mut, Action};
+use crate::bytecode::transforms::visit::{rewrite_stmts_preorder, walk_body_exprs_mut, Action};
 
 /// Name of the synthetic struct constructor the decoder emits for
 /// `FLatentActionInfo` arguments.
@@ -37,10 +37,10 @@ const LATENT_INFO_STRUCT: &str = "MakeLatentActionInfo";
 /// calls inside branches, sequences, loops, switches, and latches are
 /// covered.
 pub fn strip_latent_action_info(body: &mut [Stmt]) {
-    for stmt in body.iter_mut() {
-        strip_in_stmt(stmt);
-        walk_stmt_children_mut(stmt, &mut |sub_body| strip_latent_action_info(sub_body));
-    }
+    // Preorder; strip_in_stmt at each node also walks the node's own call
+    // expressions. The order is irrelevant to output (try_strip_call is
+    // idempotent: a re-walk finds no trailing MakeLatentActionInfo to drop).
+    rewrite_stmts_preorder(body, &mut |stmt| strip_in_stmt(stmt));
 }
 
 /// Apply the strip to the call at the statement layer (`Stmt::Call`)

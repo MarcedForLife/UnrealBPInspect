@@ -296,6 +296,43 @@ impl<'a> DecodeCtx<'a> {
             arm_covered_segments: RefCell::new(Vec::new()),
         }
     }
+
+    /// Derive a sub-context for a nested decode scope.
+    ///
+    /// Copies every shared `&'a` reference (tables, opcode graph, CFG, region
+    /// tree, byte ranges, `cross_event_inline`, k2node map, `owned_ranges`,
+    /// `skeleton`) and RESETS the per-scope mutable state: `claimed` and
+    /// `decoding_owner` to `None`, and every transient cell to its default.
+    /// Callers re-set `claimed` / `decoding_owner` for their scope (sequence
+    /// copies the parent owner, inline sets `Some(owner)`, disjoint leaves
+    /// `None`) and override the region refs when decoding a freshly-built
+    /// local CFG.
+    ///
+    /// NOT for `decode_owner_event_body`'s synth context: that re-decodes a
+    /// whole event from scratch and must keep `cross_event_inline` `None`,
+    /// which this copies from the parent. Build that one explicitly.
+    pub(crate) fn child(&self) -> DecodeCtx<'a> {
+        DecodeCtx {
+            mem_to_disk: self.mem_to_disk,
+            event_entries: self.event_entries,
+            function_signatures: self.function_signatures,
+            owned_ranges: self.owned_ranges,
+            skeleton: self.skeleton,
+            graph: self.graph,
+            cfg: self.cfg,
+            region_tree: self.region_tree,
+            region_byte_ranges: self.region_byte_ranges,
+            cross_event_inline: self.cross_event_inline,
+            k2node_byte_map: self.k2node_byte_map,
+            ..DecodeCtx::new(
+                self.bytecode,
+                self.name_table,
+                self._imports,
+                self._export_names,
+                self.ue5,
+            )
+        }
+    }
 }
 
 /// Context the naked-if recognizer needs to recover a loop-internal

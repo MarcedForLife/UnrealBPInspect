@@ -32,8 +32,9 @@
 
 use crate::bytecode::expr::{BinaryOp, Expr};
 use crate::bytecode::stmt::Stmt;
+use crate::bytecode::transforms::var_refs::{self, Defs, VarScope};
 use crate::bytecode::transforms::visit::{
-    descend_into_children, resolve_expr_chain, resolve_var_chain, scope_stack, walk_expr,
+    descend_into_children, resolve_expr_chain, resolve_var_chain, scope_stack,
 };
 
 /// Walk a statement body, lowering `[Var = X != N; if (Var) A else B]`
@@ -213,7 +214,7 @@ fn remove_chain_def(
     // sub-bodies: each cascade level reuses the same temp name and operates
     // in its own scope, safe regardless of the outer rewrite. The
     // Assignment lhs is a def, not a use.
-    if count_var_uses_at_top_level(body, temp_name) != 1 {
+    if var_refs::count_var(body, temp_name, VarScope::CurrentLevel, Defs::SkipLhs) != 1 {
         return None;
     }
 
@@ -255,81 +256,6 @@ fn remove_chain_def(
 
     body.remove(def_idx);
     Some((def_idx, eq_lhs, eq_rhs))
-}
-
-/// Count `Expr::Var(name)` occurrences at the CURRENT scope level only,
-/// without recursing into nested `Vec<Stmt>` slots (Branch then/else,
-/// Loop body, Switch cases, Latch init/body, Sequence pins). Assignment
-/// lhs positions are defs, not uses.
-///
-/// This is deliberately narrower than `expr_transforms::count_var_uses`.
-/// The cascade compiler reuses one temp name across nested levels:
-/// the outer Branch's then-body re-assigns the same `$SwitchEnum_CmpSuccess`
-/// before reading it. Each level is a fresh def-use chain in its own scope,
-/// so the outer rewrite stays safe regardless of inner uses.
-///
-/// What the counter still walks at the current scope:
-/// - Assignment rhs (`t = X`, where `X` may reference `name`)
-/// - Call func and args, Return value
-/// - Branch cond (the use we expect to see)
-/// - Loop cond and ForEach array expression (current-scope reads)
-/// - Switch expr and case values (current-scope reads)
-fn count_var_uses_at_top_level(body: &[Stmt], name: &str) -> usize {
-    body.iter()
-        .map(|stmt| count_var_uses_in_stmt_top_level(stmt, name))
-        .sum()
-}
-
-fn count_var_uses_in_stmt_top_level(stmt: &Stmt, name: &str) -> usize {
-    match stmt {
-        Stmt::Assignment { rhs, .. } => count_var_uses_in_expr(rhs, name),
-        Stmt::Call { func, args, .. } => {
-            let mut total = count_var_uses_in_expr(func, name);
-            for arg in args {
-                total += count_var_uses_in_expr(arg, name);
-            }
-            total
-        }
-        Stmt::Return { value, .. } => value
-            .as_ref()
-            .map(|expr| count_var_uses_in_expr(expr, name))
-            .unwrap_or(0),
-        Stmt::Branch { cond, .. } => count_var_uses_in_expr(cond, name),
-        Stmt::Loop { cond, kind, .. } => {
-            let mut total = cond
-                .as_ref()
-                .map(|expr| count_var_uses_in_expr(expr, name))
-                .unwrap_or(0);
-            if let crate::bytecode::stmt::LoopKind::ForEach { array, .. } = kind {
-                total += count_var_uses_in_expr(array, name);
-            }
-            total
-        }
-        Stmt::Switch { expr, cases, .. } => {
-            let mut total = count_var_uses_in_expr(expr, name);
-            for case in cases {
-                for value in &case.values {
-                    total += count_var_uses_in_expr(value, name);
-                }
-            }
-            total
-        }
-        Stmt::Sequence { .. }
-        | Stmt::Latch { .. }
-        | Stmt::Break { .. }
-        | Stmt::EventCall { .. }
-        | Stmt::Unknown { .. } => 0,
-    }
-}
-
-fn count_var_uses_in_expr(expr: &Expr, name: &str) -> usize {
-    let mut count = 0;
-    walk_expr(expr, &mut |node| {
-        if matches!(node, Expr::Var(other) if other == name) {
-            count += 1;
-        }
-    });
-    count
 }
 
 #[cfg(test)]

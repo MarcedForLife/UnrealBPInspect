@@ -12,7 +12,7 @@ use crate::bytecode::opcodes::{EX_JUMP, EX_JUMP_IF_NOT, EX_NOTHING, EX_RETURN, E
 use crate::bytecode::partition::OpcodeGraph;
 
 use super::dom::{compute_dominators, compute_postdominators};
-use super::region::{build_region_tree, RegionKind};
+use super::region::{all_reachable_blocks, build_region_tree, RegionKind};
 use super::{BasicBlock, BlockId, ControlFlowGraph};
 
 /// Build a synthetic CFG from edge list plus optional per-block
@@ -116,6 +116,18 @@ fn make_cfg_with_opcodes(
 
 fn make_cfg(node_count: usize, edges: &[(BlockId, BlockId)]) -> (ControlFlowGraph, OpcodeGraph) {
     make_cfg_with_opcodes(node_count, edges, &BTreeMap::new())
+}
+
+#[test]
+fn all_reachable_covers_multi_sink_event_and_excludes_unreachable() {
+    // 0 -> 1 -> {2, 3}; both 2 and 3 are returns (edge to sink). Block 4 is
+    // isolated (no incoming), so unreachable from the entry. sink id = 5.
+    let (cfg, _) = make_cfg(5, &[(0, 1), (1, 2), (1, 3)]);
+    let reached = all_reachable_blocks(&cfg);
+    // Whole event including both return leaves and the synthetic sink.
+    assert_eq!(reached, BTreeSet::from([0, 1, 2, 3, cfg.sink]));
+    // The unreachable block is not pulled in.
+    assert!(!reached.contains(&4));
 }
 
 #[test]

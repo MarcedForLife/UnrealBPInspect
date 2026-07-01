@@ -19,6 +19,16 @@ use super::target::{
     read_jump_target, JumpTarget, JUMP_TARGET_BYTES,
 };
 
+/// End offset of the last segment of arm `index` in a region's arm extents,
+/// or `None` when the arm is absent or empty. `extents` come from
+/// [`DecodeCtx::region_arm_extents_for`].
+pub(super) fn arm_last_end(extents: &[Vec<std::ops::Range<usize>>], index: usize) -> Option<usize> {
+    extents
+        .get(index)
+        .and_then(|arm| arm.last())
+        .map(|range| range.end)
+}
+
 /// Scan the else arm `[else_start, else_end)` of a multi-break loop-body branch
 /// for its own terminating loop break-jump: an `EX_JUMP` whose resolved
 /// target is either at/past the loop tail (forward break to the epilogue)
@@ -102,7 +112,7 @@ fn c2_region_bounded_layout(
 ) -> Option<BranchLayout> {
     let scan_jump_pos = scan_jump_pos?;
     let extents = ctx.region_arm_extents_for(construct_offset, &[body_start_disk, else_disk])?;
-    let then_end = extents.first().and_then(|arm| arm.last()).map(|r| r.end)?;
+    let then_end = arm_last_end(&extents, 0)?;
     let else_arm = extents.get(1)?;
     let else_start = else_arm.first().map(|r| r.start)?;
     let else_end = else_arm.last().map(|r| r.end)?;
@@ -810,7 +820,7 @@ pub(crate) fn isvalid_else_body_end(
     // returns the union of reachable owned segments; we take the end
     // of the last segment as the body terminator.
     if let Some(extents) = ctx.region_arm_extents_for(chain_limit, &[target]) {
-        if let Some(end) = extents.first().and_then(|arm| arm.last()).map(|r| r.end) {
+        if let Some(end) = arm_last_end(&extents, 0) {
             if end > target && end <= chain_limit {
                 return Some(end);
             }
@@ -873,7 +883,7 @@ fn find_convergence_for_displaced(
     // bounded by the SESE region exit, that exit IS the convergence
     // point by dominance.
     if let Some(extents) = ctx.region_arm_extents_for(construct_offset, &[then_start, else_start]) {
-        let arm_end = |index: usize| extents.get(index).and_then(|arm| arm.last()).map(|r| r.end);
+        let arm_end = |index: usize| arm_last_end(&extents, index);
         if let Some(convergence) = match (arm_end(0), arm_end(1)) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (Some(a), None) | (None, Some(a)) => Some(a),

@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::Stmt;
 use crate::bytecode::transforms::name_shape::is_compiler_temp_name;
+use crate::bytecode::transforms::var_refs;
 use crate::bytecode::transforms::visit::{
     expr_contains_unknown, walk_body_exprs, walk_body_exprs_mut, walk_stmt_children,
     walk_stmt_children_mut, walk_stmt_exprs_mut, Action,
@@ -224,7 +225,7 @@ fn replace_call_handles_in_stmt(stmt: &mut Stmt, name: &str, replacement: &Expr)
 /// Single inlining sweep over `body`. Returns `true` if any substitution was
 /// made (caller should re-run for chained temps).
 fn inline_pass(body: &mut Vec<Stmt>) -> bool {
-    let use_counts = count_var_uses(body);
+    let use_counts = var_refs::count_all_var_uses(body);
 
     // Collect candidates: indices of Assignment stmts whose lhs Var has
     // exactly one use (RHS-only count; LHS is the def, not a use) and a
@@ -281,20 +282,6 @@ fn inline_pass(body: &mut Vec<Stmt>) -> bool {
     }
 
     changed
-}
-
-/// Count how many times each `Expr::Var(name)` appears as a use across the
-/// full body. Assignment lhs positions are skipped (they are defs, not uses)
-/// by the shared walker's lhs-skip semantics. Recurses into nested
-/// statement bodies.
-fn count_var_uses(body: &[Stmt]) -> BTreeMap<String, usize> {
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    walk_body_exprs(body, &mut |expr| {
-        if let Expr::Var(name) = expr {
-            *counts.entry(name.clone()).or_insert(0) += 1;
-        }
-    });
-    counts
 }
 
 /// Replace the first occurrence of `Expr::Var(var_name)` (as a use, not

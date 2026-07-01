@@ -2,10 +2,11 @@
 //! the production module so the walker definitions stay readable; the
 //! synthetic Stmt/Expr trees that exercise every variant live here.
 
-use super::test_fixtures::{lit, var};
+use super::test_fixtures::{assign, call, lit, stmt_kind, var};
 use super::visit::{
-    any_expr, walk_body_exprs, walk_body_exprs_mut, walk_body_exprs_mut_visit_lhs,
-    walk_body_exprs_visit_lhs, walk_expr, walk_expr_mut, walk_stmt_exprs, walk_stmt_exprs_mut,
+    any_expr, for_each_sub_body, rewrite_stmts_postorder, rewrite_stmts_preorder, walk_body_exprs,
+    walk_body_exprs_mut, walk_body_exprs_mut_visit_lhs, walk_body_exprs_visit_lhs, walk_expr,
+    walk_expr_mut, walk_stmt_children, walk_stmt_exprs, walk_stmt_exprs_mut,
     walk_stmt_exprs_mut_visit_lhs, walk_stmt_exprs_visit_lhs, Action,
 };
 use crate::bytecode::expr::{BinaryOp, CastKind, Expr, SwitchExprCase, UnaryOp};
@@ -740,4 +741,101 @@ fn any_expr_short_circuits_on_first_match() {
     });
     assert!(found);
     assert_eq!(seen, vec!["FIRST".to_string(), "SECOND".to_string()]);
+}
+
+/// One label per statement so visit order is comparable.
+fn stmt_label(stmt: &Stmt) -> String {
+    match stmt {
+        Stmt::Branch { .. } => "branch".to_string(),
+        Stmt::Call {
+            func: Expr::Var(name),
+            ..
+        } => name.clone(),
+        _ => stmt_kind(stmt).to_string(),
+    }
+}
+
+fn branch_with_arms() -> Vec<Stmt> {
+    vec![
+        Stmt::Branch {
+            cond: var("c"),
+            then_body: vec![call("then1", vec![]), call("then2", vec![])],
+            else_body: vec![call("else1", vec![])],
+            offset: 0,
+        },
+        call("after", vec![]),
+    ]
+}
+
+#[test]
+fn preorder_visits_parent_before_children() {
+    let mut body = branch_with_arms();
+    let mut order = Vec::new();
+    rewrite_stmts_preorder(&mut body, &mut |stmt| order.push(stmt_label(stmt)));
+    assert_eq!(order, vec!["branch", "then1", "then2", "else1", "after"]);
+}
+
+#[test]
+fn postorder_visits_children_before_parent() {
+    let mut body = branch_with_arms();
+    let mut order = Vec::new();
+    rewrite_stmts_postorder(&mut body, &mut |stmt| order.push(stmt_label(stmt)));
+    assert_eq!(order, vec!["then1", "then2", "else1", "branch", "after"]);
+    // Same statements as preorder, only the order differs.
+    let mut pre = Vec::new();
+    rewrite_stmts_preorder(&mut branch_with_arms(), &mut |stmt| {
+        pre.push(stmt_label(stmt))
+    });
+    let (mut a, mut b) = (order.clone(), pre);
+    a.sort();
+    b.sort();
+    assert_eq!(a, b);
+}
+
+#[test]
+fn preorder_descends_into_the_mutated_node_not_a_snapshot() {
+    // The load-bearing contract: a visit that rewrites the Branch into a leaf
+    // leaves no children, so the original arms are never visited afterwards.
+    let mut body = branch_with_arms();
+    let mut order = Vec::new();
+    rewrite_stmts_preorder(&mut body, &mut |stmt| {
+        order.push(stmt_label(stmt));
+        if matches!(stmt, Stmt::Branch { .. }) {
+            *stmt = assign("x", lit("1"));
+        }
+    });
+    assert_eq!(order, vec!["branch", "after"]);
+    assert!(!order.iter().any(|label| label.starts_with("then")));
+    assert!(matches!(body[0], Stmt::Assignment { .. }));
+}
+
+/// The slot-addressed walker yields exactly the sub-bodies the unslotted
+/// canonical walker does, in the same order. `for_each_sub_body` is just
+/// `walk_stmt_children` plus a `ScopeSlot` tag; dropping the tag must
+/// recover an identical sequence of sub-body slices. Identity (pointer +
+/// length) comparison proves both walkers reference the same slices in the
+/// same order without needing `Stmt: PartialEq`. Run against every variant
+/// of `synthetic_tree` so any slot the canonical walker covers but the
+/// slotted one drops (or vice versa) trips the assertion.
+#[test]
+fn slotted_walker_matches_walk_stmt_children() {
+    let body = synthetic_tree();
+    for stmt in &body {
+        let mut unslotted: Vec<(*const Stmt, usize)> = Vec::new();
+        walk_stmt_children(stmt, &mut |sub_body: &[Stmt]| {
+            unslotted.push((sub_body.as_ptr(), sub_body.len()));
+        });
+
+        let mut slotted: Vec<(*const Stmt, usize)> = Vec::new();
+        for_each_sub_body(stmt, |_slot, sub_body: &[Stmt]| {
+            slotted.push((sub_body.as_ptr(), sub_body.len()));
+        });
+
+        assert_eq!(
+            unslotted,
+            slotted,
+            "for_each_sub_body must yield the same sub-bodies as walk_stmt_children for {}",
+            stmt_kind(stmt)
+        );
+    }
 }

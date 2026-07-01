@@ -147,14 +147,14 @@ pub(super) fn walk_region(
     // merge continuation handled inside try_emit_ifthenelse_region.
     let defer_to_inner_sibling = region.kind == RegionKind::IfThenElse
         && find_same_entry_inner_sibling(region_id, region_tree).is_some();
-    if let Some((emitted, pulled_continuation, matched)) = dispatch_region_emitters(
+    if let Some((emitted, pulled_continuation, is_sequence_chain)) = dispatch_region_emitters(
         region,
         region_id,
         region_tree,
         walk,
         !defer_to_inner_sibling,
     ) {
-        if matches!(matched, MatchedEmitter::SequenceChain) {
+        if is_sequence_chain {
             // The SequenceChain emit decodes each pin body, including
             // pin-0's after-chain fallthrough block, which SESE often
             // assigns to an ANCESTOR region rather than this one.
@@ -532,37 +532,7 @@ fn decode_region_block_if_unclaimed(
 
     let block_end = block.end;
     for &opcode_addr in &block.opcodes {
-        if address_in_consumed(consumed, opcode_addr) {
-            continue;
-        }
-        if claimed_end_for_disk_sweep(ctx, opcode_addr).is_some() {
-            continue;
-        }
-        if opcode_addr >= ctx.bytecode.len() {
-            continue;
-        }
-        let mut pos = opcode_addr;
-        let before = pos;
-        match decode_one_or_branch(&mut pos, block_end, ctx) {
-            Ok(Some(stmt)) => {
-                consumed.extend(extra_consumed_ranges(&stmt, before, pos));
-                stmts.push(stmt);
-                if pos > before {
-                    consumed.push(before..pos);
-                }
-            }
-            Ok(None) => {
-                if pos > before {
-                    consumed.push(before..pos);
-                }
-            }
-            Err(unknown) => {
-                stmts.push(*unknown);
-                if pos > before {
-                    consumed.push(before..pos);
-                }
-            }
-        }
+        decode_opcode_at(opcode_addr, block_end, ctx, stmts, consumed);
     }
 }
 
