@@ -1,7 +1,8 @@
 //! Bytecode-level binary readers.
 //!
 //! Works on `&[u8]` + `&mut usize` (not `Cursor`). Returns defaults on
-//! truncation rather than erroring; bytecode parsing is best-effort.
+//! truncation, but retain the attempted cursor end so callers can diagnose
+//! missing operands instead of accepting the fallback value as decoded data.
 
 use std::collections::BTreeMap;
 
@@ -29,27 +30,19 @@ macro_rules! read_bc_num {
     ($name:ident, $ty:ty, $default:expr) => {
         pub fn $name(bytecode: &[u8], pos: &mut usize) -> $ty {
             const SIZE: usize = std::mem::size_of::<$ty>();
-            if *pos + SIZE > bytecode.len() {
-                *pos = bytecode.len();
+            let end = pos.saturating_add(SIZE);
+            if end > bytecode.len() {
+                *pos = end;
                 return $default;
             }
-            let val = <$ty>::from_le_bytes(bytecode[*pos..*pos + SIZE].try_into().unwrap());
-            *pos += SIZE;
+            let val = <$ty>::from_le_bytes(bytecode[*pos..end].try_into().unwrap());
+            *pos = end;
             val
         }
     };
 }
 
-pub fn read_bc_u8(bytecode: &[u8], pos: &mut usize) -> u8 {
-    if *pos >= bytecode.len() {
-        *pos = bytecode.len();
-        return 0;
-    }
-    let val = bytecode[*pos];
-    *pos += 1;
-    val
-}
-
+read_bc_num!(read_bc_u8, u8, 0);
 read_bc_num!(read_bc_i32, i32, 0);
 read_bc_num!(read_bc_u32, u32, 0);
 read_bc_num!(read_bc_i64, i64, 0);
@@ -125,4 +118,23 @@ pub fn read_bc_string(bytecode: &[u8], pos: &mut usize) -> String {
         bytes.push(byte);
     }
     String::from_utf8_lossy(&bytes).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncated_numeric_reads_preserve_attempted_end_without_overflow() {
+        let mut position = 1;
+        assert_eq!(read_bc_i32(&[0, 1], &mut position), 0);
+        assert_eq!(position, 5);
+        assert_eq!(read_bc_u8(&[0, 1], &mut position), 0);
+        assert_eq!(position, 6);
+        position = usize::MAX - 1;
+        assert_eq!(read_bc_f64(&[], &mut position), 0.0);
+        assert_eq!(position, usize::MAX);
+        assert_eq!(read_bc_u8(&[], &mut position), 0);
+        assert_eq!(position, usize::MAX);
+    }
 }

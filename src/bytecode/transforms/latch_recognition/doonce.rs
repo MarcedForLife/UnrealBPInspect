@@ -11,6 +11,7 @@ use super::shared::{
     DOONCE_GATE_PREFIX, DOONCE_INIT_PREFIX, RESET_DOONCE_CALL_NAME,
 };
 use crate::bytecode::expr::Expr;
+use crate::bytecode::expr::LiteralValue;
 use crate::bytecode::stmt::{LatchKind, Stmt};
 use crate::bytecode::transforms::visit::{self, walk_stmt_children_mut};
 use std::collections::BTreeSet;
@@ -954,7 +955,7 @@ fn is_gate_self_assignment(stmt: &Stmt, gate_name: &str) -> bool {
     if lhs_name != gate_name {
         return false;
     }
-    matches!(rhs, Expr::Literal(text) if text == "true")
+    matches!(rhs, Expr::Literal(LiteralValue::Text(text)) if text == "true")
 }
 
 /// Derive a display name for a DoOnce from its body. Scans for the first

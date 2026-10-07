@@ -6,6 +6,7 @@ use super::doonce::{
     classify_doonce_sequence, doonce_var_suffix, is_synthetic_reset_doonce, DoOnceSequenceEvidence,
 };
 use crate::bytecode::expr::Expr;
+use crate::bytecode::expr::LiteralValue;
 use crate::bytecode::stmt::{LatchKind, Stmt};
 
 /// Variable-name prefix for the DoOnce gate (`true` once the gate has fired).
@@ -81,7 +82,7 @@ pub(super) fn match_var_assigned_literal<'a>(
     let Expr::Var(name) = lhs else {
         return None;
     };
-    if !matches!(rhs, Expr::Literal(text) if text == value) {
+    if !matches!(rhs, Expr::Literal(LiteralValue::Text(text)) if text == value) {
         return None;
     }
     Some((name.as_str(), *offset))
@@ -279,7 +280,7 @@ pub(super) fn is_scaffold_noop_branch(stmt: &Stmt) -> bool {
     if !then_body.is_empty() || !else_body.is_empty() {
         return false;
     }
-    matches!(cond, Expr::Literal(text) if text == "true")
+    matches!(cond, Expr::Literal(LiteralValue::Text(text)) if text == "true")
 }
 
 /// Return `true` when `stmt` is a `Var(name) = Literal("true")` or
@@ -296,7 +297,7 @@ pub(super) fn is_doonce_scaffold_assignment(stmt: &Stmt) -> bool {
     if !lhs_name.starts_with(DOONCE_INIT_PREFIX) && !lhs_name.starts_with(DOONCE_GATE_PREFIX) {
         return false;
     }
-    matches!(rhs, Expr::Literal(text) if text == "true" || text == "false")
+    matches!(rhs, Expr::Literal(LiteralValue::Text(text)) if text == "true" || text == "false")
 }
 
 /// Return `true` when `stmt` is pure DoOnce scaffolding, recursively.
@@ -347,7 +348,7 @@ pub(super) fn match_var_set_to_true(stmt: &Stmt) -> Option<&str> {
     let Expr::Var(name) = lhs else {
         return None;
     };
-    if !matches!(rhs, Expr::Literal(text) if text == "true") {
+    if !matches!(rhs, Expr::Literal(LiteralValue::Text(text)) if text == "true") {
         return None;
     }
     Some(name.as_str())

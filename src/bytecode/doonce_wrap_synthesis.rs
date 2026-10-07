@@ -7,6 +7,7 @@
 //! flow-stack formation pass (`cfg::macro_region::form_event_macro_regions`)
 //! and wraps the matching flat call after the transform stack runs.
 
+use crate::bytecode::expr::LiteralValue;
 use std::collections::BTreeSet;
 
 use crate::bytecode::cfg::macro_region::{
@@ -66,7 +67,7 @@ fn render_call(func: &crate::bytecode::expr::Expr, args: &[crate::bytecode::expr
         .iter()
         .map(|arg| match arg {
             crate::bytecode::expr::Expr::Var(value) => value.clone(),
-            crate::bytecode::expr::Expr::Literal(value) => value.clone(),
+            crate::bytecode::expr::Expr::Literal(value) => value.to_string(),
             other => format!("{:?}", other),
         })
         .collect::<Vec<_>>()
@@ -145,7 +146,7 @@ fn locate_doonce(
 fn render_expr(expr: &crate::bytecode::expr::Expr) -> String {
     match expr {
         crate::bytecode::expr::Expr::Var(name) => name.clone(),
-        crate::bytecode::expr::Expr::Literal(value) => value.clone(),
+        crate::bytecode::expr::Expr::Literal(value) => value.to_string(),
         other => format!("{:?}", other),
     }
 }
@@ -860,7 +861,7 @@ fn reset_doonce_arg(stmt: &Stmt) -> Option<String> {
     }
     match &args[0] {
         crate::bytecode::expr::Expr::Var(name) => Some(name.clone()),
-        crate::bytecode::expr::Expr::Literal(value) => Some(value.clone()),
+        crate::bytecode::expr::Expr::Literal(LiteralValue::Text(value)) => Some(value.clone()),
         _ => None,
     }
 }

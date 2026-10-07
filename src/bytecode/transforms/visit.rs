@@ -1336,7 +1336,7 @@ fn find_top_level_var_assignment<'a>(scopes: &[&'a [Stmt]], name: &str) -> Optio
 #[cfg(test)]
 mod tests {
     use super::{resolve_expr_chain, resolve_var_chain};
-    use crate::bytecode::expr::{BinaryOp, Expr};
+    use crate::bytecode::expr::{BinaryOp, Expr, LiteralValue};
     use crate::bytecode::stmt::Stmt;
     use crate::bytecode::transforms::test_fixtures::{assign, call, lit, var};
 
@@ -1427,7 +1427,7 @@ mod tests {
         let scopes = scopes_of(&body);
         let resolved = resolve_var_chain(&scopes, "X").expect("first wins");
         match resolved {
-            Expr::Literal(text) => assert_eq!(text, "first"),
+            Expr::Literal(LiteralValue::Text(text)) => assert_eq!(text, "first"),
             other => panic!("expected first literal, got {other:?}"),
         }
     }
@@ -1469,7 +1469,7 @@ mod tests {
         let scopes: Vec<&[Stmt]> = vec![&inner, &outer];
         let resolved = resolve_var_chain(&scopes, "X").expect("inner wins");
         match resolved {
-            Expr::Literal(text) => assert_eq!(text, "inner"),
+            Expr::Literal(LiteralValue::Text(text)) => assert_eq!(text, "inner"),
             other => panic!("expected inner literal, got {other:?}"),
         }
     }
@@ -1510,8 +1510,8 @@ mod tests {
         else {
             panic!("expected Binary Add");
         };
-        assert!(matches!(*lhs, Expr::Literal(ref text) if text == "3"));
-        assert!(matches!(*rhs, Expr::Literal(ref text) if text == "4"));
+        assert!(matches!(*lhs, Expr::Literal(LiteralValue::Text(ref text)) if text == "3"));
+        assert!(matches!(*rhs, Expr::Literal(LiteralValue::Text(ref text)) if text == "4"));
     }
 
     /// `resolve_expr_chain` follows a multi-hop chain inside a
@@ -1531,7 +1531,7 @@ mod tests {
         else {
             panic!("expected Binary Add");
         };
-        assert!(matches!(*lhs, Expr::Literal(ref text) if text == "5"));
+        assert!(matches!(*lhs, Expr::Literal(LiteralValue::Text(ref text)) if text == "5"));
         assert!(matches!(*rhs, Expr::Var(ref name) if name == "Y"));
     }
 

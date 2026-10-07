@@ -5,6 +5,7 @@
 //! indices the cross-event inline classifier needs, and constructs the
 //! per-event structure skeleton (including tail-JIN arm prescan).
 
+use crate::bytecode::expr::LiteralValue;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -90,7 +91,7 @@ fn scan_ubergraph_dispatch(
             return None;
         }
         match args.first() {
-            Some(Expr::Literal(value)) => value.parse::<usize>().ok(),
+            Some(Expr::Literal(LiteralValue::Text(value))) => value.parse::<usize>().ok(),
             _ => None,
         }
     };

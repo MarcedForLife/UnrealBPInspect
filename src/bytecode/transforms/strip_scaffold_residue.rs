@@ -30,6 +30,7 @@
 //! variables for their literal values.
 
 use crate::bytecode::expr::Expr;
+use crate::bytecode::expr::LiteralValue;
 use crate::bytecode::stmt::Stmt;
 use crate::bytecode::transforms::visit::walk_stmt_children_mut;
 
@@ -72,7 +73,7 @@ fn is_removable_residue(stmt: &Stmt) -> bool {
 /// once the variable has only one use, leaving this exact shape behind
 /// in scaffold Branch conditions.
 fn is_literal_true(expr: &Expr) -> bool {
-    matches!(expr, Expr::Literal(text) if text == "true")
+    matches!(expr, Expr::Literal(LiteralValue::Text(text)) if text == "true")
 }
 
 #[cfg(test)]
@@ -82,7 +83,7 @@ mod tests {
     use crate::bytecode::stmt::Stmt;
 
     fn lit_true() -> Expr {
-        Expr::Literal("true".to_string())
+        Expr::Literal("true".into())
     }
 
     fn call(name: &str) -> Stmt {
@@ -168,7 +169,7 @@ mod tests {
     #[test]
     fn preserves_non_true_constant_branch_even_when_empty() {
         let mut body = vec![Stmt::Branch {
-            cond: Expr::Literal("false".to_string()),
+            cond: Expr::Literal("false".into()),
             then_body: vec![],
             else_body: vec![],
             offset: 0,

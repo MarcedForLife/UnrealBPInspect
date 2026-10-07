@@ -33,7 +33,7 @@ mod tests {
     /// static-library list.
     fn class_literal_methodcall(class: &str, name: &str, args: Vec<Expr>) -> Expr {
         Expr::MethodCall {
-            recv: Box::new(Expr::Literal(class.to_string())),
+            recv: Box::new(Expr::Literal(class.into())),
             name: name.to_string(),
             args,
         }

@@ -34,6 +34,7 @@
 //! prescan.
 
 use crate::bytecode::expr::Expr;
+use crate::bytecode::expr::LiteralValue;
 use crate::bytecode::opcodes::*;
 use crate::bytecode::partition::opcode_length_at;
 use crate::bytecode::readers::read_bc_u32;
@@ -141,7 +142,8 @@ pub(crate) fn try_decode_naked_if(
     // claim check above usually catches it first, but the literal
     // guard also covers pathologies where the scaffold prescan
     // declines to claim.
-    if matches!(&cond, Expr::Literal(text) if text == "true" || text == "false") {
+    if matches!(&cond, Expr::Literal(LiteralValue::Text(text)) if text == "true" || text == "false")
+    {
         return None;
     }
 

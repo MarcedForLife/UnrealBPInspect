@@ -640,6 +640,7 @@ pub fn walk_opcode<V: OpcodeVisitor>(
 ) -> V::Result {
     let start = *pos;
     if start >= ctx.bytecode.len() {
+        *pos = pos.saturating_add(1);
         return visitor.on_unknown(0, start);
     }
 
@@ -647,7 +648,11 @@ pub fn walk_opcode<V: OpcodeVisitor>(
     visitor.enter_opcode(opcode, start);
     let result = walk_opcode_dispatch(ctx, pos, visitor, opcode, start);
     visitor.exit_opcode(opcode, start);
-    result
+    if *pos > ctx.bytecode.len() {
+        visitor.on_unknown(opcode, start)
+    } else {
+        result
+    }
 }
 
 /// Body of the opcode dispatch, factored out so [`walk_opcode`] can wrap
@@ -735,9 +740,9 @@ fn dispatch_const_literal<V: OpcodeVisitor>(
         EX_NOTHING_INT32 => {
             // 4-byte payload, semantics opaque to the walker. Pass raw bytes through.
             let bytes_start = *pos;
-            *pos += 4;
+            *pos = pos.saturating_add(4);
             let mut buffer = [0u8; 4];
-            if bytes_start + 4 <= ctx.bytecode.len() {
+            if bytes_start.saturating_add(4) <= ctx.bytecode.len() {
                 buffer.copy_from_slice(&ctx.bytecode[bytes_start..bytes_start + 4]);
             }
             visitor.on_int_const_passthrough(opcode, buffer, start)
@@ -1215,7 +1220,7 @@ pub(crate) fn read_field_path(
         };
     }
     let needed = path_num as usize * 8 + 4;
-    if path_num > MAX_FIELD_PATH_DEPTH || *pos + needed > bytecode.len() {
+    if path_num > MAX_FIELD_PATH_DEPTH || pos.saturating_add(needed) > bytecode.len() {
         let _owner = read_bc_i32(bytecode, pos);
         return FieldPath {
             display: "???".into(),
@@ -1238,7 +1243,7 @@ pub(crate) fn read_field_path(
 /// code units. Visitors can lossily decode to UTF-8 if needed.
 fn read_unicode_string(bytecode: &[u8], pos: &mut usize) -> Vec<u16> {
     let mut units: Vec<u16> = Vec::new();
-    while *pos + 1 < bytecode.len() {
+    while pos.saturating_add(1) < bytecode.len() {
         let low = bytecode[*pos];
         let high = bytecode[*pos + 1];
         *pos += 2;

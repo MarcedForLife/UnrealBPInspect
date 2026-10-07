@@ -327,7 +327,7 @@ mod tests {
     #[test]
     fn branch_yields_then_then_else_with_no_forc_difference() {
         let branch = Stmt::Branch {
-            cond: Expr::Literal("true".to_string()),
+            cond: Expr::Literal("true".into()),
             then_body: marker(1),
             else_body: marker(2),
             offset: 0,
@@ -356,11 +356,11 @@ mod tests {
             expr: Expr::Var("x".to_string()),
             cases: vec![
                 SwitchCase {
-                    values: vec![Expr::Literal("0".to_string())],
+                    values: vec![Expr::Literal("0".into())],
                     body: marker(1),
                 },
                 SwitchCase {
-                    values: vec![Expr::Literal("1".to_string())],
+                    values: vec![Expr::Literal("1".into())],
                     body: marker(2),
                 },
             ],

@@ -484,6 +484,7 @@ fn is_inline_candidate_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bytecode::expr::LiteralValue;
     use crate::bytecode::expr::{BinaryOp, Expr};
     use crate::bytecode::stmt::Stmt;
     use crate::bytecode::transforms::test_fixtures::{assign, lit, var};
@@ -654,7 +655,7 @@ mod tests {
         for stmt in &body {
             if let Stmt::Assignment { lhs, rhs, .. } = stmt {
                 assert!(
-                    !matches!((lhs, rhs), (Expr::Literal(literal), Expr::Var(_)) if literal == "0"),
+                    !matches!((lhs, rhs), (Expr::Literal(LiteralValue::Text(literal)), Expr::Var(_)) if literal == "0"),
                     "must not produce literal-on-lhs corruption"
                 );
             }

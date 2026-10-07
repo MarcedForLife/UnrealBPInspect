@@ -162,6 +162,8 @@ An optional [agent skill](skill/README.md) helps coding agents inspect, compare,
 
 Pseudocode includes structured control flow and Blueprint comments. DoOnce and FlipFlop names are inferred from their bodies and may differ from editor node titles.
 
+Expression literals retain floating-point source bits. Pseudocode uses enough digits to round-trip each numeric literal.
+
 ## Development
 
 ```sh

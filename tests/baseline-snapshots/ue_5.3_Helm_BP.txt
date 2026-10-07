@@ -69,11 +69,11 @@ Functions:
     GetWheelVelocity(out $Velocity)
     $Divide_FloatFloat_1 = ($Velocity / 150.0000)
     // "Play wheel rotation audio"
-    self.WheelRotationAudioComponent.SetPitchMultiplier(FClamp($Divide_FloatFloat_1, 0.0000, 1.3000))
+    self.WheelRotationAudioComponent.SetPitchMultiplier(FClamp($Divide_FloatFloat_1, 0.0000, 1.2999999523162842))
     $Divide_FloatFloat_1 = ($Velocity / 150.0000)
     self.WheelRotationAudioComponent.SetVolumeMultiplier($Divide_FloatFloat_1)
     $Divide_FloatFloat_1 = ($Velocity / 150.0000)
-    if ($Divide_FloatFloat_1 >= 0.0100) {
+    if ($Divide_FloatFloat_1 >= 0.009999999776482582) {
         if (Not_PreBool(self.WheelRotationAudioComponent.IsPlaying())) {
             self.WheelRotationAudioComponent.Play(0.0000)
         }
@@ -84,7 +84,7 @@ Functions:
     }
     // Sequence [1]:
     GetSteeringAngle(out $SteeringAngle)
-    if (NearlyEqual_FloatFloat(Abs($SteeringAngle), 1.0000, 0.0200) && self.WheelHitPlayable) {
+    if (NearlyEqual_FloatFloat(Abs($SteeringAngle), 1.0000, 0.019999999552965164) && self.WheelHitPlayable) {
         // "Play hit audio when the wheel hits max rotation"
         // "Check if we are hitting the limit"
         $SpawnSoundAttached = SpawnSoundAttached(self.WheelMaxRotationCue, self.VREPhysicsConstraint, 'None',

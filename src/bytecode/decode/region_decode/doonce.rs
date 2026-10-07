@@ -1,4 +1,5 @@
 use super::*;
+use crate::bytecode::expr::LiteralValue;
 use crate::bytecode::transforms::latch_recognition::{DOONCE_GATE_PREFIX, DOONCE_INIT_PREFIX};
 
 /// Region-driven emitter for `RegionKind::DoOnceGate`. Returns a
@@ -318,7 +319,7 @@ fn is_gate_self_set(stmt: &Stmt, gate_name: &str) -> bool {
     if lhs_name != gate_name {
         return false;
     }
-    matches!(rhs, Expr::Literal(text) if text == "true")
+    matches!(rhs, Expr::Literal(LiteralValue::Text(text)) if text == "true")
 }
 
 /// Derive a DoOnce display name from the gate-open arm body. Picks the

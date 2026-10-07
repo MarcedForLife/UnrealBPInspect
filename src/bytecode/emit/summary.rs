@@ -850,7 +850,7 @@ fn increment_inline_string(stmts: &[Stmt]) -> String {
 /// Render an expression as a compact string.
 pub(super) fn expr_to_string(expr: &Expr) -> String {
     match expr {
-        Expr::Literal(text) => text.clone(),
+        Expr::Literal(value) => value.to_string(),
         Expr::Var(name) => name.clone(),
         Expr::Call { name, args } => {
             format!(

@@ -248,7 +248,7 @@ fn drain_chain(
             let _ = cond;
             pre_cloned
         } else {
-            match std::mem::replace(cond, Expr::Literal(String::new())) {
+            match std::mem::replace(cond, Expr::Literal(String::new().into())) {
                 Expr::Binary { rhs, .. } => *rhs,
                 // Should not happen, matches_link_direct confirmed the shape.
                 other => other,
