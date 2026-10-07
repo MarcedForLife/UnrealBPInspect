@@ -567,6 +567,16 @@ fn decode_loop_continuation(
     walk: RegionWalkCtx,
 ) -> Vec<Stmt> {
     let RegionWalkCtx { cfg, ctx, .. } = walk;
+    // A loop whose only continuation is the function return can own that
+    // block while its region exit is the synthetic sink. Preserve the raw
+    // epilogue before the region's coverage is consumed.
+    if ctx.bytecode.get(resume).copied() == Some(EX_RETURN) {
+        let mut cursor = resume;
+        if let Ok(Some(statement)) = super::super::block::decode_one(&mut cursor, ctx) {
+            super::super::ctx::mark_claimed(ctx, resume, cursor, OwnerId::CfgRegion { region_id });
+            return vec![statement];
+        }
+    }
     let Some(tree) = ctx.region_tree else {
         return Vec::new();
     };

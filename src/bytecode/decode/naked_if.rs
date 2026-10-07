@@ -254,23 +254,38 @@ fn try_decode_loop_break_guard(
     // own FORWARD break-jump (an `EX_JUMP` to the loop tail / epilogue)
     // before reaching `tail`. The default tail bound over-runs that jump
     // and swallows the enclosing branch's else arm. Bound the body at the
-    // break-jump instead and append a trailing `Stmt::Break`. A
+    // exit jump instead and preserve its return or loop break. A
     // single-guard loop runs straight to `tail` with no such jump, so
     // `forward_break_after` returns `None` and the body bound is unchanged.
-    let mut trailing_break: Option<Stmt> = None;
+    let mut trailing_exit: Option<Stmt> = None;
     if trampoline_body.is_none() {
         if let Some(end) = forward_break_after(body_start_disk, guard.tail, ctx) {
             body_end_disk = end;
-            trailing_break = Some(Stmt::Break {
-                offset: end - JUMP_INSTR_BYTES,
-            });
+            let mut target_cursor = end - 4;
+            let target_mem = read_bc_u32(ctx.bytecode, &mut target_cursor) as usize;
+            let target = jump_target_disk(target_mem, ctx);
+            trailing_exit = if ctx.bytecode.get(target).copied() == Some(EX_RETURN) {
+                let mut return_cursor = target;
+                super::block::decode_one(&mut return_cursor, ctx)
+                    .ok()
+                    .flatten()
+            } else {
+                Some(Stmt::Break {
+                    offset: end - JUMP_INSTR_BYTES,
+                })
+            };
         }
     }
 
     let synthesize_break = trampoline_body.is_some();
+    let body_decode_end = if trailing_exit.is_some() {
+        body_end_disk - JUMP_INSTR_BYTES
+    } else {
+        body_end_disk
+    };
     let mut then_body = trampoline_body
-        .unwrap_or_else(|| decode_naked_if_body(body_start_disk, body_end_disk, ctx));
-    if let Some(break_stmt) = trailing_break {
+        .unwrap_or_else(|| decode_naked_if_body(body_start_disk, body_decode_end, ctx));
+    if let Some(break_stmt) = trailing_exit {
         then_body.push(break_stmt);
     } else if synthesize_break {
         // The break is synthesized from the loop-break-guard semantic
@@ -279,6 +294,20 @@ fn try_decode_loop_break_guard(
         then_body.push(Stmt::Break {
             offset: guard_offset,
         });
+    }
+
+    // A function result ends the entire call, unlike a flow pop that
+    // resumes the increment. Keep that terminator inside its true branch.
+    if body_end_disk == guard.tail
+        && ctx.bytecode.get(guard.tail).copied() == Some(EX_RETURN)
+        && !synthesize_break
+        && !matches!(
+            then_body.last(),
+            Some(Stmt::Return { .. } | Stmt::Break { .. })
+        )
+    {
+        let mut return_cursor = guard.tail;
+        then_body.push(super::block::decode_one(&mut return_cursor, ctx).ok()??);
     }
 
     // Claim the recovered body so the region walker's disk-order re-walk

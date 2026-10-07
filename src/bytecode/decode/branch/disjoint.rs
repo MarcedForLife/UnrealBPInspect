@@ -38,6 +38,29 @@ pub(crate) fn decode_jump(pos: &mut usize, range_end: usize, ctx: &DecodeCtx) ->
     *pos += opcode_byte_count; // consume EX_JUMP
 
     let target_mem = read_jump_target(ctx.bytecode, pos);
+    // A jump to the function epilogue exits the function even when it is
+    // decoded inside a loop body or its completion slice.
+    if ctx.loop_completion_region.get().is_some()
+        && !ctx
+            .event_entries
+            .is_some_and(|entries| entries.contains_key(&target_mem))
+    {
+        if let Some(target) = ctx
+            .mem_to_disk
+            .and_then(|mapping| mapping.get(&target_mem))
+            .copied()
+        {
+            let owned = ctx
+                .owned_ranges
+                .is_none_or(|ranges| ranges.iter().any(|range| range.contains(&target)));
+            if owned && ctx.bytecode.get(target).copied() == Some(EX_RETURN) {
+                let mut cursor = target;
+                return super::super::block::decode_one(&mut cursor, ctx)
+                    .ok()
+                    .flatten();
+            }
+        }
+    }
     match classify_target(target_mem, jump_offset, range_end, ctx) {
         JumpTarget::EventEntry { event_name, mem } => Some(Stmt::EventCall {
             event_name,

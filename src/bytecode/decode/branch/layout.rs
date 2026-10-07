@@ -175,26 +175,39 @@ pub(crate) fn decode_branch(pos: &mut usize, range_end: usize, ctx: &DecodeCtx) 
     let body_start_disk = *pos;
     let target_class = classify_target(target_mem, body_start_disk, range_end, ctx);
 
-    let (then_body, else_body, resume_disk) = match decide_branch_layout(
-        target_class,
-        construct_offset,
-        body_start_disk,
-        range_end,
-        ctx,
-    ) {
-        Some(layout) => decode_branch_bodies(layout, ctx),
-        None => {
-            // Fallback: target unresolved or out of range. Treat the
-            // remainder of the range as the then-body, leave else
-            // empty, and resume at range_end. The then-body is decoded
-            // up to `range_end`, not the cross-range scan end, because
-            // the region walk will continue with the next owned range
-            // independently.
-            let then_body = decode_subrange(body_start_disk, range_end, ctx);
-            (then_body, Vec::new(), range_end)
+    let recovered =
+        decode_loop_return_tail(target_mem, body_start_disk, range_end, ctx).or_else(|| {
+            decode_loop_shared_return_guard(
+                construct_offset,
+                target_mem,
+                body_start_disk,
+                range_end,
+                ctx,
+            )
+        });
+    let (then_body, else_body, resume_disk) = if let Some(bodies) = recovered {
+        bodies
+    } else {
+        match decide_branch_layout(
+            target_class,
+            construct_offset,
+            body_start_disk,
+            range_end,
+            ctx,
+        ) {
+            Some(layout) => decode_branch_bodies(layout, ctx),
+            None => {
+                // Fallback: target unresolved or out of range. Treat the
+                // remainder of the range as the then-body, leave else
+                // empty, and resume at range_end. The then-body is decoded
+                // up to `range_end`, not the cross-range scan end, because
+                // the region walk will continue with the next owned range
+                // independently.
+                let then_body = decode_subrange(body_start_disk, range_end, ctx);
+                (then_body, Vec::new(), range_end)
+            }
         }
     };
-
     *pos = resume_disk;
 
     BranchDecode {
@@ -205,6 +218,100 @@ pub(crate) fn decode_branch(pos: &mut usize, range_end: usize, ctx: &DecodeCtx) 
             offset: construct_offset,
         },
     }
+}
+
+/// A displaced loop body can continue through a flow pop while either
+/// branch returns through a shared tail beyond that pop. Decode the tail
+/// under every reaching branch, including its return, before claiming it.
+fn decode_loop_return_tail(
+    target_mem: usize,
+    body_start: usize,
+    range_end: usize,
+    ctx: &DecodeCtx,
+) -> Option<(Vec<Stmt>, Vec<Stmt>, usize)> {
+    let region_id = ctx.loop_completion_region.get()?;
+    if ctx.bytecode.get(range_end).copied() != Some(EX_POP_EXECUTION_FLOW) {
+        return None;
+    }
+    let target = *ctx.mem_to_disk?.get(&target_mem)?;
+    if target <= range_end {
+        return None;
+    }
+    if ctx
+        .event_entries
+        .is_some_and(|entries| entries.contains_key(&target_mem))
+    {
+        return None;
+    }
+    let scan_end = match ctx.owned_ranges {
+        Some(ranges) => ranges.iter().find(|range| range.contains(&target))?.end,
+        None => ctx.bytecode.len(),
+    }
+    .min(ctx.bytecode.len());
+    let mut cursor = target;
+    let tail_end = loop {
+        let opcode = *ctx.bytecode.get(cursor)?;
+        if matches!(
+            opcode,
+            EX_JUMP
+                | EX_COMPUTED_JUMP
+                | EX_JUMP_IF_NOT
+                | EX_PUSH_EXECUTION_FLOW
+                | EX_POP_EXECUTION_FLOW
+                | EX_POP_FLOW_IF_NOT
+                | EX_END_OF_SCRIPT
+        ) {
+            return None;
+        }
+        let length = opcode_length_at(cursor, ctx.bytecode, ctx.ue5, ctx.name_table);
+        if length == 0 || length > scan_end.saturating_sub(cursor) {
+            return None;
+        }
+        cursor += length;
+        if opcode == EX_RETURN {
+            break cursor;
+        }
+    };
+    let owner = OwnerId::CfgRegion { region_id };
+    let _owner = ctx.with_decoding_owner(owner);
+    let then_body = decode_subrange(body_start, range_end, ctx);
+    let else_body = decode_subrange(target, tail_end, ctx);
+    mark_claimed(ctx, target, tail_end, owner);
+    Some((then_body, else_body, range_end))
+}
+
+/// Rejoin both arms at the same conditional return before the loop resumes.
+/// A displaced else arm jumps backward to this guard, rather than breaking.
+fn decode_loop_shared_return_guard(
+    construct_offset: usize,
+    target_mem: usize,
+    body_start: usize,
+    range_end: usize,
+    ctx: &DecodeCtx,
+) -> Option<(Vec<Stmt>, Vec<Stmt>, usize)> {
+    let guard = ctx.loop_break_guard.get()?;
+    if range_end != guard.tail || ctx.bytecode.get(guard.tail).copied() != Some(EX_RETURN) {
+        return None;
+    }
+    let else_start = *ctx.mem_to_disk?.get(&target_mem)?;
+    let extents = ctx.region_arm_extents_for(construct_offset, &[body_start, else_start])?;
+    let shared_start = arm_last_end(&extents, 0)?;
+    if !(body_start < shared_start && shared_start < else_start && else_start < range_end) {
+        return None;
+    }
+    let forward = scan_for_terminating_jump(ctx, shared_start, else_start)?;
+    let backward = scan_for_terminating_jump(ctx, else_start, range_end)?;
+    if ctx.mem_to_disk?.get(&forward.target_mem).copied() != Some(guard.tail)
+        || ctx.mem_to_disk?.get(&backward.target_mem).copied() != Some(shared_start)
+        || !range_contains_pop_flow_if_not(ctx, shared_start, forward.jump_pos)
+    {
+        return None;
+    }
+    let _owner = ctx.with_decoding_owner(guard.owner);
+    let then_body = decode_subrange(body_start, forward.after_jump_disk, ctx);
+    let mut else_body = decode_subrange(else_start, backward.jump_pos, ctx);
+    else_body.extend(decode_subrange(shared_start, forward.after_jump_disk, ctx));
+    Some((then_body, else_body, range_end))
 }
 
 /// Per-shape layout describing the slice ranges to decode for then and

@@ -1148,3 +1148,182 @@ fn nested_loop_exit_flags_and_completion_calls_match_unrefined_execution() {
     });
     assert_eq!(loop_kinds, [true, true]);
 }
+
+#[test]
+fn displaced_loop_return_tails_preserve_branch_paths_and_skip_completion() {
+    for shared_tail in [false, true] {
+        let mut stream = Vec::new();
+        assignment(&mut stream, 6, integer(0));
+        let head = jump(&mut stream, EX_JUMP_IF_NOT);
+        stream.extend(math(10, &[local(6), local(8)]));
+        let push = jump(&mut stream, EX_PUSH_EXECUTION_FLOW);
+        let enter_body = jump(&mut stream, EX_JUMP);
+        let increment = stream.len();
+        assignment(&mut stream, 6, math(11, &[local(6), integer(1)]));
+        let back = jump(&mut stream, EX_JUMP);
+        let completed = stream.len();
+        call(&mut stream, 15);
+        let completion_return = jump(&mut stream, EX_JUMP);
+        let body_start = stream.len();
+        call(&mut stream, 13);
+        let outer = branch(&mut stream, 0);
+        let inner = branch(&mut stream, 1);
+        stream.push(EX_POP_EXECUTION_FLOW);
+        let first_tail = stream.len();
+        call(&mut stream, 3);
+        let first_return = finish(&mut stream);
+        let second_tail = if shared_tail {
+            first_tail
+        } else {
+            let offset = stream.len();
+            call(&mut stream, 4);
+            finish(&mut stream);
+            offset
+        };
+        for (offset, target) in [
+            (head, completed),
+            (push, increment),
+            (enter_body, body_start),
+            (back, head),
+            (completion_return, first_return),
+            (outer, second_tail),
+            (inner, first_tail),
+        ] {
+            patch(&mut stream, offset, target);
+        }
+        for (limit, path, near, expected) in [
+            (0, 0, 0, vec!["OuterComplete"]),
+            (
+                2,
+                0,
+                1,
+                vec!["Visit", if shared_tail { "Commit" } else { "Notify" }],
+            ),
+            (2, 1, 0, vec!["Visit", "Commit"]),
+            (2, 1, 1, vec!["Visit", "Visit", "OuterComplete"]),
+        ] {
+            let mut initial = initial_state();
+            initial.insert("Limit".into(), limit);
+            initial.insert("Path".into(), path);
+            initial.insert("Near".into(), near);
+            assert_invocations(
+                std::slice::from_ref(&stream),
+                &[0],
+                initial,
+                &expected,
+                false,
+            );
+        }
+    }
+}
+
+#[test]
+fn loop_flow_guard_returns_without_incrementing_or_visiting_later_items() {
+    let mut stream = Vec::new();
+    let exit_frame = jump(&mut stream, EX_PUSH_EXECUTION_FLOW);
+    assignment(&mut stream, 6, integer(0));
+    let head = jump(&mut stream, EX_JUMP_IF_NOT);
+    stream.extend(math(10, &[local(6), local(8)]));
+    let body_frame = jump(&mut stream, EX_PUSH_EXECUTION_FLOW);
+    let enter_body = jump(&mut stream, EX_JUMP);
+    let increment = stream.len();
+    assignment(&mut stream, 6, math(11, &[local(6), integer(1)]));
+    let back = jump(&mut stream, EX_JUMP);
+    let completed = stream.len();
+    call(&mut stream, 15);
+    stream.push(EX_POP_EXECUTION_FLOW);
+    let body_start = stream.len();
+    stream.extend(math(13, &[local(6)]));
+    stream.push(EX_POP_FLOW_IF_NOT);
+    stream.extend(math(9, &[local(6), local(1)]));
+    call(&mut stream, 3);
+    let exit = finish(&mut stream);
+    for (offset, target) in [
+        (exit_frame, exit),
+        (head, completed),
+        (body_frame, increment),
+        (enter_body, body_start),
+        (back, head),
+    ] {
+        patch(&mut stream, offset, target);
+    }
+    for (limit, near, expected) in [
+        (0, 0, vec!["OuterComplete"]),
+        (3, 0, vec!["Visit[0]", "Commit"]),
+        (3, 1, vec!["Visit[0]", "Visit[1]", "Commit"]),
+        (2, 3, vec!["Visit[0]", "Visit[1]", "OuterComplete"]),
+    ] {
+        let mut initial = initial_state();
+        initial.insert("Limit".into(), limit);
+        initial.insert("Near".into(), near);
+        assert_invocations(
+            std::slice::from_ref(&stream),
+            &[0],
+            initial,
+            &expected,
+            false,
+        );
+    }
+}
+
+#[test]
+fn displaced_else_rejoins_loop_return_guard_instead_of_breaking() {
+    let mut stream = Vec::new();
+    let exit_frame = jump(&mut stream, EX_PUSH_EXECUTION_FLOW);
+    assignment(&mut stream, 6, integer(0));
+    let head = jump(&mut stream, EX_JUMP_IF_NOT);
+    stream.extend(math(10, &[local(6), local(8)]));
+    let body_frame = jump(&mut stream, EX_PUSH_EXECUTION_FLOW);
+    let enter_body = jump(&mut stream, EX_JUMP);
+    let increment = stream.len();
+    assignment(&mut stream, 6, math(11, &[local(6), integer(1)]));
+    let back = jump(&mut stream, EX_JUMP);
+    let completed = stream.len();
+    call(&mut stream, 15);
+    let complete_return = jump(&mut stream, EX_JUMP);
+    let body_start = stream.len();
+    stream.extend(math(13, &[local(6)]));
+    let condition = branch(&mut stream, 0);
+    assignment(&mut stream, 2, math(9, &[local(6), local(1)]));
+    let shared = stream.len();
+    stream.push(EX_POP_FLOW_IF_NOT);
+    stream.extend(local(2));
+    call(&mut stream, 3);
+    let early_return = jump(&mut stream, EX_JUMP);
+    let else_start = stream.len();
+    assignment(&mut stream, 2, integer(0));
+    let rejoin = jump(&mut stream, EX_JUMP);
+    let exit = finish(&mut stream);
+    for (offset, target) in [
+        (exit_frame, exit),
+        (head, completed),
+        (body_frame, increment),
+        (enter_body, body_start),
+        (back, head),
+        (complete_return, exit),
+        (condition, else_start),
+        (early_return, exit),
+        (rejoin, shared),
+    ] {
+        patch(&mut stream, offset, target);
+    }
+    for (limit, path, near, expected) in [
+        (0, 1, 0, vec!["OuterComplete"]),
+        (3, 1, 0, vec!["Visit[0]", "Commit"]),
+        (3, 1, 1, vec!["Visit[0]", "Visit[1]", "Commit"]),
+        (2, 0, 0, vec!["Visit[0]", "Visit[1]", "OuterComplete"]),
+        (2, 1, 3, vec!["Visit[0]", "Visit[1]", "OuterComplete"]),
+    ] {
+        let mut initial = initial_state();
+        initial.insert("Limit".into(), limit);
+        initial.insert("Path".into(), path);
+        initial.insert("Near".into(), near);
+        assert_invocations(
+            std::slice::from_ref(&stream),
+            &[0],
+            initial,
+            &expected,
+            false,
+        );
+    }
+}
