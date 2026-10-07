@@ -44,92 +44,128 @@
               {
                 "fields": [
                   {
-                    "name": "NewVariables",
+                    "name": "VarName",
+                    "value": "WinchConstraintInstance"
+                  },
+                  {
+                    "name": "VarGuid",
                     "value": {
                       "fields": [
                         {
-                          "name": "VarName",
-                          "value": "WinchConstraintInstance"
+                          "name": "Guid",
+                          "value": "[07, fe, e3, 81, bd, 94, 2c, 43, 82, 4c, 82, 51, 97, 18, da, e2]"
+                        }
+                      ],
+                      "type": "Guid"
+                    }
+                  },
+                  {
+                    "name": "VarType",
+                    "value": {
+                      "fields": [
+                        {
+                          "name": "PinCategory",
+                          "value": "object"
                         },
                         {
-                          "name": "VarGuid",
-                          "value": {
-                            "fields": [
-                              {
-                                "name": "Guid",
-                                "value": "[07, fe, e3, 81, bd, 94, 2c, 43, 82, 4c, 82, 51, 97, 18, da, e2]"
-                              }
-                            ],
-                            "type": "Guid"
-                          }
-                        },
-                        {
-                          "name": "VarType",
-                          "value": {
-                            "payload_sha256": "4bac5b79487657b16c2a3dd04fd715fc882bde8c12e111f934aaeb3d41b4ace4",
-                            "size": 65,
-                            "unknown_type": "EdGraphPinType"
-                          }
-                        },
-                        {
-                          "name": "FriendlyName",
-                          "value": "Winch Constraint Instance"
-                        },
-                        {
-                          "name": "Category",
-                          "value": "KismetSchemaDefaultDefault"
-                        },
-                        {
-                          "name": "PropertyFlags",
-                          "value": 67589
-                        },
-                        {
-                          "name": "RepNotifyFunc",
+                          "name": "PinSubCategory",
                           "value": "None"
                         },
                         {
-                          "name": "ReplicationCondition",
-                          "value": "COND_None"
+                          "name": "PinSubCategoryObject",
+                          "value": "/Game/LastResort/Blueprints/Vehicles/Ships/Common/WinchConstraint_BP.WinchConstraint_BP_C"
                         },
                         {
-                          "name": "MetaDataArray",
+                          "name": "ContainerType",
+                          "value": "None"
+                        },
+                        {
+                          "name": "bIsReference",
+                          "value": false
+                        },
+                        {
+                          "name": "bIsWeakPointer",
+                          "value": false
+                        },
+                        {
+                          "name": "PinSubCategoryMemberReference",
                           "value": {
-                            "inner_type": "StructProperty",
-                            "items": [
+                            "fields": [
                               {
-                                "fields": [
-                                  {
-                                    "name": "MetaDataArray",
-                                    "value": {
-                                      "fields": [
-                                        {
-                                          "name": "DataKey",
-                                          "value": "MultiLine"
-                                        },
-                                        {
-                                          "name": "DataValue",
-                                          "value": "true"
-                                        }
-                                      ],
-                                      "type": "BPVariableMetaDataEntry"
-                                    }
-                                  }
-                                ],
-                                "type": ""
+                                "name": "MemberParent",
+                                "value": "None"
+                              },
+                              {
+                                "name": "MemberName",
+                                "value": "None"
+                              },
+                              {
+                                "name": "MemberGuid",
+                                "value": "[00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]"
                               }
-                            ]
+                            ],
+                            "type": "SimpleMemberReference"
                           }
                         },
                         {
-                          "name": "DefaultValue",
-                          "value": ""
+                          "name": "bIsConst",
+                          "value": false
+                        },
+                        {
+                          "name": "bIsUObjectWrapper",
+                          "value": false
                         }
                       ],
-                      "type": "BPVariableDescription"
+                      "type": "EdGraphPinType"
                     }
+                  },
+                  {
+                    "name": "FriendlyName",
+                    "value": "Winch Constraint Instance"
+                  },
+                  {
+                    "name": "Category",
+                    "value": "KismetSchemaDefaultDefault"
+                  },
+                  {
+                    "name": "PropertyFlags",
+                    "value": 67589
+                  },
+                  {
+                    "name": "RepNotifyFunc",
+                    "value": "None"
+                  },
+                  {
+                    "name": "ReplicationCondition",
+                    "value": "COND_None"
+                  },
+                  {
+                    "name": "MetaDataArray",
+                    "value": {
+                      "inner_type": "StructProperty",
+                      "items": [
+                        {
+                          "fields": [
+                            {
+                              "name": "DataKey",
+                              "value": "MultiLine"
+                            },
+                            {
+                              "name": "DataValue",
+                              "value": "true"
+                            }
+                          ],
+                          "type": "BPVariableMetaDataEntry"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "name": "DefaultValue",
+                    "value": ""
                   }
                 ],
-                "type": ""
+                "type": "BPVariableDescription"
               }
             ]
           }
@@ -150,9 +186,96 @@
         {
           "name": "LastEditedDocuments",
           "value": {
-            "payload_sha256": "426da3ba7de68af374e140aec3a62752af765d353d4c0ce9f3c7fc20f9ff985a",
-            "size": 569,
-            "unknown_type": "ArrayProperty<StructProperty>"
+            "inner_type": "StructProperty",
+            "items": [
+              {
+                "fields": [
+                  {
+                    "name": "EditedObjectPath",
+                    "value": "/Game/LastResort/Blueprints/Vehicles/Ships/Schooner/Parts/Helm/Helm_BP.Helm_BP:UserConstructionScript"
+                  },
+                  {
+                    "name": "SavedViewOffset",
+                    "value": {
+                      "fields": [
+                        {
+                          "name": "X",
+                          "value": -313.88299560546875
+                        },
+                        {
+                          "name": "Y",
+                          "value": -392.18072509765625
+                        }
+                      ],
+                      "type": "Vector2D"
+                    }
+                  },
+                  {
+                    "name": "SavedZoomAmount",
+                    "value": 1.0
+                  }
+                ],
+                "type": "EditedDocumentInfo"
+              },
+              {
+                "fields": [
+                  {
+                    "name": "EditedObjectPath",
+                    "value": "/Game/LastResort/Blueprints/Vehicles/Ships/Schooner/Parts/Helm/Helm_BP.Helm_BP:EventGraph"
+                  },
+                  {
+                    "name": "SavedViewOffset",
+                    "value": {
+                      "fields": [
+                        {
+                          "name": "X",
+                          "value": -480.6610107421875
+                        },
+                        {
+                          "name": "Y",
+                          "value": -769.301025390625
+                        }
+                      ],
+                      "type": "Vector2D"
+                    }
+                  },
+                  {
+                    "name": "SavedZoomAmount",
+                    "value": 0.75
+                  }
+                ],
+                "type": "EditedDocumentInfo"
+              },
+              {
+                "fields": [
+                  {
+                    "name": "EditedObjectPath",
+                    "value": "/Game/LastResort/Blueprints/Vehicles/Ships/Schooner/Parts/Helm/Helm_BP.Helm_BP:GetSteeringAngle"
+                  },
+                  {
+                    "name": "SavedViewOffset",
+                    "value": {
+                      "fields": [
+                        {
+                          "name": "X",
+                          "value": -1015.5650634765625
+                        },
+                        {
+                          "name": "Y",
+                          "value": -378.4217224121094
+                        }
+                      ],
+                      "type": "Vector2D"
+                    }
+                  },
+                  {
+                    "name": "SavedZoomAmount",
+                    "value": 1.0
+                  }
+                ],
+                "type": "EditedDocumentInfo"
+              }
+            ]
           }
         },
         {
@@ -286,9 +409,113 @@
                     {
                       "name": "ResponseArray",
                       "value": {
-                        "payload_sha256": "3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae",
-                        "size": 709,
-                        "unknown_type": "ArrayProperty<StructProperty>"
+                        "inner_type": "StructProperty",
+                        "items": [
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "WorldStatic"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "WorldDynamic"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Visibility"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Camera"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "PhysicsBody"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Vehicle"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Destructible"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Hand"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          }
+                        ]
                       }
                     }
                   ],
@@ -393,9 +620,113 @@
                     {
                       "name": "ResponseArray",
                       "value": {
-                        "payload_sha256": "3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae",
-                        "size": 709,
-                        "unknown_type": "ArrayProperty<StructProperty>"
+                        "inner_type": "StructProperty",
+                        "items": [
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "WorldStatic"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "WorldDynamic"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Visibility"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Camera"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "PhysicsBody"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Vehicle"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Destructible"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Hand"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          }
+                        ]
                       }
                     }
                   ],
@@ -500,9 +831,113 @@
                     {
                       "name": "ResponseArray",
                       "value": {
-                        "payload_sha256": "3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae",
-                        "size": 709,
-                        "unknown_type": "ArrayProperty<StructProperty>"
+                        "inner_type": "StructProperty",
+                        "items": [
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "WorldStatic"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "WorldDynamic"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Visibility"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Camera"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "PhysicsBody"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Vehicle"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Destructible"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Hand"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          }
+                        ]
                       }
                     }
                   ],
@@ -607,9 +1042,113 @@
                     {
                       "name": "ResponseArray",
                       "value": {
-                        "payload_sha256": "3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae",
-                        "size": 709,
-                        "unknown_type": "ArrayProperty<StructProperty>"
+                        "inner_type": "StructProperty",
+                        "items": [
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "WorldStatic"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "WorldDynamic"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Visibility"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Camera"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "PhysicsBody"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Vehicle"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Destructible"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Hand"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          }
+                        ]
                       }
                     }
                   ],
@@ -714,9 +1253,113 @@
                     {
                       "name": "ResponseArray",
                       "value": {
-                        "payload_sha256": "3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae",
-                        "size": 709,
-                        "unknown_type": "ArrayProperty<StructProperty>"
+                        "inner_type": "StructProperty",
+                        "items": [
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "WorldStatic"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "WorldDynamic"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Visibility"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Camera"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "PhysicsBody"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Vehicle"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Destructible"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Hand"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          }
+                        ]
                       }
                     }
                   ],
@@ -821,9 +1464,113 @@
                     {
                       "name": "ResponseArray",
                       "value": {
-                        "payload_sha256": "3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae",
-                        "size": 709,
-                        "unknown_type": "ArrayProperty<StructProperty>"
+                        "inner_type": "StructProperty",
+                        "items": [
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "WorldStatic"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "WorldDynamic"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Visibility"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Camera"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "PhysicsBody"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Vehicle"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Destructible"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Hand"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          }
+                        ]
                       }
                     }
                   ],
@@ -912,9 +1659,113 @@
                     {
                       "name": "ResponseArray",
                       "value": {
-                        "payload_sha256": "3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae",
-                        "size": 709,
-                        "unknown_type": "ArrayProperty<StructProperty>"
+                        "inner_type": "StructProperty",
+                        "items": [
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "WorldStatic"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "WorldDynamic"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Visibility"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Camera"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "PhysicsBody"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Vehicle"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Destructible"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          },
+                          {
+                            "fields": [
+                              {
+                                "name": "Channel",
+                                "value": "Hand"
+                              },
+                              {
+                                "name": "Response",
+                                "value": "ECR_Ignore"
+                              }
+                            ],
+                            "type": "ResponseChannel"
+                          }
+                        ]
                       }
                     }
                   ],

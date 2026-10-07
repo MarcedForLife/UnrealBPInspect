@@ -13,8 +13,15 @@ Components:
       AreaClass: /Script/NavigationSystem.NavArea_Obstacle
       bGenerateOverlapEvents: false
       BodyInstance: BodyInstance {CollisionProfileName: Name("Custom"),
-          CollisionResponses: CollisionResponse {ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes,
-          sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>}}
+          CollisionResponses: CollisionResponse {ResponseArray: Array<StructProperty>[ResponseChannel {Channel: Name("WorldStatic"),
+          Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("WorldDynamic"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Visibility"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Camera"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("PhysicsBody"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Vehicle"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Destructible"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Hand"), Response: ECollisionResponse::ECR_Ignore}]}}
       RelativeLocation: Vector {X: 3.8049316, Y: 0.0000, Z: 146.60861}
       RelativeRotation: Rotator {Pitch: 90.0000, Yaw: 0.0000, Roll: 0.0000}
     PawnBlockingCollision1 (BoxComponent)
@@ -22,8 +29,15 @@ Components:
       AreaClass: /Script/NavigationSystem.NavArea_Obstacle
       bGenerateOverlapEvents: false
       BodyInstance: BodyInstance {CollisionProfileName: Name("Custom"),
-          CollisionResponses: CollisionResponse {ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes,
-          sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>},
+          CollisionResponses: CollisionResponse {ResponseArray: Array<StructProperty>[ResponseChannel {Channel: Name("WorldStatic"),
+          Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("WorldDynamic"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Visibility"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Camera"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("PhysicsBody"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Vehicle"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Destructible"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Hand"), Response: ECollisionResponse::ECR_Ignore}]},
           PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat}
       RelativeLocation: Vector {X: 41.2000, Y: -17.274881, Z: 177.23033}
       RelativeRotation: Rotator {Pitch: 0.0000, Yaw: 0.0000, Roll: -31.000109}
@@ -32,8 +46,15 @@ Components:
       AreaClass: /Script/NavigationSystem.NavArea_Obstacle
       bGenerateOverlapEvents: false
       BodyInstance: BodyInstance {CollisionProfileName: Name("Custom"),
-          CollisionResponses: CollisionResponse {ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes,
-          sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>},
+          CollisionResponses: CollisionResponse {ResponseArray: Array<StructProperty>[ResponseChannel {Channel: Name("WorldStatic"),
+          Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("WorldDynamic"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Visibility"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Camera"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("PhysicsBody"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Vehicle"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Destructible"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Hand"), Response: ECollisionResponse::ECR_Ignore}]},
           PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat}
       RelativeLocation: Vector {X: 41.2000, Y: -16.961174, Z: 117.092064}
       RelativeRotation: Rotator {Pitch: 0.0000, Yaw: 0.0000, Roll: -151.00003}
@@ -42,8 +63,15 @@ Components:
       AreaClass: /Script/NavigationSystem.NavArea_Obstacle
       bGenerateOverlapEvents: false
       BodyInstance: BodyInstance {CollisionProfileName: Name("Custom"),
-          CollisionResponses: CollisionResponse {ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes,
-          sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>},
+          CollisionResponses: CollisionResponse {ResponseArray: Array<StructProperty>[ResponseChannel {Channel: Name("WorldStatic"),
+          Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("WorldDynamic"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Visibility"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Camera"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("PhysicsBody"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Vehicle"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Destructible"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Hand"), Response: ECollisionResponse::ECR_Ignore}]},
           PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat}
       RelativeLocation: Vector {X: 41.2000, Y: 17.274881, Z: 177.23033}
       RelativeRotation: Rotator {Pitch: 0.0000, Yaw: 0.0000, Roll: 31.000078}
@@ -52,8 +80,15 @@ Components:
       AreaClass: /Script/NavigationSystem.NavArea_Obstacle
       bGenerateOverlapEvents: false
       BodyInstance: BodyInstance {CollisionProfileName: Name("Custom"),
-          CollisionResponses: CollisionResponse {ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes,
-          sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>},
+          CollisionResponses: CollisionResponse {ResponseArray: Array<StructProperty>[ResponseChannel {Channel: Name("WorldStatic"),
+          Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("WorldDynamic"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Visibility"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Camera"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("PhysicsBody"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Vehicle"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Destructible"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Hand"), Response: ECollisionResponse::ECR_Ignore}]},
           PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat}
       RelativeLocation: Vector {X: 41.2000, Y: -34.877983, Z: 146.49644}
       RelativeRotation: Rotator {Pitch: 0.0000, Yaw: 0.0000, Roll: 89.999954}
@@ -62,8 +97,15 @@ Components:
       AreaClass: /Script/NavigationSystem.NavArea_Obstacle
       bGenerateOverlapEvents: false
       BodyInstance: BodyInstance {CollisionProfileName: Name("Custom"),
-          CollisionResponses: CollisionResponse {ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes,
-          sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>},
+          CollisionResponses: CollisionResponse {ResponseArray: Array<StructProperty>[ResponseChannel {Channel: Name("WorldStatic"),
+          Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("WorldDynamic"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Visibility"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Camera"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("PhysicsBody"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Vehicle"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Destructible"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Hand"), Response: ECollisionResponse::ECR_Ignore}]},
           PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat}
       RelativeLocation: Vector {X: 41.2000, Y: 16.961174, Z: 117.092064}
       RelativeRotation: Rotator {Pitch: 0.0000, Yaw: 0.0000, Roll: 151.00003}
@@ -72,8 +114,15 @@ Components:
       AreaClass: /Script/NavigationSystem.NavArea_Obstacle
       bGenerateOverlapEvents: false
       BodyInstance: BodyInstance {CollisionProfileName: Name("Custom"),
-          CollisionResponses: CollisionResponse {ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes,
-          sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>},
+          CollisionResponses: CollisionResponse {ResponseArray: Array<StructProperty>[ResponseChannel {Channel: Name("WorldStatic"),
+          Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("WorldDynamic"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Visibility"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Camera"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("PhysicsBody"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Vehicle"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Destructible"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Hand"), Response: ECollisionResponse::ECR_Ignore}]},
           PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat}
       RelativeLocation: Vector {X: 41.2000, Y: 34.877983, Z: 146.49644}
       RelativeRotation: Rotator {Pitch: 0.0000, Yaw: 0.0000, Roll: 89.999954}

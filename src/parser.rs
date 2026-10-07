@@ -11,7 +11,7 @@ use crate::binary::*;
 use crate::bytecode::names::K2NODE_PREFIX;
 use crate::ffield::*;
 use crate::pins::scan_for_pins;
-use crate::properties::read_properties;
+use crate::properties::{read_properties, read_soft_object_path};
 use crate::resolve::{class_of, format_func_flags, resolve_index, short_class};
 use crate::types::*;
 
@@ -51,6 +51,7 @@ enum ExportKind {
 /// Shared immutable context for export-data parsing helpers.
 struct ParseCtx<'a> {
     name_table: &'a NameTable,
+    soft_object_paths: &'a [String],
     imports: &'a [ImportEntry],
     export_names: &'a [String],
     debug: bool,
@@ -73,6 +74,8 @@ struct PackageHeader {
     ver: AssetVersion,
     name_count: i32,
     name_offset: i32,
+    soft_object_path_count: i32,
+    soft_object_path_offset: i32,
     export_count: i32,
     export_offset: i32,
     import_count: i32,
@@ -120,10 +123,12 @@ fn read_package_header(reader: &mut Reader) -> Result<PackageHeader> {
     );
     let name_count = read_i32(reader)?;
     let name_offset = read_i32(reader)?;
-    if file_ver_ue5 >= VER_UE5_SOFT_OBJECT_PATH_LIST {
-        let _soft_count = read_i32(reader)?;
-        let _soft_offset = read_i32(reader)?;
-    }
+    let (soft_object_path_count, soft_object_path_offset) =
+        if file_ver_ue5 >= VER_UE5_SOFT_OBJECT_PATH_LIST {
+            (read_i32(reader)?, read_i32(reader)?)
+        } else {
+            (0, 0)
+        };
     if file_ver >= VER_UE4_LOCALIZATION_ID {
         let _loc_id = read_fstring(reader)?;
     }
@@ -137,6 +142,11 @@ fn read_package_header(reader: &mut Reader) -> Result<PackageHeader> {
     let import_offset = read_i32(reader)?;
     for (table, count, offset) in [
         ("name", name_count, name_offset),
+        (
+            "soft object path",
+            soft_object_path_count,
+            soft_object_path_offset,
+        ),
         ("import", import_count, import_offset),
         ("export", export_count, export_offset),
     ] {
@@ -157,6 +167,8 @@ fn read_package_header(reader: &mut Reader) -> Result<PackageHeader> {
         },
         name_count,
         name_offset,
+        soft_object_path_count,
+        soft_object_path_offset,
         export_count,
         export_offset,
         import_count,
@@ -278,6 +290,21 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
     let ver = hdr.ver;
     let name_table = NameTable::read(&mut reader, hdr.name_count, hdr.name_offset)
         .context("failed to read name table")?;
+    let soft_object_path_end = [hdr.name_offset, hdr.import_offset, hdr.export_offset]
+        .into_iter()
+        .filter(|offset| *offset > hdr.soft_object_path_offset)
+        .map(|offset| offset as usize)
+        .min()
+        .unwrap_or(data.len());
+    let mut soft_path_reader = std::io::Cursor::new(&data[..soft_object_path_end]);
+    soft_path_reader.set_position(hdr.soft_object_path_offset as u64);
+    let mut soft_object_paths = Vec::new();
+    for index in 0..hdr.soft_object_path_count {
+        soft_object_paths.push(
+            read_soft_object_path(&mut soft_path_reader, &name_table, ver)
+                .with_context(|| format!("failed to read soft object path table entry {index}"))?,
+        );
+    }
 
     if debug {
         eprintln!(
@@ -309,6 +336,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
         .collect();
     let pctx = ParseCtx {
         name_table: &name_table,
+        soft_object_paths: &soft_object_paths,
         imports: &imports,
         export_names: &export_names_pre,
         debug,
@@ -518,7 +546,14 @@ fn parse_one_export(
 
     if kind == ExportKind::Other {
         ensure!(
-            read_properties(reader, pctx.name_table, end, ver, &mut products.props)?,
+            read_properties(
+                reader,
+                pctx.name_table,
+                pctx.soft_object_paths,
+                end,
+                ver,
+                &mut products.props
+            )?,
             "missing property terminator"
         );
         let short = short_class(&class_name);
@@ -539,7 +574,14 @@ fn parse_one_export(
 
     let is_function = kind == ExportKind::Function;
     ensure!(
-        read_properties(reader, pctx.name_table, end, ver, &mut products.props)?,
+        read_properties(
+            reader,
+            pctx.name_table,
+            pctx.soft_object_paths,
+            end,
+            ver,
+            &mut products.props
+        )?,
         "missing property terminator"
     );
     let props_end_pos = reader.position();
@@ -1074,6 +1116,127 @@ mod tests {
         let _total_header_size = read_i32(&mut reader).unwrap();
         let _folder_name = read_fstring(&mut reader).unwrap();
         reader.position()
+    }
+
+    fn synthetic_soft_path_asset(index: i32, table_count: i32) -> Vec<u8> {
+        let names = [
+            "None",
+            "Object",
+            "Reference",
+            "SoftObjectProperty",
+            "/Game/Test",
+            "Asset",
+        ];
+        let mut bytes = PACKAGE_FILE_TAG.to_le_bytes().to_vec();
+        for value in [
+            -8i32,
+            0,
+            522,
+            1008,
+            0,
+            0,
+            0,
+            0,
+            0,
+            names.len() as i32,
+            84,
+            table_count,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+        ] {
+            bytes.extend(value.to_le_bytes());
+        }
+        assert_eq!(bytes.len(), 84);
+        for name in names {
+            bytes.extend((name.len() as i32 + 1).to_le_bytes());
+            bytes.extend(name.as_bytes());
+            bytes.push(0);
+            bytes.extend([0; 4]); // Name hash.
+        }
+        let soft_object_path_offset = bytes.len() as i32;
+        bytes[52..56].copy_from_slice(&soft_object_path_offset.to_le_bytes());
+        for value in [4i32, 0, 5, 0, 6] {
+            bytes.extend(value.to_le_bytes());
+        }
+        bytes.extend(b"Child\0");
+        let export_offset = bytes.len() as i32;
+        bytes[72..76].copy_from_slice(&export_offset.to_le_bytes());
+        let mut payload = Vec::new();
+        for value in [2i32, 0, 3, 0, 4, 0] {
+            payload.extend(value.to_le_bytes());
+        }
+        payload.push(0); // No property GUID.
+        payload.extend(index.to_le_bytes());
+        payload.extend([0; 8]); // None property terminator.
+        let mut export = vec![0; 96];
+        export[16..20].copy_from_slice(&1i32.to_le_bytes()); // Object name.
+        export[28..36].copy_from_slice(&(payload.len() as i64).to_le_bytes());
+        let serial_offset = i64::from(export_offset) + export.len() as i64;
+        export[36..44].copy_from_slice(&serial_offset.to_le_bytes());
+        bytes.extend(export);
+        bytes.extend(payload);
+        bytes
+    }
+
+    #[test]
+    fn package_soft_path_indices_resolve_and_invalid_indices_report_export_diagnostics() {
+        let bytes = synthetic_soft_path_asset(0, 1);
+        let asset = parse_asset(&bytes, false).unwrap();
+        assert!(asset.diagnostics.is_empty(), "{:?}", asset.diagnostics);
+        assert!(
+            matches!(&asset.exports[0].1[0].value, PropValue::SoftObject(path) if path == "/Game/Test.Asset:Child")
+        );
+        for index in [-1, 1, i32::MAX] {
+            let bytes = synthetic_soft_path_asset(index, 1);
+            let asset = parse_asset(&bytes, false).unwrap();
+            assert_eq!(asset.diagnostics.len(), 1);
+            assert_eq!(asset.diagnostics[0].export_index, Some(1));
+            assert!(asset.diagnostics[0]
+                .reason
+                .contains("soft object path index"));
+        }
+    }
+
+    #[test]
+    fn soft_path_table_cannot_consume_the_following_export_table() {
+        for table_count in [-1, 2] {
+            let bytes = synthetic_soft_path_asset(0, table_count);
+            assert!(parse_asset(&bytes, false).is_err());
+        }
+        let mut bytes = synthetic_soft_path_asset(0, 1);
+        bytes[52..56].copy_from_slice(&i32::MAX.to_le_bytes());
+        assert!(parse_asset(&bytes, false).is_err());
+    }
+
+    #[test]
+    fn soft_path_table_header_starts_at_ue5_version_1008() {
+        for file_ver_ue5 in [1007i32, 1008] {
+            let mut bytes = PACKAGE_FILE_TAG.to_le_bytes().to_vec();
+            // Legacy, UE3 compatibility, UE4, UE5, licensee and custom versions.
+            for value in [-8i32, 0, 522, file_ver_ue5, 0, 0] {
+                bytes.extend(value.to_le_bytes());
+            }
+            // Header size, empty folder, package flags, empty name table.
+            bytes.extend([0; 20]);
+            if file_ver_ue5 >= 1008 {
+                bytes.extend([0; 8]); // Empty soft object path table.
+            }
+            bytes.extend([0; 12]); // Localization and gatherable text table.
+            for value in [2i32, 0, 3, 0] {
+                bytes.extend(value.to_le_bytes());
+            }
+            let mut reader = std::io::Cursor::new(bytes.as_slice());
+            let header = read_package_header(&mut reader).unwrap();
+            assert_eq!(header.export_count, 2);
+            assert_eq!(header.import_count, 3);
+            assert_eq!(reader.position(), bytes.len() as u64);
+        }
     }
 
     #[test]

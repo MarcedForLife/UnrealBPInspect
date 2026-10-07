@@ -63,27 +63,37 @@
       [0]: -> UserConstructionScript
       [1]: -> GetSteeringAngle
     NewVariables: [StructProperty; 1 items]
-      [0]: () {
-        NewVariables: (BPVariableDescription) {
-          VarName: WinchConstraintInstance
-          VarGuid: (Guid) {
-            Guid: "[07, fe, e3, 81, bd, 94, 2c, 43, 82, 4c, 82, 51, 97, 18, da, e2]"
-          }
-          VarType: <unknown EdGraphPinType, 65 bytes, sha256=4bac5b79487657b16c2a3dd04fd715fc882bde8c12e111f934aaeb3d41b4ace4>
-          FriendlyName: "Winch Constraint Instance"
-          Category: "KismetSchemaDefaultDefault"
-          PropertyFlags: 67589
-          RepNotifyFunc: None
-          ReplicationCondition: COND_None (ELifetimeCondition)
-          MetaDataArray: [StructProperty; 1 items]
-            [0]: () {
-              MetaDataArray: (BPVariableMetaDataEntry) {
-                DataKey: MultiLine
-                DataValue: "true"
-              }
-            }
-          DefaultValue: ""
+      [0]: (BPVariableDescription) {
+        VarName: WinchConstraintInstance
+        VarGuid: (Guid) {
+          Guid: "[07, fe, e3, 81, bd, 94, 2c, 43, 82, 4c, 82, 51, 97, 18, da, e2]"
         }
+        VarType: (EdGraphPinType) {
+          PinCategory: object
+          PinSubCategory: None
+          PinSubCategoryObject: -> /Game/LastResort/Blueprints/Vehicles/Ships/Common/WinchConstraint_BP.WinchConstraint_BP_C
+          ContainerType: None (EPinContainerType)
+          bIsReference: false
+          bIsWeakPointer: false
+          PinSubCategoryMemberReference: (SimpleMemberReference) {
+            MemberParent: -> None
+            MemberName: None
+            MemberGuid: "[00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]"
+          }
+          bIsConst: false
+          bIsUObjectWrapper: false
+        }
+        FriendlyName: "Winch Constraint Instance"
+        Category: "KismetSchemaDefaultDefault"
+        PropertyFlags: 67589
+        RepNotifyFunc: None
+        ReplicationCondition: COND_None (ELifetimeCondition)
+        MetaDataArray: [StructProperty; 1 items]
+          [0]: (BPVariableMetaDataEntry) {
+            DataKey: MultiLine
+            DataValue: "true"
+          }
+        DefaultValue: ""
       }
     CategorySorting: [NameProperty; 5 items]
       [0]: Default
@@ -91,7 +101,31 @@
       [2]: Event Graph
       [3]: Config
       [4]: State
-    LastEditedDocuments: <unknown ArrayProperty<StructProperty>, 569 bytes, sha256=426da3ba7de68af374e140aec3a62752af765d353d4c0ce9f3c7fc20f9ff985a>
+    LastEditedDocuments: [StructProperty; 3 items]
+      [0]: (EditedDocumentInfo) {
+        EditedObjectPath: ~/Game/LastResort/Blueprints/Vehicles/Ships/Schooner/Parts/Helm/Helm_BP.Helm_BP:UserConstructionScript
+        SavedViewOffset: (Vector2D) {
+          X: -313.8830
+          Y: -392.18073
+        }
+        SavedZoomAmount: 1.0000
+      }
+      [1]: (EditedDocumentInfo) {
+        EditedObjectPath: ~/Game/LastResort/Blueprints/Vehicles/Ships/Schooner/Parts/Helm/Helm_BP.Helm_BP:EventGraph
+        SavedViewOffset: (Vector2D) {
+          X: -480.6610
+          Y: -769.3010
+        }
+        SavedZoomAmount: 0.7500
+      }
+      [2]: (EditedDocumentInfo) {
+        EditedObjectPath: ~/Game/LastResort/Blueprints/Vehicles/Ships/Schooner/Parts/Helm/Helm_BP.Helm_BP:GetSteeringAngle
+        SavedViewOffset: (Vector2D) {
+          X: -1015.56506
+          Y: -378.42172
+        }
+        SavedZoomAmount: 1.0000
+      }
     ComponentTemplateNameIndex: {NameProperty->IntProperty; 1 entries}
       [0].key: StaticMeshComponent
       [0].val: 1
@@ -131,7 +165,39 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes, sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>
+        ResponseArray: [StructProperty; 8 items]
+          [0]: (ResponseChannel) {
+            Channel: WorldStatic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [1]: (ResponseChannel) {
+            Channel: WorldDynamic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [2]: (ResponseChannel) {
+            Channel: Visibility
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [3]: (ResponseChannel) {
+            Channel: Camera
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [4]: (ResponseChannel) {
+            Channel: PhysicsBody
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [5]: (ResponseChannel) {
+            Channel: Vehicle
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [6]: (ResponseChannel) {
+            Channel: Destructible
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [7]: (ResponseChannel) {
+            Channel: Hand
+            Response: ECR_Ignore (ECollisionResponse)
+          }
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
@@ -157,7 +223,39 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes, sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>
+        ResponseArray: [StructProperty; 8 items]
+          [0]: (ResponseChannel) {
+            Channel: WorldStatic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [1]: (ResponseChannel) {
+            Channel: WorldDynamic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [2]: (ResponseChannel) {
+            Channel: Visibility
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [3]: (ResponseChannel) {
+            Channel: Camera
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [4]: (ResponseChannel) {
+            Channel: PhysicsBody
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [5]: (ResponseChannel) {
+            Channel: Vehicle
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [6]: (ResponseChannel) {
+            Channel: Destructible
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [7]: (ResponseChannel) {
+            Channel: Hand
+            Response: ECR_Ignore (ECollisionResponse)
+          }
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
@@ -183,7 +281,39 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes, sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>
+        ResponseArray: [StructProperty; 8 items]
+          [0]: (ResponseChannel) {
+            Channel: WorldStatic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [1]: (ResponseChannel) {
+            Channel: WorldDynamic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [2]: (ResponseChannel) {
+            Channel: Visibility
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [3]: (ResponseChannel) {
+            Channel: Camera
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [4]: (ResponseChannel) {
+            Channel: PhysicsBody
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [5]: (ResponseChannel) {
+            Channel: Vehicle
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [6]: (ResponseChannel) {
+            Channel: Destructible
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [7]: (ResponseChannel) {
+            Channel: Hand
+            Response: ECR_Ignore (ECollisionResponse)
+          }
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
@@ -209,7 +339,39 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes, sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>
+        ResponseArray: [StructProperty; 8 items]
+          [0]: (ResponseChannel) {
+            Channel: WorldStatic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [1]: (ResponseChannel) {
+            Channel: WorldDynamic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [2]: (ResponseChannel) {
+            Channel: Visibility
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [3]: (ResponseChannel) {
+            Channel: Camera
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [4]: (ResponseChannel) {
+            Channel: PhysicsBody
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [5]: (ResponseChannel) {
+            Channel: Vehicle
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [6]: (ResponseChannel) {
+            Channel: Destructible
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [7]: (ResponseChannel) {
+            Channel: Hand
+            Response: ECR_Ignore (ECollisionResponse)
+          }
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
@@ -235,7 +397,39 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes, sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>
+        ResponseArray: [StructProperty; 8 items]
+          [0]: (ResponseChannel) {
+            Channel: WorldStatic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [1]: (ResponseChannel) {
+            Channel: WorldDynamic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [2]: (ResponseChannel) {
+            Channel: Visibility
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [3]: (ResponseChannel) {
+            Channel: Camera
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [4]: (ResponseChannel) {
+            Channel: PhysicsBody
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [5]: (ResponseChannel) {
+            Channel: Vehicle
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [6]: (ResponseChannel) {
+            Channel: Destructible
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [7]: (ResponseChannel) {
+            Channel: Hand
+            Response: ECR_Ignore (ECollisionResponse)
+          }
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
@@ -261,7 +455,39 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes, sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>
+        ResponseArray: [StructProperty; 8 items]
+          [0]: (ResponseChannel) {
+            Channel: WorldStatic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [1]: (ResponseChannel) {
+            Channel: WorldDynamic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [2]: (ResponseChannel) {
+            Channel: Visibility
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [3]: (ResponseChannel) {
+            Channel: Camera
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [4]: (ResponseChannel) {
+            Channel: PhysicsBody
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [5]: (ResponseChannel) {
+            Channel: Vehicle
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [6]: (ResponseChannel) {
+            Channel: Destructible
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [7]: (ResponseChannel) {
+            Channel: Hand
+            Response: ECR_Ignore (ECollisionResponse)
+          }
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
@@ -283,7 +509,39 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes, sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>
+        ResponseArray: [StructProperty; 8 items]
+          [0]: (ResponseChannel) {
+            Channel: WorldStatic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [1]: (ResponseChannel) {
+            Channel: WorldDynamic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [2]: (ResponseChannel) {
+            Channel: Visibility
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [3]: (ResponseChannel) {
+            Channel: Camera
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [4]: (ResponseChannel) {
+            Channel: PhysicsBody
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [5]: (ResponseChannel) {
+            Channel: Vehicle
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [6]: (ResponseChannel) {
+            Channel: Destructible
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [7]: (ResponseChannel) {
+            Channel: Hand
+            Response: ECR_Ignore (ECollisionResponse)
+          }
       }
     }
     RelativeLocation: (Vector) {

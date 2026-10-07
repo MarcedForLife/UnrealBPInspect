@@ -35,8 +35,8 @@ Components:
       bGenerateOverlapEvents: false
       CanCharacterStepUpOn: ECanBeCharacterBase::ECB_No
       BodyInstance: BodyInstance {ObjectType: ECollisionChannel::ECC_PhysicsBody, CollisionProfileName: Name("Custom"),
-          CollisionResponses: CollisionResponse {ResponseArray: Array<StructProperty>[{ResponseArray: ResponseChannel {Channel: Name("Pawn"),
-          Response: ECollisionResponse::ECR_Ignore}}]}, AngularDamping: 8.0000,
+          CollisionResponses: CollisionResponse {ResponseArray: Array<StructProperty>[ResponseChannel {Channel: Name("Pawn"),
+          Response: ECollisionResponse::ECR_Ignore}]}, AngularDamping: 8.0000,
           PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat, bSimulatePhysics: true,
           bOverrideMass: true}
       RelativeLocation: Vector {X: -0.0000457763671875, Y: 0.0000, Z: 146.60861206054688}
