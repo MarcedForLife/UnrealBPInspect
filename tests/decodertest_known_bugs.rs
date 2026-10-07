@@ -1,12 +1,8 @@
 //! Trackers for the v2 decoder behaviours surfaced by the committed
 //! `BP_DecoderTest` synthetic fixture.
 //!
-//! These assert the DESIRED output. Each maps to a numbered finding in
-//! `docs/v2-cfg-structuring-plan.md` ("BP_DecoderTest fixture findings").
-//! When a fix lands, its tracker flips to green and the `v2_baseline`
-//! snapshot for `ue_4.27_BP_DecoderTest.txt` is refreshed in the same change.
-//! The "EXPECTED-FAIL" wording inside some assert messages is the diagnostic
-//! shown only on regression; the suite is fully green.
+//! Regression tests for control flow, shared event bodies, and sequence pins.
+//! Summary baselines live in `tests/baseline-snapshots/`.
 //!
 //! Run just these with:
 //!   cargo test --release --test decodertest_known_bugs

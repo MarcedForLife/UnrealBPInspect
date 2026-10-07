@@ -1,378 +1,184 @@
 # Unreal Blueprint Inspect
 
-A standalone CLI that makes Unreal Engine Blueprint `.uasset` files readable outside the editor: in terminals, AI assistants, code review, CI pipelines, and documentation.
+`bp-inspect` reads Unreal Engine Blueprint `.uasset` files and outputs readable pseudocode, component trees, variables, and function signatures. It runs without Unreal Editor or the original project, and supports JSON output and Git diffs.
 
-Parses the binary format directly and outputs component trees, variable declarations, function signatures, decoded bytecode pseudo-code, and graph node summaries. No editor, no project context, no dependencies.
-
-> [!NOTE]
-> This project is in early development. Core parsing works well, but expect rough edges and breaking changes.
->
-> This started as a personal prototype to see if Blueprint bytecode could be made readable outside the editor. AI-assisted development made it practical to explore as a solo side project.
+Support is incomplete. Expect rough edges in decoded output and verify it against the editor when needed.
 
 ## Install
 
-### Windows (PowerShell)
+Download a binary from [Releases](https://github.com/MarcedForLife/UnrealBPInspect/releases), or use an install script.
+
+Windows PowerShell
 
 ```powershell
 irm https://raw.githubusercontent.com/MarcedForLife/UnrealBPInspect/main/install.ps1 | iex
 ```
 
-### macOS / Linux
+macOS and Linux
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/MarcedForLife/UnrealBPInspect/main/install.sh | sh
 ```
 
-### With Cargo
+Binaries are available for Windows x86_64, Linux x86_64, and macOS Intel and Apple Silicon. The scripts verify the release SHA-256 checksum before replacing an existing installation and configure Git text conversion. Windows also adds the install directory to your user PATH. On macOS and Linux, add `~/.local/bin` to PATH if needed.
+
+To customise a downloaded installer, use `BP_INSPECT_VERSION` and `INSTALL_DIR` with `install.sh`, or `-Version` and `-InstallDir` with `install.ps1`.
 
 ```sh
-cargo install unreal-bp-inspect
+BP_INSPECT_VERSION=v1.0.0 INSTALL_DIR="$HOME/.local/bin" sh install.sh
 ```
 
-The install scripts download the latest binary, add it to your PATH, and configure Git to show readable Blueprint diffs. See [Git integration](#git-integration) for details.
-
-### Install options
-
-| Option                 | Shell                                       | PowerShell                           |
-| ---------------------- | ------------------------------------------- | ------------------------------------ |
-| Specific version       | `BP_INSPECT_VERSION=v0.1.0 curl ... \| sh`  | `.\install.ps1 -Version v0.1.0`      |
-| Custom directory       | `INSTALL_DIR=/usr/local/bin curl ... \| sh` | `.\install.ps1 -InstallDir C:\Tools` |
-| With Claude Code skill | `curl ... \| sh -s -- --with-skill`         | `.\install.ps1 -WithSkill`           |
-
-### From source
+To build from source, install [Rust](https://www.rust-lang.org/tools/install), then run
 
 ```sh
 git clone https://github.com/MarcedForLife/UnrealBPInspect.git
 cd UnrealBPInspect
-cargo install --path .
+cargo install --locked --path .
 ```
 
 ## Usage
 
 ```sh
-bp-inspect [OPTIONS] <PATH>...
+bp-inspect MyBlueprint.uasset
+bp-inspect Content/Blueprints/
+bp-inspect MyBlueprint.uasset --filter health,mana
+bp-inspect MyBlueprint.uasset --json
+bp-inspect --diff Old_BP.uasset New_BP.uasset
 ```
 
-Accepts one or more `.uasset` files or directories. Directories are scanned recursively.
+Directories are scanned recursively without following directory symlinks. Filtering is case-insensitive and matches component, variable, and function names as well as function bodies. Multiple files produce a JSON array, while a single file produces an object. Failed files are reported on stderr. A batch keeps successful results but returns exit code 2 if any file fails.
 
-| Flag                       | Description                                             |
-| -------------------------- | ------------------------------------------------------- |
-| `-f` / `--filter <term>`   | Filter output by substring (comma-separated, see below) |
-| `-j` / `--json`            | Full structured output as JSON                          |
-| `-d` / `--diff`            | Compare two `.uasset` files (unified diff of summaries) |
-| `--context <N>`            | Context lines in diff output (default: 3)               |
-| `--update [version]`       | Update to the latest (or specified) release             |
-| `--dump`                   | Full import/export/property dump (verbose diagnostic)   |
-| `--debug`                  | Dump raw table data for format investigation            |
-| `-V` / `--version`         | Print version                                           |
+Use `--dump` for the full import, export, and property output, `--debug` for raw table diagnostics, and `--help` for all options. `bp-inspect --update` installs the latest release, or use `--update v1.0.0` for a specific version.
 
-### Default output
-
-Shows the Blueprint as a single readable document with components, variables, call graph, and decoded functions with inline comments:
+### Reading a Blueprint
 
 ```sh
-$ bp-inspect Helm_BP.uasset
+bp-inspect Enemy_BP.uasset
 ```
 
-```
-Blueprint: Helm_BP (extends Actor)
+Illustrative output, shortened to show the components, variables, call graph, and damage logic
+
+```text
+Blueprint: Enemy_BP (extends Character)
 
 Components:
-  DefaultSceneRoot (SceneComponent)
-  Scene (SceneComponent)
-    Stand (StaticMeshComponent)
-      StaticMesh: helm_elemnt_02
-      BodyInstance: CollisionProfileName: Custom, PhysMaterialOverride: 11_Wood_Physic_Mat
-    Wheel (GrippableStaticMeshComponent)
-      StaticMesh: helm_elemnt_01
-      BodyInstance: ObjectType: ECC_PhysicsBody, CollisionProfileName: PhysicsActor, ...
-      RelativeLocation: (-0.0000, 0.0000, 146.6086)
-    WheelConstraint (ChildActorComponent)
-      ChildActorClass: WinchConstraint_BP_C
-      [template: WinchConstraint_BP_C]
-        WinchMesh: helm_elemnt_01
-        WinchComponentName: "Wheel"
-        InitialRotationAlpha: 0.5000
+  CapsuleComponent (CapsuleComponent)
+    Mesh (SkeletalMeshComponent)
 
 Variables:
-  WinchConstraintInstance: WinchConstraint_BP_C*
-```
+  Health: float = 100.0000
 
-Larger Blueprints include call graphs and decoded functions:
-
-```
 Call graph:
-  InitialiseHandPhysics → EnableHandPhysics
-  OnComponentGripped → DisableHandPhysics, ResolveFingerPoses
-  OnGripReleased → EnableHandPhysics
-  ReceiveBeginPlay → InitialiseHandPhysics, ScaleHandToPlayer
-  ReceiveTick → TeleportHandToController
-  ResolveFingerPoses → ResolveFingerPose
-  ...
+  ApplyDamage → Die
+
+Functions:
+  ApplyDamage(Amount: float) [Public]
+    // "Reduce health and check for death"
+    self.Health = (self.Health - Amount)
+    if (self.Health <= 0.0000) {
+        Die()
+    }
 ```
 
-Functions are decompiled into structured pseudocode with Blueprint comments placed inline:
+### Control flow
 
+```sh
+bp-inspect Enemy_BP.uasset --filter UpdateNearbyEnemies
 ```
-  ReceiveBeginPlay():
-    // "Resize the hand based on the players height (breaks physical animation)"
-    ScaleHandToPlayer(self.PlayerHeight)
-    // "Do first time setup and enable physics for the hand"
-    InitialiseHandPhysics()
-    // "Bind on player teleported events"
-    $Cast_AsVRPlayer_BP = cast<VRPlayer_BP_C>(self.MotionController.GetOwner())
-    if ($Cast_AsVRPlayer_BP) {
-        $Cast_AsVRPlayer_BP.OnCharacterTeleported_Bind += self.OnOwnerTeleported
-        // "Bind player status updates to update the player state widget"
-        if (IsValid(self.PlayerStateWidget)) {
-            $Cast_AsVRPlayer_BP.PlayerStatusesUpdated += self.OnPlayerStatusesUpdated
+
+Illustrative function with a ForEach loop, nested branch, and switch cases
+
+```text
+  UpdateNearbyEnemies() [Public]
+    // "Choose a behaviour for each nearby enemy"
+    for (Enemy in self.NearbyEnemies) {
+        if (IsValid(Enemy)) {
+            switch (Enemy.AlertLevel) {
+                case 0:
+                    Enemy.Patrol()
+                case 1:
+                    Enemy.Investigate(self.LastKnownPosition)
+                default:
+                    Enemy.Attack(self.Target)
+            }
         }
     }
 ```
 
-Latent actions (Delay, MoveTo) show their resume continuation inline:
-
-```
-  // "On grip released"
-  OnGripReleased():
-    self.SkeletalMeshComponent.DetachFromComponent(KeepWorld, KeepWorld, KeepWorld, true)
-    EnableHandPhysics()
-    self.GrippingActor = false
-    // "Since we simulate gravity on gripped components, wait a little bit
-    //  before restoring the hands mass. This stops the gripped component
-    //  from being launched when held from the bottom"
-    Delay(0.5000)
-    self.SkeletalMeshComponent.SetMassOverrideInKg(self.RootBoneName, self.OriginalHandMass, true)
-```
-
-### Filtering
-
-`--filter` searches across all sections of the output, case-insensitive. It shows matching components, variables, functions (by name or body content), and the related call graph entries.
-
-Filter by a function or event name:
-
-```sh
-bp-inspect MyBlueprint.uasset --filter ReceiveTick
-```
-
-```
-Blueprint: VRHand_BP (extends SkeletalMeshActor)
-
-Call graph:
-  ReceiveTick → TeleportHandToController
-
-Functions:
-  ReceiveTick():
-    ...
-    if ((!self.GrippingActor) && ($VSize >= self.MaxHandDistance)) {
-        TeleportHandToController()
-    }
-
-  TeleportHandToController() [Public|BlueprintPure]
-    ...
-```
-
-Filter by a variable name to see its definition and every function that references it:
-
-```sh
-bp-inspect MyBlueprint.uasset --filter GrippingActor
-```
-
-```
-Blueprint: VRHand_BP (extends SkeletalMeshActor)
-
-Variables:
-  GrippingActor: bool
-
-Call graph:
-  OnComponentGripped → DisableHandPhysics, ResolveFingerPoses
-  OnGripReleased → EnableHandPhysics
-  ...
-
-Functions:
-  OnGripReleased():
-    ...
-    self.GrippingActor = false
-    ...
-
-  OnComponentGripped(GrippedActor: GrippedComponent_Struct) [Public|BlueprintPure]
-    ...
-    self.GrippingActor = true
-    ...
-```
-
-Multiple terms can be comma-separated: `--filter health,mana`.
-
-### Batch / directory mode
-
-```sh
-bp-inspect Content/Blueprints/                          # all .uasset files under directory
-bp-inspect A_BP.uasset B_BP.uasset                      # multiple files
-bp-inspect Content/ --json | jq '.[].functions[].name'   # multi-file JSON array
-```
+The decoder also recognises counted and while loops, loop breaks, Sequence pins, DoOnce and FlipFlop patterns, and continuations after latent actions such as Delay. Recovery depends on the compiled bytecode pattern.
 
 ### Comparing Blueprints
 
+`--diff` compares summaries in the supplied order. Exit code 0 means identical, 1 means differences, and 2 means an error. Errors are written to stderr. Use `--context <N>` to change the number of context lines, or `--filter` to narrow the comparison.
+
 ```sh
-bp-inspect --diff Old_BP.uasset New_BP.uasset
+bp-inspect --diff Old_Enemy_BP.uasset New_Enemy_BP.uasset
 ```
 
-Outputs a unified diff of the decoded summaries. Exit code 0 means identical, 1 means differences found. Combine with `--filter` to compare specific functions.
+Illustrative diff adding armour to the damage calculation
 
 ```diff
+--- Old_Enemy_BP.uasset
++++ New_Enemy_BP.uasset
+@@ -7,4 +7,5 @@
  Variables:
--  MaxHandDistance: float = 50.0000
-+  MaxHandDistance: float = 75.0000
- ...
-@@ -290,8 +290,8 @@
-   UserConstructionScript() [Event|Public|BlueprintPure]
-     // "Set the appropriate mesh"
--    self.SkeletalMeshComponent.SetSkeletalMesh(switch(self.Hand) { ... }, true)
-+    self.SkeletalMeshComponent.SetSkinnedAssetAndUpdate(switch(self.Hand) { ... }, true)
-     // "Set the appropriate animation blueprint"
--    self.SkeletalMeshComponent.SetAnimClass(switch(self.Hand) { ... })
-+    self.SkeletalMeshComponent.SetAnimInstanceClass(switch(self.Hand) { ... })
-```
+   Health: float = 100.0000
++  Armor: float = 10.0000
 
-### JSON mode
-
-Full structured output for programmatic use. Includes top-level `imports`, `exports`, and `functions` arrays. Functions have pre-extracted signatures, flags, and structured bytecode:
-
-```sh
-bp-inspect MyBlueprint.uasset --json | jq '.functions[] | {name, signature, flags}'
+ Call graph:
+@@ -14,5 +15,5 @@
+   ApplyDamage(Amount: float) [Public]
+     // "Reduce health and check for death"
+-    self.Health = (self.Health - Amount)
++    self.Health = (self.Health - FMax((Amount - self.Armor), 0.0000))
+     if (self.Health <= 0.0000) {
+         Die()
 ```
 
 ## Git integration
 
-bp-inspect can act as a Git [textconv](https://git-scm.com/docs/gitattributes#_performing_text_diffs_of_binary_files) filter, making `git diff`, `git log -p`, and GUI tools show readable Blueprint diffs instead of "Binary files differ".
+Add this to your Unreal project's `.gitattributes`
 
-### Setup
-
-**1. `.gitattributes`** - add to your UE project repo (committed, shared with teammates):
-
-```
+```gitattributes
 *.uasset diff=bp-inspect
 ```
 
-**2. Git config** - run once (globally, so it applies to all repos):
+The install scripts configure the text converter. For a manual or source installation, run
 
 ```sh
 git config --global diff.bp-inspect.textconv bp-inspect
 git config --global diff.bp-inspect.cachetextconv true
 ```
 
-If bp-inspect isn't on PATH, use the full path instead:
+With `bp-inspect` on PATH, `git diff`, `git show`, and `git log -p` display readable Blueprint summaries. This only changes diff display, not the stored assets or binary merge behaviour.
 
-```sh
-# macOS / Linux
-git config --global diff.bp-inspect.textconv /path/to/bp-inspect
-
-# Windows - use forward slashes
-git config --global diff.bp-inspect.textconv C:/Tools/bp-inspect.exe
-```
-
-### Notes
-
-- **Read-only** - textconv only affects diff display. Git still treats `.uasset` as binary for merge/conflict resolution.
-- **`cachetextconv = true`** caches converted text per blob SHA, so repeated diffs are fast.
-- Works with `git log -p`, `git show`, `git diff --cached`, and any tool that uses Git's diff machinery.
-
-## Claude Code skill
-
-bp-inspect includes a [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skill that teaches Claude to read, debug, and explain Blueprint files.
-
-Install it alongside bp-inspect using `--with-skill` (see [Install options](#install-options)), or copy manually:
-
-```sh
-cp -r skill/ ~/.claude/skills/unreal-bp/
-```
-
-Once installed, Claude can read any `.uasset` file you point it at. Ask it to explain what a Blueprint does, debug a specific function, or plan a Blueprint-to-C++ migration.
-
-## How it works
-
-bp-inspect reads the compiled bytecode from the binary file directly, with zero UE dependency. A large Blueprint with 90 functions parses in under 100ms.
-
-The hard part is making bytecode *readable*. bp-inspect:
-
-- Reconstructs function signatures from parameter properties
-- Disassembles Kismet bytecode into structured pseudo-code with if/else, while/for, ForEach, and sequence nodes
-- Reorders displaced convergence blocks from the UE4 compiler
-- Inlines single-use temporaries and folds struct Break/Make patterns
-- Strips serialisation noise (GUID suffixes, K2Node prefixes, library prefixes)
-- Splits ubergraph functions into labelled event handlers
-- Inlines latent resume blocks after their corresponding Delay() calls
-- Places Blueprint comment boxes and bubble comments inline near the code they annotate (via 2D spatial matching between graph nodes and bytecode)
-- Detects DoOnce and FlipFlop macro patterns and emits them as structured pseudocode
-
-The goal is output that reads like hand-written pseudocode, not a bytecode dump.
-
-> [!NOTE]
-> DoOnce and FlipFlop macro instances carry no user-set label in the compiled asset, so their names in output are derived heuristically from the first meaningful call in the body (e.g. `DoOnce(AttemptGrip)`). These names are stable per gate but won't match the node titles you might remember from the editor.
-
-**How it compares to existing tools:**
-
-| Tool                                                         | Approach                                    | Limitations                                                                           |
-| ------------------------------------------------------------ | ------------------------------------------- | ------------------------------------------------------------------------------------- |
-| **UAssetAPI**                                                | .NET serialisation library for modding      | Raw property trees and byte arrays, no disassembly or readable output                 |
-| **UE commandlets**                                           | Editor-based dump tools                     | Requires full editor instance with project loaded and all dependencies compiled       |
-| **[NodeToCode](https://github.com/protospatial/NodeToCode)** | Editor plugin, translates graphs via LLM    | Requires running editor and LLM service (cloud or local); reads live graph, not files |
-| **bp-inspect**                                               | Standalone binary, reads `.uasset` directly | No editor, no project context, no network. Works in terminals, CI, and AI assistants  |
+An optional [agent skill](skill/README.md) helps coding agents inspect, compare, and debug Blueprints with the CLI. It uses the Agent Skills format and works with agents that can run local commands.
 
 ## Supported formats
 
-- **UE4** uncooked `.uasset` files (4.14-4.27, file versions 459-522)
-- **UE5** uncooked `.uasset` files (5.0-5.5) with Large World Coordinates support
-- Tested with UE 4.27 (version 522), 5.3 (version 1009), and 5.5 (version 1012+). Other UE5 versions should work but are unverified.
-- Animation Blueprints and Widget Blueprints partially work (event graphs and functions parse correctly; AnimGraph state machines and widget hierarchy display are planned)
-- Cooked assets (split `.uasset`/`.uexp`) and UE5 IoStore format are not yet supported
+- Uncooked UE4 `.uasset` files from 4.14 to 4.27 and UE5 files from 5.0 to 5.5. Committed test fixtures cover 4.27, 5.3, and 5.5. Other versions are unverified.
+- Animation and Widget Blueprints have partial support for event graphs and functions. Animation state machines and widget hierarchies are not displayed.
+- Cooked assets split across `.uasset` and `.uexp`, and UE5 IoStore files, are not supported.
+
+Pseudocode includes structured control flow and Blueprint comments. DoOnce and FlipFlop names are inferred from their bodies and may differ from editor node titles.
 
 ## Development
 
-### Building
-
 ```sh
-cargo build             # dev build
-cargo build --release   # optimised build → target/release/bp-inspect
+cargo fmt --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-features
+cargo build --locked --release
+python tests/installers.py
+cargo run --locked -- samples/ue_4.27/Helm_BP.uasset
 ```
 
-### Running locally
+Tests use the committed assets in `samples/`. See [test snapshots](tests/snapshots/README.md) for updating expected output after intentional changes. Private assets stay ignored and are not required to build or test. Installer tests use local mock downloads and temporary installation directories.
 
-```sh
-cargo run -- samples/<file>.uasset                        # summary (default)
-cargo run -- samples/<file>.uasset --filter ReceiveTick   # filter by event
-cargo run -- --diff samples/A.uasset samples/B.uasset     # compare two files
-cargo run -- samples/                                     # all files in directory
-```
+Open a pull request for changes, or an issue for bugs and sample assets that fail to parse.
 
-### Testing
-
-```sh
-cargo test                      # run all tests
-cargo test -- --nocapture       # run with stdout visible
-cargo test inline               # run tests matching "inline"
-UPDATE_SNAPSHOTS=1 cargo test   # update snapshot files after intentional output changes
-```
-
-**Unit tests** live inline in source files (`#[cfg(test)]`). They test private helpers that aren't accessible from outside their module. **Integration tests** in `tests/` exercise the public API end-to-end with snapshot regression and structural assertions.
-
-**Snapshot tests**: expected outputs live in `tests/snapshots/`. After intentional output changes, run with `UPDATE_SNAPSHOTS=1` to regenerate, then review diffs before committing.
-
-**Test fixtures**: place `.uasset` files in `samples/ue_4.27/` or `samples/ue_5.5/`. Small committed fixtures are used by integration tests; larger files are gitignored for local testing.
-
-### Contributing
-
-Branch from `main` and open a pull request when ready.
-
-| Convention        | Details                                                                        |
-| ----------------- | ------------------------------------------------------------------------------ |
-| Branch naming     | `feature/short-description` or `bugfix/short-description`                      |
-| Commit hygiene    | Squash fixups and WIP commits; keep logically distinct changes separate        |
-| Before submitting | `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`         |
-| Merge strategy    | Merge commit when history is curated, squash merge for single-concern branches |
-
-Bug reports and sample `.uasset` files are also welcome as issues.
+To publish a release, run the Release workflow on `main` with a patch, minor, or major version bump. It prepares the version and validates all four platform builds before pushing the version commit and tag together. It then uploads binaries and SHA-256 checksums to a draft release and publishes it. If `main` changes during the build, the workflow stops before pushing and must be rerun. Pull `main` afterwards to pick up the version commit.
 
 ## License
 
-Apache-2.0
+[Apache-2.0](LICENSE)

@@ -53,9 +53,7 @@ pub(crate) mod walker;
 #[cfg(test)]
 mod walker_tests;
 
-// Re-exported for test harnesses (the cfg reaching-condition probes and
-// the private-fixtures `partition_tests::local_tests`); production
-// callers reach it through `super::mem_disk` directly.
+// Re-exported for control-flow graph test probes; production callers use `super::mem_disk` directly.
 #[cfg(test)]
 pub(crate) use mem_disk::build_mem_to_disk_map;
 
@@ -69,9 +67,7 @@ pub(crate) use orchestrate::{
 // decode agree on the event-node set (including the InputAction pattern).
 pub(crate) use ubergraph_scan::build_event_node_index;
 
-// Re-exported for test harnesses (the cfg reaching-condition probes and
-// the private-fixtures `partition_tests::local_tests`); production
-// callers reach it through `super::header` directly.
+// Re-exported for control-flow graph test probes; production callers use `super::header` directly.
 #[cfg(test)]
 pub(crate) use header::read_version_and_name_table;
 
@@ -81,8 +77,3 @@ pub(crate) use header::read_version_and_name_table;
 // `#[cfg(test)]` items, so this cannot be test-gated. Not used by the
 // production decode pipeline.
 pub use probe::{probe_ubergraph_partition, UbergraphProbeData};
-
-// `K2NodeByteMapForTest` stays internal to `probe` (its only use is that
-// function's return type); only the helper is reached as `decode::*`.
-#[cfg(all(test, feature = "private-fixtures"))]
-pub(crate) use probe::build_k2node_byte_map_for_test;

@@ -211,3 +211,87 @@ fn diff_different_versions_produces_unified_diff() {
     // but the two return values must agree.
     assert!(output.is_empty() != has_changes);
 }
+
+#[test]
+fn cli_diff_preserves_argument_order() {
+    let first = common::samples_dir().join("ue_4.27/BP_DecoderTest.uasset");
+    let second = common::samples_dir().join("ue_4.27/Helm_BP.uasset");
+    for (before, after) in [(&first, &second), (&second, &first)] {
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_bp-inspect"))
+            .arg("--diff")
+            .arg(before)
+            .arg(after)
+            .output()
+            .expect("CLI should run");
+        assert_eq!(result.status.code(), Some(1));
+        assert!(result.stderr.is_empty());
+        let (expected, has_changes) = v2_diff(
+            &std::fs::read(before).unwrap(),
+            &std::fs::read(after).unwrap(),
+            &before.display().to_string(),
+            &after.display().to_string(),
+        );
+        assert!(has_changes);
+        assert!(
+            String::from_utf8(result.stdout).unwrap() == expected,
+            "CLI diff should compare {} before {}",
+            before.display(),
+            after.display()
+        );
+    }
+}
+
+#[test]
+fn cli_diff_distinguishes_matches_from_errors() {
+    let fixture = common::samples_dir().join("ue_4.27/Helm_BP.uasset");
+    let missing = tempfile::tempdir().unwrap().path().join("missing.uasset");
+    for (after, expected) in [(&fixture, 0), (&missing, 2)] {
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_bp-inspect"))
+            .arg("--diff")
+            .arg(&fixture)
+            .arg(after)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(expected));
+        assert!(result.stdout.is_empty());
+        assert_eq!(result.stderr.is_empty(), expected == 0);
+    }
+}
+
+#[test]
+fn cli_partial_batch_retains_results_and_reports_failure() {
+    let fixture = common::samples_dir().join("ue_4.27/Helm_BP.uasset");
+    let directory = tempfile::tempdir().unwrap();
+    let invalid = directory.path().join("invalid.uasset");
+    std::fs::write(&invalid, b"not an asset").unwrap();
+    for mode in ["--json", "--dump"] {
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_bp-inspect"))
+            .arg(mode)
+            .arg(&fixture)
+            .arg(&invalid)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("1 of 2 files failed"));
+        assert!(!result.stdout.is_empty());
+        if mode == "--json" {
+            let output: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+            let results = output.as_array().unwrap();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0]["file"], fixture.to_string_lossy().as_ref());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_directory_scan_does_not_follow_symlink_cycles() {
+    let directory = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(directory.path(), directory.path().join("cycle")).unwrap();
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_bp-inspect"))
+        .arg(directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("No .uasset files found"));
+}

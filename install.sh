@@ -1,14 +1,6 @@
 #!/bin/sh
-# Install bp-inspect (Unreal Blueprint Inspector)
-#
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/MarcedForLife/UnrealBPInspect/main/install.sh | sh
-#   curl -fsSL .../install.sh | sh -s -- --with-skill
-#
-# Environment variables:
-#   INSTALL_DIR         Override install directory (default: ~/.local/bin)
-#   BP_INSPECT_VERSION  Pin to a specific version (default: latest)
-
+# Install bp-inspect from a checksummed GitHub release.
+# INSTALL_DIR defaults to ~/.local/bin. BP_INSPECT_VERSION defaults to latest.
 set -eu
 
 REPO="MarcedForLife/UnrealBPInspect"
@@ -16,150 +8,128 @@ BINARY="bp-inspect"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${BP_INSPECT_VERSION:-latest}"
 WITH_SKILL=false
+SKILL_DIR="$HOME/.claude/skills/unreal-bp"
 
-# Parse arguments
-for arg in "$@"; do
-    case "$arg" in
+while [ "$#" -gt 0 ]; do
+    case "$1" in
         --with-skill) WITH_SKILL=true ;;
+        --skill-dir)
+            if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                echo "Error: --skill-dir requires a directory." >&2
+                exit 1
+            fi
+            SKILL_DIR="$2"
+            WITH_SKILL=true
+            shift
+            ;;
         --help|-h)
-            echo "Usage: install.sh [--with-skill]"
-            echo ""
-            echo "Environment variables:"
-            echo "  INSTALL_DIR         Install directory (default: ~/.local/bin)"
-            echo "  BP_INSPECT_VERSION  Version to install (default: latest)"
+            echo "Usage: install.sh [--with-skill] [--skill-dir DIRECTORY]"
+            echo "  --with-skill  Install to ~/.claude/skills/unreal-bp (legacy default)"
+            echo "  --skill-dir   Install the skill to a chosen directory"
+            echo "Environment: INSTALL_DIR, BP_INSPECT_VERSION (default: latest)"
             exit 0
             ;;
-        *) echo "Unknown option: $arg"; exit 1 ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
+    shift
 done
 
-# Detect platform
-detect_platform() {
-    OS="$(uname -s)"
-    ARCH="$(uname -m)"
-
-    case "$OS" in
-        Linux)  PLATFORM="linux" ;;
-        Darwin) PLATFORM="macos" ;;
-        *)
-            echo "Error: Unsupported OS: $OS"
-            echo "Install via: cargo install unreal-bp-inspect"
-            exit 1
-            ;;
-    esac
-
-    case "$ARCH" in
-        x86_64|amd64)   ARCH="x86_64" ;;
-        aarch64|arm64)   ARCH="aarch64" ;;
-        *)
-            echo "Error: Unsupported architecture: $ARCH"
-            echo "Install via: cargo install unreal-bp-inspect"
-            exit 1
-            ;;
-    esac
-
-    # Linux arm64 not in release matrix
-    if [ "$PLATFORM" = "linux" ] && [ "$ARCH" = "aarch64" ]; then
-        echo "Error: Linux ARM64 binaries are not available yet."
-        echo "Install via: cargo install unreal-bp-inspect"
-        exit 1
-    fi
-
-    ASSET="${BINARY}-${PLATFORM}-${ARCH}"
-}
-
-detect_platform
-
-# Resolve download URL
-if [ "$VERSION" = "latest" ]; then
-    URL="https://github.com/${REPO}/releases/latest/download/${ASSET}"
-else
-    URL="https://github.com/${REPO}/releases/download/${VERSION}/${ASSET}"
-fi
-
-echo "Installing bp-inspect..."
-
-# Create install directory
-mkdir -p "$INSTALL_DIR"
-
-TARGET="$INSTALL_DIR/$BINARY"
-
-# Download (try curl, fall back to wget)
-echo "  Downloading from GitHub releases..."
-if command -v curl >/dev/null 2>&1; then
-    HTTP_CODE=$(curl -fsSL -w "%{http_code}" -o "$TARGET" "$URL" 2>/dev/null) || true
-    if [ ! -f "$TARGET" ] || [ "$(wc -c < "$TARGET" | tr -d ' ')" -lt 1000 ]; then
-        rm -f "$TARGET"
-        echo "Error: Failed to download bp-inspect."
-        if [ "$VERSION" != "latest" ]; then
-            echo "  Check that version '$VERSION' exists at:"
-        else
-            echo "  Check that a release exists at:"
-        fi
-        echo "  https://github.com/${REPO}/releases"
-        exit 1
-    fi
-elif command -v wget >/dev/null 2>&1; then
-    if ! wget -q -O "$TARGET" "$URL" 2>/dev/null; then
-        rm -f "$TARGET"
-        echo "Error: Failed to download bp-inspect."
-        echo "  https://github.com/${REPO}/releases"
-        exit 1
-    fi
-else
-    echo "Error: curl or wget required."
+case "$(uname -s)" in
+    Linux) PLATFORM="linux" ;;
+    Darwin) PLATFORM="macos" ;;
+    *) echo "Error: Unsupported OS." >&2; exit 1 ;;
+esac
+case "$(uname -m)" in
+    x86_64|amd64) ARCH="x86_64" ;;
+    aarch64|arm64) ARCH="aarch64" ;;
+    *) echo "Error: Unsupported architecture." >&2; exit 1 ;;
+esac
+if [ "$PLATFORM-$ARCH" = "linux-aarch64" ]; then
+    echo "Linux ARM64 binaries are unavailable. Install from source:" >&2
+    echo "cargo install --locked --git https://github.com/${REPO}.git" >&2
     exit 1
 fi
+ASSET="${BINARY}-${PLATFORM}-${ARCH}"
 
-chmod +x "$TARGET"
-
-# Configure Git textconv
-if command -v git >/dev/null 2>&1; then
-    git config --global diff.bp-inspect.textconv "$TARGET"
-    git config --global diff.bp-inspect.cachetextconv true
-    echo "  Configured Git textconv for .uasset diffs."
-else
-    echo "  Git not found -- skipping textconv setup."
-    echo "  Run these after installing Git:"
-    echo "    git config --global diff.bp-inspect.textconv \"$TARGET\""
-    echo "    git config --global diff.bp-inspect.cachetextconv true"
-fi
-
-# Install Claude Code skill
-if [ "$WITH_SKILL" = true ]; then
-    SKILL_DIR="$HOME/.claude/skills/unreal-bp"
-    mkdir -p "$SKILL_DIR"
-    SKILL_URL="https://raw.githubusercontent.com/${REPO}/main/skill/SKILL.md"
+# Every failed transfer is fatal, even if a partial file was written.
+download() {
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL -o "$SKILL_DIR/SKILL.md" "$SKILL_URL" 2>/dev/null && \
-            echo "  Installed Claude Code skill to $SKILL_DIR" || \
-            echo "  Warning: Failed to download Claude Code skill."
+        curl -fsSL --retry 3 -o "$2" "$1"
     elif command -v wget >/dev/null 2>&1; then
-        wget -q -O "$SKILL_DIR/SKILL.md" "$SKILL_URL" 2>/dev/null && \
-            echo "  Installed Claude Code skill to $SKILL_DIR" || \
-            echo "  Warning: Failed to download Claude Code skill."
+        wget -q -O "$2" "$1"
+    else
+        echo "Error: curl or wget required." >&2
+        return 1
     fi
+}
+
+mkdir -p "$INSTALL_DIR"
+INSTALL_DIR=$(cd "$INSTALL_DIR" && pwd)
+TARGET="$INSTALL_DIR/$BINARY"
+TEMP_DIR=$(mktemp -d "$INSTALL_DIR/.bp-inspect.XXXXXX")
+SKILL_TEMP=""
+trap 'rm -rf "$TEMP_DIR"; if [ -n "$SKILL_TEMP" ]; then rm -f "$SKILL_TEMP"; fi' 0
+trap 'exit 1' HUP INT TERM
+
+# Resolve latest once so the binary, checksums, and skill use the same tag.
+if [ "$VERSION" = "latest" ]; then
+    download "https://api.github.com/repos/${REPO}/releases/latest" "$TEMP_DIR/release.json"
+    VERSION=$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$TEMP_DIR/release.json" | head -n 1)
+fi
+case "$VERSION" in v*) ;; *) VERSION="v$VERSION" ;; esac
+if ! printf '%s\n' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'; then
+    echo "Error: Invalid release version: $VERSION" >&2
+    exit 1
+fi
+URL="https://github.com/${REPO}/releases/download/${VERSION}"
+echo "Installing bp-inspect $VERSION..."
+download "$URL/$ASSET" "$TEMP_DIR/$ASSET"
+download "$URL/checksums.txt" "$TEMP_DIR/checksums.txt"
+EXPECTED=$(awk -v asset="$ASSET" '$2 == asset || $2 == "*" asset { print $1 }' "$TEMP_DIR/checksums.txt")
+if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL=$(sha256sum "$TEMP_DIR/$ASSET" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+    ACTUAL=$(shasum -a 256 "$TEMP_DIR/$ASSET" | awk '{print $1}')
+else
+    echo "Error: sha256sum or shasum required." >&2
+    exit 1
+fi
+if [ "$EXPECTED" != "$ACTUAL" ]; then
+    echo "Error: Missing, duplicate, or mismatched SHA-256 checksum for $ASSET." >&2
+    exit 1
+fi
+chmod +x "$TEMP_DIR/$ASSET"
+INSTALLED_VERSION=$("$TEMP_DIR/$ASSET" --version)
+
+if [ "$WITH_SKILL" = true ]; then
+    mkdir -p "$SKILL_DIR"
+    SKILL_TEMP=$(mktemp "$SKILL_DIR/.SKILL.XXXXXX")
+    download "https://raw.githubusercontent.com/${REPO}/${VERSION}/skill/SKILL.md" "$SKILL_TEMP"
+    if [ ! -s "$SKILL_TEMP" ]; then
+        echo "Error: Downloaded skill is empty." >&2
+        exit 1
+    fi
+    chmod 644 "$SKILL_TEMP"
 fi
 
-# Verify
-INSTALLED_VERSION=$("$TARGET" --version 2>/dev/null || echo "bp-inspect (version unknown)")
-echo ""
+mv -f "$TEMP_DIR/$ASSET" "$TARGET"
+if [ "$WITH_SKILL" = true ]; then
+    mv -f "$SKILL_TEMP" "$SKILL_DIR/SKILL.md"
+    echo "  Installed skill to $SKILL_DIR"
+fi
+
+if command -v git >/dev/null 2>&1; then
+    # textconv is a shell command, so retain quoting inside the config value.
+    QUOTED_TARGET=$(printf '%s' "$TARGET" | sed "s/'/'\\\\''/g")
+    git config --global diff.bp-inspect.textconv "'$QUOTED_TARGET'"
+    git config --global diff.bp-inspect.cachetextconv true
+fi
+
 echo "  $INSTALLED_VERSION"
 echo "  Installed to: $TARGET"
-
-# Check PATH
 case ":${PATH}:" in
     *":${INSTALL_DIR}:"*) ;;
-    *)
-        echo ""
-        echo "  Warning: $INSTALL_DIR is not on your PATH."
-        echo "  Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
-        echo "    export PATH=\"$INSTALL_DIR:\$PATH\""
-        ;;
+    *) echo "  Add $INSTALL_DIR to your PATH." ;;
 esac
-
-# Remind about .gitattributes
-echo ""
-echo "To enable Git diff support, add this to your UE project's .gitattributes:"
+echo "To enable Git diffs, add this to your Unreal project's .gitattributes:"
 echo "  *.uasset diff=bp-inspect"
-echo ""

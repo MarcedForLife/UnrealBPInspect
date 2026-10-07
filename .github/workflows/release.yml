@@ -4,80 +4,79 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: 'Version bump type'
+        description: Version bump type
         required: true
         type: choice
-        options:
-          - patch
-          - minor
-          - major
+        options: [patch, minor, major]
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   version-bump:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.bump.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Calculate new version
+      - name: Prepare version files
         id: bump
+        env:
+          BUMP: ${{ inputs.bump }}
         run: |
-          CURRENT=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-          case "${{ inputs.bump }}" in
-            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
-            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
-            patch) PATCH=$((PATCH + 1)) ;;
-          esac
-          NEW="$MAJOR.$MINOR.$PATCH"
-          echo "version=$NEW" >> "$GITHUB_OUTPUT"
-          echo "tag=v$NEW" >> "$GITHUB_OUTPUT"
-          echo "Bumping $CURRENT -> $NEW"
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+          import tomllib
 
-      - name: Check tag doesn't exist
-        run: |
-          if git ls-remote --tags origin "refs/tags/${{ steps.bump.outputs.tag }}" | grep -q .; then
-            echo "::error::Tag ${{ steps.bump.outputs.tag }} already exists"
-            exit 1
-          fi
+          manifest = pathlib.Path('Cargo.toml')
+          current = tomllib.loads(manifest.read_text())['package']['version']
+          major, minor, patch = map(int, current.split('.'))
+          bump = os.environ['BUMP']
+          if bump == 'major':
+              major, minor, patch = major + 1, 0, 0
+          elif bump == 'minor':
+              minor, patch = minor + 1, 0
+          elif bump == 'patch':
+              patch += 1
+          else:
+              raise ValueError(f'Unknown bump: {bump}')
+          version = f'{major}.{minor}.{patch}'
+          manifest.write_text(re.sub(r'^version = ".*"$', f'version = "{version}"', manifest.read_text(), count=1, flags=re.M))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'tag=v{version}\n')
+          PY
+          cargo check
 
-      - name: Update Cargo.toml
-        run: |
-          sed -i "s/^version = \".*\"/version = \"${{ steps.bump.outputs.version }}\"/" Cargo.toml
-          grep -q "^version = \"${{ steps.bump.outputs.version }}\"" Cargo.toml || {
-            echo "::error::Version update failed - Cargo.toml not modified"
-            exit 1
-          }
-
-      - name: Update Cargo.lock
-        run: cargo check
-
-      - name: Commit and tag
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock
-          git commit -m "Bump version to ${{ steps.bump.outputs.tag }} [skip ci]"
-          git tag "${{ steps.bump.outputs.tag }}"
-          git push origin main
-          git push origin "${{ steps.bump.outputs.tag }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: version-bump
+          path: |
+            Cargo.toml
+            Cargo.lock
 
   build:
     needs: version-bump
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: bp-inspect-linux-x86_64
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-15-intel
             artifact: bp-inspect-macos-x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
@@ -85,34 +84,37 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             artifact: bp-inspect-windows-x86_64.exe
-
     runs-on: ${{ matrix.os }}
-
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.version-bump.outputs.tag }}
-
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: version-bump
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Rename binary (unix)
-        if: runner.os != 'Windows'
-        run: cp target/${{ matrix.target }}/release/bp-inspect ${{ matrix.artifact }}
-
-      - name: Rename binary (windows)
-        if: runner.os == 'Windows'
-        run: copy target\${{ matrix.target }}\release\bp-inspect.exe ${{ matrix.artifact }}
-
-      - uses: actions/upload-artifact@v4
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-features
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Test installers
+        env:
+          BP_INSPECT_TEST_BINARY: target/${{ matrix.target }}/release/bp-inspect${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: python tests/installers.py
+      - name: Stage binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARTIFACT: ${{ matrix.artifact }}
+          BINARY_SUFFIX: ${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: cp "target/$TARGET/release/bp-inspect$BINARY_SUFFIX" "$ARTIFACT"
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
@@ -120,19 +122,34 @@ jobs:
   release:
     needs: [version-bump, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.version-bump.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v8
         with:
           merge-multiple: true
-
       - name: Generate checksums
         run: sha256sum bp-inspect-* > checksums.txt
-
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.version-bump.outputs.tag }}
-          files: |
-            bp-inspect-*
-            checksums.txt
-          generate_release_notes: true
+      - name: Commit and tag validated binaries
+        run: |
+          git fetch origin main
+          if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
+            echo "::error::main changed during the build. Run Release again."
+            exit 1
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add Cargo.toml Cargo.lock
+          git commit -m "Bump version to $TAG"
+          git tag "$TAG"
+          git push --atomic origin HEAD:refs/heads/main "refs/tags/$TAG"
+      - name: Upload and publish release
+        run: |
+          gh release create "$TAG" bp-inspect-* checksums.txt --verify-tag --draft --generate-notes --title "$TAG"
+          gh release edit "$TAG" --draft=false

@@ -26,7 +26,7 @@ fn sample_path_for_baseline(baseline_name: &str) -> Option<PathBuf> {
 /// Assert each baseline in `tests/baseline-snapshots/` matches the current v2
 /// emit output for its sample. Baselines whose sample isn't checked in locally
 /// are skipped (CI only ships the small committed fixtures; private-fixture
-/// baselines are local-only developer signals per CLAUDE.md). Set
+/// baselines stay local). Set
 /// `UPDATE_SNAPSHOTS=1` to refresh baselines after an intentional emit change.
 #[test]
 fn v2_baseline_assert() {

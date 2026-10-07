@@ -10,9 +10,7 @@ tests/baseline-snapshots/*
 !tests/baseline-snapshots/*Helm*.txt
 !tests/baseline-snapshots/*BP_DecoderTest*.txt
 
-# Local-only test machinery (loads uncommitted fixtures), kept on disk but not
-# tracked. `tests/local_*.rs` are auto-discovered integration tests; the
-# `src/**/local_tests.rs` modules compile only under `--features private-fixtures`.
+# Keep any local test experiments untracked.
 /tests/local_*.rs
 /src/bytecode/**/local_tests.rs
 

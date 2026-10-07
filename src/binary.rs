@@ -49,7 +49,9 @@ pub fn read_fstring(reader: &mut Reader) -> Result<String> {
         let mut s = vec![0u8; count * 2];
         reader.read_exact(&mut s)?;
         let utf16: Vec<u16> = s
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         Ok(String::from_utf16_lossy(&utf16)
