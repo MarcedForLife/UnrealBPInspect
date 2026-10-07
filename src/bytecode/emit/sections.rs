@@ -120,6 +120,15 @@ pub(crate) fn emit_prefix_sections(
         filters,
         &matched_funcs,
     );
+    let unresolved = context.comments.unresolved_lines(filters);
+    if !unresolved.is_empty() {
+        output.push_str("Graph comments (location unresolved):\n");
+        for line in unresolved {
+            output.push_str(&line);
+            output.push('\n');
+        }
+        output.push('\n');
+    }
     if !blocks.is_empty() || filters.is_empty() {
         output.push_str("Functions:\n");
     }

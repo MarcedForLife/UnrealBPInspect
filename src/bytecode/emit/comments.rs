@@ -33,6 +33,8 @@ use crate::types::ParsedAsset;
 /// Per-block comment annotations for one asset, ready to interleave at emit.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CommentEmitPlan {
+    /// Authored texts with no unique placement, keyed by source graph page.
+    unresolved: BTreeMap<String, Vec<String>>,
     /// Lines emitted directly above an event header, keyed by event name.
     event_wrapping: BTreeMap<String, Vec<String>>,
     /// Lines emitted directly below a block signature, keyed by block name.
@@ -76,6 +78,9 @@ impl CommentEmitPlan {
             ..
         } = placed;
         match class {
+            PlacementClass::Unresolved => {
+                self.unresolved.entry(block).or_default().push(text);
+            }
             PlacementClass::EventWrapping => {
                 self.event_wrapping.entry(block).or_default().extend(lines);
             }
@@ -91,6 +96,28 @@ impl CommentEmitPlan {
                     .push(text);
             }
         }
+    }
+
+    pub(crate) fn unresolved_lines(&self, filters: &[String]) -> Vec<String> {
+        let mut lines = Vec::new();
+        for (page, texts) in &self.unresolved {
+            let heading = format!("  Graph {page:?}:");
+            let mut included = false;
+            for text in texts {
+                if !crate::output_summary::filter::block_matches_filter(
+                    &format!("{heading}\n{text}"),
+                    filters,
+                ) {
+                    continue;
+                }
+                if !included {
+                    lines.push(heading.clone());
+                    included = true;
+                }
+                lines.extend(render_comment_lines(text, "    "));
+            }
+        }
+        lines
     }
 
     /// Event-wrapping lines for `block`, if any.
@@ -249,5 +276,100 @@ mod tests {
 
         // Restored to empty after the block scope.
         assert!(inline_comment_lines(40, "    ").is_none());
+    }
+    #[test]
+    fn unresolved_comments_render_and_filter_by_page_or_text() {
+        let mut plan = CommentEmitPlan::default();
+        plan.insert(placed(
+            "Example",
+            PlacementClass::Unresolved,
+            &[],
+            "Keep this note",
+        ));
+        let lines = plan.unresolved_lines(&[]);
+        assert_eq!(
+            lines,
+            vec!["  Graph \"Example\":", "    // \"Keep this note\""]
+        );
+        assert_eq!(plan.unresolved_lines(&["example".into()]), lines);
+        assert_eq!(plan.unresolved_lines(&["keep this".into()]), lines);
+        assert!(plan.unresolved_lines(&["unrelated".into()]).is_empty());
+    }
+
+    #[test]
+    fn comments_on_counted_loop_header_statements_are_emitted() {
+        use crate::bytecode::{
+            expr::Expr,
+            stmt::{LoopKind, Stmt},
+        };
+        let body = vec![Stmt::Loop {
+            kind: LoopKind::ForC {
+                init: vec![Stmt::Assignment {
+                    lhs: Expr::Var("Index".into()),
+                    rhs: Expr::Literal("0".into()),
+                    offset: 10,
+                }],
+                increment: vec![Stmt::Call {
+                    func: Expr::Var("Advance".into()),
+                    args: vec![],
+                    offset: 30,
+                }],
+            },
+            cond: None,
+            body: vec![],
+            completion: None,
+            offset: 10,
+        }];
+        let map = BTreeMap::from([
+            (10, vec!["initialize".into()]),
+            (30, vec!["advance".into()]),
+        ]);
+        let lines = with_inline_comments(Some(&map), || {
+            crate::bytecode::emit::render_body_lines(&body, &BTreeMap::new())
+        });
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("initialize"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            lines.iter().filter(|line| line.contains("advance")).count(),
+            1
+        );
+        assert!(lines[0].contains("initialize"));
+        assert!(lines[1].contains("advance"));
+    }
+
+    #[test]
+    fn comments_on_flipflop_branch_survive_header_rendering() {
+        use crate::bytecode::{
+            expr::Expr,
+            stmt::{LatchKind, Stmt},
+        };
+        let body = vec![Stmt::Latch {
+            kind: LatchKind::FlipFlop {
+                gate_var: "Gate".into(),
+                names: None,
+            },
+            init: vec![],
+            offset: 10,
+            body: vec![Stmt::Branch {
+                cond: Expr::Var("Gate".into()),
+                then_body: vec![],
+                else_body: vec![],
+                offset: 20,
+            }],
+        }];
+        let map = BTreeMap::from([(20, vec!["toggle body".into()])]);
+        let lines = with_inline_comments(Some(&map), || {
+            crate::bytecode::emit::render_body_lines(&body, &BTreeMap::new())
+        });
+        let note = lines
+            .iter()
+            .position(|line| line.contains("toggle body"))
+            .unwrap();
+        assert!(lines[note + 1].contains("A|B:"));
     }
 }

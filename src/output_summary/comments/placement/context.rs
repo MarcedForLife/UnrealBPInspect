@@ -73,7 +73,7 @@ impl<'a> ClassifyContext<'a> {
 
     /// Byte map covering `block`: the ubergraph map for an event page, the
     /// function's own map for a standalone-function page. `None` when no map
-    /// covers the block (then inline placements cannot anchor and are dropped).
+    /// covers the block (then inline placements need another source of evidence).
     pub(super) fn byte_map_for_block(
         &self,
         block: &str,
@@ -101,11 +101,6 @@ pub(super) fn sorted_exec_entries(contained: &[usize], context: &ClassifyContext
         .collect();
     entries.sort_unstable();
     entries.into_iter().map(|(_, _, node)| node).collect()
-}
-
-/// The top-left execution entry point of the box, if any.
-pub(super) fn exec_entry_point(contained: &[usize], context: &ClassifyContext) -> Option<usize> {
-    sorted_exec_entries(contained, context).into_iter().next()
 }
 
 /// Whether `node` is an execution-root: it drives exec flow (has at least one
@@ -161,8 +156,8 @@ pub(super) fn node_has_external_exec_input(
 ///
 /// A single node can serve several compiled events (one InputAction node
 /// backs both the Pressed and Released functions); name-ascending iteration
-/// keeps the lexicographically first, matching the EventWrapping
-/// first-contained-event tie-break.
+/// keeps one representative for detecting event nodes. The classifier
+/// consults the full index before choosing an event header.
 fn build_event_node_to_name(
     parsed: &ParsedAsset,
     export_names: &[String],

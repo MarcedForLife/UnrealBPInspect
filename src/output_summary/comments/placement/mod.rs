@@ -20,7 +20,7 @@
 //!    on a pure node, a box of pure expression nodes, or exec nodes with no
 //!    byte attribution), follow data-output pin links outward and anchor to
 //!    the nearest consuming statement.
-//! 7. `Fallback`      - no usable anchor; dropped (and counted).
+//! 7. `Unresolved`    - retain the text under its source graph page.
 //!
 //! Inline and bubble placements anchor through the byte map: contained node
 //! (or the bubble's owner) -> disk byte range -> covering statement -> the
@@ -59,6 +59,8 @@ use ordering::sort_placed;
 pub(crate) enum PlacementClass {
     /// Above the `EventName():` header of `block` (the owning event).
     EventWrapping,
+    /// Retained under the source graph because no unique location was found.
+    Unresolved,
     /// Below the block signature, as a whole-graph description.
     FunctionLevel,
     /// Above the statement at disk offset `statement_offset` in `block`'s body.
@@ -70,7 +72,7 @@ pub(crate) enum PlacementClass {
 /// One classified, rendered comment ready to interleave at emit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlacedComment {
-    /// Block (function or event) name the comment belongs to.
+    /// Block name, or source graph page for an unresolved comment.
     pub block: String,
     pub class: PlacementClass,
     /// Pre-rendered marker lines (already indented for the placement class).
@@ -82,9 +84,9 @@ pub(crate) struct PlacedComment {
     pub text: String,
 }
 
-/// The full set of placed comments for one asset, plus the count of boxes that
-/// classified as inline/bubble but could not anchor (no byte map, or no
-/// covering statement). The drop count is reported, never silently swallowed.
+/// Every extracted comment has either a resolved placement or an explicitly
+/// unresolved entry. `unanchored` counts the latter, including empty boxes
+/// and comments without a known graph page.
 ///
 /// `trace` is the per-comment placement audit, populated for measurement only
 /// (consumed by `BP_INSPECT_COMMENT_AUDIT`, never by STDOUT). It carries no
@@ -92,7 +94,7 @@ pub(crate) struct PlacedComment {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct PlacementPlan {
     pub placed: Vec<PlacedComment>,
-    /// Boxes that wanted a statement anchor but found none.
+    /// Retained comments without a unique statement or header anchor.
     pub unanchored: usize,
     /// One audit entry per comment box/bubble, in box iteration order.
     pub trace: Vec<PlacementTrace>,
@@ -122,14 +124,19 @@ pub(crate) fn build_placement_plan(
     let context = ClassifyContext::new(decoded, parsed, export_names, model);
     let mut plan = PlacementPlan::default();
 
-    // Event-wrapping suppression is page-global: a box over more than the
-    // group-size cap of event nodes is a layout divider, dropped outright.
     for comment in &model.boxes {
         let (outcome, trace) = classify(comment, model, &context);
         match outcome {
-            Some(Classification::Placed(placed)) => plan.placed.push(*placed),
-            Some(Classification::Unanchored) => plan.unanchored += 1,
-            None => {}
+            Some(Classification::Placed(placed)) => {
+                plan.unanchored += usize::from(placed.class == PlacementClass::Unresolved);
+                plan.placed.push(*placed);
+            }
+            Some(Classification::Unanchored) | None => {
+                plan.unanchored += 1;
+                if let Classification::Placed(placed) = Classification::unresolved(comment) {
+                    plan.placed.push(*placed);
+                }
+            }
         }
         plan.trace.push(trace);
     }
@@ -147,6 +154,20 @@ pub(super) enum Classification {
 }
 
 impl Classification {
+    fn unresolved(comment: &super::CommentBox) -> Self {
+        Self::Placed(Box::new(PlacedComment {
+            block: comment
+                .graph_page
+                .clone()
+                .unwrap_or_else(|| "<unknown graph>".into()),
+            class: PlacementClass::Unresolved,
+            lines: Vec::new(),
+            text: comment.text.clone(),
+            box_x: comment.x,
+            box_y: comment.y,
+        }))
+    }
+
     /// Cascade combinator: keep a resolved `Placed` outcome, otherwise
     /// evaluate the next strategy. Lets a fallback chain read as an ordered
     /// list of anchoring attempts instead of repeated

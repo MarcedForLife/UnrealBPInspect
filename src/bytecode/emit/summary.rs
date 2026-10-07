@@ -223,10 +223,18 @@ fn emit_stmt(
     // line up with the construct they annotate. The active map is installed
     // only by the summary block emitters, so the dump/JSON paths never see it.
     let indent = indent_str(indent_level);
-    if let Some(lines) = inline_comment_lines(stmt.offset(), &indent) {
-        for line in lines {
-            output.push_str(&line);
-            output.push('\n');
+    let mut offsets = vec![stmt.offset()];
+    if let Stmt::Loop {
+        kind: LoopKind::ForC { init, increment },
+        ..
+    } = stmt
+    {
+        offsets.extend(init.iter().chain(increment).map(Stmt::offset));
+    }
+    let mut emitted = std::collections::BTreeSet::new();
+    for offset in offsets {
+        if emitted.insert(offset) {
+            emit_comment_lines(output, inline_comment_lines(offset, &indent).as_deref());
         }
     }
     match stmt {
@@ -574,11 +582,16 @@ fn emit_flipflop_body(
     if let [Stmt::Branch {
         then_body,
         else_body,
+        offset,
         ..
     }] = body
     {
         if else_body.is_empty() {
             let label_indent = indent_str(indent_level + 1);
+            emit_comment_lines(
+                output,
+                inline_comment_lines(*offset, &label_indent).as_deref(),
+            );
             output.push_str(&label_indent);
             output.push_str("A|B: {\n");
             emit_body(output, then_body, indent_level + 2, resume_bodies);

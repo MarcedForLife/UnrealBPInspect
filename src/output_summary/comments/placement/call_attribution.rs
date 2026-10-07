@@ -23,6 +23,9 @@ pub(super) fn branch_statement_for_node<'a>(
     if class.rsplit('.').next()? != "K2Node_IfThenElse" {
         return None;
     }
+    if let Some(stmt) = branch_with_unique_condition(node, body, parsed, &names) {
+        return Some(stmt);
+    }
     let outputs: Vec<&EdGraphPin> = parsed
         .pin_data
         .get(&node)?
@@ -38,6 +41,75 @@ pub(super) fn branch_statement_for_node<'a>(
     common_statement_branch(body, first, second)
 }
 
+fn branch_with_unique_condition<'a>(
+    node: usize,
+    body: &'a [Stmt],
+    parsed: &ParsedAsset,
+    names: &[String],
+) -> Option<&'a Stmt> {
+    let condition_path = |node| {
+        let condition = parsed
+            .pin_data
+            .get(&node)?
+            .pins
+            .iter()
+            .find(|pin| pin.name == "Condition" && pin.direction == PIN_DIRECTION_INPUT)?;
+        let [source] = condition.linked_to.as_slice() else {
+            return None;
+        };
+        graph_pin_path(source, parsed, names, &mut BTreeSet::new())
+    };
+    let expected = condition_path(node)?;
+    let header = &parsed.exports.get(node.checked_sub(1)?)?.0;
+    let duplicates = parsed
+        .exports
+        .iter()
+        .enumerate()
+        .filter(|(index, (other, _))| {
+            other.outer_index == header.outer_index
+                && crate::resolve::short_class(&crate::resolve::class_of(
+                    &parsed.imports,
+                    names,
+                    other,
+                )) == "K2Node_IfThenElse"
+                && condition_path(index + 1).as_ref() == Some(&expected)
+        })
+        .count();
+    if duplicates != 1 {
+        return None;
+    }
+    let mut matches = Vec::new();
+    collect_branches_with_condition(body, &expected, &mut matches);
+    match matches.as_slice() {
+        [stmt] => Some(*stmt),
+        _ => None,
+    }
+}
+
+fn collect_branches_with_condition<'a>(
+    body: &'a [Stmt],
+    expected: &[String],
+    matches: &mut Vec<&'a Stmt>,
+) {
+    for stmt in body {
+        if let Stmt::Branch { cond, .. } = stmt {
+            let condition = match cond {
+                Expr::Unary {
+                    op: crate::bytecode::expr::UnaryOp::Not,
+                    operand,
+                } => operand,
+                other => other,
+            };
+            if expression_path(condition).as_deref() == Some(expected) {
+                matches.push(stmt);
+            }
+        }
+        for child in stmt.child_bodies_all() {
+            collect_branches_with_condition(child, expected, matches);
+        }
+    }
+}
+
 fn first_mapped_exec_statement<'a>(
     start: usize,
     body: &'a [Stmt],
@@ -50,7 +122,7 @@ fn first_mapped_exec_statement<'a>(
         if !visited.insert(node) {
             continue;
         }
-        if let Some(mapping) = call_statements_by_node(node, body, parsed) {
+        if let Some(mapping) = call_statements_by_node(node, &[body], parsed) {
             if let Some(stmt) = mapping.get(&node) {
                 return Some(*stmt);
             }
@@ -69,12 +141,17 @@ fn first_mapped_exec_statement<'a>(
             }
         }
         if let Some(data) = parsed.pin_data.get(&node) {
-            queue.extend(
-                data.pins
-                    .iter()
-                    .filter(|pin| pin.is_exec_output())
-                    .flat_map(|pin| pin.linked_to.iter().map(|link| link.node)),
-            );
+            // Crossing another fork can make an inner branch look like the
+            // source branch. Only a linear continuation preserves this proof.
+            let successors: Vec<usize> = data
+                .pins
+                .iter()
+                .filter(|pin| pin.is_exec_output())
+                .flat_map(|pin| pin.linked_to.iter().map(|link| link.node))
+                .collect();
+            if let [successor] = successors[..] {
+                queue.push_back(successor);
+            }
         }
     }
     None
@@ -104,7 +181,7 @@ fn common_statement_branch<'a>(body: &'a [Stmt], first: &Stmt, second: &Stmt) ->
     None
 }
 
-fn contains_statement(body: &[Stmt], target: &Stmt) -> bool {
+pub(super) fn contains_statement(body: &[Stmt], target: &Stmt) -> bool {
     body.iter().any(|stmt| {
         std::ptr::eq(stmt, target)
             || stmt
@@ -118,7 +195,7 @@ fn contains_statement(body: &[Stmt], target: &Stmt) -> bool {
 /// An empty map means the group exists but its correspondence is ambiguous.
 pub(super) fn call_statements_by_node<'a>(
     node: usize,
-    body: &'a [Stmt],
+    bodies: &[&'a [Stmt]],
     parsed: &ParsedAsset,
 ) -> Option<BTreeMap<usize, &'a Stmt>> {
     use crate::prop_query::find_struct_field_str;
@@ -143,7 +220,9 @@ pub(super) fn call_statements_by_node<'a>(
         return None;
     }
     let mut statements = Vec::new();
-    collect_call_statements(body, &member, &mut statements);
+    for body in bodies {
+        collect_call_statements(body, &member, &mut statements);
+    }
     if statements.len() != nodes.len() {
         return Some(BTreeMap::new());
     }

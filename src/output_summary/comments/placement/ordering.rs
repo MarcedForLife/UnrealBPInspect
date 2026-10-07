@@ -24,6 +24,7 @@ pub(super) fn sort_placed(placed: &mut [PlacedComment]) {
 /// within one block (header annotations precede body annotations).
 fn class_rank(class: &PlacementClass) -> u8 {
     match class {
+        PlacementClass::Unresolved => 3,
         PlacementClass::EventWrapping => 0,
         PlacementClass::FunctionLevel => 1,
         PlacementClass::InlineAtStatement { .. } => 2,

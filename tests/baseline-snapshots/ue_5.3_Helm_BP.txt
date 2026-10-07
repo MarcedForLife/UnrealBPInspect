@@ -58,6 +58,28 @@ Call graph:
   ReceiveTick → UpdateAudio, UpdateWheelRotation
   UpdateAudio → GetSteeringAngle, GetWheelVelocity
 
+Graph comments (location unresolved):
+  Graph "EventGraph":
+    // "On wheel gripped"
+    // "Gripping the wheel completely changes the constraint twist ammount for some reason."
+    // "So, stop ticking until we can adjust the previous twist to the new current"
+    // "We've updated the previous twist and"
+    // "can now resume ticking"
+    // "The twist doesn't change until the next tick."
+    // "So, wait exactly one tick/frame"
+  Graph "UpdateAudio":
+    // "Play hit audio when the wheel hits max rotation"
+    // "Check if we are hitting the limit"
+  Graph "UpdateWheelRotation":
+    // "Calculate the current complete rotation from the physics constraint"
+    // "Enabled/Disable the twist limit if closer/further than 180 degrees to the max rotation limit"
+    // "Make sure we set the twist limit if we are below"
+    // "180 degrees until the max rotation"
+    // "The constraint positively clipped"
+    // "(clockwise past 180 degrees )"
+    // "The constraint negatively clipped"
+    // "(anti-clockwise past -180 degrees )"
+
 Functions:
   ClampWheelRotation(CurrentAngle: float) [Public|HasDefaults|BlueprintEvent]
     $Multiply_FloatFloat = (self.MaxRotation * -1.0000)
@@ -127,8 +149,6 @@ Functions:
     if (NearlyEqual_FloatFloat($Abs, 1.0000, 0.019999999552965164) && self.WheelHitPlayable) {
         GetWheelVelocity(out $Velocity)
         $VolumeMultiplier = FClamp(($Velocity / 100.0000), 0.0000, 2.0000)
-        // "Play hit audio when the wheel hits max rotation"
-        // "Check if we are hitting the limit"
         $SpawnSoundAttached = SpawnSoundAttached(self.WheelMaxRotationCue, self.VREPhysicsConstraint, 'None',
             Vec(0.0000,0.0000,0.0000), Rot(0.0000,0.0000,0.0000), 0, false, $VolumeMultiplier, 1.0000, 0.0000, None,
             None, true)
@@ -143,11 +163,6 @@ Functions:
 
   // Called by: ReceiveTick
   UpdateWheelRotation() [Public|BlueprintEvent]
-    // Graph comment (location unresolved)
-    // "Enabled/Disable the twist limit if closer/further than 180 degrees to the max rotation limit"
-    // Graph comment (location unresolved)
-    // "Make sure we set the twist limit if we are below"
-    // "180 degrees until the max rotation"
     $GetCurrentTwist = self.VREPhysicsConstraint.GetCurrentTwist()
     // "Capture the change in rotation since last update"
     RotationDifference = ($GetCurrentTwist - self.PreviousRotation)
@@ -179,7 +194,6 @@ Functions:
     // "Invert the rotation so that clockwise is positive and"
     // "anti-clockwise is negative (easier on the brain)"
     self.TotalRotation = (self.TotalRotation + $Multiply_FloatFloat)
-    // "Calculate the current complete rotation from the physics constraint"
     $Abs = Abs(self.TotalRotation)
     if ((self.MaxRotation - $Abs) < 180.0000) {
         BreakRotator(self.VREPhysicsConstraint.GetAngularOffset(), $Roll, $Pitch, $Yaw)
@@ -201,17 +215,12 @@ Functions:
         self.VREPhysicsConstraint.SetAngularTwistLimit(0, 0.0000)
     }
 
-  // "On wheel gripped"
   BndEvt__Helm_BP_Wheel_K2Node_ComponentBoundEvent_1_VROnGripSignature__DelegateSignature():
     // Sequence [0]:
     SetActorTickEnabled(false)
     // Sequence [1]:
     Delay(self, 0.0000)
-    // "The twist doesn't change until the next tick."
-    // "So, wait exactly one tick/frame"
     self.PreviousRotation = self.VREPhysicsConstraint.GetCurrentTwist()
-    // "We've updated the previous twist and"
-    // "can now resume ticking"
     SetActorTickEnabled(true)
 
   BndEvt__Helm_BP_Wheel_K2Node_ComponentBoundEvent_2_VROnDropSignature__DelegateSignature():
