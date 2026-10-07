@@ -647,7 +647,11 @@ fn decode_standalone_functions(
                 )
             });
             let body = match std::panic::catch_unwind(decode) {
-                Ok((body, byte_map)) => {
+                Ok((body, byte_map, omissions)) => {
+                    diagnostics.extend(omissions.into_iter().map(|reason| AssetDiagnostic {
+                        export_index: Some(export_index),
+                        reason: format!("function {}: {reason}", hdr.object_name),
+                    }));
                     function_byte_maps.insert(hdr.object_name.clone(), byte_map);
                     body
                 }
@@ -928,6 +932,7 @@ fn decode_standalone_function_body(
 ) -> (
     Vec<crate::bytecode::stmt::Stmt>,
     crate::bytecode::k2node_byte_map::K2NodeByteMap,
+    Vec<String>,
 ) {
     let full_range = Range {
         start: 0,
@@ -1001,7 +1006,102 @@ fn decode_standalone_function_body(
     };
     let byte_map = crate::bytecode::k2node_byte_map::build_k2node_byte_map(&byte_map_inputs);
 
-    (body, byte_map)
+    let omissions = unrepresented_observable_statements(&body, &fn_graph, &ctx);
+    (body, byte_map, omissions)
+}
+
+/// Check observable statement offsets before transforms can inline or fold them.
+/// Compiler temporaries and structural opcodes require separate provenance and
+/// are deliberately outside this check. Coverage does not prove branch polarity
+/// or evaluation order, but a reachable call or output write must not disappear.
+fn unrepresented_observable_statements(
+    body: &[crate::bytecode::stmt::Stmt],
+    graph: &crate::bytecode::partition::OpcodeGraph,
+    context: &DecodeCtx,
+) -> Vec<String> {
+    use crate::bytecode::stmt::Stmt;
+    let reachable = match reachable_statement_offsets(graph) {
+        Ok(offsets) => offsets,
+        Err(reason) => return vec![reason],
+    };
+    let mut represented = std::collections::BTreeSet::new();
+    collect_statement_offsets(body, &mut represented);
+    reachable.into_iter().filter_map(|offset| {
+        if represented.contains(&offset) {
+            return None;
+        }
+        let mut cursor = offset;
+        let statement = super::block::decode_one(&mut cursor, context).ok().flatten()?;
+        let observable = match &statement {
+            Stmt::Call { .. } | Stmt::Return { .. } => true,
+            Stmt::Assignment { lhs, .. } => is_observable_assignment(lhs),
+            _ => false,
+        };
+        observable.then(|| format!("reachable statement at bytecode offset 0x{offset:x} is missing from decoded output"))
+    }).collect()
+}
+
+fn collect_statement_offsets(
+    body: &[crate::bytecode::stmt::Stmt],
+    offsets: &mut std::collections::BTreeSet<usize>,
+) {
+    for statement in body {
+        offsets.insert(statement.offset());
+        for child in statement.child_bodies_all() {
+            collect_statement_offsets(child, offsets);
+        }
+    }
+}
+
+fn is_observable_assignment(expression: &crate::bytecode::expr::Expr) -> bool {
+    use crate::bytecode::expr::Expr;
+    match expression {
+        Expr::Out(_) => true,
+        Expr::Var(name) => name.starts_with("self.") || name.starts_with("default."),
+        Expr::FieldAccess { recv, .. } | Expr::Index { recv, .. } => is_observable_assignment(recv),
+        _ => false,
+    }
+}
+
+fn reachable_statement_offsets(
+    graph: &crate::bytecode::partition::OpcodeGraph,
+) -> Result<std::collections::BTreeSet<usize>, String> {
+    use crate::bytecode::opcodes::{EX_END_OF_SCRIPT, EX_RETURN};
+    use std::collections::{BTreeSet, VecDeque};
+    let mut pending = VecDeque::from([(0, Vec::new())]);
+    let mut visited = BTreeSet::new();
+    let mut offsets = BTreeSet::new();
+    let budget = graph
+        .boundaries
+        .len()
+        .saturating_mul(128)
+        .clamp(1024, 1_000_000);
+    while let Some((offset, stack)) = pending.pop_front() {
+        if !visited.insert((offset, stack.clone())) {
+            continue;
+        }
+        if visited.len() > budget || stack.len() > 64 {
+            return Err("statement coverage check exceeded its flow-stack limit".into());
+        }
+        let Some(&opcode) = graph.opcodes.get(&offset) else {
+            return Err(format!(
+                "statement coverage reached invalid bytecode offset 0x{offset:x}"
+            ));
+        };
+        offsets.insert(offset);
+        if !matches!(opcode, EX_RETURN | EX_END_OF_SCRIPT) {
+            crate::bytecode::partition::step_successors(
+                offset,
+                opcode,
+                &stack,
+                graph,
+                0,
+                &|_, target, continuation, queue| queue.push_back((target, continuation.to_vec())),
+                &mut pending,
+            );
+        }
+    }
+    Ok(offsets)
 }
 
 /// Apply the transform pipeline to every function and event body.
@@ -1561,5 +1661,165 @@ mod sequence_pin_tests {
             restore_sequence_pins(&mut body, &mask);
             assert_eq!(sequence_pin_counts(&body), vec![2]);
         }
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::{reachable_statement_offsets, unrepresented_observable_statements};
+    use crate::bytecode::decode::test_fixtures::{empty_name_table, ue4_ctx};
+    use crate::bytecode::expr::Expr;
+    use crate::bytecode::opcodes::*;
+    use crate::bytecode::partition::{build_opcode_graph, OpcodeGraph};
+    use crate::bytecode::stmt::Stmt;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn call(offset: usize) -> Stmt {
+        Stmt::Call {
+            func: Expr::Var("Work".into()),
+            args: vec![],
+            offset,
+        }
+    }
+
+    #[test]
+    fn repeated_calls_require_each_original_offset() {
+        let bytecode = [
+            EX_CALL_MATH,
+            1,
+            0,
+            0,
+            0,
+            EX_END_FUNCTION_PARMS,
+            EX_CALL_MATH,
+            1,
+            0,
+            0,
+            0,
+            EX_END_FUNCTION_PARMS,
+            EX_RETURN,
+            EX_NOTHING,
+            EX_END_OF_SCRIPT,
+        ];
+        let names = empty_name_table();
+        let addresses = BTreeMap::new();
+        let graph = build_opcode_graph(&bytecode, 0, &names, &addresses);
+        let context = ue4_ctx(&bytecode, &names, &addresses);
+        let reasons = unrepresented_observable_statements(
+            &[
+                call(0),
+                Stmt::Return {
+                    value: None,
+                    offset: 12,
+                },
+            ],
+            &graph,
+            &context,
+        );
+        assert_eq!(reasons.len(), 1);
+        assert!(reasons[0].contains("offset 0x6"));
+        let nested = [
+            Stmt::Sequence {
+                pins: vec![vec![call(0)], vec![call(6)]],
+                offset: 0,
+            },
+            Stmt::Return {
+                value: None,
+                offset: 12,
+            },
+        ];
+        assert!(unrepresented_observable_statements(&nested, &graph, &context).is_empty());
+    }
+
+    #[test]
+    fn omitted_void_return_is_reported_before_tail_return_elision() {
+        let bytecode = [EX_RETURN, EX_NOTHING, EX_END_OF_SCRIPT];
+        let names = empty_name_table();
+        let addresses = BTreeMap::new();
+        let graph = build_opcode_graph(&bytecode, 0, &names, &addresses);
+        let context = ue4_ctx(&bytecode, &names, &addresses);
+        let reasons = unrepresented_observable_statements(&[], &graph, &context);
+        assert_eq!(reasons.len(), 1);
+        assert!(reasons[0].contains("offset 0x0"));
+    }
+
+    #[test]
+    fn omitted_output_write_is_reported_but_local_bookkeeping_is_not() {
+        for variable_opcode in [
+            EX_LOCAL_OUT_VARIABLE,
+            EX_INSTANCE_VARIABLE,
+            EX_LOCAL_VARIABLE,
+        ] {
+            let mut bytecode = vec![EX_LET_BOOL, variable_opcode];
+            bytecode.extend_from_slice(&1i32.to_le_bytes());
+            bytecode.extend_from_slice(&[0; 12]);
+            bytecode.extend_from_slice(&[EX_TRUE, EX_RETURN, EX_NOTHING, EX_END_OF_SCRIPT]);
+            let names = empty_name_table();
+            let addresses = BTreeMap::new();
+            let graph = build_opcode_graph(&bytecode, 0, &names, &addresses);
+            let context = ue4_ctx(&bytecode, &names, &addresses);
+            let reasons = unrepresented_observable_statements(
+                &[Stmt::Return {
+                    value: None,
+                    offset: 19,
+                }],
+                &graph,
+                &context,
+            );
+            assert_eq!(
+                reasons.len(),
+                usize::from(variable_opcode != EX_LOCAL_VARIABLE)
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_return_does_not_execute_pending_continuation() {
+        let graph = OpcodeGraph {
+            boundaries: BTreeSet::from([0, 5, 8]),
+            successors: BTreeMap::from([(0, vec![8, 5]), (5, vec![]), (8, vec![])]),
+            opcodes: BTreeMap::from([
+                (0, EX_PUSH_EXECUTION_FLOW),
+                (5, EX_RETURN),
+                (8, EX_CALL_MATH),
+            ]),
+            flow_frames: vec![],
+        };
+        assert_eq!(
+            reachable_statement_offsets(&graph).unwrap(),
+            BTreeSet::from([0, 5])
+        );
+    }
+
+    #[test]
+    fn flow_pop_executes_only_its_matching_continuation() {
+        let graph = OpcodeGraph {
+            boundaries: BTreeSet::from([0, 5, 8, 9]),
+            successors: BTreeMap::from([(0, vec![8, 5]), (5, vec![9]), (8, vec![]), (9, vec![])]),
+            opcodes: BTreeMap::from([
+                (0, EX_PUSH_EXECUTION_FLOW),
+                (5, EX_POP_EXECUTION_FLOW),
+                (8, EX_RETURN),
+                (9, EX_CALL_MATH),
+            ]),
+            flow_frames: vec![],
+        };
+        assert_eq!(
+            reachable_statement_offsets(&graph).unwrap(),
+            BTreeSet::from([0, 5, 8])
+        );
+    }
+
+    #[test]
+    fn growing_flow_stacks_produce_a_bounded_check_failure() {
+        let graph = OpcodeGraph {
+            boundaries: BTreeSet::from([0, 5, 8]),
+            successors: BTreeMap::from([(0, vec![8, 5]), (5, vec![0]), (8, vec![])]),
+            opcodes: BTreeMap::from([(0, EX_PUSH_EXECUTION_FLOW), (5, EX_JUMP), (8, EX_RETURN)]),
+            flow_frames: vec![],
+        };
+        assert!(reachable_statement_offsets(&graph)
+            .unwrap_err()
+            .contains("flow-stack limit"));
     }
 }

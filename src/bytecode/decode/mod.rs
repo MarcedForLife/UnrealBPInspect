@@ -5,15 +5,13 @@
 //! Return opcodes and decodes their expression operands into typed
 //! `Expr` trees; out-of-scope opcodes surface as `Expr::Unknown`.
 //!
-//! The decoder still takes the raw asset bytes (`asset_data`) so it can
-//! re-read the package-header and name-table sections it needs for
-//! resolution. Bytecode bytes themselves are sourced from
-//! `ParsedAsset::bytecode_by_export`, populated during the prologue walk.
+//! Version metadata, names and bytecode all come from `ParsedAsset`.
+//! `ParsedAsset::bytecode_by_export` contains bytes captured during parsing.
 //!
 //! The module root holds only declarations and re-exports. The decode
 //! orchestration lives in sibling files: `orchestrate` (entry point and
 //! body decode drivers), `transform_stack` (the body transform
-//! pipeline), `header` (version/name-table reads), `ubergraph_scan`
+//! pipeline), `header` (captured bytecode lookup), `ubergraph_scan`
 //! (event-entry discovery and skeleton construction), and `probe`
 //! (test-only reproductions of partition slices).
 
