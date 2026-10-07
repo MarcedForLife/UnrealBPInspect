@@ -180,7 +180,7 @@ pub(crate) fn decode_linear(start: usize, ctx: &DecodeCtx) -> Vec<Stmt> {
 ///   EX_CALL_MATH, EX_VIRTUAL_FUNCTION, EX_LOCAL_VIRTUAL_FUNCTION
 /// - Return: EX_RETURN
 /// - Instrumentation (dropped): EX_WIRE_TRACEPOINT, EX_TRACEPOINT, EX_INSTRUMENTATION_EVENT
-fn decode_one(pos: &mut usize, ctx: &DecodeCtx) -> Result<Option<Stmt>, Box<Stmt>> {
+pub(super) fn decode_one(pos: &mut usize, ctx: &DecodeCtx) -> Result<Option<Stmt>, Box<Stmt>> {
     let offset = *pos;
     if offset >= ctx.bytecode.len() {
         return Err(Box::new(make_unknown(

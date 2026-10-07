@@ -112,7 +112,7 @@ fn ue4_ctx_with_owned_and_claimed<'a>(
     name_table: &'a crate::binary::NameTable,
     mem_to_disk: &'a BTreeMap<usize, usize>,
     owned: &'a [std::ops::Range<usize>],
-    claimed: &'a std::cell::RefCell<BTreeMap<usize, super::ctx::Claim>>,
+    claimed: &'a std::cell::RefCell<BTreeMap<usize, Vec<super::ctx::Claim>>>,
 ) -> DecodeCtx<'a> {
     DecodeCtx {
         mem_to_disk: Some(mem_to_disk),
@@ -195,14 +195,14 @@ fn isvalid_backward_with_jump_follow_claims_displaced_body() {
     assert!(
         claims
             .iter()
-            .any(|(&start, claim)| start == 0x01 && claim.end == 0x04),
+            .any(|(&start, claim)| start == 0x01 && claim.iter().any(|claim| claim.end == 0x04)),
         "claimed map should contain valid-pin segment 0x01..0x04, got {:?}",
         claims
     );
     assert!(
         claims
             .iter()
-            .any(|(&start, claim)| start == 0x10 && claim.end == 0x12),
+            .any(|(&start, claim)| start == 0x10 && claim.iter().any(|claim| claim.end == 0x12)),
         "claimed map should contain invalid-pin else range 0x10..0x12, got {:?}",
         claims
     );
@@ -244,7 +244,7 @@ fn isvalid_backward_without_post_jin_jump_falls_back() {
     // fallback path doesn't follow into another owned segment.
     let has_else_claim = claims
         .iter()
-        .any(|(&start, claim)| start == 0x00 && claim.end == 0x02);
+        .any(|(&start, claim)| start == 0x00 && claim.iter().any(|claim| claim.end == 0x02));
     assert!(
         has_else_claim,
         "backward else range 0x00..0x02 should be claimed, got {:?}",

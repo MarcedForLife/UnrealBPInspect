@@ -466,7 +466,7 @@ fn emit_continuation_region(
         }
         stmts
     };
-    if let Some((emitted, _continuation, _is_sequence_chain)) =
+    if let Some((emitted, _continuation)) =
         dispatch_region_emitters(region, region_id, region_tree, walk, true)
     {
         return append_own_exit(emitted);
@@ -846,6 +846,9 @@ pub(super) fn decode_arm_via_region_dispatch(
         if let Some((emitted, consumed_ids)) =
             dispatch_child_region_at(block_id, region_id, region_tree, walk, &sibling_stops)
         {
+            for stmt in &emitted {
+                consumed.extend(extra_consumed_ranges_for_stmt(stmt));
+            }
             stmts.extend(emitted);
             for &consumed_id in &consumed_ids {
                 mark_region_consumed(

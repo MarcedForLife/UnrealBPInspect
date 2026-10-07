@@ -68,7 +68,7 @@ fn scan_ubergraph_dispatch(
     // text path reported. `function_signatures` is threaded so OUT-param
     // wrapping matches the rest of the decoder, though dispatch stubs have
     // no OUT params in practice.
-    let claimed: RefCell<BTreeMap<usize, super::ctx::Claim>> = RefCell::new(BTreeMap::new());
+    let claimed: RefCell<BTreeMap<usize, Vec<super::ctx::Claim>>> = RefCell::new(BTreeMap::new());
     let scan_ctx = DecodeCtx {
         function_signatures: Some(&asset.function_signatures),
         claimed: Some(&claimed),

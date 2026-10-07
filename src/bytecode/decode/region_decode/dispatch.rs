@@ -1,16 +1,8 @@
 use super::*;
 
-/// Run the per-kind region emitters in priority order and return the
-/// emitted statements, the optional pulled IfThenElse merge continuation,
-/// and whether the SequenceChain emitter fired. The cascade ORDER is
-/// load-bearing and lives here as the single source shared by
-/// `walk_region`, `dispatch_child_region_at`, and
-/// `emit_continuation_region`.
-///
-/// The SequenceChain flag is acted on only by the disk-order walk
-/// (`walk_region`): SequenceChain pin bodies can land in an ancestor
-/// region, so it records every emitted offset into the shared consumed
-/// set. The other callers ignore it.
+/// Run the region emitters in priority order. The caller records emitted
+/// statement offsets as well as the region and any pulled continuation.
+/// Shared by the region walk and nested arm and pin dispatch.
 ///
 /// `try_ifthenelse` is false only for the dual-role IsValid defer case
 /// (`walk_region`), where the outer IfThenElse emit is skipped so the
@@ -21,28 +13,28 @@ pub(super) fn dispatch_region_emitters(
     region_tree: &RegionTree,
     walk: RegionWalkCtx,
     try_ifthenelse: bool,
-) -> Option<(Vec<Stmt>, Option<RegionId>, bool)> {
+) -> Option<(Vec<Stmt>, Option<RegionId>)> {
     if try_ifthenelse {
         if let Some((emitted, continuation)) =
             try_emit_ifthenelse_region(region, region_id, walk, Some(region_tree))
         {
-            return Some((emitted, continuation, false));
+            return Some((emitted, continuation));
         }
     }
     if let Some(emitted) = try_emit_ifthen_region(region, region_id, walk, Some(region_tree)) {
-        return Some((emitted, None, false));
+        return Some((emitted, None));
     }
     if let Some(emitted) = try_emit_doonce_region(region, region_id, walk) {
-        return Some((emitted, None, false));
+        return Some((emitted, None));
     }
     if let Some(emitted) = try_emit_sequencechain_region(region, region_id, walk, region_tree) {
-        return Some((emitted, None, true));
+        return Some((emitted, None));
     }
     if let Some(emitted) = try_emit_loop_region(region, region_id, walk) {
-        return Some((emitted, None, false));
+        return Some((emitted, None));
     }
     if let Some(emitted) = try_emit_switch_region(region, region_id, walk) {
-        return Some((emitted, None, false));
+        return Some((emitted, None));
     }
     None
 }
@@ -119,6 +111,9 @@ pub(super) fn decode_pin_body(
             walk,
             other_pin_entries,
         ) {
+            for stmt in &emitted {
+                consumed.extend(extra_consumed_ranges_for_stmt(stmt));
+            }
             stmts.extend(emitted);
             for &cid in &consumed_ids {
                 mark_region_consumed(region_tree, cid, cfg, &mut consumed, &mut visited_blocks);
@@ -280,7 +275,7 @@ pub(super) fn dispatch_child_region_at(
     // Hold the sibling-pin boundary set live for the dispatched region's
     // arm decode, so its arm slicer cannot over-walk into a sibling pin.
     let _stops_guard = walk.ctx.with_arm_descent_stops(other_pin_entries.clone());
-    let (emitted, continuation, _is_sequence_chain) =
+    let (emitted, continuation) =
         dispatch_region_emitters(child, child_id, region_tree, walk, true)?;
     let mut consumed_ids = vec![child_id];
     if let Some(cont_id) = continuation {

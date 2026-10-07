@@ -229,21 +229,21 @@ fn try_decode_loop_break_guard(
     // tail bound cannot reconstruct that nesting, it would emit a
     // statement-stripped guard with the body scattered into a dead tail.
     //
-    // When the nested flow is a single self-contained SequenceChain
-    // trampoline whose JUMP targets the loop exit (`tail + 1`), the body IS
-    // recoverable: `decode_naked_if_body` already routes the trampoline's
-    // displaced LET through `decode_one_or_branch` (production emits both
-    // LETs today, just unguarded), and a `break` is synthesized from the
-    // loop-break-guard semantic (the cond=true path exits the loop). Any
-    // other nested-flow shape, or a trampoline that does not jump to the
-    // loop exit, still bails (recovering it here would be unsound).
-    let mut synthesize_break = false;
+    // A self-contained Sequence trampoline can set more than one loop's
+    // exit flag. Decode its displaced first pin and saved resume pin in
+    // execution order before synthesizing the innermost loop's break.
+    let mut trampoline_body = None;
     if body_contains_nested_flow(body_start_disk, body_end_disk, ctx) {
         match classify_nested_flow(body_start_disk, body_end_disk, ctx) {
             NestedFlowShape::TrampolineOnly {
                 jump_to_loop_exit: true,
             } => {
-                synthesize_break = true;
+                trampoline_body = Some(decode_trampoline_break_body(
+                    body_start_disk,
+                    body_end_disk,
+                    ctx,
+                    guard.owner,
+                )?);
             }
             // Not a loop-exiting trampoline: bail (recovery would be unsound).
             _ => return None,
@@ -258,14 +258,18 @@ fn try_decode_loop_break_guard(
     // single-guard loop runs straight to `tail` with no such jump, so
     // `forward_break_after` returns `None` and the body bound is unchanged.
     let mut trailing_break: Option<Stmt> = None;
-    if let Some(end) = forward_break_after(body_start_disk, guard.tail, ctx) {
-        body_end_disk = end;
-        trailing_break = Some(Stmt::Break {
-            offset: end - JUMP_INSTR_BYTES,
-        });
+    if trampoline_body.is_none() {
+        if let Some(end) = forward_break_after(body_start_disk, guard.tail, ctx) {
+            body_end_disk = end;
+            trailing_break = Some(Stmt::Break {
+                offset: end - JUMP_INSTR_BYTES,
+            });
+        }
     }
 
-    let mut then_body = decode_naked_if_body(body_start_disk, body_end_disk, ctx);
+    let synthesize_break = trampoline_body.is_some();
+    let mut then_body = trampoline_body
+        .unwrap_or_else(|| decode_naked_if_body(body_start_disk, body_end_disk, ctx));
     if let Some(break_stmt) = trailing_break {
         then_body.push(break_stmt);
     } else if synthesize_break {
@@ -436,6 +440,104 @@ fn classify_nested_flow(body_start: usize, tail: usize, ctx: &DecodeCtx) -> Nest
     } else {
         NestedFlowShape::Other
     }
+}
+
+fn has_only_linear_opcodes(start: usize, end: usize, ctx: &DecodeCtx) -> bool {
+    let mut cursor = start;
+    while cursor < end {
+        if matches!(
+            ctx.bytecode.get(cursor),
+            Some(
+                &EX_JUMP
+                    | &EX_JUMP_IF_NOT
+                    | &EX_COMPUTED_JUMP
+                    | &EX_PUSH_EXECUTION_FLOW
+                    | &EX_POP_EXECUTION_FLOW
+                    | &EX_POP_FLOW_IF_NOT
+                    | &EX_RETURN
+                    | &EX_END_OF_SCRIPT
+            )
+        ) {
+            return false;
+        }
+        let length = opcode_length_at(cursor, ctx.bytecode, ctx.ue5, ctx.name_table);
+        if length == 0 || length > end - cursor {
+            return false;
+        }
+        cursor += length;
+    }
+    true
+}
+
+/// A Sequence can set several loop-exit flags before returning to the loop.
+/// Follow its first pin's displaced block, then its saved resume pin, before
+/// replacing the loop's eventual exit with a structured break.
+fn decode_trampoline_break_body(
+    body_start: usize,
+    tail: usize,
+    ctx: &DecodeCtx,
+    owner: super::ctx::OwnerId,
+) -> Option<Vec<Stmt>> {
+    let mut push_offset = body_start;
+    while push_offset < tail && ctx.bytecode.get(push_offset) != Some(&EX_PUSH_EXECUTION_FLOW) {
+        let length = opcode_length_at(push_offset, ctx.bytecode, ctx.ue5, ctx.name_table);
+        if length == 0 {
+            return None;
+        }
+        push_offset += length;
+    }
+    let mut cursor = push_offset + 1;
+    let resume_mem = read_bc_u32(ctx.bytecode, &mut cursor) as usize;
+    let resume = jump_target_disk(resume_mem, ctx);
+    let (target_mem, _, after_jump) =
+        super::branch::peek_jump_after_instrumentation(cursor, tail, ctx)?;
+    let target = jump_target_disk(target_mem, ctx);
+    if target != tail + 1 || resume != after_jump || resume >= tail {
+        return None;
+    }
+
+    if !has_only_linear_opcodes(body_start, push_offset, ctx)
+        || !has_only_linear_opcodes(resume, tail, ctx)
+    {
+        return None;
+    }
+    let target_limit = match ctx.owned_ranges {
+        Some(ranges) => ranges.iter().find(|range| range.contains(&target))?.end,
+        None => ctx.bytecode.len(),
+    };
+    let mut target_end = target;
+    let mut found_pop = false;
+    for _ in 0..MAX_BODY_OPCODES {
+        if target_end >= target_limit {
+            return None;
+        }
+        match ctx.bytecode.get(target_end).copied()? {
+            EX_POP_EXECUTION_FLOW => {
+                found_pop = true;
+                break;
+            }
+            EX_JUMP
+            | EX_JUMP_IF_NOT
+            | EX_PUSH_EXECUTION_FLOW
+            | EX_POP_FLOW_IF_NOT
+            | EX_RETURN
+            | EX_END_OF_SCRIPT => return None,
+            _ => {}
+        }
+        let length = opcode_length_at(target_end, ctx.bytecode, ctx.ue5, ctx.name_table);
+        if length == 0 || length > target_limit - target_end {
+            return None;
+        }
+        target_end += length;
+    }
+    if !found_pop {
+        return None;
+    }
+    let mut body = decode_naked_if_body(body_start, push_offset, ctx);
+    body.extend(decode_naked_if_body(target, target_end, ctx));
+    body.extend(decode_naked_if_body(resume, tail, ctx));
+    mark_claimed(ctx, target, target_end + 1, owner);
+    Some(body)
 }
 
 /// Decode the naked-if body at `[body_start, body_end)` into a flat

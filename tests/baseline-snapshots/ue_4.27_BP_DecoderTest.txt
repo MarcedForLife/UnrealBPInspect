@@ -119,7 +119,11 @@ Functions:
 
   Loop_ForEachWithBreak() [Public|BlueprintPure]
     // "A ForEach that breaks out of the body partway through"
+    Temp_bool_True_if_break_was_hit_Variable = false
     for (item in self.IntArray) {
+        if (Temp_bool_True_if_break_was_hit_Variable) {
+            break
+        }
         if (item > 5) {
             break
         } else {
@@ -199,6 +203,7 @@ Functions:
 
   Switch_OnByteEnum() [Public|BlueprintPure]
     // "A switch on a custom Enum"
+    Colour = 1
     switch (Colour) {
         case 0:
             PrintString(self, "Red", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)

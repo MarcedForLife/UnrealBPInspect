@@ -5,14 +5,14 @@
 //! as dedicated variants. Unrecognised patterns become `Stmt::Unknown` with
 //! structured diagnostics rather than a raw passthrough.
 //!
-//! The `offset` field on every variant is the bytecode mem_offset where
+//! The `offset` field on every variant is the bytecode disk offset where
 //! the construct begins. Synthetic statements produced by later transforms
 //! reuse the originating statement's offset.
 
 use crate::bytecode::expr::Expr;
 
 /// A single statement in the decoded statement tree.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Stmt {
     /// A value assignment (`lhs = rhs`).
     Assignment { lhs: Expr, rhs: Expr, offset: usize },
@@ -89,7 +89,7 @@ pub enum Stmt {
 }
 
 impl Stmt {
-    /// The bytecode mem_offset where this statement begins. Every variant
+    /// The bytecode disk offset where this statement begins. Every variant
     /// carries an `offset` field; synthetic statements reuse the offset of
     /// the statement they originated from.
     pub fn offset(&self) -> usize {
@@ -232,7 +232,7 @@ impl Stmt {
 }
 
 /// Discriminates the three loop shapes the decoder recognises.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum LoopKind {
     /// A condition-checked loop with no implicit counter or collection.
     While,
@@ -254,7 +254,7 @@ pub enum LoopKind {
 }
 
 /// Discriminates the two latch constructs Blueprint exposes.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum LatchKind {
     /// A DoOnce gate. `name` is the derived display name (first user
     /// call inside the body, falling back to `DoOnce_<suffix>`).
@@ -275,7 +275,7 @@ pub enum LatchKind {
 /// One arm of a `Stmt::Switch`. Multiple case values map to a single
 /// shared body, mirroring the editor graph shape where pin values like
 /// Walking/Running/Swimming all wire to one downstream branch.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SwitchCase {
     pub values: Vec<Expr>,
     pub body: Vec<Stmt>,

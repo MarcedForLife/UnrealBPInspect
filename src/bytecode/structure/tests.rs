@@ -210,7 +210,7 @@ fn phantom_child_detected_when_head_inside_parent_partition() {
     assert_eq!(inner.parent_chain, Some(outer.head));
 
     // Head 0x05 must be contained in some range of the outer chain's
-    // pin partition. Without this, the parent-containment fixed point
+    // pin partition. Without this, parent-containment selection
     // wouldn't have anything to match on.
     let head_inside_outer = outer
         .pin_partitions

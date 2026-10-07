@@ -131,36 +131,13 @@ pub(super) fn decode_entry_preamble(
         if opcode_addr == break_at {
             break;
         }
-        if address_in_consumed(&preamble_consumed, opcode_addr) {
-            continue;
-        }
-        if claimed_end_for_disk_sweep(ctx, opcode_addr).is_some() {
-            continue;
-        }
-        if opcode_addr >= ctx.bytecode.len() {
-            continue;
-        }
-        let mut pos = opcode_addr;
-        let before = pos;
-        match decode_one_or_branch(&mut pos, decode_bound, ctx) {
-            Ok(Some(stmt)) => {
-                preamble.push(stmt);
-                if pos > before {
-                    preamble_consumed.push(before..pos);
-                }
-            }
-            Ok(None) => {
-                if pos > before {
-                    preamble_consumed.push(before..pos);
-                }
-            }
-            Err(unknown) => {
-                preamble.push(*unknown);
-                if pos > before {
-                    preamble_consumed.push(before..pos);
-                }
-            }
-        }
+        decode_opcode_at(
+            opcode_addr,
+            decode_bound,
+            ctx,
+            &mut preamble,
+            &mut preamble_consumed,
+        );
     }
     preamble
 }
@@ -330,25 +307,16 @@ pub(super) fn decode_opcode_at(
     }
     let mut pos = opcode_addr;
     let before = pos;
-    match decode_one_or_branch(&mut pos, range_end, ctx) {
-        Ok(Some(stmt)) => {
-            consumed.extend(extra_consumed_ranges(&stmt, before, pos));
-            stmts.push(stmt);
-            if pos > before {
-                consumed.push(before..pos);
-            }
-        }
-        Ok(None) => {
-            if pos > before {
-                consumed.push(before..pos);
-            }
-        }
-        Err(unknown) => {
-            stmts.push(*unknown);
-            if pos > before {
-                consumed.push(before..pos);
-            }
-        }
+    let decoded = match decode_one_or_branch(&mut pos, range_end, ctx) {
+        Ok(stmt) => stmt,
+        Err(unknown) => Some(*unknown),
+    };
+    if let Some(stmt) = decoded {
+        consumed.extend(extra_consumed_ranges(&stmt, before, pos));
+        stmts.push(stmt);
+    }
+    if pos > before {
+        consumed.push(before..pos);
     }
 }
 

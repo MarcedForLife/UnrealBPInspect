@@ -281,7 +281,7 @@ fn decode_inline_region_body(
         mem_to_disk,
     );
     let inline_claimed: std::cell::RefCell<
-        std::collections::BTreeMap<usize, super::super::ctx::Claim>,
+        std::collections::BTreeMap<usize, Vec<super::super::ctx::Claim>>,
     > = std::cell::RefCell::new(std::collections::BTreeMap::new());
     // Inline body decodes a freshly-built local CFG with its own claim set
     // and the inlined owner. child() copies the shared refs (including

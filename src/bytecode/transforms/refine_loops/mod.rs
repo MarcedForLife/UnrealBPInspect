@@ -51,6 +51,33 @@ pub fn refine_loops(stmts: &mut Vec<Stmt>) {
     refine_loops_vec(stmts, &[]);
 }
 
+/// Keep the non-bound part of a foreach condition after its index scaffold
+/// is removed. In particular, an inner loop may set an outer loop's flag.
+fn foreach_break_guard(cond: &Expr, body: &[Stmt], ancestors: &[&[Stmt]]) -> Option<Expr> {
+    let scopes = scope_stack(body, ancestors);
+    let resolved = resolve_cond_chain(cond, &scopes);
+    let Expr::Binary {
+        op: crate::bytecode::expr::BinaryOp::And,
+        lhs,
+        rhs,
+    } = resolved
+    else {
+        return None;
+    };
+    for operand in [lhs.as_ref(), rhs.as_ref()] {
+        let resolved = resolve_cond_chain(operand, &scopes);
+        if let Some(flag) = crate::bytecode::transforms::visit::negated_operand(resolved) {
+            if matches!(
+                flag,
+                Expr::Var(_) | Expr::FieldAccess { .. } | Expr::Literal(_)
+            ) {
+                return Some(flag.clone());
+            }
+        }
+    }
+    None
+}
+
 /// Walk a `Vec<Stmt>` body, refining While nodes and also absorbing the
 /// immediately-preceding counter assignment into each ForC's `init` field.
 ///
@@ -252,7 +279,7 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
             cond,
             body,
             completion,
-            ..
+            offset,
         } => {
             // Try ForEach first — it's the more specific shape and subsumes ForC.
             let cond_expr = match cond {
@@ -276,6 +303,7 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                 if let Some((item, array)) =
                     match_foreach_shape(cond_expr, &inc_stmts, body, ancestors)
                 {
+                    let break_guard = foreach_break_guard(cond_expr, body, ancestors);
                     // Collect the counter aliases before stripping (which
                     // drops the defining fetch and may remove the
                     // index-mirror the alias scan reads).
@@ -313,6 +341,17 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                         if let Some(aliases) = &counter_aliases {
                             substitute_foreach_fetches(body, &array, aliases, &item, ancestors);
                         }
+                    }
+                    if let Some(guard) = break_guard {
+                        body.insert(
+                            0,
+                            Stmt::Branch {
+                                cond: guard,
+                                then_body: vec![Stmt::Break { offset: *offset }],
+                                else_body: Vec::new(),
+                                offset: *offset,
+                            },
+                        );
                     }
                     *kind = LoopKind::ForEach { item, array };
                     *cond = None;

@@ -170,6 +170,8 @@ Property output preserves numeric precision and complete parsed collection conte
 
 Temporary assignments and loop-condition recomputations remain when moving or removing them could change evaluation order. Calls are not shared without proof that their results remain valid.
 
+Control-flow reconstruction preserves branch continuations, nested loop exit conditions and Sequence pin boundaries. Synthetic trace tests cover zero-iteration loops and completion order.
+
 ## Development
 
 ```sh

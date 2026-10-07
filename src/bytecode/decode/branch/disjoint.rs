@@ -445,7 +445,7 @@ fn prefix_has_user_stmt(start: usize, target_disk: usize, ctx: &DecodeCtx) -> bo
             mem_to_disk,
         );
     let prefix_claimed: std::cell::RefCell<
-        std::collections::BTreeMap<usize, super::super::ctx::Claim>,
+        std::collections::BTreeMap<usize, Vec<super::super::ctx::Claim>>,
     > = std::cell::RefCell::new(std::collections::BTreeMap::new());
     // Prefix probe decodes a freshly-built local CFG with its own claim set
     // and no owner (child() resets decoding_owner to None). child() copies the

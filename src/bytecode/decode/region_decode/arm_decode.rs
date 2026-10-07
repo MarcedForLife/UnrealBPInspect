@@ -345,20 +345,7 @@ fn clip_to_region_ranges(
 /// guard installed by the caller lets `decode_subrange` bypass claims
 /// whose byte spans are fully contained in this region.
 pub(super) fn decode_arm_segments(segments: &[Range<usize>], ctx: &DecodeCtx) -> Vec<Stmt> {
-    let mut stmts: Vec<Stmt> = Vec::new();
-    // Track the segments decoded so far in this arm. The disjoint-range
-    // inline path consults `arm_covered_segments` so a later segment's
-    // `EX_JUMP` doesn't re-pull a body an earlier segment already covered
-    // directly. Seeded empty and grown segment-by-segment so a
-    // segment's own jump can't see itself as prior coverage.
-    let mut covered: Vec<Range<usize>> = Vec::new();
-    for segment in segments {
-        let _guard = ctx.with_arm_covered_segments(covered.clone());
-        let mut decoded = decode_subrange(segment.start, segment.end, ctx);
-        stmts.append(&mut decoded);
-        covered.push(segment.clone());
-    }
-    stmts
+    decode_arm_segments_excluding(segments, ctx, &[])
 }
 
 /// Like `decode_arm_segments`, but suppresses any top-level statement
@@ -372,13 +359,14 @@ pub(super) fn decode_arm_segments_excluding(
     ctx: &DecodeCtx,
     exclude: &[Range<usize>],
 ) -> Vec<Stmt> {
-    if exclude.is_empty() {
-        return decode_arm_segments(segments, ctx);
-    }
     let mut stmts: Vec<Stmt> = Vec::new();
+    let mut covered: Vec<Range<usize>> = Vec::new();
     for segment in segments {
+        // Both arm paths expose prior segments to disjoint-body recognition.
+        let _guard = ctx.with_arm_covered_segments(covered.clone());
         let mut decoded = decode_subrange_excluding(segment.start, segment.end, ctx, exclude);
         stmts.append(&mut decoded);
+        covered.push(segment.clone());
     }
     stmts
 }
@@ -388,11 +376,10 @@ pub(super) fn decode_arm_segments_excluding(
 /// re-decode gates check the opcode start address, so a single-byte mark
 /// is sufficient to suppress re-emission.
 pub(super) fn stmt_offset_exclude_set(stmts: &[Stmt]) -> Vec<Range<usize>> {
-    let mut offsets: Vec<usize> = Vec::new();
-    for stmt in stmts {
-        collect_stmt_offsets(stmt, &mut offsets);
-    }
-    offsets.into_iter().map(|off| off..off + 1).collect()
+    stmts
+        .iter()
+        .flat_map(extra_consumed_ranges_for_stmt)
+        .collect()
 }
 
 /// Fallback arm decode for synthetic contexts that lack

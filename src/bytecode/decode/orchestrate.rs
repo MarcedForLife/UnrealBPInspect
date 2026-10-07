@@ -799,7 +799,7 @@ fn decode_ubergraph_event_body(
         &arm_boundaries,
         Some(inputs.graph),
     );
-    let claimed: RefCell<BTreeMap<usize, super::ctx::Claim>> = RefCell::new(BTreeMap::new());
+    let claimed: RefCell<BTreeMap<usize, Vec<super::ctx::Claim>>> = RefCell::new(BTreeMap::new());
     let cei = super::cross_event_inline::CrossEventInlineCtx {
         current_event_name: event_name,
         event_owned_ranges: inputs.event_ranges,
@@ -951,7 +951,7 @@ fn decode_standalone_function_body(
         name_table,
         fn_mem_to_disk,
     );
-    let claimed: RefCell<BTreeMap<usize, super::ctx::Claim>> = RefCell::new(BTreeMap::new());
+    let claimed: RefCell<BTreeMap<usize, Vec<super::ctx::Claim>>> = RefCell::new(BTreeMap::new());
     let ctx = DecodeCtx {
         mem_to_disk: Some(fn_mem_to_disk),
         function_signatures: Some(&asset.function_signatures),
@@ -1176,7 +1176,7 @@ fn decode_owner_event_body(
     if cfg.blocks.is_empty() {
         return None;
     }
-    let claimed: RefCell<BTreeMap<usize, super::ctx::Claim>> = RefCell::new(BTreeMap::new());
+    let claimed: RefCell<BTreeMap<usize, Vec<super::ctx::Claim>>> = RefCell::new(BTreeMap::new());
     // Built explicitly, NOT via base_ctx.child(): re-decoding a whole event
     // from scratch must keep cross_event_inline None (child() would copy the
     // parent's Some, flipping the synth jump path from drop to cross-event
@@ -1337,7 +1337,8 @@ fn decode_resume_bodies(
             name_table,
             mem_to_disk,
         );
-        let claimed: RefCell<BTreeMap<usize, super::ctx::Claim>> = RefCell::new(BTreeMap::new());
+        let claimed: RefCell<BTreeMap<usize, Vec<super::ctx::Claim>>> =
+            RefCell::new(BTreeMap::new());
         let ctx = DecodeCtx {
             mem_to_disk: Some(mem_to_disk),
             function_signatures: Some(&asset.function_signatures),
@@ -1404,7 +1405,7 @@ fn collect_sequence_masks(
 
 /// Recover disconnected editor pins only when one decoded sequence matches.
 /// Empty slots remain in the IR so every renderer uses the same pin identity.
-fn restore_sequence_pins(body: &mut [crate::bytecode::stmt::Stmt], mask: &[bool]) {
+pub(super) fn restore_sequence_pins(body: &mut [crate::bytecode::stmt::Stmt], mask: &[bool]) {
     use crate::bytecode::stmt::Stmt;
     let connected = mask.iter().filter(|wired| **wired).count();
     if connected == 0 || connected == mask.len() {
