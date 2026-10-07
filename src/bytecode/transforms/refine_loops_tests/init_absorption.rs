@@ -8,13 +8,9 @@ use super::*;
 use crate::bytecode::expr::{BinaryOp, Expr};
 use crate::bytecode::stmt::{LoopKind, Stmt};
 
-/// A body with a trailing cond recomputation.
-/// The canonical cond def lives in the parent scope (sibling of the
-/// loop). The loop body ends with a duplicate of that def. Strip must
-/// peel the recomputation so `extract_increment` reaches the actual
-/// counter increment and ForC promotion fires.
+/// A general While must keep the final condition-temp assignment visible.
 #[test]
-fn forc_strips_trailing_cond_recomputation_single_stmt() {
+fn ordinary_while_keeps_trailing_condition_recomputation() {
     let counter = "Temp_int_Loop_Counter_Variable_0";
     let cond_temp = "$cond";
     let canonical_cond_def = counter_lt_n(counter, "10");
@@ -24,27 +20,12 @@ fn forc_strips_trailing_cond_recomputation_single_stmt() {
         assign(var(cond_temp), canonical_cond_def.clone()),
     ];
     let mut stmts = vec![
-        assign(var(cond_temp), canonical_cond_def.clone()),
+        assign(var(cond_temp), canonical_cond_def),
         while_loop(var(cond_temp), body),
     ];
-
+    let original = serde_json::to_value(&stmts).unwrap();
     refine_loops(&mut stmts);
-
-    // The parent-scope cond def survives at stmts[0]; the loop refines
-    // to ForC after the recomputation peel exposes the counter
-    // increment as the trailing body stmt.
-    assert_eq!(stmts.len(), 2, "parent cond def must remain");
-    let Stmt::Loop { kind, body, .. } = &stmts[1] else {
-        panic!("expected Loop at stmts[1]");
-    };
-    assert!(
-        matches!(kind, LoopKind::ForC { .. }),
-        "should refine to ForC after recomputation strip, got {}",
-        loop_kind_name(kind)
-    );
-    // Body retains only Work() once the recomputation is stripped and
-    // the counter increment is moved out.
-    assert_eq!(body.len(), 1, "body should retain Work() only");
+    assert_eq!(serde_json::to_value(&stmts).unwrap(), original);
 }
 
 /// A ForEach body with a multi-stmt trailing

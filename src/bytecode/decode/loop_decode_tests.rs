@@ -651,4 +651,202 @@ mod tests {
             "absorbed body should activate ForEach refinement"
         );
     }
+
+    fn call_bytes(stream: &mut Vec<u8>, export_index: i32) {
+        stream.push(EX_CALL_MATH);
+        stream.extend_from_slice(&export_index.to_le_bytes());
+        stream.push(EX_END_FUNCTION_PARMS);
+    }
+
+    fn loop_with_header_stream(repeat_header: bool) -> (Vec<u8>, usize, usize) {
+        use super::super::test_fixtures::put_field_path;
+        let mut stream = Vec::new();
+        call_bytes(&mut stream, 1); // Initialize, outside the back edge.
+        let header_start = stream.len();
+        stream.extend([EX_LET_BOOL, EX_LOCAL_VARIABLE]);
+        put_field_path(&mut stream, 0);
+        call_bytes(&mut stream, 2); // CheckCounter, observable evaluation.
+        let head_offset = stream.len();
+        stream.push(EX_JUMP_IF_NOT);
+        stream.extend_from_slice(&[0; 4]);
+        stream.push(EX_LOCAL_VARIABLE);
+        put_field_path(&mut stream, 0);
+        call_bytes(&mut stream, 3); // Advance.
+        stream.push(EX_JUMP);
+        let target = if repeat_header {
+            header_start
+        } else {
+            head_offset
+        };
+        stream.extend_from_slice(&(target as u32).to_le_bytes());
+        let resume_offset = stream.len();
+        stream[head_offset + 1..head_offset + 5]
+            .copy_from_slice(&(resume_offset as u32).to_le_bytes());
+        call_bytes(&mut stream, 4); // ObserveCondition.
+        stream.push(EX_END_OF_SCRIPT);
+        (stream, head_offset, resume_offset)
+    }
+
+    fn execute_header_loop(
+        body: &[Stmt],
+        counter: &mut i64,
+        condition: &mut bool,
+        limit: i64,
+        trace: &mut Vec<String>,
+    ) -> bool {
+        for stmt in body {
+            match stmt {
+                Stmt::Call {
+                    func: Expr::Var(name),
+                    ..
+                } => match name.as_str() {
+                    "Initialize" => {
+                        *counter = 0;
+                        trace.push("initialize".into());
+                    }
+                    "Advance" => {
+                        *counter += 1;
+                        trace.push(format!("advance {counter}"));
+                    }
+                    "ObserveCondition" => trace.push(format!("condition {condition}")),
+                    _ => panic!("unexpected call {name}"),
+                },
+                Stmt::Assignment {
+                    rhs: Expr::Call { name, .. },
+                    ..
+                } if name == "CheckCounter" => {
+                    trace.push(format!("check {counter}"));
+                    *condition = *counter < limit;
+                }
+                Stmt::Loop {
+                    kind: LoopKind::While,
+                    cond: Some(Expr::Var(_)),
+                    body,
+                    ..
+                } => {
+                    let mut iterations = 0;
+                    while *condition {
+                        assert!(iterations < 5, "stale loop condition did not terminate");
+                        iterations += 1;
+                        if execute_header_loop(body, counter, condition, limit, trace) {
+                            break;
+                        }
+                    }
+                }
+                Stmt::Break { .. } => return true,
+                _ => panic!(
+                    "unexpected statement {}",
+                    serde_json::to_string(stmt).unwrap()
+                ),
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn decoded_header_calls_keep_initial_backedge_and_exit_evaluations() {
+        use super::super::{branch::decode_subrange, test_fixtures::ue4_ctx_with_exports};
+        let (stream, head_offset, resume_offset) = loop_with_header_stream(true);
+        let names = crate::binary::NameTable::from_names(vec!["$Condition".into()]);
+        let exports = vec![
+            "Initialize".into(),
+            "CheckCounter".into(),
+            "Advance".into(),
+            "ObserveCondition".into(),
+        ];
+        let map = identity_map(&(0..stream.len()).collect::<Vec<_>>());
+        let context = ue4_ctx_with_exports(&stream, &names, &map, &exports);
+        let mut cursor = head_offset;
+        let loop_stmt = try_decode_loop(&mut cursor, stream.len(), &context).unwrap();
+        assert_eq!(cursor, resume_offset);
+        let mut decoded = decode_subrange(0, head_offset, &context);
+        decoded.push(loop_stmt);
+        decoded.extend(decode_subrange(resume_offset, stream.len(), &context));
+        for (limit, expected) in [
+            (0, vec!["initialize", "check 0", "condition false"]),
+            (
+                2,
+                vec![
+                    "initialize",
+                    "check 0",
+                    "advance 1",
+                    "check 1",
+                    "advance 2",
+                    "check 2",
+                    "condition false",
+                ],
+            ),
+        ] {
+            for transform in [false, true] {
+                let mut body = decoded.clone();
+                if transform {
+                    super::super::apply_transform_stack_to_body(&mut body);
+                }
+                let mut trace = Vec::new();
+                execute_header_loop(&body, &mut -1, &mut false, limit, &mut trace);
+                assert_eq!(trace, expected);
+            }
+        }
+        for transform in [false, true] {
+            let mut body = decoded.clone();
+            let Stmt::Loop {
+                body: loop_body, ..
+            } = &mut body[2]
+            else {
+                panic!("expected loop")
+            };
+            loop_body.insert(1, Stmt::Break { offset: 0 });
+            if transform {
+                super::super::apply_transform_stack_to_body(&mut body);
+            }
+            let mut trace = Vec::new();
+            execute_header_loop(&body, &mut -1, &mut false, 2, &mut trace);
+            assert_eq!(
+                trace,
+                ["initialize", "check 0", "advance 1", "condition true"]
+            );
+        }
+    }
+
+    #[test]
+    fn direct_conditional_backedge_does_not_replay_captured_condition() {
+        use super::super::test_fixtures::ue4_ctx_with_exports;
+        let (stream, head_offset, _) = loop_with_header_stream(false);
+        let names = crate::binary::NameTable::from_names(vec!["$Condition".into()]);
+        let exports = vec![
+            "Initialize".into(),
+            "CheckCounter".into(),
+            "Advance".into(),
+            "ObserveCondition".into(),
+        ];
+        let map = identity_map(&(0..stream.len()).collect::<Vec<_>>());
+        let context = ue4_ctx_with_exports(&stream, &names, &map, &exports);
+        let mut cursor = head_offset;
+        let Stmt::Loop { body, .. } = try_decode_loop(&mut cursor, stream.len(), &context).unwrap()
+        else {
+            panic!("expected loop")
+        };
+        assert_eq!(body.len(), 1);
+        assert!(matches!(&body[0], Stmt::Call { func: Expr::Var(name), .. } if name == "Advance"));
+    }
+
+    #[test]
+    fn control_flow_before_loop_condition_requires_its_own_recognizer() {
+        let mut stream = vec![EX_PUSH_EXECUTION_FLOW];
+        stream.extend_from_slice(&0u32.to_le_bytes());
+        let head_offset = stream.len();
+        stream.push(EX_JUMP_IF_NOT);
+        stream.extend_from_slice(&17u32.to_le_bytes());
+        stream.push(EX_TRUE);
+        stream.push(EX_NOTHING);
+        stream.push(EX_JUMP);
+        stream.extend_from_slice(&0u32.to_le_bytes());
+        stream.push(EX_END_OF_SCRIPT);
+        let names = empty_name_table();
+        let map = identity_map(&(0..stream.len()).collect::<Vec<_>>());
+        let context = ue4_ctx(&stream, &names, &map);
+        let mut cursor = head_offset;
+        assert!(try_decode_loop(&mut cursor, stream.len(), &context).is_none());
+        assert_eq!(cursor, head_offset);
+    }
 }

@@ -122,7 +122,9 @@ fn helm_json_snapshot() {
 fn helm_filter_works() {
     let data = common::load_fixture("ue_4.27/Helm_BP.uasset");
     let full = common::decoded_summary(&data);
-    let filtered = filter_summary(&full, &["getsteeringangle".to_string()]);
+    let asset = parse_asset(&data, false).unwrap();
+    let decoded = unreal_bp_inspect::bytecode::decode::decode_asset(&asset);
+    let filtered = filter_summary(&decoded, &asset, &["getsteeringangle".to_string()]);
     assert!(!filtered.is_empty());
     assert!(
         filtered.len() < full.len(),
@@ -184,8 +186,8 @@ fn output_determinism() {
 /// Mirror the CLI `--diff` path: emit each side's v2 summary, filter, then
 /// unified-diff the two texts.
 fn v2_diff(before: &[u8], after: &[u8], label_a: &str, label_b: &str) -> (String, bool) {
-    let before_text = filter_summary(&common::decoded_summary(before), &[]);
-    let after_text = filter_summary(&common::decoded_summary(after), &[]);
+    let before_text = common::decoded_summary(before);
+    let after_text = common::decoded_summary(after);
     diff_summary_texts(&before_text, &after_text, label_a, label_b, 3)
 }
 

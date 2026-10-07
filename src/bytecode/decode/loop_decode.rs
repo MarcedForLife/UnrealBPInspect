@@ -9,11 +9,8 @@
 //! Loop-shape refinement is split between this module and
 //! `transforms::refine_loops`. The decoder owns the back-edge fast-path
 //! (every recognised loop emits `LoopKind::While`); ForC and ForEach
-//! refinement runs later in `transforms::refine_loops`, after
-//! `inline_single_use_temps` has resolved condition temporaries. Both
-//! halves are needed: this module preserves source-level shape from the
-//! opcode stream, and `refine_loops` covers patterns that only become
-//! visible once temp inlining has happened.
+//! refinement runs later in `transforms::refine_loops`. Back-edge targets
+//! determine which header instructions repeat, independently of inlining.
 
 use crate::bytecode::opcodes::*;
 use crate::bytecode::partition::opcode_length_at;
@@ -70,6 +67,41 @@ pub(crate) fn try_decode_loop(pos: &mut usize, range_end: usize, ctx: &DecodeCtx
     }
 
     let back_edge = find_back_edge(ctx, body_disk, range_end, head_offset)?;
+
+    // The back edge may precede the conditional jump. Those instructions
+    // execute on every iteration, while the surrounding decoder emits their
+    // first execution before this loop. Replay exactly that prefix at the
+    // tail so conditions and calls keep their frequency and final values.
+    let mut target_cursor = back_edge.jump_disk + 1;
+    let target_mem = read_bc_u32(ctx.bytecode, &mut target_cursor) as usize;
+    let target_disk = ctx
+        .mem_to_disk
+        .and_then(|mapping| mapping.get(&target_mem).copied())
+        .unwrap_or(target_mem);
+    if target_disk < head_offset {
+        // Trampoline/control-flow preheaders need their dedicated recognizer.
+        // Do not let a bounded prefix decode follow a Sequence out of range.
+        let mut prefix_cursor = target_disk;
+        while prefix_cursor < head_offset {
+            if matches!(
+                ctx.bytecode[prefix_cursor],
+                EX_JUMP
+                    | EX_JUMP_IF_NOT
+                    | EX_PUSH_EXECUTION_FLOW
+                    | EX_POP_EXECUTION_FLOW
+                    | EX_POP_FLOW_IF_NOT
+                    | EX_RETURN
+                    | EX_END_OF_SCRIPT
+            ) {
+                return None;
+            }
+            let length = opcode_length_at(prefix_cursor, ctx.bytecode, ctx.ue5, ctx.name_table);
+            if length == 0 || length > head_offset - prefix_cursor {
+                return None;
+            }
+            prefix_cursor += length;
+        }
+    }
 
     // The body extends from after the cond expression up to the
     // back-edge `EX_JUMP` (exclusive). The post-loop position is the
@@ -151,7 +183,7 @@ pub(crate) fn try_decode_loop(pos: &mut usize, range_end: usize, ctx: &DecodeCtx
     // mark those sibling regions consumed (mirrors the nested-loop sibling
     // suppression in `try_dispatch_loop_body_loop_region_at`).
     let mut break_if_else_displaced: Option<(usize, usize)> = None;
-    let (body_stmts, completion) = match absorbed {
+    let (mut body_stmts, completion) = match absorbed {
         Some(layout) => decode_absorbed_loop_body(
             ctx,
             layout,
@@ -177,11 +209,12 @@ pub(crate) fn try_decode_loop(pos: &mut usize, range_end: usize, ctx: &DecodeCtx
         return None;
     }
 
+    if target_disk < head_offset {
+        body_stmts.extend(decode_subrange(target_disk, head_offset, ctx));
+    }
     register_loop_body_dedup_claims(ctx, &body_byte_ranges, break_if_else_displaced);
 
-    // All loops are emitted as While here. ForC and ForEach refinement
-    // runs in transforms::refine_loops after inline_single_use_temps
-    // has resolved condition temporaries to their final shapes.
+    // ForC and ForEach recognition runs later over this explicit While.
     *pos = resume_disk;
 
     Some(Stmt::Loop {

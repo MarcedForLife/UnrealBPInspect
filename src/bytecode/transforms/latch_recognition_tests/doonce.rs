@@ -125,7 +125,7 @@ fn recognizes_compound_doonce_outer_call_then_sequence() {
             "Temp_bool_Has_Been_Initd_Variable_3",
             "Temp_bool_IsClosed_Variable_3",
         ),
-        call_stmt("ReleaseGrip"),
+        call_stmt("ReleaseResource"),
     ];
 
     recognize_latches(&mut body);
@@ -144,7 +144,7 @@ fn recognizes_compound_doonce_outer_call_then_sequence() {
     assert_eq!(inner.len(), 1);
     assert!(matches!(&inner[0], Stmt::Call { .. }));
     match kind {
-        LatchKind::DoOnce { name, .. } => assert_eq!(name, "ReleaseGrip"),
+        LatchKind::DoOnce { name, .. } => assert_eq!(name, "ReleaseResource"),
         _ => panic!("expected LatchKind::DoOnce"),
     }
 }
@@ -163,7 +163,7 @@ fn recognizes_compound_doonce_with_outer_gate_check() {
             offset: 0x10,
         },
         assign(gate_var, lit("true")),
-        call_stmt("ReleaseGrip"),
+        call_stmt("ReleaseResource"),
         doonce_scaffold_sequence(init_var, gate_var),
     ];
 
@@ -179,7 +179,7 @@ fn recognizes_compound_doonce_with_outer_gate_check() {
     assert_eq!(inner.len(), 1);
     assert!(matches!(&inner[0], Stmt::Call { .. }));
     match kind {
-        LatchKind::DoOnce { name, .. } => assert_eq!(name, "ReleaseGrip"),
+        LatchKind::DoOnce { name, .. } => assert_eq!(name, "ReleaseResource"),
         _ => panic!("expected LatchKind::DoOnce"),
     }
 }
@@ -303,7 +303,7 @@ fn folds_user_body_pin_with_sibling_scaffold_pin() {
                 assign(gate_var, lit("false")),
                 assign(init_var, lit("true")),
             ],
-            vec![call_stmt("ReleaseGrip")],
+            vec![call_stmt("ReleaseResource")],
         ],
         offset: 0x100,
     };
@@ -312,7 +312,7 @@ fn folds_user_body_pin_with_sibling_scaffold_pin() {
 
     recognize_latches(&mut body);
 
-    // Expected: [Call(ResetDoOnce(DoOnce_4)), Latch::DoOnce(ReleaseGrip)].
+    // Expected: [Call(ResetDoOnce(DoOnce_4)), Latch::DoOnce(ReleaseResource)].
     assert_eq!(
         body.len(),
         2,
@@ -331,7 +331,7 @@ fn folds_user_body_pin_with_sibling_scaffold_pin() {
     assert!(init.is_empty(), "DoOnce latches carry no init clause");
     match kind {
         LatchKind::DoOnce { name, gate_var: g } => {
-            assert_eq!(name, "ReleaseGrip");
+            assert_eq!(name, "ReleaseResource");
             assert_eq!(g, gate_var);
         }
         _ => panic!("expected LatchKind::DoOnce"),
@@ -383,4 +383,43 @@ fn reset_then_call_does_not_synthesise_phantom_doonce() {
         "a reset + user call must not synthesise a phantom DoOnce wrap; got body {:?}",
         body.iter().map(stmt_kind).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn resetting_one_gate_does_not_wrap_an_already_recognized_independent_gate() {
+    let existing = Stmt::Latch {
+        kind: LatchKind::DoOnce {
+            name: "ReleaseResource".into(),
+            gate_var: "Temp_bool_IsClosed_Variable_3".into(),
+        },
+        init: Vec::new(),
+        body: vec![call_stmt("ReleaseResource")],
+        offset: 20,
+    };
+    let mut body = vec![
+        Stmt::Sequence {
+            pins: vec![reset_doonce_pair("_4"), vec![existing]],
+            offset: 10,
+        },
+        doonce_scaffold_sequence(
+            "Temp_bool_Has_Been_Initd_Variable_4",
+            "Temp_bool_IsClosed_Variable_4",
+        ),
+    ];
+    recognize_latches(&mut body);
+    fn count_gate(body: &[Stmt], gate: &str) -> usize {
+        body.iter()
+            .map(|stmt| {
+                usize::from(matches!(stmt,
+            Stmt::Latch { kind: LatchKind::DoOnce { gate_var, .. }, .. } if gate_var == gate))
+                    + stmt
+                        .child_bodies_structural()
+                        .iter()
+                        .map(|child| count_gate(child, gate))
+                        .sum::<usize>()
+            })
+            .sum()
+    }
+    assert_eq!(count_gate(&body, "Temp_bool_IsClosed_Variable_4"), 0);
+    assert_eq!(count_gate(&body, "Temp_bool_IsClosed_Variable_3"), 1);
 }

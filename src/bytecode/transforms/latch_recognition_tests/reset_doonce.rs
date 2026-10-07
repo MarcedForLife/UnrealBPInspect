@@ -73,7 +73,7 @@ fn reset_doonce_inside_latch_body_folds() {
     // walker must reach that body and fold the pair before dead-elim runs.
     let inner_pair = reset_doonce_pair("_1");
     let outer_gate = "Temp_bool_IsClosed_Variable_2";
-    let mut user_body = vec![call_stmt("AttemptGrip")];
+    let mut user_body = vec![call_stmt("TryAcquire")];
     user_body.extend(inner_pair);
     let mut body = vec![doonce_branch(outer_gate, user_body)];
 
@@ -181,4 +181,146 @@ fn post_chain_reset_skipped_when_branch_lacks_doonce() {
     assert_eq!(body.len(), 2);
     assert!(matches!(&body[0], Stmt::Branch { .. }));
     assert!(matches!(&body[1], Stmt::Call { .. }));
+}
+
+fn named_latch(name: &str, gate: &str) -> Stmt {
+    Stmt::Latch {
+        kind: crate::bytecode::stmt::LatchKind::DoOnce {
+            name: name.into(),
+            gate_var: gate.into(),
+        },
+        init: Vec::new(),
+        body: vec![call_stmt("PerformAction")],
+        offset: 0,
+    }
+}
+
+fn reset_gate(name: &str) -> Stmt {
+    Stmt::Call {
+        func: var("ResetDoOnce"),
+        args: vec![var(name)],
+        offset: 0,
+    }
+}
+
+fn latch_name(stmt: &Stmt) -> &str {
+    match stmt {
+        Stmt::Latch {
+            kind: crate::bytecode::stmt::LatchKind::DoOnce { name, .. },
+            ..
+        } => name,
+        _ => panic!("expected a DoOnce latch"),
+    }
+}
+
+#[test]
+fn shared_gate_has_one_name_across_event_entries_and_resume_bodies() {
+    use crate::bytecode::asset::Event;
+    use crate::bytecode::transforms::latch_recognition::rewrite_asset_wide_reset_doonce_names;
+    let gate = "Temp_bool_IsClosed_Variable_7";
+    let mut events = vec![
+        Event {
+            name: "StartAction".into(),
+            body: vec![named_latch("PerformAction", gate)],
+            export_index: None,
+        },
+        Event {
+            name: "ResumeAction".into(),
+            body: vec![named_latch("DoOnce_7", gate), reset_gate("DoOnce_7")],
+            export_index: None,
+        },
+    ];
+    let mut resumes = std::collections::BTreeMap::from([(100, vec![reset_gate("DoOnce_7")])]);
+    rewrite_asset_wide_reset_doonce_names(&mut [], &mut events, &mut resumes);
+    assert_eq!(latch_name(&events[0].body[0]), "PerformAction");
+    assert_eq!(latch_name(&events[1].body[0]), "PerformAction");
+    assert_reset_doonce_call(&events[1].body[1], "PerformAction");
+    assert_reset_doonce_call(&resumes[&100][0], "PerformAction");
+}
+
+#[test]
+fn independent_gates_calling_the_same_action_keep_distinct_reset_targets() {
+    use crate::bytecode::asset::Event;
+    use crate::bytecode::transforms::latch_recognition::rewrite_asset_wide_reset_doonce_names;
+    let mut events = vec![
+        Event {
+            name: "FirstInput".into(),
+            body: vec![
+                named_latch("PerformAction", "Temp_bool_IsClosed_Variable_3"),
+                reset_gate("DoOnce_5"),
+            ],
+            export_index: None,
+        },
+        Event {
+            name: "SecondInput".into(),
+            body: vec![
+                named_latch("PerformAction", "Temp_bool_IsClosed_Variable_5"),
+                reset_gate("DoOnce_3"),
+            ],
+            export_index: None,
+        },
+    ];
+    rewrite_asset_wide_reset_doonce_names(
+        &mut [],
+        &mut events,
+        &mut std::collections::BTreeMap::new(),
+    );
+    assert_eq!(latch_name(&events[0].body[0]), "DoOnce_3");
+    assert_eq!(latch_name(&events[1].body[0]), "DoOnce_5");
+    assert_reset_doonce_call(&events[0].body[1], "DoOnce_5");
+    assert_reset_doonce_call(&events[1].body[1], "DoOnce_3");
+}
+
+#[test]
+fn local_function_gates_do_not_alias_ubergraph_gates() {
+    use crate::bytecode::asset::{Event, Function};
+    use crate::bytecode::transforms::latch_recognition::rewrite_asset_wide_reset_doonce_names;
+    let gate = "Temp_bool_IsClosed_Variable_3";
+    let mut functions = vec![Function {
+        name: "FunctionScope".into(),
+        body: vec![named_latch("FunctionAction", gate), reset_gate("DoOnce_3")],
+        export_index: None,
+    }];
+    let mut events = vec![Event {
+        name: "EventScope".into(),
+        body: vec![named_latch("EventAction", gate), reset_gate("DoOnce_3")],
+        export_index: None,
+    }];
+    rewrite_asset_wide_reset_doonce_names(
+        &mut functions,
+        &mut events,
+        &mut std::collections::BTreeMap::new(),
+    );
+    assert_eq!(latch_name(&functions[0].body[0]), "FunctionAction");
+    assert_reset_doonce_call(&functions[0].body[1], "FunctionAction");
+    assert_eq!(latch_name(&events[0].body[0]), "EventAction");
+    assert_reset_doonce_call(&events[0].body[1], "EventAction");
+}
+
+#[test]
+fn action_names_cannot_collide_with_another_gates_canonical_identifier() {
+    use crate::bytecode::transforms::latch_recognition::rewrite_reset_doonce_names;
+    let mut body = vec![
+        named_latch("DoOnce_5", "Temp_bool_IsClosed_Variable_3"),
+        named_latch("OtherAction", "Temp_bool_IsClosed_Variable_5"),
+        reset_gate("DoOnce_3"),
+        reset_gate("DoOnce_5"),
+    ];
+    rewrite_reset_doonce_names(&mut body);
+    assert_eq!(latch_name(&body[0]), "DoOnce_3");
+    assert_eq!(latch_name(&body[1]), "OtherAction");
+    assert_reset_doonce_call(&body[2], "DoOnce_3");
+    assert_reset_doonce_call(&body[3], "OtherAction");
+}
+
+#[test]
+fn an_unseen_reset_gate_still_reserves_its_identifier() {
+    use crate::bytecode::transforms::latch_recognition::rewrite_reset_doonce_names;
+    let mut body = vec![
+        named_latch("DoOnce_5", "Temp_bool_IsClosed_Variable_3"),
+        reset_gate("DoOnce_5"),
+    ];
+    rewrite_reset_doonce_names(&mut body);
+    assert_eq!(latch_name(&body[0]), "DoOnce_3");
+    assert_reset_doonce_call(&body[1], "DoOnce_5");
 }

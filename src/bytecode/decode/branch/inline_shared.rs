@@ -281,7 +281,7 @@ fn decode_inline_region_body(
         mem_to_disk,
     );
     let inline_claimed: std::cell::RefCell<
-        std::collections::BTreeMap<usize, super::super::ctx::Claim>,
+        std::collections::BTreeMap<usize, Vec<super::super::ctx::Claim>>,
     > = std::cell::RefCell::new(std::collections::BTreeMap::new());
     // Inline body decodes a freshly-built local CFG with its own claim set
     // and the inlined owner. child() copies the shared refs (including
@@ -388,19 +388,8 @@ fn owning_event_name_for_disk(
     })
 }
 
-/// Wrap an embedded shared-DoOnce inline body in a `Stmt::Latch{DoOnce}`,
-/// synthesizing the gate from graph identity (`target_node` is a DoOnce
-/// MacroInstance). The gate var is a node-unique synthetic, the inlined
-/// body carries no `ResetDoOnce` sibling so no real gate var is needed for
-/// reset matching.
-///
-/// When `prefer_owner_name` is set (the direct fan-in shape), the display
-/// name is taken from the OWNING event's own recognised DoOnce latch
-/// (e.g. `DoOnce_3`), re-decoded from graph identity, so the non-owner
-/// renders the same gate name the owner does. Otherwise (the
-/// embedded-footprint shape, whose owner holds several DoOnce latches) the
-/// name follows the first user call in the inlined body, matching the
-/// standalone-event latch naming.
+/// Reuse the owner's gate identity when inlining a shared DoOnce. Embedded
+/// macros with several owner gates use the node's unique attributed gate.
 fn wrap_inline_doonce(
     stmts: Vec<Stmt>,
     target_node: usize,
@@ -412,30 +401,53 @@ fn wrap_inline_doonce(
     if stmts.is_empty() {
         return None;
     }
-    let owner_name = prefer_owner_name
-        .then(|| owner_doonce_name_for_disk(target_disk, ctx))
-        .flatten();
-    let name = owner_name
-        .or_else(|| first_call_func_name(&stmts))
-        .unwrap_or_else(|| "DoOnce".to_string());
+    let kind = prefer_owner_name
+        .then(|| owner_doonce_for_disk(target_disk, ctx))
+        .flatten()
+        .unwrap_or_else(|| {
+            let gate_var = ctx
+                .cross_event_inline
+                .and_then(|inline| inline.k2node_byte_map)
+                .and_then(|map| {
+                    let gates: std::collections::BTreeSet<_> = map
+                        .node_gate_set_offsets(target_node, None)
+                        .iter()
+                        .filter_map(|offset| map.gate_let_var_by_offset.get(offset).cloned())
+                        .collect();
+                    (gates.len() == 1).then(|| gates.into_iter().next().unwrap())
+                })
+                .unwrap_or_else(|| format!("Temp_bool_IsClosed_Inlined_{target_node}"));
+            LatchKind::DoOnce {
+                name: first_call_func_name(&stmts).unwrap_or_else(|| "DoOnce".to_string()),
+                gate_var,
+            }
+        });
+    if let LatchKind::DoOnce { gate_var, .. } = &kind {
+        if contains_doonce_gate(&stmts, gate_var) {
+            return wrap_inlined_stmts(stmts, offset);
+        }
+    }
+    let offset = stmts.first().map(Stmt::offset).unwrap_or(offset);
     Some(Stmt::Latch {
-        kind: LatchKind::DoOnce {
-            name,
-            gate_var: format!("Temp_bool_IsClosed_Inlined_{}", target_node),
-        },
+        kind,
         init: Vec::new(),
         body: stmts,
         offset,
     })
 }
 
-/// The owning event's recognised DoOnce latch display name for the shared
-/// DoOnce reached at `target_disk`, re-decoded from graph identity.
-fn owner_doonce_name_for_disk(target_disk: usize, ctx: &DecodeCtx) -> Option<String> {
+fn contains_doonce_gate(body: &[Stmt], gate: &str) -> bool {
+    body.iter().any(|stmt| {
+        matches!(stmt, Stmt::Latch { kind: LatchKind::DoOnce { gate_var, .. }, .. } if gate_var == gate)
+            || stmt.child_bodies_structural().iter().any(|child| contains_doonce_gate(child, gate))
+    })
+}
+
+fn owner_doonce_for_disk(target_disk: usize, ctx: &DecodeCtx) -> Option<LatchKind> {
     let cei = ctx.cross_event_inline?;
     let owner_event = owning_event_name_for_disk(target_disk, cei.event_owned_ranges)?;
     let owner_ranges = cei.event_owned_ranges.get(owner_event)?;
-    super::super::synthesize_owner_doonce_name(owner_event, owner_ranges, ctx)
+    super::super::synthesize_owner_doonce(owner_event, owner_ranges, ctx)
 }
 
 /// The function name of the first `Stmt::Call` in `stmts` (recursing

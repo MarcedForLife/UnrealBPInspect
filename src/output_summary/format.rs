@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
+use super::filter::block_matches_filter;
+
 use crate::prop_query::{
     find_prop, find_prop_object, find_prop_object_array, find_prop_str, find_prop_str_items,
     prop_value_short,
@@ -33,36 +35,6 @@ fn fmt_prop_list(
 ) {
     for prop in props {
         if skip.contains(&prop.name.as_str()) {
-            continue;
-        }
-        if let PropValue::Struct {
-            struct_type,
-            fields,
-        } = &prop.value
-        {
-            match struct_type.as_str() {
-                "Vector" | "Rotator" => {
-                    let val = prop_value_short(&prop.value, ctx.imports, ctx.export_names);
-                    writeln!(buf, "{}{}: {}", indent, prop.name, val).unwrap();
-                }
-                _ => {
-                    let summary: Vec<String> = fields
-                        .iter()
-                        .filter_map(|f| match &f.value {
-                            PropValue::Struct { .. }
-                            | PropValue::Array { .. }
-                            | PropValue::Map { .. } => None,
-                            _ => {
-                                let val = prop_value_short(&f.value, ctx.imports, ctx.export_names);
-                                Some(format!("{}: {}", f.name, val))
-                            }
-                        })
-                        .collect();
-                    if !summary.is_empty() {
-                        writeln!(buf, "{}{}: {}", indent, prop.name, summary.join(", ")).unwrap();
-                    }
-                }
-            }
             continue;
         }
         let val = prop_value_short(&prop.value, ctx.imports, ctx.export_names);
@@ -152,6 +124,7 @@ pub(crate) fn format_component_tree(
     buf: &mut String,
     asset: &ParsedAsset,
     export_names: &[String],
+    filters: &[String],
 ) -> Vec<(String, String)> {
     let mut scs_nodes: HashMap<String, (String, String, Vec<String>)> = HashMap::new();
     let mut components: Vec<(String, String)> = Vec::new();
@@ -207,11 +180,19 @@ pub(crate) fn format_component_tree(
             comp_props: &comp_props,
             cat_exports: &cat_exports,
         };
-        writeln!(buf, "Components:").unwrap();
+        let mut items = String::new();
         for root in &root_nodes {
-            fmt_comp_tree(buf, root, 0, &scs_nodes, &ctx);
+            let mut item = String::new();
+            fmt_comp_tree(&mut item, root, 0, &scs_nodes, &ctx);
+            if block_matches_filter(&item, filters) {
+                items.push_str(&item);
+            }
         }
-        writeln!(buf).unwrap();
+        if !items.is_empty() {
+            writeln!(buf, "Components:").unwrap();
+            buf.push_str(&items);
+            writeln!(buf).unwrap();
+        }
     }
 
     components
@@ -223,6 +204,7 @@ pub(crate) fn format_variables(
     asset: &ParsedAsset,
     export_names: &[String],
     component_names: &[(String, String)],
+    filters: &[String],
 ) {
     let comp_names: Vec<&str> = component_names.iter().map(|(n, _)| n.as_str()).collect();
 
@@ -248,7 +230,9 @@ pub(crate) fn format_variables(
     for (hdr, props) in &asset.exports {
         if hdr.object_name.starts_with("Default__") && !props.is_empty() {
             for prop in props {
-                if matches!(prop.name.as_str(), "ActorLabel" | "bCanProxyPhysics") {
+                if matches!(prop.name.as_str(), "ActorLabel" | "UberGraphFrame")
+                    || comp_names.contains(&prop.name.as_str())
+                {
                     continue;
                 }
                 let val_str = prop_value_short(&prop.value, &asset.imports, export_names);
@@ -257,22 +241,34 @@ pub(crate) fn format_variables(
         }
     }
 
-    if !members.is_empty() {
-        writeln!(buf, "Variables:").unwrap();
-        for decl in &members {
-            let var_name = decl.split(':').next().unwrap_or("");
-            if let Some((_, val)) = defaults.iter().find(|(n, _)| n == var_name) {
-                writeln!(buf, "  {} = {}", decl, val).unwrap();
-            } else {
-                writeln!(buf, "  {}", decl).unwrap();
+    let variables: Vec<String> = members
+        .iter()
+        .map(|declaration| {
+            let var_name = declaration.split(':').next().unwrap_or("");
+            match defaults.iter().find(|(name, _)| name == var_name) {
+                Some((_, value)) => format!("  {declaration} = {value}\n"),
+                None => format!("  {declaration}\n"),
             }
+        })
+        .collect();
+    let defaults: Vec<String> = defaults
+        .iter()
+        .filter(|(name, _)| {
+            !members
+                .iter()
+                .any(|declaration| declaration.split(':').next() == Some(name.as_str()))
+        })
+        .map(|(name, value)| format!("  {name} = {value}\n"))
+        .collect();
+    for (header, items) in [("Variables:", variables), ("Default values:", defaults)] {
+        let selected: String = items
+            .into_iter()
+            .filter(|item| block_matches_filter(item, filters))
+            .collect();
+        if !selected.is_empty() {
+            writeln!(buf, "{header}").unwrap();
+            buf.push_str(&selected);
+            writeln!(buf).unwrap();
         }
-        writeln!(buf).unwrap();
-    } else if !defaults.is_empty() {
-        writeln!(buf, "Default values:").unwrap();
-        for (name, val) in &defaults {
-            writeln!(buf, "  {} = {}", name, val).unwrap();
-        }
-        writeln!(buf).unwrap();
     }
 }

@@ -9,8 +9,11 @@
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use unreal_bp_inspect::bytecode::asset::DecodedAsset;
 use unreal_bp_inspect::bytecode::decode::decode_asset;
 use unreal_bp_inspect::bytecode::emit::emit_summary_with_asset;
+use unreal_bp_inspect::bytecode::expr::Expr;
+use unreal_bp_inspect::bytecode::stmt::{LatchKind, Stmt};
 use unreal_bp_inspect::parser::parse_asset;
 
 /// v2 summary of the committed BP_DecoderTest fixture. Cached: the fixture is
@@ -24,7 +27,7 @@ fn decoder_test_emit() -> &'static str {
             .unwrap_or_else(|err| panic!("read {}: {}", asset_path.display(), err));
         let parsed = parse_asset(&bytes, false)
             .unwrap_or_else(|err| panic!("parse {}: {:?}", asset_path.display(), err));
-        let decoded = decode_asset(&parsed, &bytes);
+        let decoded = decode_asset(&parsed);
         emit_summary_with_asset(&decoded, &parsed)
     })
 }
@@ -61,54 +64,116 @@ fn function_body(emit: &str, name: &str) -> String {
     body.join("\n")
 }
 
-/// Finding 1: identically-wired mirror events decode asymmetrically.
-/// `OnRightAxis` prepends a spurious `ResetDoOnce(Release)` inside the
-/// `DoOnce(Attempt)` THEN body that `OnLeftAxis` does not. Both should have
-/// exactly one (the post-`Attempt` re-arm), matching the editor graph.
+fn decoder_test_events() -> &'static DecodedAsset {
+    static DECODED: OnceLock<DecodedAsset> = OnceLock::new();
+    DECODED.get_or_init(|| {
+        let asset_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("samples/ue_4.27/BP_DecoderTest.uasset");
+        let bytes = std::fs::read(asset_path).unwrap();
+        decode_asset(&parse_asset(&bytes, false).unwrap())
+    })
+}
+
+fn event_body(name: &str) -> &'static [Stmt] {
+    &decoder_test_events()
+        .events
+        .iter()
+        .find(|event| event.name == name)
+        .unwrap()
+        .body
+}
+
+fn call_is(stmt: &Stmt, name: &str) -> bool {
+    matches!(stmt, Stmt::Call { func: Expr::Var(function), .. } if function == name)
+}
+
+fn latch_for_call<'body>(
+    body: &'body [Stmt],
+    call: &str,
+) -> Option<(&'body str, &'body str, &'body [Stmt])> {
+    for stmt in body {
+        if let Stmt::Latch {
+            kind: LatchKind::DoOnce { name, gate_var },
+            body,
+            ..
+        } = stmt
+        {
+            if body.iter().any(|stmt| call_is(stmt, call)) {
+                return Some((name, gate_var, body));
+            }
+        }
+        for child in stmt.child_bodies_structural() {
+            if let Some(latch) = latch_for_call(child, call) {
+                return Some(latch);
+            }
+        }
+    }
+    None
+}
+
+fn reset_target(stmt: &Stmt) -> Option<&str> {
+    let Stmt::Call { args, .. } = stmt else {
+        return None;
+    };
+    if !call_is(stmt, "ResetDoOnce") {
+        return None;
+    }
+    match args.as_slice() {
+        [Expr::Var(target)] => Some(target),
+        _ => None,
+    }
+}
+
+fn reset_count(body: &[Stmt], name: &str) -> usize {
+    body.iter()
+        .map(|stmt| {
+            usize::from(reset_target(stmt) == Some(name))
+                + stmt
+                    .child_bodies_structural()
+                    .iter()
+                    .map(|child| reset_count(child, name))
+                    .sum::<usize>()
+        })
+        .sum()
+}
+
+/// Each input path resets its own shared release gate exactly once.
 #[test]
 fn finding1_onrightaxis_no_duplicate_release_reset() {
-    let emit = decoder_test_emit();
-    let left = function_body(emit, "OnLeftAxis")
-        .matches("ResetDoOnce(Release)")
-        .count();
-    let right = function_body(emit, "OnRightAxis")
-        .matches("ResetDoOnce(Release)")
-        .count();
-    assert_eq!(
-        left, 1,
-        "sanity: OnLeftAxis should have exactly one ResetDoOnce(Release)"
-    );
-    assert_eq!(
-        right, left,
-        "EXPECTED-FAIL (finding 1): OnRightAxis has {} ResetDoOnce(Release), \
-         should mirror OnLeftAxis ({}). The convergence/duplication pass is \
-         duplicating the shared Release-gate reset for the right event.",
-        right, left
+    let mut release_names = Vec::new();
+    for (axis, released) in [
+        ("OnLeftAxis", "OnLeftReleased"),
+        ("OnRightAxis", "OnRightReleased"),
+    ] {
+        let (name, _, _) = latch_for_call(event_body(released), "Release").unwrap();
+        assert_eq!(reset_count(event_body(axis), name), 1, "{axis}");
+        release_names.push(name);
+    }
+    assert_ne!(
+        release_names[0], release_names[1],
+        "independent release gates need distinct names"
     );
 }
 
-/// Finding 2: the dedicated released events fire the shared `DoOnce(Release)`
-/// via fan-in. They must render the `DoOnce(Release) { Release(bIsLeft) }`
-/// path they trigger, not an empty body and not the wrong content. The
-/// assertion checks the full shape, the tracker is otherwise fooled by a
-/// non-empty-but-wrong body.
+/// Shared release entries retain one identity, while left and right stay independent.
 #[test]
 fn finding2_released_events_show_release_doonce() {
-    let emit = decoder_test_emit();
-    for (event, call) in [
-        ("OnLeftReleased", "Release(true)"),
-        ("OnRightReleased", "Release(false)"),
+    let mut gates = Vec::new();
+    for (axis, released, argument) in [
+        ("OnLeftAxis", "OnLeftReleased", "true"),
+        ("OnRightAxis", "OnRightReleased", "false"),
     ] {
-        let body = function_body(emit, event);
-        assert!(
-            body.contains("DoOnce(Release)") && body.contains(call),
-            "finding 2: {}() should render `DoOnce(Release) {{ {} }}` (the shared \
-             Release path it drives via fan-in), got:\n{}",
-            event,
-            call,
-            body
-        );
+        let (axis_name, axis_gate, _) = latch_for_call(event_body(axis), "Release").unwrap();
+        let (name, gate, body) = latch_for_call(event_body(released), "Release").unwrap();
+        assert_eq!(axis_name, name);
+        assert_eq!(axis_gate, gate);
+        assert!(body
+            .iter()
+            .any(|stmt| matches!(stmt, Stmt::Call { args, .. }
+            if call_is(stmt, "Release") && args == &[Expr::Literal(argument.into())])));
+        gates.push(gate);
     }
+    assert_ne!(gates[0], gates[1]);
 }
 
 /// Finding 3: a plain two-pin Sequence emits a third, unlabeled `PrintString`
@@ -131,9 +196,8 @@ fn finding3_seq_twopin_no_trailing_duplicate() {
 /// Finding 4 (RESOLVED): a 4-pin Sequence with pin 2 disconnected preserves
 /// faithful editor pin numbering. The disconnected pin emits an explicit
 /// `// Sequence [2] (empty):` header with no body, and the wired pin 3 stays
-/// `// Sequence [3]:`. Faithful numbering comes from emit-time EdGraph
-/// then-pin correlation (no IR change); see `emit_sequence` in
-/// `bytecode/emit/summary.rs`.
+/// `// Sequence [3]:`. Unambiguous editor pin correlation restores the
+/// disconnected slot in the decoded statement tree.
 #[test]
 fn finding4_seq_withemptypin_faithful_numbering() {
     let emit = decoder_test_emit();
@@ -629,26 +693,21 @@ fn l2_latch_doonce_single_gate_no_phantom() {
     );
 }
 
-/// Finding L3: `OnLeftAxis`'s else branch must emit exactly ONE
-/// `ResetDoOnce(Attempt)` (then `DoOnce(Release) { Release(true) }`), matching the
-/// editor graph and the mirror `OnRightAxis`. The re-wired explicit Sequence in
-/// the else re-triggers the B3b sibling-arm duplicate-decode: v2 emits
-/// `ResetDoOnce(Attempt)` TWICE. Scoped to the duplicate (the unambiguous spec
-/// violation); the then-arm ordering and the call-graph attribution drop are
-/// tracked in the investigation, not pinned here. SENSITIVE: shares machinery
-/// with the GripLeft/GripRight real fixtures — guard the 9-fixture gate on fix.
+/// The below-threshold branch resets the matching attempt gate once.
 #[test]
 fn l3_onleftaxis_else_single_attempt_reset() {
-    let emit = decoder_test_emit();
-    let body = function_body(emit, "OnLeftAxis");
-    let resets = body.matches("ResetDoOnce(Attempt)").count();
-    assert_eq!(
-        resets, 1,
-        "EXPECTED-FAIL (finding L3): OnLeftAxis emits {} `ResetDoOnce(Attempt)` in \
-         its else; should be exactly 1. The re-wired else Sequence re-triggers the \
-         B3b sibling-arm duplicate-decode.\nbody:\n{}",
-        resets, body
-    );
+    for axis in ["OnLeftAxis", "OnRightAxis"] {
+        let body = event_body(axis);
+        let (attempt_name, _, _) = latch_for_call(body, "Attempt").unwrap();
+        let else_body = body
+            .iter()
+            .find_map(|stmt| match stmt {
+                Stmt::Branch { else_body, .. } => Some(else_body.as_slice()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(reset_count(else_body, attempt_name), 1, "{axis}");
+    }
 }
 
 /// Finding L4: `OnLeftAxis` calls `Attempt(true)` and `Release(true)` in its
@@ -699,50 +758,103 @@ fn l4_onleftaxis_in_call_graph() {
     );
 }
 
-/// Finding L5: `OnLeftAxis`'s then-arm (the `DoOnce(Attempt)` block) must order
-/// `Attempt(true)` BEFORE the post-Attempt `ResetDoOnce(Release)` re-arm,
-/// matching the editor graph and the mirror `OnRightAxis` (`Attempt(false)` then
-/// `ResetDoOnce(Release)`). The two events are mirrors and must render the
-/// then-arm identically; the within-event Knot fan-in scrambles OnLeftAxis's
-/// statement order so v2 emits the reset first (`ResetDoOnce(Release)` then
-/// `Attempt(true)`).
+/// Re-arming the release gate occurs after Attempt and inside its DoOnce.
 #[test]
 fn l5_onleftaxis_thenarm_attempt_before_release_reset() {
-    let emit = decoder_test_emit();
-    let body = function_body(emit, "OnLeftAxis");
-    let (attempt_pos, reset_pos) = match (
-        body.find("Attempt(true)"),
-        body.find("ResetDoOnce(Release)"),
-    ) {
-        (Some(attempt), Some(reset)) => (attempt, reset),
-        _ => panic!(
-            "L5 guard: OnLeftAxis must contain both `Attempt(true)` and \
-             `ResetDoOnce(Release)` in its then-arm.\nbody:\n{}",
-            body
-        ),
-    };
+    for (axis, released) in [
+        ("OnLeftAxis", "OnLeftReleased"),
+        ("OnRightAxis", "OnRightReleased"),
+    ] {
+        let (_, _, gated) = latch_for_call(event_body(axis), "Attempt").unwrap();
+        let (release_name, _, _) = latch_for_call(event_body(released), "Release").unwrap();
+        let attempt = gated
+            .iter()
+            .position(|stmt| call_is(stmt, "Attempt"))
+            .unwrap();
+        let reset = gated
+            .iter()
+            .position(|stmt| reset_target(stmt) == Some(release_name))
+            .unwrap();
+        assert!(attempt < reset, "{axis}");
+        assert_eq!(reset_count(gated, release_name), 1, "{axis}");
+    }
+}
+
+#[test]
+fn simple_for_recomputes_its_bound_after_the_increment() {
+    let body = function_body(decoder_test_emit(), "Loop_ForSimple");
+    let inner = first_loop_inner(&body);
+    let condition = "$LessEqual_IntInt = (Temp_int_Variable <= 3)";
     assert!(
-        attempt_pos < reset_pos,
-        "EXPECTED-FAIL (finding L5): OnLeftAxis's then-arm emits \
-         `ResetDoOnce(Release)` before `Attempt(true)`; the editor order is \
-         `Attempt(true)` then the post-Attempt `ResetDoOnce(Release)` re-arm \
-         (matching the mirror OnRightAxis).\nbody:\n{}",
-        body
+        inner.contains(condition),
+        "loop condition must be refreshed: {body}"
     );
-    // Sanity: the mirror OnRightAxis already renders the correct order, guarding
-    // against a fix that reverses both events instead of just OnLeftAxis.
-    let right = function_body(emit, "OnRightAxis");
-    let right_ordered = match (
-        right.find("Attempt(false)"),
-        right.find("ResetDoOnce(Release)"),
-    ) {
-        (Some(attempt), Some(reset)) => attempt < reset,
-        _ => false,
-    };
     assert!(
-        right_ordered,
-        "L5 sanity: OnRightAxis should order `Attempt(false)` before its \
-         `ResetDoOnce(Release)`.\nbody:\n{}",
-        right
+        inner
+            .find("Temp_int_Variable = (Temp_int_Variable + 1)")
+            .unwrap()
+            < inner.find(condition).unwrap(),
+        "increment must precede the next condition: {body}"
     );
+    assert!(
+        body.find("Temp_int_Variable = 0").unwrap() < body.find(condition).unwrap(),
+        "initialization must precede the first condition: {body}"
+    );
+}
+
+#[test]
+fn while_recomputes_its_condition_after_changing_the_counter() {
+    let body = function_body(decoder_test_emit(), "Loop_While");
+    let inner = first_loop_inner(&body);
+    let condition = "$Less_IntInt = (LoopCounter < 5)";
+    assert!(
+        inner.contains(condition),
+        "loop condition must be refreshed: {body}"
+    );
+    assert!(
+        inner.find("LoopCounter = (LoopCounter + 1)").unwrap() < inner.find(condition).unwrap(),
+        "increment must precede the next condition: {body}"
+    );
+}
+
+#[test]
+fn converged_doonce_has_one_shared_gate_in_both_event_entries() {
+    fn latch_count(body: &[Stmt]) -> usize {
+        body.iter()
+            .map(|stmt| {
+                usize::from(matches!(
+                    stmt,
+                    Stmt::Latch {
+                        kind: LatchKind::DoOnce { .. },
+                        ..
+                    }
+                )) + stmt
+                    .child_bodies_structural()
+                    .iter()
+                    .map(|child| latch_count(child))
+                    .sum::<usize>()
+            })
+            .sum()
+    }
+    let mut identities = Vec::new();
+    for event in ["Conv_DirectDoOnce_A", "Conv_DirectDoOnce_B"] {
+        let body = event_body(event);
+        assert_eq!(
+            latch_count(body),
+            1,
+            "{event} must execute through one gate"
+        );
+        let identity = body
+            .iter()
+            .find_map(|stmt| match stmt {
+                Stmt::Latch {
+                    kind: LatchKind::DoOnce { name, gate_var },
+                    ..
+                } => Some((name, gate_var)),
+                _ => None,
+            })
+            .unwrap();
+        identities.push(identity);
+    }
+    assert_eq!(identities[0], identities[1]);
 }

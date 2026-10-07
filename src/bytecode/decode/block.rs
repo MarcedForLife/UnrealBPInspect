@@ -180,7 +180,7 @@ pub(crate) fn decode_linear(start: usize, ctx: &DecodeCtx) -> Vec<Stmt> {
 ///   EX_CALL_MATH, EX_VIRTUAL_FUNCTION, EX_LOCAL_VIRTUAL_FUNCTION
 /// - Return: EX_RETURN
 /// - Instrumentation (dropped): EX_WIRE_TRACEPOINT, EX_TRACEPOINT, EX_INSTRUMENTATION_EVENT
-fn decode_one(pos: &mut usize, ctx: &DecodeCtx) -> Result<Option<Stmt>, Box<Stmt>> {
+pub(super) fn decode_one(pos: &mut usize, ctx: &DecodeCtx) -> Result<Option<Stmt>, Box<Stmt>> {
     let offset = *pos;
     if offset >= ctx.bytecode.len() {
         return Err(Box::new(make_unknown(
@@ -346,16 +346,14 @@ pub(super) fn decode_assignment(pos: &mut usize, ctx: &DecodeCtx) -> Stmt {
 /// collapse for nested expressions; both share the predicate so the
 /// recognised-class set stays in one place.
 ///
-/// After canonicalisation, arguments at OUT-parameter positions of the
-/// callee wrap in `Expr::Out`. The lookup keys on the resolved callee
-/// name against `ctx.function_signatures`. Imported (cross-asset)
-/// callees aren't represented there and pass through unwrapped.
+/// Parameter directions are retained by the expression decoder before
+/// imported callee identities are shortened for display.
 pub(super) fn decode_call(pos: &mut usize, ctx: &DecodeCtx) -> Stmt {
     use crate::bytecode::transforms::lower_static_library_calls::is_static_library_class_literal;
 
     let offset = *pos;
     let expr = decode_expr(pos, ctx);
-    let stmt = match expr {
+    match expr {
         Expr::Call { name, args } => Stmt::Call {
             func: Expr::Var(name),
             args,
@@ -378,60 +376,6 @@ pub(super) fn decode_call(pos: &mut usize, ctx: &DecodeCtx) -> Stmt {
             args: vec![],
             offset,
         },
-    };
-    wrap_out_args(stmt, ctx)
-}
-
-/// Wrap call-site arguments at OUT-parameter positions in `Expr::Out`,
-/// using the signature recorded on `ParsedAsset` for the callee.
-///
-/// Returns the input unchanged when:
-/// - the statement is not a `Stmt::Call`,
-/// - the callee name resolves through more than a `FieldAccess` field
-///   or `Var` (no signature key),
-/// - `ctx.function_signatures` is absent (unit-test contexts),
-/// - the callee isn't in the signature map (imported / unknown),
-/// - the argument is already `Expr::Out` (avoid double-wrap).
-pub(super) fn wrap_out_args(stmt: Stmt, ctx: &DecodeCtx) -> Stmt {
-    const CPF_OUT_PARM: u64 = 0x100;
-    let signatures = match ctx.function_signatures {
-        Some(map) => map,
-        None => return stmt,
-    };
-    let Stmt::Call { func, args, offset } = stmt else {
-        return stmt;
-    };
-    let callee_name = match &func {
-        Expr::Var(name) => name.as_str(),
-        Expr::FieldAccess { field, .. } => field.as_str(),
-        _ => {
-            return Stmt::Call { func, args, offset };
-        }
-    };
-    let Some(signature) = signatures.get(callee_name) else {
-        return Stmt::Call { func, args, offset };
-    };
-    let wrapped: Vec<Expr> = args
-        .into_iter()
-        .enumerate()
-        .map(|(idx, arg)| {
-            let param = match signature.params.get(idx) {
-                Some(p) => p,
-                None => return arg,
-            };
-            if param.flags & CPF_OUT_PARM == 0 {
-                return arg;
-            }
-            if matches!(arg, Expr::Out(_)) {
-                return arg;
-            }
-            Expr::Out(Box::new(arg))
-        })
-        .collect();
-    Stmt::Call {
-        func,
-        args: wrapped,
-        offset,
     }
 }
 
@@ -456,7 +400,9 @@ fn decode_return(pos: &mut usize, ctx: &DecodeCtx) -> Stmt {
             _ => {
                 let expr = decode_expr(pos, ctx);
                 match expr {
-                    Expr::Unknown { .. } => None,
+                    Expr::Unknown { reason, .. } => {
+                        return make_unknown_len(offset, ctx, &reason, pos.saturating_sub(offset));
+                    }
                     other => Some(other),
                 }
             }
@@ -470,8 +416,8 @@ fn decode_return(pos: &mut usize, ctx: &DecodeCtx) -> Stmt {
 /// Build a `Stmt::Unknown` from the raw bytes at `offset` with the given byte
 /// length.
 fn make_unknown_len(offset: usize, ctx: &DecodeCtx, reason: &str, length: usize) -> Stmt {
-    let end = (offset + length).min(ctx.bytecode.len());
-    let raw_bytes = ctx.bytecode[offset..end].to_vec();
+    let end = offset.saturating_add(length).min(ctx.bytecode.len());
+    let raw_bytes = ctx.bytecode[offset.min(end)..end].to_vec();
     Stmt::Unknown {
         reason: reason.to_string(),
         raw_bytes,

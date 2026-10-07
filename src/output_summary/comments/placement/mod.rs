@@ -42,6 +42,7 @@ use super::audit::{maybe_emit_audit, PlacementTrace, Strategy};
 use super::CommentModel;
 
 mod anchor;
+mod call_attribution;
 mod classify;
 mod context;
 mod ordering;

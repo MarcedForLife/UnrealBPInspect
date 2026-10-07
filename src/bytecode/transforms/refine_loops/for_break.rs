@@ -28,10 +28,8 @@ use crate::bytecode::transforms::visit;
 ///
 /// On match it:
 ///
-/// - sets `*cond` to the bound operand reference (the un-resolved
-///   `Var($LessEqual_IntInt)` so the later inliner folds it into the header,
-///   mirroring plain ForC, and so the dead-`$`-temp sweep keeps the bound
-///   alive while dropping the `$BooleanAND` And-leak),
+/// - sets `*cond` to the resolved bound expression so each iteration reads
+///   the updated counter, without relying on temporary inlining,
 /// - moves the increment statements out of the guard region into
 ///   `LoopKind::ForC { init: vec![], increment }`,
 /// - drops the trailing guard Branch and its optional `$`-temp re-eval from
@@ -59,8 +57,7 @@ pub(super) fn try_promote_for_loop_with_break(
     // The head cond must be the And-guarded `(!break_flag && (counter <= last))`
     // shape. Resolve the cond and its And operands, peel the break-flag
     // negation, and confirm the surviving operand is an index bound over a
-    // counter. `bound_operand` is the ORIGINAL (un-resolved) operand reference
-    // so it can become the loop's new cond.
+    // counter. Install the resolved comparison in the loop header.
     let Some((counter_name, bound_operand)) = match_for_break_bound(cond_expr, &scopes) else {
         return false;
     };
@@ -81,8 +78,8 @@ pub(super) fn try_promote_for_loop_with_break(
 /// Match the ForLoopWithBreak head cond: resolve `cond` to `Binary(And, A, B)`,
 /// peel the break-flag negation, and confirm the surviving operand is an index
 /// bound `Binary(Le|Lt, Var(counter), bound)`. Returns the counter name and the
-/// ORIGINAL (un-resolved) bound operand so the caller can install it as the
-/// loop's cond (letting the inliner fold the `$`-temp into the header).
+/// resolved bound expression so the caller can install it as the loop's
+/// repeatedly evaluated condition.
 ///
 /// Distinct from [`match_foreach_cond`]: this requires a plain index bound, NOT
 /// an `Array_Length` ForEach bound, so it never fires on a ForEach-with-break.
@@ -109,7 +106,10 @@ fn match_for_break_bound(cond: &Expr, scopes: &[&[Stmt]]) -> Option<(String, Exp
         return None;
     };
     let counter_name = match_index_bound_counter(bound_operand, scopes)?;
-    Some((counter_name, bound_operand.clone()))
+    Some((
+        counter_name,
+        resolve_cond_chain(bound_operand, scopes).clone(),
+    ))
 }
 
 /// When `expr` resolves to `Binary(Le|Lt, Var(counter), bound)` whose bound is

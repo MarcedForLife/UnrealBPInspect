@@ -208,6 +208,12 @@ mod tests {
             .map(|(hdr, _)| hdr.object_name.clone())
             .collect();
         let parsed = ParsedAsset {
+            version: crate::types::AssetVersion {
+                file_ver: 522,
+                file_ver_ue5: 0,
+            },
+            name_table: crate::binary::NameTable::from_names(Vec::new()),
+            diagnostics: Vec::new(),
             imports,
             exports,
             pin_data: Default::default(),
@@ -252,6 +258,12 @@ mod tests {
             .map(|(hdr, _)| hdr.object_name.clone())
             .collect();
         let parsed = ParsedAsset {
+            version: crate::types::AssetVersion {
+                file_ver: 522,
+                file_ver_ue5: 0,
+            },
+            name_table: crate::binary::NameTable::from_names(Vec::new()),
+            diagnostics: Vec::new(),
             imports,
             exports,
             pin_data: Default::default(),
@@ -369,6 +381,12 @@ mod tests {
             .map(|(hdr, _)| hdr.object_name.clone())
             .collect();
         let parsed = ParsedAsset {
+            version: crate::types::AssetVersion {
+                file_ver: 522,
+                file_ver_ue5: 0,
+            },
+            name_table: crate::binary::NameTable::from_names(Vec::new()),
+            diagnostics: Vec::new(),
             imports,
             exports,
             pin_data: Default::default(),

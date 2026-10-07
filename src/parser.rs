@@ -4,14 +4,14 @@
 //! 3. Per-export tagged properties and bytecode
 
 use anyhow::{ensure, Context, Result};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::binary::*;
 use crate::bytecode::names::K2NODE_PREFIX;
 use crate::ffield::*;
 use crate::pins::scan_for_pins;
-use crate::properties::read_properties;
+use crate::properties::{read_properties, read_soft_object_path};
 use crate::resolve::{class_of, format_func_flags, resolve_index, short_class};
 use crate::types::*;
 
@@ -51,6 +51,7 @@ enum ExportKind {
 /// Shared immutable context for export-data parsing helpers.
 struct ParseCtx<'a> {
     name_table: &'a NameTable,
+    soft_object_paths: &'a [String],
     imports: &'a [ImportEntry],
     export_names: &'a [String],
     debug: bool,
@@ -73,6 +74,8 @@ struct PackageHeader {
     ver: AssetVersion,
     name_count: i32,
     name_offset: i32,
+    soft_object_path_count: i32,
+    soft_object_path_offset: i32,
     export_count: i32,
     export_offset: i32,
     import_count: i32,
@@ -101,6 +104,12 @@ fn read_package_header(reader: &mut Reader) -> Result<PackageHeader> {
     let _licensee_ver = read_i32(reader)?;
     // Custom versions: each entry is 16-byte GUID + int32 version = 20 bytes
     let custom_ver_count = read_i32(reader)?;
+    ensure!(
+        custom_ver_count >= 0
+            && custom_ver_count as u64
+                <= (reader.get_ref().len() as u64).saturating_sub(reader.position()) / 20,
+        "invalid custom version count {custom_ver_count}"
+    );
     reader.seek(SeekFrom::Current(custom_ver_count as i64 * 20))?;
     let _total_header_size = read_i32(reader)?;
     let _folder_name = read_fstring(reader)?;
@@ -114,10 +123,12 @@ fn read_package_header(reader: &mut Reader) -> Result<PackageHeader> {
     );
     let name_count = read_i32(reader)?;
     let name_offset = read_i32(reader)?;
-    if file_ver_ue5 >= VER_UE5_SOFT_OBJECT_PATH_LIST {
-        let _soft_count = read_i32(reader)?;
-        let _soft_offset = read_i32(reader)?;
-    }
+    let (soft_object_path_count, soft_object_path_offset) =
+        if file_ver_ue5 >= VER_UE5_SOFT_OBJECT_PATH_LIST {
+            (read_i32(reader)?, read_i32(reader)?)
+        } else {
+            (0, 0)
+        };
     if file_ver >= VER_UE4_LOCALIZATION_ID {
         let _loc_id = read_fstring(reader)?;
     }
@@ -129,6 +140,25 @@ fn read_package_header(reader: &mut Reader) -> Result<PackageHeader> {
     let export_offset = read_i32(reader)?;
     let import_count = read_i32(reader)?;
     let import_offset = read_i32(reader)?;
+    for (table, count, offset) in [
+        ("name", name_count, name_offset),
+        (
+            "soft object path",
+            soft_object_path_count,
+            soft_object_path_offset,
+        ),
+        ("import", import_count, import_offset),
+        ("export", export_count, export_offset),
+    ] {
+        ensure!(
+            count >= 0 && offset >= 0 && offset as usize <= reader.get_ref().len(),
+            "invalid {table} table range"
+        );
+        ensure!(
+            count as usize <= reader.get_ref().len().saturating_sub(offset as usize) / 8,
+            "invalid {table} table count {count}"
+        );
+    }
 
     Ok(PackageHeader {
         ver: AssetVersion {
@@ -137,6 +167,8 @@ fn read_package_header(reader: &mut Reader) -> Result<PackageHeader> {
         },
         name_count,
         name_offset,
+        soft_object_path_count,
+        soft_object_path_offset,
         export_count,
         export_offset,
         import_count,
@@ -249,8 +281,7 @@ fn read_export_headers(
 
 /// Parse a complete `.uasset` byte slice into a [`ParsedAsset`].
 ///
-/// Individual export parse failures are logged (when `debug` is true)
-/// and produce empty property lists.
+/// Malformed exports retain any successfully read properties.
 pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
     let file_size = data.len();
     let mut reader = std::io::Cursor::new(data);
@@ -259,6 +290,21 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
     let ver = hdr.ver;
     let name_table = NameTable::read(&mut reader, hdr.name_count, hdr.name_offset)
         .context("failed to read name table")?;
+    let soft_object_path_end = [hdr.name_offset, hdr.import_offset, hdr.export_offset]
+        .into_iter()
+        .filter(|offset| *offset > hdr.soft_object_path_offset)
+        .map(|offset| offset as usize)
+        .min()
+        .unwrap_or(data.len());
+    let mut soft_path_reader = std::io::Cursor::new(&data[..soft_object_path_end]);
+    soft_path_reader.set_position(hdr.soft_object_path_offset as u64);
+    let mut soft_object_paths = Vec::new();
+    for index in 0..hdr.soft_object_path_count {
+        soft_object_paths.push(
+            read_soft_object_path(&mut soft_path_reader, &name_table, ver)
+                .with_context(|| format!("failed to read soft object path table entry {index}"))?,
+        );
+    }
 
     if debug {
         eprintln!(
@@ -290,6 +336,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
         .collect();
     let pctx = ParseCtx {
         name_table: &name_table,
+        soft_object_paths: &soft_object_paths,
         imports: &imports,
         export_names: &export_names_pre,
         debug,
@@ -309,13 +356,143 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
             total_links
         );
     }
-    Ok(ParsedAsset {
+    let mut asset = ParsedAsset {
+        version: ver,
+        name_table,
+        diagnostics: parsed_exports.diagnostics,
         imports,
         exports: parsed_exports.exports,
         pin_data: parsed_exports.pin_data,
         function_signatures: parsed_exports.function_signatures,
         bytecode_by_export: parsed_exports.bytecode_by_export,
-    })
+    };
+    add_imported_function_signatures(&mut asset);
+    Ok(asset)
+}
+
+/// Recover imported parameter directions only when all stored call nodes agree.
+/// Qualified import paths keep unrelated functions with the same name separate.
+fn add_imported_function_signatures(asset: &mut ParsedAsset) {
+    use crate::prop_query::{find_prop, find_prop_str};
+    use crate::resolve::resolve_import_path;
+
+    let mut candidates: BTreeMap<String, Vec<(String, String, u64)>> = BTreeMap::new();
+    let mut ambiguous = BTreeSet::new();
+    for (&node_index, pin_data) in &asset.pin_data {
+        let Some((header, properties)) = asset.exports.get(node_index.saturating_sub(1)) else {
+            continue;
+        };
+        if header.class_index >= 0
+            || asset
+                .imports
+                .get((-header.class_index - 1) as usize)
+                .is_none_or(|import| import.object_name != "K2Node_CallFunction")
+        {
+            continue;
+        }
+        let Some(Property {
+            value: PropValue::Struct { fields, .. },
+            ..
+        }) = find_prop(properties, "FunctionReference")
+        else {
+            continue;
+        };
+        let Some(member_name) = find_prop_str(fields, "MemberName") else {
+            continue;
+        };
+        let Some(Property {
+            value: PropValue::Object(parent),
+            ..
+        }) = find_prop(fields, "MemberParent")
+        else {
+            continue;
+        };
+        if *parent >= 0 {
+            continue;
+        }
+        let key = format!(
+            "{}.{}",
+            resolve_import_path(&asset.imports, *parent),
+            member_name
+        );
+        let params: Vec<_> = pin_data
+            .pins
+            .iter()
+            .filter(|pin| {
+                pin.pin_type != PIN_TYPE_EXEC && pin.name != "self" && pin.name != "ReturnValue"
+            })
+            .map(|pin| {
+                (
+                    pin.name.clone(),
+                    pin.pin_type.clone(),
+                    if pin.is_data_output() { 0x180 } else { 0x80 },
+                )
+            })
+            .collect();
+        if let Some(previous) = candidates.get(&key) {
+            if previous != &params {
+                ambiguous.insert(key);
+            }
+        } else {
+            candidates.insert(key, params);
+        }
+    }
+    insert_imported_function_signatures(asset, candidates, ambiguous);
+}
+
+fn insert_imported_function_signatures(
+    asset: &mut ParsedAsset,
+    candidates: BTreeMap<String, Vec<(String, String, u64)>>,
+    ambiguous: BTreeSet<String>,
+) {
+    use crate::resolve::resolve_import_path;
+    let mut owners_by_name: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for key in candidates.keys() {
+        if let Some((_, name)) = key.rsplit_once('.') {
+            owners_by_name
+                .entry(name.into())
+                .or_default()
+                .insert(key.clone());
+        }
+    }
+    for (index, import) in asset.imports.iter().enumerate() {
+        if import.class_name == "Function" {
+            owners_by_name
+                .entry(import.object_name.clone())
+                .or_default()
+                .insert(resolve_import_path(&asset.imports, -(index as i32) - 1));
+        }
+    }
+    for (key, params) in candidates {
+        if ambiguous.contains(&key) {
+            continue;
+        }
+        let signature = FunctionSignature {
+            params: params
+                .into_iter()
+                .map(|(name, type_name, flags)| ParamInfo {
+                    name,
+                    type_name,
+                    flags,
+                })
+                .collect(),
+            return_type: None,
+        };
+        // Virtual calls carry only an FName. Infer their direction only
+        // when this asset identifies a single owner for that name.
+        if let Some((_, name)) = key.rsplit_once('.') {
+            if owners_by_name
+                .get(name)
+                .is_some_and(|owners| owners.len() == 1)
+            {
+                asset
+                    .function_signatures
+                    .entry(name.into())
+                    .or_insert_with(|| signature.clone());
+            }
+        }
+        asset.function_signatures.insert(key, signature);
+    }
 }
 
 /// Per-export parse products collected while walking the serialized export
@@ -323,6 +500,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
 /// EdGraph pin data per K2Node, the function call signatures, and the raw
 /// captured bytecode keyed by 1-based export index.
 struct ParsedExports {
+    diagnostics: Vec<AssetDiagnostic>,
     exports: Vec<(ExportHeader, Vec<Property>)>,
     pin_data: HashMap<usize, NodePinData>,
     function_signatures: BTreeMap<String, FunctionSignature>,
@@ -352,7 +530,8 @@ fn parse_one_export(
     pctx: &ParseCtx,
     ver: AssetVersion,
     pin_scan_hint: &mut Option<u64>,
-) -> Result<ExportProducts> {
+    products: &mut ExportProducts,
+) -> Result<()> {
     reader.seek(SeekFrom::Start(hdr.serial_offset as u64))?;
     let end = hdr.serial_offset as u64 + hdr.serial_size as u64;
     let class_name = class_of(pctx.imports, pctx.export_names, hdr);
@@ -366,39 +545,54 @@ fn parse_one_export(
     }
 
     if kind == ExportKind::Other {
-        let props = read_properties(reader, pctx.name_table, end, ver);
+        ensure!(
+            read_properties(
+                reader,
+                pctx.name_table,
+                pctx.soft_object_paths,
+                end,
+                ver,
+                &mut products.props
+            )?,
+            "missing property terminator"
+        );
         let short = short_class(&class_name);
         let mut pin_data = None;
         if short.starts_with(K2NODE_PREFIX) || short == "EdGraphNode_Comment" {
-            // K2Node subclasses serialize additional data between the
-            // tagged property stream and the pin array. Scan forward
-            // from the current position looking for the pin data
-            // signature: deprecated_count(0) + reasonable pin_count.
-            let (pins, new_hint) = scan_for_pins(reader, pctx.name_table, end, ver, *pin_scan_hint);
+            // Class-specific data may precede the array. Repeated owning-pin
+            // wrappers identify candidates, and only complete arrays survive.
+            let (pins, new_hint) =
+                scan_for_pins(reader, pctx.name_table, end, ver, *pin_scan_hint)?;
             *pin_scan_hint = new_hint;
             if let Some(pins) = pins {
                 pin_data = Some(NodePinData { pins });
             }
         }
-        return Ok(ExportProducts {
-            props,
-            signature: None,
-            bytecode: None,
-            pin_data,
-        });
+        products.pin_data = pin_data;
+        return Ok(());
     }
 
     let is_function = kind == ExportKind::Function;
-    let props = read_properties(reader, pctx.name_table, end, ver);
+    ensure!(
+        read_properties(
+            reader,
+            pctx.name_table,
+            pctx.soft_object_paths,
+            end,
+            ver,
+            &mut products.props
+        )?,
+        "missing property terminator"
+    );
     let props_end_pos = reader.position();
 
-    let mut extra_props = props;
+    let extra_props = &mut products.props;
 
     // UStruct header: Next, Super, Children
     parse_ustruct_header(
         reader,
         pctx,
-        &mut extra_props,
+        extra_props,
         props_end_pos,
         end,
         &hdr.object_name,
@@ -428,10 +622,13 @@ fn parse_one_export(
     }
 
     // Script bytecode
-    let bytecode = capture_bytecode(reader, pctx, end, &hdr.object_name)?;
+    products.signature = signature;
+    products.bytecode = capture_bytecode(reader, pctx, end, &hdr.object_name)?
+        .filter(|(bytes, _)| is_function || !bytes.is_empty());
 
     // Function flags (after bytecode, only for Function exports)
-    if is_function && reader.position() + 4 <= end {
+    if is_function {
+        ensure!(reader.position() + 4 <= end, "missing function flags");
         let func_flags = read_u32(reader)?;
         if func_flags != 0 {
             extra_props.push(Property {
@@ -439,17 +636,16 @@ fn parse_one_export(
                 value: PropValue::Str(format_func_flags(func_flags)),
             });
         }
-        if func_flags & FUNC_NET != 0 && reader.position() + 4 <= end {
+        if func_flags & FUNC_NET != 0 {
+            ensure!(
+                reader.position() + 4 <= end,
+                "missing replicated function offset"
+            );
             let _rep_offset = read_i32(reader)?;
         }
     }
 
-    Ok(ExportProducts {
-        props: extra_props,
-        signature,
-        bytecode,
-        pin_data: None,
-    })
+    Ok(())
 }
 
 /// Walk every export's serialized data, reading its tagged properties,
@@ -465,43 +661,75 @@ fn parse_exports(
     ver: AssetVersion,
     file_size: usize,
 ) -> ParsedExports {
+    let mut diagnostics = Vec::new();
     let mut exports = Vec::with_capacity(export_headers.len());
     let mut pin_data_map: HashMap<usize, NodePinData> = HashMap::new();
     let mut function_signatures: BTreeMap<String, FunctionSignature> = BTreeMap::new();
     let mut bytecode_by_export: BTreeMap<usize, (Vec<u8>, u32)> = BTreeMap::new();
     let mut pin_scan_hint: Option<u64> = None;
     for (ei, hdr) in export_headers.iter().enumerate() {
-        if hdr.serial_size <= 0
+        if hdr.serial_size == 0 && (0..=file_size as i64).contains(&hdr.serial_offset) {
+            exports.push((hdr.clone(), Vec::new()));
+            continue;
+        }
+        if hdr.serial_size < 0
             || hdr.serial_offset < 0
-            || (hdr.serial_offset + hdr.serial_size) > file_size as i64
+            || hdr
+                .serial_offset
+                .checked_add(hdr.serial_size)
+                .is_none_or(|end| end > file_size as i64)
         {
+            diagnostics.push(AssetDiagnostic {
+                export_index: Some(ei + 1),
+                reason: format!(
+                    "{} has invalid serialized range {} + {} for {} file bytes",
+                    hdr.object_name, hdr.serial_offset, hdr.serial_size, file_size
+                ),
+            });
             exports.push((hdr.clone(), Vec::new()));
             continue;
         }
 
-        match parse_one_export(reader, hdr, pctx, ver, &mut pin_scan_hint) {
-            Ok(products) => {
-                exports.push((hdr.clone(), products.props));
-                if let Some(sig) = products.signature {
-                    function_signatures.insert(hdr.object_name.clone(), sig);
-                }
-                if let Some(bytecode) = products.bytecode {
-                    bytecode_by_export.insert(ei + 1, bytecode);
-                }
-                if let Some(pin_data) = products.pin_data {
-                    pin_data_map.insert(ei + 1, pin_data);
-                }
-            }
-            Err(e) => {
-                if pctx.debug {
-                    eprintln!("  {} parse error: {}", hdr.object_name, e);
-                }
-                exports.push((hdr.clone(), Vec::new()));
-            }
+        let mut products = ExportProducts {
+            props: Vec::new(),
+            signature: None,
+            bytecode: None,
+            pin_data: None,
+        };
+        let mut export_reader = std::io::Cursor::new(
+            &reader.get_ref()[..(hdr.serial_offset + hdr.serial_size) as usize],
+        );
+        if let Err(error) = parse_one_export(
+            &mut export_reader,
+            hdr,
+            pctx,
+            ver,
+            &mut pin_scan_hint,
+            &mut products,
+        ) {
+            diagnostics.push(AssetDiagnostic {
+                export_index: Some(ei + 1),
+                reason: format!(
+                    "{} at file offset {}: {error:#}",
+                    hdr.object_name,
+                    export_reader.position()
+                ),
+            });
+        }
+        exports.push((hdr.clone(), products.props));
+        if let Some(signature) = products.signature {
+            function_signatures.insert(hdr.object_name.clone(), signature);
+        }
+        if let Some(bytecode) = products.bytecode {
+            bytecode_by_export.insert(ei + 1, bytecode);
+        }
+        if let Some(pin_data) = products.pin_data {
+            pin_data_map.insert(ei + 1, pin_data);
         }
     }
 
     ParsedExports {
+        diagnostics,
         exports,
         pin_data: pin_data_map,
         function_signatures,
@@ -558,13 +786,15 @@ fn parse_ustruct_header(
     end: u64,
     name: &str,
 ) -> Result<()> {
-    if props_end_pos + 12 > end {
-        return Ok(());
-    }
+    ensure!(props_end_pos + 12 <= end, "truncated UStruct header");
     let next = read_i32(reader)?;
     let super_ref = read_i32(reader)?;
     let children_count = read_i32(reader)?;
-    if children_count > 0 && children_count < MAX_REASONABLE_COUNT {
+    ensure!(
+        children_count >= 0 && children_count as u64 <= end.saturating_sub(reader.position()) / 4,
+        "invalid UStruct child count {children_count}"
+    );
+    if children_count > 0 {
         reader.seek(SeekFrom::Current(children_count as i64 * 4))?;
     }
     if pctx.debug {
@@ -631,18 +861,19 @@ fn parse_ffield_children(
     name: &str,
 ) -> Result<Vec<(String, String, u64)>> {
     let mut children = Vec::new();
-    if reader.position() + 4 > end {
-        return Ok(children);
-    }
+    ensure!(reader.position() + 4 <= end, "missing field child count");
     let child_prop_count = read_i32(reader)?;
+    ensure!(
+        child_prop_count >= 0
+            && child_prop_count as u64 <= end.saturating_sub(reader.position()) / 16,
+        "invalid field child count {child_prop_count}"
+    );
     if pctx.debug && child_prop_count > 0 {
         eprintln!("  {} child properties: {}", name, child_prop_count);
     }
     // Read declared children
     for _ in 0..child_prop_count {
-        if reader.position() + 16 > end {
-            break;
-        }
+        ensure!(reader.position() + 16 <= end, "truncated field child");
         children.push(read_one_ffield_child(reader, pctx, end)?);
     }
     // Read undeclared trailing children: some UE versions emit more children than declared
@@ -663,25 +894,32 @@ fn parse_ffield_children(
 /// Returns the `(disk_bytes, mem_size)` pair so callers can hand the raw
 /// bytes to the decoder without having to re-locate the block. Decoding
 /// and structuring happen later in the pipeline; this only advances the
-/// reader past the block and captures the bytes. Returns `None` when there's
-/// no bytecode block (header truncated or `storage_size <= 0`).
+/// reader past the block and captures the bytes. A valid zero-sized block
+/// is retained as an empty byte vector.
 fn capture_bytecode(
     reader: &mut Reader,
     pctx: &ParseCtx,
     end: u64,
     name: &str,
 ) -> Result<Option<(Vec<u8>, u32)>> {
-    if reader.position() + 8 > end {
-        return Ok(None);
-    }
+    ensure!(reader.position() + 8 <= end, "truncated bytecode header");
     if pctx.debug {
         debug_peek_script(reader, name, end)?;
     }
 
     let bytecode_size = read_i32(reader)?;
     let storage_size = read_i32(reader)?;
-    if storage_size <= 0 || (reader.position() + storage_size as u64) > end {
-        return Ok(None);
+    ensure!(
+        bytecode_size >= 0 && storage_size >= 0,
+        "negative bytecode size"
+    );
+    ensure!(
+        storage_size as u64 <= end.saturating_sub(reader.position()),
+        "bytecode exceeds export bounds"
+    );
+    if storage_size == 0 {
+        ensure!(bytecode_size == 0, "missing serialized bytecode");
+        return Ok(Some((Vec::new(), 0)));
     }
     let mut bytecode_data = vec![0u8; storage_size as usize];
     reader.read_exact(&mut bytecode_data)?;
@@ -727,6 +965,127 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn imported_call_asset() -> ParsedAsset {
+        let imports = [
+            ("Class", "K2Node_CallFunction", 0),
+            ("Class", "Sensor", 0),
+            ("Function", "ReadValue", -2),
+            ("Class", "OtherSensor", 0),
+            ("Function", "ReadValue", -4),
+        ]
+        .into_iter()
+        .map(|(class_name, object_name, outer_index)| ImportEntry {
+            class_package: "Synthetic".into(),
+            class_name: class_name.into(),
+            object_name: object_name.into(),
+            outer_index,
+        })
+        .collect();
+        let mut exports = Vec::new();
+        let mut pin_data = HashMap::new();
+        for (node_index, parent, direction) in
+            [(1, -2, PIN_DIRECTION_OUTPUT), (2, -4, PIN_DIRECTION_INPUT)]
+        {
+            exports.push((
+                ExportHeader {
+                    class_index: -1,
+                    super_index: 0,
+                    outer_index: 0,
+                    object_name: format!("Call_{node_index}"),
+                    serial_offset: 0,
+                    serial_size: 0,
+                },
+                vec![Property {
+                    name: "FunctionReference".into(),
+                    value: PropValue::Struct {
+                        struct_type: "MemberReference".into(),
+                        fields: vec![
+                            Property {
+                                name: "MemberParent".into(),
+                                value: PropValue::Object(parent),
+                            },
+                            Property {
+                                name: "MemberName".into(),
+                                value: PropValue::Name("ReadValue".into()),
+                            },
+                        ],
+                    },
+                }],
+            ));
+            let pins = [
+                ("execute", PIN_TYPE_EXEC, PIN_DIRECTION_INPUT),
+                ("self", "object", PIN_DIRECTION_INPUT),
+                ("Value", "float", direction),
+                ("ReturnValue", "bool", PIN_DIRECTION_OUTPUT),
+            ]
+            .into_iter()
+            .map(|(name, pin_type, direction)| EdGraphPin {
+                name: name.into(),
+                pin_type: pin_type.into(),
+                direction,
+                pin_id: [0; 16],
+                linked_to: Vec::new(),
+            })
+            .collect();
+            pin_data.insert(node_index, NodePinData { pins });
+        }
+        ParsedAsset {
+            version: AssetVersion {
+                file_ver: 522,
+                file_ver_ue5: 0,
+            },
+            name_table: NameTable::from_names(Vec::new()),
+            diagnostics: Vec::new(),
+            imports,
+            exports,
+            pin_data,
+            function_signatures: BTreeMap::new(),
+            bytecode_by_export: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn imported_signatures_distinguish_owners_and_exclude_receiver_and_return() {
+        let mut asset = imported_call_asset();
+        add_imported_function_signatures(&mut asset);
+        let output = &asset.function_signatures["Sensor.ReadValue"];
+        let input = &asset.function_signatures["OtherSensor.ReadValue"];
+        assert_eq!(output.params.len(), 1);
+        assert_eq!(input.params.len(), 1);
+        assert_eq!(output.params[0].name, "Value");
+        assert_ne!(output.params[0].flags & 0x100, 0);
+        assert_eq!(input.params[0].flags & 0x100, 0);
+        assert!(!asset.function_signatures.contains_key("ReadValue"));
+    }
+
+    #[test]
+    fn virtual_imported_call_uses_single_graph_owner_without_function_import() {
+        let mut asset = imported_call_asset();
+        asset.imports.truncate(2);
+        asset.exports.truncate(1);
+        asset.pin_data.retain(|index, _| *index == 1);
+        add_imported_function_signatures(&mut asset);
+        assert_ne!(
+            asset.function_signatures["ReadValue"].params[0].flags & 0x100,
+            0
+        );
+        assert!(asset.function_signatures.contains_key("Sensor.ReadValue"));
+    }
+
+    #[test]
+    fn conflicting_editor_pin_layouts_do_not_infer_imported_signature() {
+        let mut asset = imported_call_asset();
+        asset.exports.push(asset.exports[0].clone());
+        let mut conflicting_pins = asset.pin_data[&1].clone();
+        conflicting_pins.pins[2].direction = PIN_DIRECTION_INPUT;
+        asset.pin_data.insert(3, conflicting_pins);
+        add_imported_function_signatures(&mut asset);
+        assert!(!asset.function_signatures.contains_key("Sensor.ReadValue"));
+        assert!(asset
+            .function_signatures
+            .contains_key("OtherSensor.ReadValue"));
+    }
+
     fn helm_fixture_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("samples")
@@ -757,6 +1116,127 @@ mod tests {
         let _total_header_size = read_i32(&mut reader).unwrap();
         let _folder_name = read_fstring(&mut reader).unwrap();
         reader.position()
+    }
+
+    fn synthetic_soft_path_asset(index: i32, table_count: i32) -> Vec<u8> {
+        let names = [
+            "None",
+            "Object",
+            "Reference",
+            "SoftObjectProperty",
+            "/Game/Test",
+            "Asset",
+        ];
+        let mut bytes = PACKAGE_FILE_TAG.to_le_bytes().to_vec();
+        for value in [
+            -8i32,
+            0,
+            522,
+            1008,
+            0,
+            0,
+            0,
+            0,
+            0,
+            names.len() as i32,
+            84,
+            table_count,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+        ] {
+            bytes.extend(value.to_le_bytes());
+        }
+        assert_eq!(bytes.len(), 84);
+        for name in names {
+            bytes.extend((name.len() as i32 + 1).to_le_bytes());
+            bytes.extend(name.as_bytes());
+            bytes.push(0);
+            bytes.extend([0; 4]); // Name hash.
+        }
+        let soft_object_path_offset = bytes.len() as i32;
+        bytes[52..56].copy_from_slice(&soft_object_path_offset.to_le_bytes());
+        for value in [4i32, 0, 5, 0, 6] {
+            bytes.extend(value.to_le_bytes());
+        }
+        bytes.extend(b"Child\0");
+        let export_offset = bytes.len() as i32;
+        bytes[72..76].copy_from_slice(&export_offset.to_le_bytes());
+        let mut payload = Vec::new();
+        for value in [2i32, 0, 3, 0, 4, 0] {
+            payload.extend(value.to_le_bytes());
+        }
+        payload.push(0); // No property GUID.
+        payload.extend(index.to_le_bytes());
+        payload.extend([0; 8]); // None property terminator.
+        let mut export = vec![0; 96];
+        export[16..20].copy_from_slice(&1i32.to_le_bytes()); // Object name.
+        export[28..36].copy_from_slice(&(payload.len() as i64).to_le_bytes());
+        let serial_offset = i64::from(export_offset) + export.len() as i64;
+        export[36..44].copy_from_slice(&serial_offset.to_le_bytes());
+        bytes.extend(export);
+        bytes.extend(payload);
+        bytes
+    }
+
+    #[test]
+    fn package_soft_path_indices_resolve_and_invalid_indices_report_export_diagnostics() {
+        let bytes = synthetic_soft_path_asset(0, 1);
+        let asset = parse_asset(&bytes, false).unwrap();
+        assert!(asset.diagnostics.is_empty(), "{:?}", asset.diagnostics);
+        assert!(
+            matches!(&asset.exports[0].1[0].value, PropValue::SoftObject(path) if path == "/Game/Test.Asset:Child")
+        );
+        for index in [-1, 1, i32::MAX] {
+            let bytes = synthetic_soft_path_asset(index, 1);
+            let asset = parse_asset(&bytes, false).unwrap();
+            assert_eq!(asset.diagnostics.len(), 1);
+            assert_eq!(asset.diagnostics[0].export_index, Some(1));
+            assert!(asset.diagnostics[0]
+                .reason
+                .contains("soft object path index"));
+        }
+    }
+
+    #[test]
+    fn soft_path_table_cannot_consume_the_following_export_table() {
+        for table_count in [-1, 2] {
+            let bytes = synthetic_soft_path_asset(0, table_count);
+            assert!(parse_asset(&bytes, false).is_err());
+        }
+        let mut bytes = synthetic_soft_path_asset(0, 1);
+        bytes[52..56].copy_from_slice(&i32::MAX.to_le_bytes());
+        assert!(parse_asset(&bytes, false).is_err());
+    }
+
+    #[test]
+    fn soft_path_table_header_starts_at_ue5_version_1008() {
+        for file_ver_ue5 in [1007i32, 1008] {
+            let mut bytes = PACKAGE_FILE_TAG.to_le_bytes().to_vec();
+            // Legacy, UE3 compatibility, UE4, UE5, licensee and custom versions.
+            for value in [-8i32, 0, 522, file_ver_ue5, 0, 0] {
+                bytes.extend(value.to_le_bytes());
+            }
+            // Header size, empty folder, package flags, empty name table.
+            bytes.extend([0; 20]);
+            if file_ver_ue5 >= 1008 {
+                bytes.extend([0; 8]); // Empty soft object path table.
+            }
+            bytes.extend([0; 12]); // Localization and gatherable text table.
+            for value in [2i32, 0, 3, 0] {
+                bytes.extend(value.to_le_bytes());
+            }
+            let mut reader = std::io::Cursor::new(bytes.as_slice());
+            let header = read_package_header(&mut reader).unwrap();
+            assert_eq!(header.export_count, 2);
+            assert_eq!(header.import_count, 3);
+            assert_eq!(reader.position(), bytes.len() as u64);
+        }
     }
 
     #[test]

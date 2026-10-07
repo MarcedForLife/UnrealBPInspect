@@ -49,11 +49,15 @@ pub fn to_json(asset: &ParsedAsset, filters: &[String]) -> Value {
         .map(|(i, (hdr, props))| function_to_json(i, hdr, props))
         .collect();
 
-    json!({
+    let mut output = json!({
         "imports": imports_json,
         "exports": exports_json,
         "functions": functions_json,
-    })
+    });
+    if !asset.diagnostics.is_empty() {
+        output["diagnostics"] = json!(asset.diagnostics);
+    }
+    output
 }
 
 /// Build JSON for a single export entry.
@@ -149,7 +153,13 @@ fn value_to_json(value: &PropValue, imports: &[ImportEntry], export_names: &[Str
         }),
         PropValue::Text(v) => json!(v),
         PropValue::SoftObject(v) => json!(v),
-        PropValue::Unknown { type_name, size } => json!({"unknown_type": type_name, "size": size}),
+        PropValue::Unknown {
+            type_name,
+            size,
+            payload_sha256,
+        } => json!({
+            "unknown_type": type_name, "size": size, "payload_sha256": payload_sha256,
+        }),
     }
 }
 

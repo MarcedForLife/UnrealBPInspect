@@ -12,12 +12,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::bytecode::asset::DecodedAsset;
 use crate::bytecode::call_graph::build_call_graph as build_typed_call_graph;
 use crate::bytecode::emit::comments::CommentEmitPlan;
-use crate::bytecode::names::K2NODE_EXECUTION_SEQUENCE;
 use crate::output_summary::call_graph::{collect_local_functions, format_call_graph};
+use crate::output_summary::filter::block_matches_filter;
 use crate::output_summary::format::{format_component_tree, format_header, format_variables};
 use crate::output_summary::ubergraph::{compute_action_key_events, display_event_name};
 use crate::prop_query::find_prop_str;
-use crate::resolve::{enclosing_graph_name, resolve_index, short_class};
 use crate::types::ParsedAsset;
 
 /// Function-header metadata shared between the prefix-section pass and
@@ -40,129 +39,91 @@ pub(crate) struct EmitCtx {
     /// the export property stream. Missing or noise-only entries leave
     /// the bracket suffix off entirely.
     pub flags: HashMap<String, String>,
-    /// `block_name -> connected-mask over the editor then-pins` of that
-    /// block's sole `K2Node_ExecutionSequence` node, in editor pin order
-    /// (`true` = pin wired, `false` = disconnected). Populated only for
-    /// blocks with exactly one ExecutionSequence node, which is the gate
-    /// for faithful editor-index Sequence numbering. Blocks with zero or
-    /// multiple ExecutionSequence nodes are absent and fall back to the
-    /// compact decoded-pin numbering.
-    pub sequence_masks: HashMap<String, Vec<bool>>,
     /// Placed comment annotations (event-wrapping, function-level, inline)
     /// for this asset, consumed only by the summary block emitters. Empty
     /// for assets that author no comment boxes.
     pub comments: CommentEmitPlan,
 }
 
-/// Append the Blueprint, Components, Variables, Call graph, and
-/// `Functions:` header sections to `output`. Mirrors the prefix that
-/// `format_summary` (in `output_summary/format.rs`) produces before its
-/// function body block. Returns the
-/// shared `EmitCtx` so the per-function pass can reuse the call graph
-/// and signature lookups without re-walking the asset.
-///
-/// The Blueprint header line is followed by a blank line. Component and
-/// variable sections also end in a trailing blank line. The Call graph
-/// block ends with a blank line as well. After all four sections, this
-/// writes the literal `Functions:` header.
+/// Render prefix items and return the selected function/event blocks.
+/// Each item keeps its identity until filtering has finished.
 pub(crate) fn emit_prefix_sections(
     output: &mut String,
     decoded: &DecodedAsset,
     parsed: &ParsedAsset,
-) -> EmitCtx {
+    filters: &[String],
+) -> Vec<String> {
     let export_names: Vec<String> = parsed
         .exports
         .iter()
-        .map(|(hdr, _)| hdr.object_name.clone())
+        .map(|(header, _)| header.object_name.clone())
         .collect();
+    format_header(output, parsed, &export_names);
+    let components = format_component_tree(output, parsed, &export_names, filters);
+    format_variables(output, parsed, &export_names, &components, filters);
 
-    let _ = format_header(output, parsed, &export_names);
-    let components = format_component_tree(output, parsed, &export_names);
-    format_variables(output, parsed, &export_names, &components);
-
-    // The ubergraph event names come from the decoded events directly.
-    // This keeps the local-function set (and the InputAction
-    // Pressed/Released label map below) sourced from the decoder.
-    let event_names: Vec<&str> = decoded.events.iter().map(|e| e.name.as_str()).collect();
+    let event_names: Vec<&str> = decoded
+        .events
+        .iter()
+        .map(|event| event.name.as_str())
+        .collect();
     let local_functions = collect_local_functions(parsed, &export_names, &event_names);
-
     let (mut callees_map, mut callers_map) = build_call_graph(decoded, &local_functions);
-
-    // `compute_action_key_events` derives the labels from the
-    // event-name suffix numbers, so input order is irrelevant.
     let action_key_events = compute_action_key_events(&event_names);
-
-    // Caller-name normalisation so `// Called by:` trailers
-    // and the call graph use the same display form.
     for callers in callers_map.values_mut() {
-        for caller in callers.iter_mut() {
+        for caller in callers {
             *caller = display_event_name(caller, &action_key_events);
         }
     }
-
-    format_call_graph(output, &mut callees_map, &action_key_events);
-
-    output.push_str("Functions:\n");
-
     let (signatures, flags) = collect_function_metadata(parsed);
-    let sequence_masks = collect_sequence_masks(parsed, &export_names);
-    let comments = CommentEmitPlan::build(decoded, parsed);
-
-    EmitCtx {
+    let context = EmitCtx {
         callers_map,
         action_key_events,
         signatures,
         flags,
-        sequence_masks,
-        comments,
-    }
-}
-
-/// Build `block_name -> editor then-pin connected-mask` for every block
-/// whose graph contains exactly one `K2Node_ExecutionSequence` node.
-///
-/// The mask records, in editor pin-array order, whether each exec-output
-/// then-pin is wired (`linked_to` non-empty). Blocks with zero or multiple
-/// ExecutionSequence nodes are deliberately omitted: the faithful
-/// editor-index renumbering is only unambiguous when a single sequence
-/// node owns the whole block, so the emitter falls back to compact
-/// decoded-pin numbering elsewhere.
-fn collect_sequence_masks(
-    parsed: &ParsedAsset,
-    export_names: &[String],
-) -> HashMap<String, Vec<bool>> {
-    let mut by_block: HashMap<String, Vec<Vec<bool>>> = HashMap::new();
-    for (zero_based, (hdr, _)) in parsed.exports.iter().enumerate() {
-        let one_based = zero_based + 1;
-        let class = short_class(&resolve_index(
-            &parsed.imports,
-            export_names,
-            hdr.class_index,
-        ));
-        if class != K2NODE_EXECUTION_SEQUENCE {
-            continue;
+        comments: CommentEmitPlan::build(decoded, parsed),
+    };
+    let mut matched_funcs = HashSet::new();
+    let mut blocks = Vec::new();
+    for function in &decoded.functions {
+        let mut block = String::new();
+        super::summary::emit_function_block(
+            &mut block,
+            &function.name,
+            &function.body,
+            &context,
+            &decoded.resume_bodies,
+        );
+        if block_matches_filter(&block, filters) {
+            matched_funcs.insert(function.name.clone());
+            blocks.push(block);
         }
-        let Some(pin_data) = parsed.pin_data.get(&one_based) else {
-            continue;
-        };
-        let Some(block) = enclosing_graph_name(parsed, export_names, one_based) else {
-            continue;
-        };
-        let mask: Vec<bool> = pin_data
-            .pins
-            .iter()
-            .filter(|pin| pin.is_exec_output())
-            .map(|pin| !pin.linked_to.is_empty())
-            .collect();
-        by_block.entry(block).or_default().push(mask);
     }
-    by_block
-        .into_iter()
-        .filter_map(|(block, masks)| match masks.as_slice() {
-            [single] => Some((block, single.clone())),
-            _ => None,
-        })
-        .collect()
+    for event in &decoded.events {
+        let mut block = String::new();
+        super::summary::emit_event_block(
+            &mut block,
+            &event.name,
+            &event.body,
+            &context,
+            &decoded.resume_bodies,
+        );
+        if block_matches_filter(&block, filters) {
+            matched_funcs.insert(event.name.clone());
+            blocks.push(block);
+        }
+    }
+    format_call_graph(
+        output,
+        &mut callees_map,
+        &context.action_key_events,
+        filters,
+        &matched_funcs,
+    );
+    if !blocks.is_empty() || filters.is_empty() {
+        output.push_str("Functions:\n");
+    }
+    blocks
 }
 
 /// Build the displayed call graph from the typed IR (`call_graph::build_call_graph`),

@@ -15,7 +15,7 @@ pub(crate) fn var(name: &str) -> Expr {
 
 /// `Expr::Literal(value)`.
 pub(crate) fn lit(value: &str) -> Expr {
-    Expr::Literal(value.to_string())
+    Expr::Literal(value.into())
 }
 
 /// `Stmt::Assignment` with a `Var(lhs_name)` lhs and offset 0.

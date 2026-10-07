@@ -17,7 +17,7 @@ use unreal_bp_inspect::parser::parse_asset;
 /// CLI path. Panics on parse failure so callers read as straight-line code.
 pub fn decoded_summary(data: &[u8]) -> String {
     let asset = parse_asset(data, false).expect("parse should succeed");
-    let decoded = decode_asset(&asset, data);
+    let decoded = decode_asset(&asset);
     emit_summary_with_asset(&decoded, &asset)
 }
 
@@ -25,7 +25,7 @@ pub fn decoded_summary(data: &[u8]) -> String {
 /// Mirrors the CLI `--dump` path.
 pub fn decoded_text(data: &[u8]) -> String {
     let mut asset = parse_asset(data, false).expect("parse should succeed");
-    let decoded = decode_asset(&asset, data);
+    let decoded = decode_asset(&asset);
     inject_v2_bytecode_props(&mut asset, &decoded);
     format_text(&asset, &[])
 }
@@ -34,7 +34,7 @@ pub fn decoded_text(data: &[u8]) -> String {
 /// Mirrors the CLI `--json` path.
 pub fn decoded_json(data: &[u8]) -> String {
     let mut asset = parse_asset(data, false).expect("parse should succeed");
-    let decoded = decode_asset(&asset, data);
+    let decoded = decode_asset(&asset);
     inject_v2_bytecode_props(&mut asset, &decoded);
     serde_json::to_string_pretty(&to_json(&asset, &[])).expect("json should serialize")
 }

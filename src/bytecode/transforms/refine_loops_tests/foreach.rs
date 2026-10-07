@@ -734,3 +734,167 @@ fn foreach_cond_preserves_user_facing_array_name_through_alias() {
         "array operand stays at the user-facing name; deep substitution would change it"
     );
 }
+
+#[test]
+fn nested_foreach_exit_flags_remain_scoped_and_completion_order_is_preserved() {
+    fn guarded_loop(
+        counter: &str,
+        array: &str,
+        stop: &str,
+        mut body: Vec<Stmt>,
+        completion: &str,
+    ) -> Stmt {
+        body.insert(
+            0,
+            assign(
+                var(&format!("{counter}Item")),
+                Expr::Index {
+                    recv: Box::new(var(array)),
+                    idx: Box::new(var(counter)),
+                },
+            ),
+        );
+        body.push(counter_inc(counter));
+        Stmt::Loop {
+            kind: LoopKind::While,
+            cond: Some(Expr::Binary {
+                op: BinaryOp::And,
+                lhs: Box::new(Expr::Call {
+                    name: "Not_PreBool".into(),
+                    args: vec![var(stop)],
+                }),
+                rhs: Box::new(counter_lt_array_length(counter, var(array))),
+            }),
+            body,
+            completion: Some(vec![call_stmt(completion)]),
+            offset: 0,
+        }
+    }
+    let deepest = guarded_loop(
+        "InnerIndex",
+        "InnerItems",
+        "InnerStop",
+        vec![Stmt::Branch {
+            cond: var("Found"),
+            then_body: vec![
+                assign(var("InnerStop"), lit("true")),
+                assign(var("OuterStop"), lit("true")),
+                Stmt::Break { offset: 7 },
+            ],
+            else_body: Vec::new(),
+            offset: 1,
+        }],
+        "InnerComplete",
+    );
+    let mut stmts = vec![
+        guarded_loop(
+            "OuterIndex",
+            "OuterItems",
+            "OuterStop",
+            vec![deepest, call_stmt("AfterInner")],
+            "OuterComplete",
+        ),
+        call_stmt("AfterOuter"),
+    ];
+    refine_loops(&mut stmts);
+    let Stmt::Loop {
+        kind: LoopKind::ForEach { .. },
+        body: outer_body,
+        completion: Some(outer_completion),
+        ..
+    } = &stmts[0]
+    else {
+        panic!("expected outer foreach");
+    };
+    let Stmt::Branch {
+        cond, then_body, ..
+    } = &outer_body[0]
+    else {
+        panic!("expected outer guard")
+    };
+    assert_eq!(cond, &var("OuterStop"));
+    assert!(matches!(then_body.as_slice(), [Stmt::Break { .. }]));
+    let Stmt::Loop {
+        kind: LoopKind::ForEach { .. },
+        body: inner_body,
+        completion: Some(inner_completion),
+        ..
+    } = &outer_body[1]
+    else {
+        panic!("expected inner foreach");
+    };
+    let Stmt::Branch {
+        cond, then_body, ..
+    } = &inner_body[0]
+    else {
+        panic!("expected inner guard")
+    };
+    assert_eq!(cond, &var("InnerStop"));
+    assert!(matches!(then_body.as_slice(), [Stmt::Break { .. }]));
+    let Stmt::Branch { then_body, .. } = &inner_body[1] else {
+        panic!("expected exit condition")
+    };
+    assert!(matches!(&then_body[0], Stmt::Assignment { lhs, .. } if lhs == &var("InnerStop")));
+    assert!(matches!(&then_body[1], Stmt::Assignment { lhs, .. } if lhs == &var("OuterStop")));
+    assert!(
+        matches!(&inner_completion[0], Stmt::Call { func, .. } if func == &var("InnerComplete"))
+    );
+    assert!(matches!(&outer_body[2], Stmt::Call { func, .. } if func == &var("AfterInner")));
+    assert!(
+        matches!(&outer_completion[0], Stmt::Call { func, .. } if func == &var("OuterComplete"))
+    );
+    assert!(matches!(&stmts[1], Stmt::Call { func, .. } if func == &var("AfterOuter")));
+}
+
+#[test]
+fn foreach_conversion_declines_unproven_additional_conditions() {
+    let bound = counter_lt_array_length("Index", var("Items"));
+    let additional = [
+        var("Enabled"),
+        Expr::Call {
+            name: "ShouldContinue".into(),
+            args: Vec::new(),
+        },
+        Expr::Unary {
+            op: crate::bytecode::expr::UnaryOp::Not,
+            operand: Box::new(Expr::Call {
+                name: "ShouldStop".into(),
+                args: Vec::new(),
+            }),
+        },
+        Expr::Binary {
+            op: BinaryOp::And,
+            lhs: Box::new(var("Enabled")),
+            rhs: Box::new(var("Ready")),
+        },
+    ];
+    for guard in additional {
+        let cond = Expr::Binary {
+            op: BinaryOp::And,
+            lhs: Box::new(guard),
+            rhs: Box::new(bound.clone()),
+        };
+        let mut stmts = vec![while_loop(
+            cond,
+            vec![
+                assign(
+                    var("Item"),
+                    Expr::Index {
+                        recv: Box::new(var("Items")),
+                        idx: Box::new(var("Index")),
+                    },
+                ),
+                call_stmt("Visit"),
+                counter_inc("Index"),
+            ],
+        )];
+        refine_loops(&mut stmts);
+        assert!(!matches!(
+            stmts[0],
+            Stmt::Loop {
+                kind: LoopKind::ForEach { .. },
+                ..
+            }
+        ));
+    }
+}

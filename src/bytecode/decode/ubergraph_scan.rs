@@ -5,6 +5,7 @@
 //! indices the cross-event inline classifier needs, and constructs the
 //! per-event structure skeleton (including tail-JIN arm prescan).
 
+use crate::bytecode::expr::LiteralValue;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -51,7 +52,6 @@ fn scan_ubergraph_dispatch(
     asset: &ParsedAsset,
     export_names: &[String],
     export_index: usize,
-    name: &str,
     ug_name: &str,
     name_table: &NameTable,
     ue5: i32,
@@ -59,7 +59,7 @@ fn scan_ubergraph_dispatch(
     use crate::bytecode::expr::Expr;
     use crate::bytecode::stmt::Stmt;
 
-    let bytecode = lookup_export_bytecode(asset, export_index, name)?;
+    let bytecode = lookup_export_bytecode(asset, export_index)?;
 
     // Dispatch stubs are flat: `[persistent]` copies, one or more
     // `ExecuteUbergraph_*` calls, and a trailing return. No jumps, so the
@@ -68,7 +68,7 @@ fn scan_ubergraph_dispatch(
     // text path reported. `function_signatures` is threaded so OUT-param
     // wrapping matches the rest of the decoder, though dispatch stubs have
     // no OUT params in practice.
-    let claimed: RefCell<BTreeMap<usize, super::ctx::Claim>> = RefCell::new(BTreeMap::new());
+    let claimed: RefCell<BTreeMap<usize, Vec<super::ctx::Claim>>> = RefCell::new(BTreeMap::new());
     let scan_ctx = DecodeCtx {
         function_signatures: Some(&asset.function_signatures),
         claimed: Some(&claimed),
@@ -90,7 +90,7 @@ fn scan_ubergraph_dispatch(
             return None;
         }
         match args.first() {
-            Some(Expr::Literal(value)) => value.parse::<usize>().ok(),
+            Some(Expr::Literal(LiteralValue::Text(value))) => value.parse::<usize>().ok(),
             _ => None,
         }
     };
@@ -219,7 +219,6 @@ pub(super) fn collect_event_entries(
             asset,
             export_names,
             export_idx + 1,
-            &hdr.object_name,
             ug_name,
             name_table,
             ue5,
@@ -526,20 +525,11 @@ pub(super) fn is_ubergraph_stub(
     asset: &ParsedAsset,
     export_names: &[String],
     export_index: usize,
-    name: &str,
     ug_name: &str,
     name_table: &NameTable,
     ue5: i32,
 ) -> bool {
-    scan_ubergraph_dispatch(
-        asset,
-        export_names,
-        export_index,
-        name,
-        ug_name,
-        name_table,
-        ue5,
-    )
-    .map(|scan| scan.is_pure_dispatch)
-    .unwrap_or(false)
+    scan_ubergraph_dispatch(asset, export_names, export_index, ug_name, name_table, ue5)
+        .map(|scan| scan.is_pure_dispatch)
+        .unwrap_or(false)
 }

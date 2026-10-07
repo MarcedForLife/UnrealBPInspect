@@ -34,6 +34,7 @@
 //! prescan.
 
 use crate::bytecode::expr::Expr;
+use crate::bytecode::expr::LiteralValue;
 use crate::bytecode::opcodes::*;
 use crate::bytecode::partition::opcode_length_at;
 use crate::bytecode::readers::read_bc_u32;
@@ -141,7 +142,8 @@ pub(crate) fn try_decode_naked_if(
     // claim check above usually catches it first, but the literal
     // guard also covers pathologies where the scaffold prescan
     // declines to claim.
-    if matches!(&cond, Expr::Literal(text) if text == "true" || text == "false") {
+    if matches!(&cond, Expr::Literal(LiteralValue::Text(text)) if text == "true" || text == "false")
+    {
         return None;
     }
 
@@ -227,21 +229,21 @@ fn try_decode_loop_break_guard(
     // tail bound cannot reconstruct that nesting, it would emit a
     // statement-stripped guard with the body scattered into a dead tail.
     //
-    // When the nested flow is a single self-contained SequenceChain
-    // trampoline whose JUMP targets the loop exit (`tail + 1`), the body IS
-    // recoverable: `decode_naked_if_body` already routes the trampoline's
-    // displaced LET through `decode_one_or_branch` (production emits both
-    // LETs today, just unguarded), and a `break` is synthesized from the
-    // loop-break-guard semantic (the cond=true path exits the loop). Any
-    // other nested-flow shape, or a trampoline that does not jump to the
-    // loop exit, still bails (recovering it here would be unsound).
-    let mut synthesize_break = false;
+    // A self-contained Sequence trampoline can set more than one loop's
+    // exit flag. Decode its displaced first pin and saved resume pin in
+    // execution order before synthesizing the innermost loop's break.
+    let mut trampoline_body = None;
     if body_contains_nested_flow(body_start_disk, body_end_disk, ctx) {
         match classify_nested_flow(body_start_disk, body_end_disk, ctx) {
             NestedFlowShape::TrampolineOnly {
                 jump_to_loop_exit: true,
             } => {
-                synthesize_break = true;
+                trampoline_body = Some(decode_trampoline_break_body(
+                    body_start_disk,
+                    body_end_disk,
+                    ctx,
+                    guard.owner,
+                )?);
             }
             // Not a loop-exiting trampoline: bail (recovery would be unsound).
             _ => return None,
@@ -252,19 +254,38 @@ fn try_decode_loop_break_guard(
     // own FORWARD break-jump (an `EX_JUMP` to the loop tail / epilogue)
     // before reaching `tail`. The default tail bound over-runs that jump
     // and swallows the enclosing branch's else arm. Bound the body at the
-    // break-jump instead and append a trailing `Stmt::Break`. A
+    // exit jump instead and preserve its return or loop break. A
     // single-guard loop runs straight to `tail` with no such jump, so
     // `forward_break_after` returns `None` and the body bound is unchanged.
-    let mut trailing_break: Option<Stmt> = None;
-    if let Some(end) = forward_break_after(body_start_disk, guard.tail, ctx) {
-        body_end_disk = end;
-        trailing_break = Some(Stmt::Break {
-            offset: end - JUMP_INSTR_BYTES,
-        });
+    let mut trailing_exit: Option<Stmt> = None;
+    if trampoline_body.is_none() {
+        if let Some(end) = forward_break_after(body_start_disk, guard.tail, ctx) {
+            body_end_disk = end;
+            let mut target_cursor = end - 4;
+            let target_mem = read_bc_u32(ctx.bytecode, &mut target_cursor) as usize;
+            let target = jump_target_disk(target_mem, ctx);
+            trailing_exit = if ctx.bytecode.get(target).copied() == Some(EX_RETURN) {
+                let mut return_cursor = target;
+                super::block::decode_one(&mut return_cursor, ctx)
+                    .ok()
+                    .flatten()
+            } else {
+                Some(Stmt::Break {
+                    offset: end - JUMP_INSTR_BYTES,
+                })
+            };
+        }
     }
 
-    let mut then_body = decode_naked_if_body(body_start_disk, body_end_disk, ctx);
-    if let Some(break_stmt) = trailing_break {
+    let synthesize_break = trampoline_body.is_some();
+    let body_decode_end = if trailing_exit.is_some() {
+        body_end_disk - JUMP_INSTR_BYTES
+    } else {
+        body_end_disk
+    };
+    let mut then_body = trampoline_body
+        .unwrap_or_else(|| decode_naked_if_body(body_start_disk, body_decode_end, ctx));
+    if let Some(break_stmt) = trailing_exit {
         then_body.push(break_stmt);
     } else if synthesize_break {
         // The break is synthesized from the loop-break-guard semantic
@@ -273,6 +294,20 @@ fn try_decode_loop_break_guard(
         then_body.push(Stmt::Break {
             offset: guard_offset,
         });
+    }
+
+    // A function result ends the entire call, unlike a flow pop that
+    // resumes the increment. Keep that terminator inside its true branch.
+    if body_end_disk == guard.tail
+        && ctx.bytecode.get(guard.tail).copied() == Some(EX_RETURN)
+        && !synthesize_break
+        && !matches!(
+            then_body.last(),
+            Some(Stmt::Return { .. } | Stmt::Break { .. })
+        )
+    {
+        let mut return_cursor = guard.tail;
+        then_body.push(super::block::decode_one(&mut return_cursor, ctx).ok()??);
     }
 
     // Claim the recovered body so the region walker's disk-order re-walk
@@ -434,6 +469,104 @@ fn classify_nested_flow(body_start: usize, tail: usize, ctx: &DecodeCtx) -> Nest
     } else {
         NestedFlowShape::Other
     }
+}
+
+fn has_only_linear_opcodes(start: usize, end: usize, ctx: &DecodeCtx) -> bool {
+    let mut cursor = start;
+    while cursor < end {
+        if matches!(
+            ctx.bytecode.get(cursor),
+            Some(
+                &EX_JUMP
+                    | &EX_JUMP_IF_NOT
+                    | &EX_COMPUTED_JUMP
+                    | &EX_PUSH_EXECUTION_FLOW
+                    | &EX_POP_EXECUTION_FLOW
+                    | &EX_POP_FLOW_IF_NOT
+                    | &EX_RETURN
+                    | &EX_END_OF_SCRIPT
+            )
+        ) {
+            return false;
+        }
+        let length = opcode_length_at(cursor, ctx.bytecode, ctx.ue5, ctx.name_table);
+        if length == 0 || length > end - cursor {
+            return false;
+        }
+        cursor += length;
+    }
+    true
+}
+
+/// A Sequence can set several loop-exit flags before returning to the loop.
+/// Follow its first pin's displaced block, then its saved resume pin, before
+/// replacing the loop's eventual exit with a structured break.
+fn decode_trampoline_break_body(
+    body_start: usize,
+    tail: usize,
+    ctx: &DecodeCtx,
+    owner: super::ctx::OwnerId,
+) -> Option<Vec<Stmt>> {
+    let mut push_offset = body_start;
+    while push_offset < tail && ctx.bytecode.get(push_offset) != Some(&EX_PUSH_EXECUTION_FLOW) {
+        let length = opcode_length_at(push_offset, ctx.bytecode, ctx.ue5, ctx.name_table);
+        if length == 0 {
+            return None;
+        }
+        push_offset += length;
+    }
+    let mut cursor = push_offset + 1;
+    let resume_mem = read_bc_u32(ctx.bytecode, &mut cursor) as usize;
+    let resume = jump_target_disk(resume_mem, ctx);
+    let (target_mem, _, after_jump) =
+        super::branch::peek_jump_after_instrumentation(cursor, tail, ctx)?;
+    let target = jump_target_disk(target_mem, ctx);
+    if target != tail + 1 || resume != after_jump || resume >= tail {
+        return None;
+    }
+
+    if !has_only_linear_opcodes(body_start, push_offset, ctx)
+        || !has_only_linear_opcodes(resume, tail, ctx)
+    {
+        return None;
+    }
+    let target_limit = match ctx.owned_ranges {
+        Some(ranges) => ranges.iter().find(|range| range.contains(&target))?.end,
+        None => ctx.bytecode.len(),
+    };
+    let mut target_end = target;
+    let mut found_pop = false;
+    for _ in 0..MAX_BODY_OPCODES {
+        if target_end >= target_limit {
+            return None;
+        }
+        match ctx.bytecode.get(target_end).copied()? {
+            EX_POP_EXECUTION_FLOW => {
+                found_pop = true;
+                break;
+            }
+            EX_JUMP
+            | EX_JUMP_IF_NOT
+            | EX_PUSH_EXECUTION_FLOW
+            | EX_POP_FLOW_IF_NOT
+            | EX_RETURN
+            | EX_END_OF_SCRIPT => return None,
+            _ => {}
+        }
+        let length = opcode_length_at(target_end, ctx.bytecode, ctx.ue5, ctx.name_table);
+        if length == 0 || length > target_limit - target_end {
+            return None;
+        }
+        target_end += length;
+    }
+    if !found_pop {
+        return None;
+    }
+    let mut body = decode_naked_if_body(body_start, push_offset, ctx);
+    body.extend(decode_naked_if_body(target, target_end, ctx));
+    body.extend(decode_naked_if_body(resume, tail, ctx));
+    mark_claimed(ctx, target, target_end + 1, owner);
+    Some(body)
 }
 
 /// Decode the naked-if body at `[body_start, body_end)` into a flat

@@ -11,6 +11,7 @@ use super::shared::{
     DOONCE_GATE_PREFIX, DOONCE_INIT_PREFIX, RESET_DOONCE_CALL_NAME,
 };
 use crate::bytecode::expr::Expr;
+use crate::bytecode::expr::LiteralValue;
 use crate::bytecode::stmt::{LatchKind, Stmt};
 use crate::bytecode::transforms::visit::{self, walk_stmt_children_mut};
 use std::collections::BTreeSet;
@@ -954,7 +955,7 @@ fn is_gate_self_assignment(stmt: &Stmt, gate_name: &str) -> bool {
     if lhs_name != gate_name {
         return false;
     }
-    matches!(rhs, Expr::Literal(text) if text == "true")
+    matches!(rhs, Expr::Literal(LiteralValue::Text(text)) if text == "true")
 }
 
 /// Derive a display name for a DoOnce from its body. Scans for the first
@@ -966,227 +967,134 @@ fn derive_doonce_name(body: &[Stmt], gate_name: &str) -> String {
     fallback_name_from_gate(gate_name)
 }
 
-/// Rewrite synthetic `Stmt::Call(ResetDoOnce(DoOnce_<N>))` arguments to the
-/// matching sibling `Stmt::Latch::DoOnce`'s display name.
-///
-/// `try_rewrite_reset_doonce_pair` produces ResetDoOnce calls whose argument
-/// is the algorithmic fallback `DoOnce_<gate_suffix>`. When a Latch
-/// reachable in the same body tree carries a meaningful display name (the
-/// first user-call name in its body) for the same gate var, this pass
-/// swaps the fallback for that name, e.g.
-///
-/// ```text
-/// DoOnce("MyAction") { ... }
-/// ...
-/// ResetDoOnce(DoOnce_3)   ->   ResetDoOnce(MyAction)
-/// ```
-///
-/// Two passes over the body tree: first collect every Latch's
-/// `(fallback_name -> display_name)` mapping, then walk again to rewrite
-/// matching `ResetDoOnce` arguments. Walking the whole body before
-/// rewriting handles nested Latches correctly (a Latch nested inside
-/// another Latch's body still contributes to the map). Earlier entries
-/// win on key collisions, mirroring the spec's "take the first" rule.
+/// Resolve latch names within one function. Reset targets must still carry
+/// their gate-derived identifiers, so this runs after all structural transforms.
 pub fn rewrite_reset_doonce_names(body: &mut Vec<Stmt>) {
-    let mut name_map: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
-    collect_doonce_names_in_body(body.as_mut_slice(), &mut name_map);
-    if name_map.is_empty() {
-        return;
-    }
-    rewrite_reset_calls_in_body(body.as_mut_slice(), &name_map);
+    rewrite_doonce_names_in_bodies(std::iter::once(body));
 }
 
-fn collect_doonce_names_in_body(
-    body: &mut [Stmt],
-    name_map: &mut std::collections::BTreeMap<String, String>,
-) {
-    for stmt in body.iter_mut() {
-        if let Stmt::Latch {
-            kind: LatchKind::DoOnce { name, gate_var },
-            ..
-        } = stmt
-        {
-            let fallback = fallback_name_from_gate(gate_var);
-            // Skip when the latch is itself a fallback (no improvement) or
-            // when its display name is a compiler temp (`$Foo`, less
-            // readable than `DoOnce_<N>`).
-            if name != &fallback && !name.starts_with('$') {
-                name_map.entry(fallback).or_insert_with(|| name.clone());
-            }
-        }
-        walk_stmt_children_mut(stmt, &mut |children| {
-            collect_doonce_names_in_body(children.as_mut_slice(), name_map)
-        });
-    }
-}
-
-fn rewrite_reset_calls_in_body(
-    body: &mut [Stmt],
-    name_map: &std::collections::BTreeMap<String, String>,
-) {
-    for stmt in body.iter_mut() {
-        if let Stmt::Call { func, args, .. } = stmt {
-            if is_reset_doonce_call(func) && args.len() == 1 {
-                if let Expr::Var(target) = &mut args[0] {
-                    if let Some(replacement) = name_map.get(target.as_str()) {
-                        *target = replacement.clone();
-                    }
-                }
-            }
-        }
-        walk_stmt_children_mut(stmt, &mut |children| {
-            rewrite_reset_calls_in_body(children.as_mut_slice(), name_map)
-        });
-    }
-}
-
-/// Asset-wide ResetDoOnce display-name resolution.
-///
-/// The per-body `rewrite_reset_doonce_names` pass only resolves names
-/// from Latches reachable from the same body it's invoked on. Synthetic
-/// `Call(ResetDoOnce(DoOnce_<N>))` arguments whose gate variable's
-/// canonical Latch wrap lives in another event/function stay as the
-/// bare fallback after the per-body pass.
-///
-/// This pass walks every function + event body across the asset, builds
-/// `gate_var -> display_name` from non-fallback `Stmt::Latch::DoOnce`
-/// entries, applies an ambiguity guard (multiple display names for the
-/// same gate_var excludes that gate_var), then rewrites surviving
-/// fallback `Call(ResetDoOnce(DoOnce_<N>))` arguments. The per-body pass
-/// runs first so locally-resolved calls aren't overridden by the
-/// asset-wide map.
+/// Functions have independent local gates. Event entries share ubergraph gates.
 pub fn rewrite_asset_wide_reset_doonce_names(
     functions: &mut [crate::bytecode::asset::Function],
     events: &mut [crate::bytecode::asset::Event],
+    resume_bodies: &mut std::collections::BTreeMap<usize, Vec<Stmt>>,
 ) {
-    let mut name_options: std::collections::BTreeMap<String, BTreeSet<String>> =
-        std::collections::BTreeMap::new();
-    for function in functions.iter() {
-        collect_asset_wide_doonce_names(&function.body, &mut name_options);
+    for function in functions {
+        rewrite_reset_doonce_names(&mut function.body);
     }
-    for event in events.iter() {
-        collect_asset_wide_doonce_names(&event.body, &mut name_options);
-    }
+    rewrite_doonce_names_in_bodies(
+        events
+            .iter_mut()
+            .map(|event| &mut event.body)
+            .chain(resume_bodies.values_mut()),
+    );
+}
 
-    let mut resolved: std::collections::BTreeMap<String, String> =
+/// Assign one display name per gate across every entry into a shared scope.
+/// Ambiguous action names keep their distinct gate-derived identifiers.
+fn rewrite_doonce_names_in_bodies<'body>(bodies: impl IntoIterator<Item = &'body mut Vec<Stmt>>) {
+    let mut bodies: Vec<_> = bodies.into_iter().collect();
+    let mut names = std::collections::BTreeMap::new();
+    for body in &bodies {
+        collect_asset_wide_doonce_names(body, &mut names);
+    }
+    let mut owners: std::collections::BTreeMap<String, BTreeSet<String>> =
         std::collections::BTreeMap::new();
-    for (gate_var, candidates) in name_options {
-        // Only a single unambiguous candidate resolves a name; `next()` is
-        // Some here, but pattern-match instead of unwrap for robustness.
-        if candidates.len() == 1 {
-            if let Some(display) = candidates.into_iter().next() {
-                resolved.insert(fallback_name_from_gate(&gate_var), display);
-            }
+    for (gate, candidates) in &names {
+        owners
+            .entry(fallback_name_from_gate(gate))
+            .or_default()
+            .insert(gate.clone());
+        for name in candidates {
+            owners.entry(name.clone()).or_default().insert(gate.clone());
         }
     }
-    if resolved.is_empty() {
-        return;
-    }
-
-    for function in functions.iter_mut() {
-        rewrite_fallback_reset_calls(&mut function.body, &resolved);
-    }
-    for event in events.iter_mut() {
-        rewrite_fallback_reset_calls(&mut event.body, &resolved);
+    let resolved: std::collections::BTreeMap<String, String> = names
+        .into_iter()
+        .map(|(gate, candidates)| {
+            let canonical = fallback_name_from_gate(&gate);
+            let display = if candidates.len() == 1 {
+                let candidate = candidates.into_iter().next().unwrap();
+                if owners[&candidate].len() == 1 {
+                    candidate
+                } else {
+                    canonical.clone()
+                }
+            } else {
+                canonical.clone()
+            };
+            (canonical, display)
+        })
+        .collect();
+    for body in &mut bodies {
+        rewrite_fallback_reset_calls(body, &resolved);
     }
 }
 
-/// Walk `body` collecting every `Stmt::Latch::DoOnce` whose `name` is a
-/// non-fallback display name. Each gate_var accumulates a `BTreeSet` of
-/// observed display names so the caller can detect ambiguity.
 fn collect_asset_wide_doonce_names(
     body: &[Stmt],
-    out: &mut std::collections::BTreeMap<String, BTreeSet<String>>,
+    names: &mut std::collections::BTreeMap<String, BTreeSet<String>>,
 ) {
     for stmt in body {
         if let Stmt::Latch {
             kind: LatchKind::DoOnce { name, gate_var },
-            init,
-            body: inner,
             ..
         } = stmt
         {
-            let fallback = fallback_name_from_gate(gate_var);
-            // Skip fallback names (no information to share) and `$temp`
-            // compiler-emitted names (less readable than the fallback).
-            if name != &fallback && !name.starts_with('$') {
-                out.entry(gate_var.clone())
-                    .or_default()
-                    .insert(name.clone());
+            let candidates = names.entry(gate_var.clone()).or_default();
+            if name != &fallback_name_from_gate(gate_var) && !name.starts_with('$') {
+                candidates.insert(name.clone());
             }
-            collect_asset_wide_doonce_names(init, out);
-            collect_asset_wide_doonce_names(inner, out);
-            continue;
         }
-        // Recurse structural children by hand. This deliberately omits a
-        // FlipFlop latch's init/body: the DoOnce arm above already handled
-        // and `continue`d DoOnce latches, so only FlipFlop reaches here, and
-        // the asset-wide DoOnce-name scan does not descend FlipFlop bodies.
-        // That is why it cannot delegate to `child_bodies_structural` /
-        // `walk_stmt_children`, both of which include Latch sub-bodies.
-        match stmt {
-            Stmt::Branch {
-                then_body,
-                else_body,
-                ..
-            } => {
-                collect_asset_wide_doonce_names(then_body, out);
-                collect_asset_wide_doonce_names(else_body, out);
-            }
-            Stmt::Sequence { pins, .. } => {
-                for pin in pins {
-                    collect_asset_wide_doonce_names(pin, out);
+        if let Stmt::Call { func, args, .. } = stmt {
+            if is_reset_doonce_call(func) {
+                if let [Expr::Var(target)] = args.as_slice() {
+                    if let Some(suffix) = target.strip_prefix(DOONCE_CALL_NAME) {
+                        if suffix.is_empty()
+                            || suffix.strip_prefix('_').is_some_and(|number| {
+                                !number.is_empty()
+                                    && number.bytes().all(|byte| byte.is_ascii_digit())
+                            })
+                        {
+                            names
+                                .entry(format!("{DOONCE_GATE_PREFIX}{suffix}"))
+                                .or_default();
+                        }
+                    }
                 }
             }
-            Stmt::Loop {
-                body: loop_body,
-                completion,
-                ..
-            } => {
-                collect_asset_wide_doonce_names(loop_body, out);
-                if let Some(comp) = completion {
-                    collect_asset_wide_doonce_names(comp, out);
-                }
-            }
-            Stmt::Switch { cases, default, .. } => {
-                for case in cases {
-                    collect_asset_wide_doonce_names(&case.body, out);
-                }
-                if let Some(default_body) = default {
-                    collect_asset_wide_doonce_names(default_body, out);
-                }
-            }
-            _ => {}
+        }
+        for children in stmt.child_bodies_structural() {
+            collect_asset_wide_doonce_names(children, names);
         }
     }
 }
 
-/// Rewrite every `Call(ResetDoOnce(DoOnce_<N>))` whose argument matches
-/// a fallback-name key in `name_map`. Recurses through every nested body
-/// via `walk_stmt_children_mut`. The argument-side check `starts_with('$')`
-/// guard isn't needed here: the rewrite key set never contains `$`-named
-/// targets (collection already filtered them out).
-///
-/// Threaded through `walk_stmt_children_mut`, which hands callers a
-/// `&mut Vec<Stmt>` slot; the Vec parameter type matches that contract.
-#[allow(clippy::ptr_arg)]
 fn rewrite_fallback_reset_calls(
-    body: &mut Vec<Stmt>,
-    name_map: &std::collections::BTreeMap<String, String>,
+    body: &mut [Stmt],
+    names: &std::collections::BTreeMap<String, String>,
 ) {
-    for stmt in body.iter_mut() {
+    for stmt in body {
+        if let Stmt::Latch {
+            kind: LatchKind::DoOnce { name, gate_var },
+            ..
+        } = stmt
+        {
+            if let Some(display) = names.get(&fallback_name_from_gate(gate_var)) {
+                *name = display.clone();
+            }
+        }
         if let Stmt::Call { func, args, .. } = stmt {
             if is_reset_doonce_call(func) && args.len() == 1 {
                 if let Expr::Var(target) = &mut args[0] {
-                    if let Some(replacement) = name_map.get(target.as_str()) {
-                        *target = replacement.clone();
+                    if let Some(display) = names.get(target) {
+                        *target = display.clone();
                     }
                 }
             }
         }
         walk_stmt_children_mut(stmt, &mut |children| {
-            rewrite_fallback_reset_calls(children, name_map)
+            rewrite_fallback_reset_calls(children, names)
         });
     }
 }

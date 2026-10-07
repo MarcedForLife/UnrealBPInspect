@@ -17,15 +17,14 @@
 //!   as a use of that temp.
 //!
 //! Deliberately OUT of scope, with their own helpers: the common
-//! subexpression elimination (CSE) family in `cse_projections.rs` (it needs a
-//! third lhs policy, visiting the lhs sub-expressions but not the lhs root)
-//! and `flipflop_naming`'s rename (`SkipLhs`, and it intentionally leaves the
+//! `flipflop_naming`'s rename (`SkipLhs`, and it intentionally leaves the
 //! `ForEach` item slot alone).
 
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::{LoopKind, Stmt};
 use crate::bytecode::transforms::visit::{
-    walk_body_exprs, walk_body_exprs_visit_lhs, walk_expr, walk_stmt_exprs_mut_visit_lhs, Action,
+    walk_body_exprs, walk_body_exprs_visit_lhs, walk_expr, walk_stmt_children,
+    walk_stmt_exprs_mut_visit_lhs, Action,
 };
 use std::collections::BTreeMap;
 
@@ -79,17 +78,19 @@ pub(crate) fn count_var(body: &[Stmt], name: &str, scope: VarScope, defs: Defs) 
     }
 }
 
-/// Count every distinct `Var` name used across `body` (`Deep` + `SkipLhs`) in
-/// a single pass. Map form of [`count_var`] for callers that screen many
-/// candidate names at once (the single-use temp inliner, struct-fold read
-/// counts).
-pub(crate) fn count_all_var_uses(body: &[Stmt]) -> BTreeMap<String, usize> {
+/// Count every distinct `Var` name across the whole body under the given
+/// assignment policy. Map form of [`count_var`] for callers screening many names.
+pub(crate) fn count_all_var_uses(body: &[Stmt], defs: Defs) -> BTreeMap<String, usize> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    walk_body_exprs(body, &mut |expr| {
+    let mut tally = |expr: &Expr| {
         if let Expr::Var(name) = expr {
             *counts.entry(name.clone()).or_insert(0) += 1;
         }
-    });
+    };
+    match defs {
+        Defs::SkipLhs => walk_body_exprs(body, &mut tally),
+        Defs::VisitLhs => walk_body_exprs_visit_lhs(body, &mut tally),
+    }
     counts
 }
 
@@ -180,13 +181,20 @@ pub(crate) fn rename_var_in_stmt(stmt: &mut Stmt, old: &str, new: &str) {
     });
 }
 
-/// A structural key for `expr`, used by the CSE (common subexpression
-/// elimination) passes to bucket equal subexpressions in a `BTreeMap`/`BTreeSet`
-/// of `String`. `None` (a swallowed serialize error) means "not a CSE
-/// candidate". `Expr` derives only `PartialEq` (no `Eq`/`Hash`), so keying is
-/// string-based.
-pub(crate) fn expr_key(expr: &Expr) -> Option<String> {
-    serde_json::to_string(expr).ok()
+/// Include loop bindings, which live outside expression trees.
+pub(crate) fn collect_loop_items(body: &[Stmt], references: &mut BTreeMap<String, usize>) {
+    for stmt in body {
+        if let Stmt::Loop {
+            kind: LoopKind::ForEach { item, .. },
+            ..
+        } = stmt
+        {
+            *references.entry(item.clone()).or_insert(0) += 1;
+        }
+        walk_stmt_children(stmt, &mut |children| {
+            collect_loop_items(children, references)
+        });
+    }
 }
 
 #[cfg(test)]
@@ -236,7 +244,7 @@ mod tests {
     #[test]
     fn deep_visitlhs_counts_lhs_that_skiplhs_misses() {
         // $t.Field = 1  -- a field-write back into temp t. The lhs receiver
-        // Var(t) is a use under VisitLhs (this is what blocks struct-fold),
+        // The receiver variable is a use under VisitLhs,
         // and invisible under SkipLhs.
         let body = vec![assign_expr(field("t", "Field"), lit("1"))];
         assert_eq!(count_var(&body, "t", VarScope::Deep, Defs::SkipLhs), 0);

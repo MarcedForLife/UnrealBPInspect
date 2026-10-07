@@ -9,6 +9,7 @@ use crate::types::EdGraphPin;
 
 use super::super::audit::{DropReason, Strategy};
 use super::super::CommentBox;
+use super::call_attribution::{branch_statement_for_node, call_statements_by_node};
 use super::context::{node_has_external_exec_input, sorted_exec_entries, ClassifyContext};
 use super::{Classification, PlacedComment, PlacementClass, TraceRecorder};
 
@@ -239,6 +240,33 @@ pub(super) fn anchor_to_node(
     let Some(body) = context.body_for_block(page) else {
         return anchor_via_owner_event(comment, node, context, recorder);
     };
+    if let Some(stmt) = branch_statement_for_node(node, body, context.parsed) {
+        recorder.record(direct_strategy);
+        return Classification::Placed(build_inline_placement(comment, page, stmt.offset()));
+    }
+    // Byte attribution deliberately merges ambiguous same-name calls. The
+    // annotation layer can distinguish their linked data inputs without
+    // changing ownership used by the decoder.
+    if let Some(matches) = call_statements_by_node(node, body, context.parsed) {
+        if let Some(stmt) = matches.get(&node) {
+            recorder.record(direct_strategy);
+            return Classification::Placed(build_inline_placement(comment, page, stmt.offset()));
+        }
+        recorder.record(Strategy::FunctionLevel);
+        let mut lines = vec!["    // Graph comment (location unresolved)".to_string()];
+        lines.extend(super::super::render::render_comment_lines(
+            &comment.text,
+            "    ",
+        ));
+        return Classification::Placed(Box::new(PlacedComment {
+            block: page.to_string(),
+            class: PlacementClass::FunctionLevel,
+            lines,
+            text: comment.text.clone(),
+            box_x: comment.x,
+            box_y: comment.y,
+        }));
+    }
     let Some(byte_map) = context.byte_map_for_block(page) else {
         recorder.record(Strategy::Dropped(DropReason::NoByteMap));
         return Classification::Unanchored;

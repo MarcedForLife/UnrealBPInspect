@@ -63,27 +63,37 @@
       [0]: -> UserConstructionScript
       [1]: -> GetSteeringAngle
     NewVariables: [StructProperty; 1 items]
-      [0]: () {
-        NewVariables: (BPVariableDescription) {
-          VarName: WinchConstraintInstance
-          VarGuid: (Guid) {
-            Guid: "[07, fe, e3, 81, bd, 94, 2c, 43, 82, 4c, 82, 51, 97, 18, da, e2]"
-          }
-          VarType: (EdGraphPinType) {}
-          FriendlyName: "Winch Constraint Instance"
-          Category: "KismetSchemaDefaultDefault"
-          PropertyFlags: 67589
-          RepNotifyFunc: None
-          ReplicationCondition: COND_None (ELifetimeCondition)
-          MetaDataArray: [StructProperty; 1 items]
-            [0]: () {
-              MetaDataArray: (BPVariableMetaDataEntry) {
-                DataKey: MultiLine
-                DataValue: "true"
-              }
-            }
-          DefaultValue: ""
+      [0]: (BPVariableDescription) {
+        VarName: WinchConstraintInstance
+        VarGuid: (Guid) {
+          Guid: "[07, fe, e3, 81, bd, 94, 2c, 43, 82, 4c, 82, 51, 97, 18, da, e2]"
         }
+        VarType: (EdGraphPinType) {
+          PinCategory: object
+          PinSubCategory: None
+          PinSubCategoryObject: -> /Game/LastResort/Blueprints/Vehicles/Ships/Common/WinchConstraint_BP.WinchConstraint_BP_C
+          ContainerType: None (EPinContainerType)
+          bIsReference: false
+          bIsWeakPointer: false
+          PinSubCategoryMemberReference: (SimpleMemberReference) {
+            MemberParent: -> None
+            MemberName: None
+            MemberGuid: "[00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00]"
+          }
+          bIsConst: false
+          bIsUObjectWrapper: false
+        }
+        FriendlyName: "Winch Constraint Instance"
+        Category: "KismetSchemaDefaultDefault"
+        PropertyFlags: 67589
+        RepNotifyFunc: None
+        ReplicationCondition: COND_None (ELifetimeCondition)
+        MetaDataArray: [StructProperty; 1 items]
+          [0]: (BPVariableMetaDataEntry) {
+            DataKey: MultiLine
+            DataValue: "true"
+          }
+        DefaultValue: ""
       }
     CategorySorting: [NameProperty; 5 items]
       [0]: Default
@@ -91,16 +101,30 @@
       [2]: Event Graph
       [3]: Config
       [4]: State
-    LastEditedDocuments: [StructProperty; 1 items]
-      [0]: () {
-        LastEditedDocuments: (EditedDocumentInfo) {
-          EditedObjectPath: (SoftObjectPath) {}
-          SavedViewOffset: (Vector2D) {
-            X: -313.8830
-            Y: -392.1807
-          }
-          SavedZoomAmount: 1.0000
+    LastEditedDocuments: [StructProperty; 3 items]
+      [0]: (EditedDocumentInfo) {
+        EditedObjectPath: ~/Game/LastResort/Blueprints/Vehicles/Ships/Schooner/Parts/Helm/Helm_BP.Helm_BP:UserConstructionScript
+        SavedViewOffset: (Vector2D) {
+          X: -313.8830
+          Y: -392.18073
         }
+        SavedZoomAmount: 1.0000
+      }
+      [1]: (EditedDocumentInfo) {
+        EditedObjectPath: ~/Game/LastResort/Blueprints/Vehicles/Ships/Schooner/Parts/Helm/Helm_BP.Helm_BP:EventGraph
+        SavedViewOffset: (Vector2D) {
+          X: -480.6610
+          Y: -769.3010
+        }
+        SavedZoomAmount: 0.7500
+      }
+      [2]: (EditedDocumentInfo) {
+        EditedObjectPath: ~/Game/LastResort/Blueprints/Vehicles/Ships/Schooner/Parts/Helm/Helm_BP.Helm_BP:GetSteeringAngle
+        SavedViewOffset: (Vector2D) {
+          X: -1015.56506
+          Y: -378.42172
+        }
+        SavedZoomAmount: 1.0000
       }
     ComponentTemplateNameIndex: {NameProperty->IntProperty; 1 entries}
       [0].key: StaticMeshComponent
@@ -114,9 +138,7 @@
 
   [2] Helm_BP_C (class: /Script/Engine.BlueprintGeneratedClass, parent: /Script/Engine.Actor)
     SimpleConstructionScript: -> SimpleConstructionScript_0
-    PropertyGuids: {NameProperty->StructProperty; 1 entries}
-      [0].key: WinchConstraintInstance
-      [0].val: () {}
+    PropertyGuids: <unknown MapProperty<NameProperty, StructProperty>, 32 bytes, sha256=404cc9e134b5052c532d8e754c1a2cec972a020a7e30c6bd74ba16f4dcfe1031>
     Super: Actor
     Members: [StrProperty; 12 items]
       [0]: "WheelConstraint: ChildActorComponent*"
@@ -143,25 +165,51 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 1 items]
-          [0]: () {
-            ResponseArray: (ResponseChannel) {
-              Channel: WorldStatic
-              Response: ECR_Ignore (ECollisionResponse)
-            }
+        ResponseArray: [StructProperty; 8 items]
+          [0]: (ResponseChannel) {
+            Channel: WorldStatic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [1]: (ResponseChannel) {
+            Channel: WorldDynamic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [2]: (ResponseChannel) {
+            Channel: Visibility
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [3]: (ResponseChannel) {
+            Channel: Camera
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [4]: (ResponseChannel) {
+            Channel: PhysicsBody
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [5]: (ResponseChannel) {
+            Channel: Vehicle
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [6]: (ResponseChannel) {
+            Channel: Destructible
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [7]: (ResponseChannel) {
+            Channel: Hand
+            Response: ECR_Ignore (ECollisionResponse)
           }
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
     RelativeLocation: (Vector) {
       X: 41.2000
-      Y: -17.2749
-      Z: 177.2303
+      Y: -17.274881
+      Z: 177.23033
     }
     RelativeRotation: (Rotator) {
       Pitch: 0.0000
       Yaw: 0.0000
-      Roll: -31.0001
+      Roll: -31.000109
     }
 
   [4] PawnBlockingCollision2_GEN_VARIABLE (class: /Script/Engine.BoxComponent)
@@ -175,25 +223,51 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 1 items]
-          [0]: () {
-            ResponseArray: (ResponseChannel) {
-              Channel: WorldStatic
-              Response: ECR_Ignore (ECollisionResponse)
-            }
+        ResponseArray: [StructProperty; 8 items]
+          [0]: (ResponseChannel) {
+            Channel: WorldStatic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [1]: (ResponseChannel) {
+            Channel: WorldDynamic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [2]: (ResponseChannel) {
+            Channel: Visibility
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [3]: (ResponseChannel) {
+            Channel: Camera
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [4]: (ResponseChannel) {
+            Channel: PhysicsBody
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [5]: (ResponseChannel) {
+            Channel: Vehicle
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [6]: (ResponseChannel) {
+            Channel: Destructible
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [7]: (ResponseChannel) {
+            Channel: Hand
+            Response: ECR_Ignore (ECollisionResponse)
           }
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
     RelativeLocation: (Vector) {
       X: 41.2000
-      Y: 34.8780
-      Z: 146.4964
+      Y: 34.877983
+      Z: 146.49644
     }
     RelativeRotation: (Rotator) {
       Pitch: 0.0000
       Yaw: 0.0000
-      Roll: 90.0000
+      Roll: 89.999954
     }
 
   [5] PawnBlockingCollision3_GEN_VARIABLE (class: /Script/Engine.BoxComponent)
@@ -207,25 +281,51 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 1 items]
-          [0]: () {
-            ResponseArray: (ResponseChannel) {
-              Channel: WorldStatic
-              Response: ECR_Ignore (ECollisionResponse)
-            }
+        ResponseArray: [StructProperty; 8 items]
+          [0]: (ResponseChannel) {
+            Channel: WorldStatic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [1]: (ResponseChannel) {
+            Channel: WorldDynamic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [2]: (ResponseChannel) {
+            Channel: Visibility
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [3]: (ResponseChannel) {
+            Channel: Camera
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [4]: (ResponseChannel) {
+            Channel: PhysicsBody
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [5]: (ResponseChannel) {
+            Channel: Vehicle
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [6]: (ResponseChannel) {
+            Channel: Destructible
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [7]: (ResponseChannel) {
+            Channel: Hand
+            Response: ECR_Ignore (ECollisionResponse)
           }
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
     RelativeLocation: (Vector) {
       X: 41.2000
-      Y: 16.9612
-      Z: 117.0921
+      Y: 16.961174
+      Z: 117.092064
     }
     RelativeRotation: (Rotator) {
       Pitch: 0.0000
       Yaw: 0.0000
-      Roll: 151.0000
+      Roll: 151.00003
     }
 
   [6] PawnBlockingCollision4_GEN_VARIABLE (class: /Script/Engine.BoxComponent)
@@ -239,25 +339,51 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 1 items]
-          [0]: () {
-            ResponseArray: (ResponseChannel) {
-              Channel: WorldStatic
-              Response: ECR_Ignore (ECollisionResponse)
-            }
+        ResponseArray: [StructProperty; 8 items]
+          [0]: (ResponseChannel) {
+            Channel: WorldStatic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [1]: (ResponseChannel) {
+            Channel: WorldDynamic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [2]: (ResponseChannel) {
+            Channel: Visibility
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [3]: (ResponseChannel) {
+            Channel: Camera
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [4]: (ResponseChannel) {
+            Channel: PhysicsBody
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [5]: (ResponseChannel) {
+            Channel: Vehicle
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [6]: (ResponseChannel) {
+            Channel: Destructible
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [7]: (ResponseChannel) {
+            Channel: Hand
+            Response: ECR_Ignore (ECollisionResponse)
           }
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
     RelativeLocation: (Vector) {
       X: 41.2000
-      Y: 17.2749
-      Z: 177.2303
+      Y: 17.274881
+      Z: 177.23033
     }
     RelativeRotation: (Rotator) {
       Pitch: 0.0000
       Yaw: 0.0000
-      Roll: 31.0001
+      Roll: 31.000078
     }
 
   [7] PawnBlockingCollision5_GEN_VARIABLE (class: /Script/Engine.BoxComponent)
@@ -271,25 +397,51 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 1 items]
-          [0]: () {
-            ResponseArray: (ResponseChannel) {
-              Channel: WorldStatic
-              Response: ECR_Ignore (ECollisionResponse)
-            }
+        ResponseArray: [StructProperty; 8 items]
+          [0]: (ResponseChannel) {
+            Channel: WorldStatic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [1]: (ResponseChannel) {
+            Channel: WorldDynamic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [2]: (ResponseChannel) {
+            Channel: Visibility
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [3]: (ResponseChannel) {
+            Channel: Camera
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [4]: (ResponseChannel) {
+            Channel: PhysicsBody
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [5]: (ResponseChannel) {
+            Channel: Vehicle
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [6]: (ResponseChannel) {
+            Channel: Destructible
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [7]: (ResponseChannel) {
+            Channel: Hand
+            Response: ECR_Ignore (ECollisionResponse)
           }
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
     RelativeLocation: (Vector) {
       X: 41.2000
-      Y: -34.8780
-      Z: 146.4964
+      Y: -34.877983
+      Z: 146.49644
     }
     RelativeRotation: (Rotator) {
       Pitch: 0.0000
       Yaw: 0.0000
-      Roll: 90.0000
+      Roll: 89.999954
     }
 
   [8] PawnBlockingCollision6_GEN_VARIABLE (class: /Script/Engine.BoxComponent)
@@ -303,25 +455,51 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 1 items]
-          [0]: () {
-            ResponseArray: (ResponseChannel) {
-              Channel: WorldStatic
-              Response: ECR_Ignore (ECollisionResponse)
-            }
+        ResponseArray: [StructProperty; 8 items]
+          [0]: (ResponseChannel) {
+            Channel: WorldStatic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [1]: (ResponseChannel) {
+            Channel: WorldDynamic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [2]: (ResponseChannel) {
+            Channel: Visibility
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [3]: (ResponseChannel) {
+            Channel: Camera
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [4]: (ResponseChannel) {
+            Channel: PhysicsBody
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [5]: (ResponseChannel) {
+            Channel: Vehicle
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [6]: (ResponseChannel) {
+            Channel: Destructible
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [7]: (ResponseChannel) {
+            Channel: Hand
+            Response: ECR_Ignore (ECollisionResponse)
           }
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
     RelativeLocation: (Vector) {
       X: 41.2000
-      Y: -16.9612
-      Z: 117.0921
+      Y: -16.961174
+      Z: 117.092064
     }
     RelativeRotation: (Rotator) {
       Pitch: 0.0000
       Yaw: 0.0000
-      Roll: -151.0000
+      Roll: -151.00003
     }
 
   [9] PawnBlockingCollision7_GEN_VARIABLE (class: /Script/Engine.CapsuleComponent)
@@ -331,19 +509,45 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 1 items]
-          [0]: () {
-            ResponseArray: (ResponseChannel) {
-              Channel: WorldStatic
-              Response: ECR_Ignore (ECollisionResponse)
-            }
+        ResponseArray: [StructProperty; 8 items]
+          [0]: (ResponseChannel) {
+            Channel: WorldStatic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [1]: (ResponseChannel) {
+            Channel: WorldDynamic
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [2]: (ResponseChannel) {
+            Channel: Visibility
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [3]: (ResponseChannel) {
+            Channel: Camera
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [4]: (ResponseChannel) {
+            Channel: PhysicsBody
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [5]: (ResponseChannel) {
+            Channel: Vehicle
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [6]: (ResponseChannel) {
+            Channel: Destructible
+            Response: ECR_Ignore (ECollisionResponse)
+          }
+          [7]: (ResponseChannel) {
+            Channel: Hand
+            Response: ECR_Ignore (ECollisionResponse)
           }
       }
     }
     RelativeLocation: (Vector) {
-      X: 3.8049
+      X: 3.8049316
       Y: 0.0000
-      Z: 146.6086
+      Z: 146.60861
     }
     RelativeRotation: (Rotator) {
       Pitch: 90.0000
@@ -355,9 +559,9 @@
     ChildActorClass: -> /Game/LastResort/Blueprints/Vehicles/Ships/Common/WinchConstraint_BP.WinchConstraint_BP_C
     ChildActorTemplate: -> WheelController_GEN_VARIABLE_Winch_BP_C_CAT
     RelativeLocation: (Vector) {
-      X: -0.0000
+      X: -0.000045
       Y: 0.0000
-      Z: 146.6086
+      Z: 146.60861
     }
 
   [11] EventGraph (class: /Script/Engine.EdGraph)
@@ -395,10 +599,11 @@
 
   [14] GetSteeringAngle (class: /Script/CoreUObject.Function)
     Signature: "GetSteeringAngle(out SteeringAngle: float)"
-    BytecodeSummary: [StrProperty; 2 items]
-      [0]: "    self.WinchConstraintInstance.GetRotationAlpha($RotationAlpha)"
-      [1]: "    out SteeringAngle = (($RotationAlpha * 2.0000) - 1.0000)"
-    FunctionFlags: "Public|HasOutParms|BlueprintPure|Const"
+    BytecodeSummary: [StrProperty; 3 items]
+      [0]: "    self.WinchConstraintInstance.GetRotationAlpha(out $RotationAlpha)"
+      [1]: "    $Subtract_FloatFloat = (($RotationAlpha * 2.0000) - 1.0000)"
+      [2]: "    out SteeringAngle = $Subtract_FloatFloat"
+    FunctionFlags: "Public|HasOutParms|BlueprintCallable|BlueprintEvent|BlueprintPure"
 
   [15] UserConstructionScript (class: /Script/CoreUObject.Function, parent: /Script/Engine.Actor.UserConstructionScript)
     Super: UserConstructionScript
@@ -408,7 +613,7 @@
       [1]: "    if ($Cast_AsWinch_Constraint_BP as bool) {"
       [2]: "        self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP"
       [3]: "    }"
-    FunctionFlags: "Event|Public|BlueprintPure"
+    FunctionFlags: "Event|Public|BlueprintCallable|BlueprintEvent"
 
   [16] Wheel_GEN_VARIABLE (class: /Script/VRExpansionPlugin.GrippableStaticMeshComponent)
     VRGripInterfaceSettings: (BPInterfaceProperties) {
@@ -434,9 +639,9 @@
       bEnableGravity: false
     }
     RelativeLocation: (Vector) {
-      X: -0.0000
+      X: -0.000045
       Y: 0.0000
-      Z: 146.6086
+      Z: 146.60861
     }
 
   [17] Default__Helm_BP_C (class: Helm_BP_C)

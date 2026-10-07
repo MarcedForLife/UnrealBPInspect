@@ -18,6 +18,7 @@
 //! every later pass.
 
 use crate::bytecode::expr::Expr;
+use crate::bytecode::expr::LiteralValue;
 use crate::bytecode::stmt::Stmt;
 use crate::bytecode::transforms::visit::{walk_body_exprs_mut_visit_lhs, Action};
 
@@ -70,7 +71,7 @@ pub fn lower_static_library_calls(body: &mut [Stmt]) {
 
 /// True when `expr` is `Expr::Literal(name)` for a recognised static-library class.
 fn is_static_library_receiver(expr: &Expr) -> bool {
-    let Expr::Literal(name) = expr else {
+    let Expr::Literal(LiteralValue::Text(name)) = expr else {
         return false;
     };
     STATIC_LIBRARY_CLASSES.iter().any(|cls| cls == name)

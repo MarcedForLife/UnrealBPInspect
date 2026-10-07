@@ -4,7 +4,7 @@
 //! bytecode range. Each chain records its push targets, per-pin
 //! reachability partitions, and an optional `parent_chain` link.
 //!
-//! The parent-containment fixed point distinguishes a genuine nested
+//! Parent-containment selection distinguishes a genuine nested
 //! Sequence (whose head sits inside a parent's pin partition) from a
 //! peer chain that happens to live in the same event. This eliminates
 //! the phantom-nested-Sequence class of bug, where the previous
@@ -73,8 +73,8 @@ pub struct StructureSkeleton {
 /// 3. For each chain, partition seeds (pin 0 inline body + each pushed
 ///    body in execution order) over `owner_range` to recover per-pin
 ///    owned ranges.
-/// 4. Iterate parent-containment to a fixed point, marking chains whose
-///    head sits inside another chain's pin partition as children.
+/// 4. Assign each chain to its innermost containing parent from the
+///    completed pin partitions.
 ///
 /// `arm_boundaries` lists tail-JIN displaced-arm ranges within the
 /// event. Pin partitioning treats each arm as a hard wall: a chain
@@ -600,10 +600,9 @@ fn follow_push_stub(target_disk: usize, range_end: usize, view: &BytecodeView) -
     }
 }
 
-/// Iterate parent assignment until stable. A chain whose head address
-/// falls inside another chain's pin partition becomes that chain's
-/// child. Multiple containment levels are resolved by repeated passes,
-/// each chain settling on the innermost containing parent.
+/// Assign each chain to its innermost containing parent. Parent selection
+/// depends only on completed pin partitions, so every level is resolved
+/// from the same immutable snapshot in one pass.
 fn assign_parent_containment(chains: &mut BTreeMap<usize, PushChainNode>) {
     if chains.len() < 2 {
         return;
@@ -614,18 +613,8 @@ fn assign_parent_containment(chains: &mut BTreeMap<usize, PushChainNode>) {
         .map(|(&head, node)| (head, node.pin_partitions.clone()))
         .collect();
 
-    let mut changed = true;
-    while changed {
-        changed = false;
-        let chain_heads: Vec<usize> = chains.keys().copied().collect();
-        for child_head in chain_heads {
-            let new_parent = innermost_containing_parent(child_head, &snapshot);
-            let entry = chains.get_mut(&child_head).expect("entry must exist");
-            if entry.parent_chain != new_parent {
-                entry.parent_chain = new_parent;
-                changed = true;
-            }
-        }
+    for (&child_head, node) in chains.iter_mut() {
+        node.parent_chain = innermost_containing_parent(child_head, &snapshot);
     }
 }
 

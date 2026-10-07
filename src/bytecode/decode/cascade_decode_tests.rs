@@ -209,7 +209,7 @@ fn four_case_dispatch_table_with_distinct_bodies() {
             for (idx, case) in cases.iter().enumerate() {
                 assert_eq!(
                     case.values,
-                    vec![Expr::Literal(idx.to_string())],
+                    vec![Expr::Literal(idx.to_string().into())],
                     "case {} values mismatch",
                     idx
                 );

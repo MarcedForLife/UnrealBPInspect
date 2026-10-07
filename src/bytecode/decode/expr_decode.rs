@@ -10,7 +10,7 @@
 use crate::bytecode::decode::walker::{
     walk_opcode, FieldPath, OpcodeVisitor, SwitchValueCase, TextConstPayload, WalkCtx,
 };
-use crate::bytecode::expr::{CastKind, Expr, SwitchExprCase};
+use crate::bytecode::expr::{CastKind, Expr, LiteralValue, SwitchExprCase};
 use crate::bytecode::names::{clean_bc_name, normalize_lwc_name};
 use crate::bytecode::opcodes::*;
 use crate::bytecode::partition::opcode_length_at;
@@ -30,6 +30,7 @@ pub(crate) fn decode_expr(pos: &mut usize, ctx: &DecodeCtx) -> Expr {
         ue5: ctx.ue5,
         bytecode: ctx.bytecode,
         name_table: ctx.name_table,
+        function_signatures: ctx.function_signatures,
     };
     walk_opcode(&walk_ctx, pos, &mut visitor)
 }
@@ -39,11 +40,13 @@ pub(crate) fn decode_expr(pos: &mut usize, ctx: &DecodeCtx) -> Expr {
 /// import / export tables so it can resolve `FPackageIndex` operands
 /// to display names without re-walking the asset.
 struct ExprVisitor<'a> {
+    function_signatures:
+        Option<&'a std::collections::BTreeMap<String, crate::types::FunctionSignature>>,
     imports: &'a [ImportEntry],
     export_names: &'a [String],
     ue5: i32,
-    /// Raw bytecode slice, only consulted for the `Unknown` fallback
-    /// (it copies a few bytes into the diagnostic blob).
+    /// Raw bytecode for unknown-opcode diagnostics and exact numeric
+    /// component bits before the walker promotes UE4 floats to doubles.
     bytecode: &'a [u8],
     /// Name table, kept for symmetry with `WalkCtx` though the visitor
     /// does not currently re-read FNames after the walker has produced
@@ -63,6 +66,44 @@ impl ExprVisitor<'_> {
     /// Apply LWC normalisation and `clean_bc_name` to a raw function name.
     fn normalise_call_name(&self, raw: &str) -> String {
         clean_bc_name(&normalize_lwc_name(raw))
+    }
+
+    /// Read source bits directly because the walker promotes UE4 components
+    /// to f64, which can change signaling-NaN payloads during conversion.
+    fn numeric_components(
+        &self,
+        count: usize,
+        lwc: bool,
+        start_offset: usize,
+    ) -> Option<Vec<LiteralValue>> {
+        let width = if lwc { 8 } else { 4 };
+        let start = start_offset.checked_add(1)?;
+        let end = start.checked_add(count.checked_mul(width)?)?;
+        self.bytecode
+            .get(start..end)?
+            .chunks_exact(width)
+            .map(|component| {
+                if lwc {
+                    Some(LiteralValue::Float64(u64::from_le_bytes(
+                        component.try_into().ok()?,
+                    )))
+                } else {
+                    Some(LiteralValue::Float32(u32::from_le_bytes(
+                        component.try_into().ok()?,
+                    )))
+                }
+            })
+            .collect()
+    }
+
+    fn composite_literal(&self, name: &str, count: usize, lwc: bool, start_offset: usize) -> Expr {
+        match self.numeric_components(count, lwc, start_offset) {
+            Some(components) => Expr::Literal(LiteralValue::Composite {
+                name: name.into(),
+                components,
+            }),
+            None => self.unknown_for(self.bytecode[start_offset], start_offset),
+        }
     }
 
     fn lwc(&self) -> bool {
@@ -105,10 +146,15 @@ impl ExprVisitor<'_> {
     /// preserve for diagnostics.
     fn unknown_for(&self, opcode: u8, start_offset: usize) -> Expr {
         let length = opcode_length_at(start_offset, self.bytecode, self.ue5, self.name_table);
-        let end = (start_offset + length).min(self.bytecode.len());
-        let raw_bytes = self.bytecode[start_offset..end].to_vec();
+        let attempted_end = start_offset.saturating_add(length);
+        let end = attempted_end.min(self.bytecode.len());
+        let raw_bytes = self.bytecode[start_offset.min(end)..end].to_vec();
         Expr::Unknown {
-            reason: format!("opcode 0x{:02x} not decoded", opcode),
+            reason: if attempted_end > self.bytecode.len() {
+                format!("truncated opcode 0x{opcode:02x}, missing operand bytes")
+            } else {
+                format!("opcode 0x{opcode:02x} not decoded")
+            },
             raw_bytes,
             offset: start_offset,
         }
@@ -119,7 +165,7 @@ impl ExprVisitor<'_> {
     /// full pseudocode emission.
     fn expr_display(expr: &Expr) -> String {
         match expr {
-            Expr::Literal(text) => text.clone(),
+            Expr::Literal(value) => value.to_string(),
             Expr::Var(name) => name.clone(),
             Expr::Call { name, args } => {
                 let arg_strs: Vec<String> = args.iter().map(Self::expr_display).collect();
@@ -137,7 +183,7 @@ impl ExprVisitor<'_> {
     fn expr_to_field_name(expr: &Expr) -> String {
         match expr {
             Expr::Var(name) => name.clone(),
-            Expr::Literal(val) => val.clone(),
+            Expr::Literal(val) => val.to_string(),
             _ => Self::expr_display(expr),
         }
     }
@@ -166,70 +212,70 @@ impl OpcodeVisitor for ExprVisitor<'_> {
     }
 
     fn on_int_const(&mut self, value: i32, _start_offset: usize) -> Expr {
-        Expr::Literal(value.to_string())
+        Expr::Literal(value.to_string().into())
     }
 
     fn on_int64_const(&mut self, value: i64, _start_offset: usize) -> Expr {
-        Expr::Literal(format!("{}L", value))
+        Expr::Literal(format!("{}L", value).into())
     }
 
     fn on_uint64_const(&mut self, value: u64, _start_offset: usize) -> Expr {
-        Expr::Literal(format!("{}UL", value))
+        Expr::Literal(format!("{}UL", value).into())
     }
 
     fn on_byte_const(&mut self, _opcode: u8, value: u8, _start_offset: usize) -> Expr {
-        Expr::Literal(value.to_string())
+        Expr::Literal(value.to_string().into())
     }
 
     fn on_float_const(&mut self, value: f32, _start_offset: usize) -> Expr {
-        Expr::Literal(format!("{:.4}", value))
+        Expr::Literal(LiteralValue::Float32(value.to_bits()))
     }
 
     fn on_double_const(&mut self, value: f64, _start_offset: usize) -> Expr {
-        Expr::Literal(format!("{:.4}", value))
+        Expr::Literal(LiteralValue::Float64(value.to_bits()))
     }
 
     fn on_string_const(&mut self, text: String, _start_offset: usize) -> Expr {
-        Expr::Literal(format!("\"{}\"", text))
+        Expr::Literal(format!("\"{}\"", text).into())
     }
 
     fn on_unicode_string_const(&mut self, raw: Vec<u16>, _start_offset: usize) -> Expr {
         let text = String::from_utf16_lossy(&raw);
-        Expr::Literal(format!("\"{}\"", text))
+        Expr::Literal(format!("\"{}\"", text).into())
     }
 
     fn on_object_const(&mut self, _opcode: u8, obj_idx: i32, _start_offset: usize) -> Expr {
-        Expr::Literal(self.obj_name(obj_idx))
+        Expr::Literal(self.obj_name(obj_idx).into())
     }
 
     fn on_name_const(&mut self, name: String, _start_offset: usize) -> Expr {
-        Expr::Literal(format!("'{}'", name))
+        Expr::Literal(format!("'{}'", name).into())
     }
 
     fn on_rotation_const(
         &mut self,
-        pitch: f64,
-        yaw: f64,
-        roll: f64,
-        _lwc: bool,
-        _start_offset: usize,
+        _pitch: f64,
+        _yaw: f64,
+        _roll: f64,
+        lwc: bool,
+        start_offset: usize,
     ) -> Expr {
-        Expr::Literal(format!("Rot({:.4},{:.4},{:.4})", pitch, yaw, roll))
+        self.composite_literal("Rot", 3, lwc, start_offset)
     }
 
     fn on_vector_const(
         &mut self,
-        x: f64,
-        y: f64,
-        z: f64,
-        _lwc: bool,
-        _start_offset: usize,
+        _x: f64,
+        _y: f64,
+        _z: f64,
+        lwc: bool,
+        start_offset: usize,
     ) -> Expr {
-        Expr::Literal(format!("Vec({:.4},{:.4},{:.4})", x, y, z))
+        self.composite_literal("Vec", 3, lwc, start_offset)
     }
 
-    fn on_vector3f_const_lwc(&mut self, x: f32, y: f32, z: f32, _start_offset: usize) -> Expr {
-        Expr::Literal(format!("Vec3f({:.4},{:.4},{:.4})", x, y, z))
+    fn on_vector3f_const_lwc(&mut self, _x: f32, _y: f32, _z: f32, start_offset: usize) -> Expr {
+        self.composite_literal("Vec3f", 3, false, start_offset)
     }
 
     fn on_vector3f_const_ue4(
@@ -246,19 +292,26 @@ impl OpcodeVisitor for ExprVisitor<'_> {
 
     fn on_transform_const(
         &mut self,
-        rotation: (f64, f64, f64, f64),
-        translation: (f64, f64, f64),
-        scale: (f64, f64, f64),
-        _lwc: bool,
-        _start_offset: usize,
+        _rotation: (f64, f64, f64, f64),
+        _translation: (f64, f64, f64),
+        _scale: (f64, f64, f64),
+        lwc: bool,
+        start_offset: usize,
     ) -> Expr {
-        let (rx, ry, rz, rw) = rotation;
-        let (tx, ty, tz) = translation;
-        let (sx, sy, sz) = scale;
-        Expr::Literal(format!(
-            "Transform(Rot({:.4},{:.4},{:.4},{:.4}),Pos({:.4},{:.4},{:.4}),Scale({:.4},{:.4},{:.4}))",
-            rx, ry, rz, rw, tx, ty, tz, sx, sy, sz
-        ))
+        let Some(components) = self.numeric_components(10, lwc, start_offset) else {
+            return self.unknown_for(EX_TRANSFORM_CONST, start_offset);
+        };
+        let groups = [("Rot", 0..4), ("Pos", 4..7), ("Scale", 7..10)];
+        Expr::Literal(LiteralValue::Composite {
+            name: "Transform".into(),
+            components: groups
+                .into_iter()
+                .map(|(name, range)| LiteralValue::Composite {
+                    name: name.into(),
+                    components: components[range].to_vec(),
+                })
+                .collect(),
+        })
     }
 
     fn on_text_const(&mut self, payload: TextConstPayload<Expr>, _start_offset: usize) -> Expr {
@@ -274,7 +327,7 @@ impl OpcodeVisitor for ExprVisitor<'_> {
             }
             TextConstPayload::Unknown(other) => format!("text(type={})", other),
         };
-        Expr::Literal(text)
+        Expr::Literal(text.into())
     }
 
     fn on_field_path_var(&mut self, opcode: u8, path: FieldPath, _start_offset: usize) -> Expr {
@@ -305,14 +358,30 @@ impl OpcodeVisitor for ExprVisitor<'_> {
 
     fn on_virtual_function(
         &mut self,
-        _opcode: u8,
+        opcode: u8,
         function_name: String,
         args: Vec<Expr>,
         _start_offset: usize,
     ) -> Expr {
+        let signature = self.function_signatures.and_then(|signatures| {
+            let signature = signatures.get(&function_name)?;
+            if opcode != EX_LOCAL_VIRTUAL_FUNCTION
+                && signatures.iter().any(|(key, candidate)| {
+                    key.rsplit_once('.')
+                        .is_some_and(|(_, name)| name == function_name)
+                        && (candidate.params.len() != signature.params.len()
+                            || candidate.params.iter().zip(&signature.params).any(
+                                |(candidate, local)| (candidate.flags ^ local.flags) & 0x100 != 0,
+                            ))
+                })
+            {
+                return None;
+            }
+            Some(signature)
+        });
         Expr::Call {
             name: self.normalise_call_name(&function_name),
-            args,
+            args: wrap_out_args(args, signature),
         }
     }
 
@@ -324,9 +393,15 @@ impl OpcodeVisitor for ExprVisitor<'_> {
         _start_offset: usize,
     ) -> Expr {
         let raw_name = self.obj_name(callee_obj_idx);
+        let signature_key =
+            crate::resolve::resolve_index(self.imports, self.export_names, callee_obj_idx);
         Expr::Call {
             name: self.normalise_call_name(&raw_name),
-            args,
+            args: wrap_out_args(
+                args,
+                self.function_signatures
+                    .and_then(|signatures| signatures.get(&signature_key)),
+            ),
         }
     }
 
@@ -474,7 +549,7 @@ impl OpcodeVisitor for ExprVisitor<'_> {
     }
 
     fn on_instance_delegate(&mut self, name: String, _start_offset: usize) -> Expr {
-        Expr::Literal(format!("'{}'", name))
+        Expr::Literal(format!("'{}'", name).into())
     }
 
     fn on_bind_delegate(
@@ -526,11 +601,11 @@ impl OpcodeVisitor for ExprVisitor<'_> {
     }
 
     fn on_bitfield_const(&mut self, path: FieldPath, value: u8, _start_offset: usize) -> Expr {
-        Expr::Literal(format!("BitFieldConst('{}', {})", path.display, value))
+        Expr::Literal(format!("BitFieldConst('{}', {})", path.display, value).into())
     }
 
     fn on_property_const(&mut self, path: FieldPath, _start_offset: usize) -> Expr {
-        Expr::Literal(format!("PropertyConst('{}')", path.display))
+        Expr::Literal(format!("PropertyConst('{}')", path.display).into())
     }
 
     fn on_struct_member_context(
@@ -546,7 +621,7 @@ impl OpcodeVisitor for ExprVisitor<'_> {
     }
 
     fn on_field_path_const(&mut self, path: FieldPath, _start_offset: usize) -> Expr {
-        Expr::Literal(format!("FieldPath('{}')", path.display))
+        Expr::Literal(format!("FieldPath('{}')", path.display).into())
     }
 
     fn on_instrumentation_event(
@@ -559,7 +634,7 @@ impl OpcodeVisitor for ExprVisitor<'_> {
             Some(name) => name,
             None => format!("{}", event_type),
         };
-        Expr::Literal(format!("InstrumentationEvent({})", label))
+        Expr::Literal(format!("InstrumentationEvent({})", label).into())
     }
 
     fn on_auto_rtfm_transact(
@@ -589,7 +664,7 @@ impl OpcodeVisitor for ExprVisitor<'_> {
     /// has already consumed the 4-byte linkage offset; render it as a
     /// `skip_offset(0xHEX)` literal.
     fn on_skip_offset_const(&mut self, target: u32, _start_offset: usize) -> Expr {
-        Expr::Literal(format!("skip_offset(0x{:x})", target))
+        Expr::Literal(format!("skip_offset(0x{:x})", target).into())
     }
 
     /// `EX_SwitchValue` (0x69) at expression position. The walker has
@@ -620,6 +695,32 @@ impl OpcodeVisitor for ExprVisitor<'_> {
     }
 }
 
+/// Parameter position is trustworthy only when the complete arity matches.
+/// This also excludes split editor pins and variadic call-node expansions.
+pub(super) fn wrap_out_args(
+    args: Vec<Expr>,
+    signature: Option<&crate::types::FunctionSignature>,
+) -> Vec<Expr> {
+    let Some(signature) = signature.filter(|signature| signature.params.len() == args.len()) else {
+        return args;
+    };
+    args.into_iter()
+        .zip(&signature.params)
+        .map(|(argument, parameter)| {
+            if parameter.flags & 0x100 != 0
+                && matches!(
+                    argument,
+                    Expr::Var(_) | Expr::FieldAccess { .. } | Expr::Index { .. }
+                )
+            {
+                Expr::Out(Box::new(argument))
+            } else {
+                argument
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,6 +742,41 @@ mod tests {
     }
 
     use super::super::test_fixtures::{put_field_path, put_fname, put_i32};
+
+    #[test]
+    fn truncated_numeric_operands_are_unknown_with_original_bytes() {
+        let name_table = make_name_table(&[]);
+        for opcode in [
+            EX_INT_CONST,
+            EX_FLOAT_CONST,
+            EX_DOUBLE_CONST,
+            EX_INT64_CONST,
+            EX_BYTE_CONST,
+        ] {
+            let stream = [opcode];
+            let context = make_ctx(&stream, &name_table, &[], &[], 0);
+            let mut position = 0;
+            let result = decode_expr(&mut position, &context);
+            let Expr::Unknown {
+                reason,
+                raw_bytes,
+                offset,
+            } = result
+            else {
+                panic!("missing numeric operand became a literal");
+            };
+            assert!(reason.contains("missing operand bytes"));
+            assert_eq!(raw_bytes, stream);
+            assert_eq!(offset, 0);
+            assert!(position > stream.len());
+        }
+        let context = make_ctx(&[], &name_table, &[], &[], 0);
+        let mut position = 0;
+        assert!(matches!(
+            decode_expr(&mut position, &context),
+            Expr::Unknown { .. }
+        ));
+    }
 
     #[test]
     fn decodes_local_variable() {
@@ -853,7 +989,8 @@ mod tests {
         let ctx = make_ctx(&stream, &name_table, &[], &[], 0);
         let mut pos = 0;
         let result = decode_expr(&mut pos, &ctx);
-        if let Expr::Literal(text) = result {
+        if let Expr::Literal(value) = result {
+            let text = value.to_string();
             assert!(text.contains("hi"));
         } else {
             panic!("expected Literal");
@@ -871,7 +1008,8 @@ mod tests {
         let ctx = make_ctx(&stream, &name_table, &[], &[], 0);
         let mut pos = 0;
         let result = decode_expr(&mut pos, &ctx);
-        if let Expr::Literal(text) = result {
+        if let Expr::Literal(value) = result {
+            let text = value.to_string();
             assert!(text.starts_with("Vec("), "got: {}", text);
         } else {
             panic!("expected Literal");
@@ -916,7 +1054,8 @@ mod tests {
         let ctx = make_ctx(&stream, &name_table, &[], &[], 0);
         let mut pos = 0;
         let result = decode_expr(&mut pos, &ctx);
-        if let Expr::Literal(text) = result {
+        if let Expr::Literal(value) = result {
+            let text = value.to_string();
             assert!(text.contains("MyField"), "got: {}", text);
             assert!(text.starts_with("FieldPath("), "got: {}", text);
         } else {
@@ -933,7 +1072,8 @@ mod tests {
         let ctx = make_ctx(&stream, &name_table, &[], &[], 0);
         let mut pos = 0;
         let result = decode_expr(&mut pos, &ctx);
-        if let Expr::Literal(text) = result {
+        if let Expr::Literal(value) = result {
+            let text = value.to_string();
             assert!(text.contains("SomeProp"), "got: {}", text);
             assert!(text.starts_with("PropertyConst("), "got: {}", text);
         } else {
@@ -979,7 +1119,8 @@ mod tests {
         let ctx = make_ctx(&stream, &name_table, &[], &[], 0);
         let mut pos = 0;
         let result = decode_expr(&mut pos, &ctx);
-        if let Expr::Literal(text) = result {
+        if let Expr::Literal(value) = result {
+            let text = value.to_string();
             assert!(text.contains("BeginEvent"), "got: {}", text);
         } else {
             panic!("expected Literal, got {:?}", result);
@@ -1084,5 +1225,191 @@ mod tests {
             other => panic!("expected Expr::Index, got {:?}", other),
         }
         assert_eq!(pos, stream.len());
+    }
+
+    fn numeric_literal(opcode: u8, payload: &[u8], ue5: i32) -> Expr {
+        let name_table = make_name_table(&[]);
+        let mut stream = vec![opcode];
+        stream.extend_from_slice(payload);
+        let context = make_ctx(&stream, &name_table, &[], &[], ue5);
+        let mut position = 0;
+        let result = decode_expr(&mut position, &context);
+        assert_eq!(position, stream.len());
+        result
+    }
+
+    fn rendered_literal(expr: Expr) -> String {
+        let body = vec![crate::bytecode::stmt::Stmt::Return {
+            value: Some(expr),
+            offset: 0,
+        }];
+        crate::bytecode::emit::render_body_lines(&body, &Default::default()).join("\n")
+    }
+
+    #[test]
+    fn scalar_literals_preserve_differences_below_four_decimal_places() {
+        for (opcode, original, changed) in [
+            (
+                EX_FLOAT_CONST,
+                2.0_f32.to_le_bytes().to_vec(),
+                2.00001_f32.to_le_bytes().to_vec(),
+            ),
+            (
+                EX_DOUBLE_CONST,
+                2.0_f64.to_le_bytes().to_vec(),
+                2.00001_f64.to_le_bytes().to_vec(),
+            ),
+        ] {
+            let original = numeric_literal(opcode, &original, 0);
+            let changed = numeric_literal(opcode, &changed, 0);
+            assert_ne!(original, changed);
+            assert_ne!(
+                serde_json::to_string(&original).unwrap(),
+                serde_json::to_string(&changed).unwrap()
+            );
+            let original_summary = rendered_literal(original);
+            let changed_summary = rendered_literal(changed);
+            let (difference, has_changes) = crate::output_diff::diff_summary_texts(
+                &original_summary,
+                &changed_summary,
+                "before",
+                "after",
+                3,
+            );
+            assert!(has_changes);
+            assert!(difference.contains("2.00001"));
+        }
+    }
+
+    #[test]
+    fn float_display_uses_original_width_and_keeps_exact_simple_values() {
+        let precise = numeric_literal(EX_FLOAT_CONST, &0.12345679_f32.to_le_bytes(), 0);
+        assert!(rendered_literal(precise).contains("0.12345679"));
+        let simple = numeric_literal(EX_FLOAT_CONST, &2.0_f32.to_le_bytes(), 0);
+        assert!(rendered_literal(simple).contains("2.0000"));
+        let negative_zero = numeric_literal(EX_DOUBLE_CONST, &(-0.0_f64).to_le_bytes(), 0);
+        assert!(rendered_literal(negative_zero).contains("-0.0000"));
+    }
+
+    #[test]
+    fn compound_literals_preserve_component_precision_at_both_widths() {
+        for (opcode, component_count) in [
+            (EX_VECTOR_CONST, 3),
+            (EX_ROTATION_CONST, 3),
+            (EX_TRANSFORM_CONST, 10),
+        ] {
+            for ue5 in [0, VER_UE5_LARGE_WORLD_COORDINATES] {
+                let component = if ue5 == 0 {
+                    2.00001_f32.to_le_bytes().to_vec()
+                } else {
+                    2.00001_f64.to_le_bytes().to_vec()
+                };
+                let literal = numeric_literal(opcode, &component.repeat(component_count), ue5);
+                assert_eq!(
+                    rendered_literal(literal).matches("2.00001").count(),
+                    component_count
+                );
+            }
+        }
+        let literal = numeric_literal(
+            EX_VECTOR3F_CONST,
+            &2.00001_f32.to_le_bytes().repeat(3),
+            VER_UE5_LARGE_WORLD_COORDINATES,
+        );
+        assert_eq!(rendered_literal(literal).matches("2.00001").count(), 3);
+    }
+
+    #[test]
+    fn nonfinite_literal_bits_survive_json_roundtrip_and_remain_distinct() {
+        for payloads in [
+            [
+                0x7fc0_0001_u32.to_le_bytes().to_vec(),
+                0x7fc0_0002_u32.to_le_bytes().to_vec(),
+            ],
+            [
+                0x7ff8_0000_0000_0001_u64.to_le_bytes().to_vec(),
+                0x7ff8_0000_0000_0002_u64.to_le_bytes().to_vec(),
+            ],
+        ] {
+            let opcode = if payloads[0].len() == 4 {
+                EX_FLOAT_CONST
+            } else {
+                EX_DOUBLE_CONST
+            };
+            let first = numeric_literal(opcode, &payloads[0], 0);
+            let second = numeric_literal(opcode, &payloads[1], 0);
+            assert_ne!(first, second);
+            let serialised = serde_json::to_string(&first).unwrap();
+            let restored: Expr = serde_json::from_str(&serialised).unwrap();
+            assert_eq!(first, restored);
+            assert_ne!(rendered_literal(first), rendered_literal(second));
+        }
+    }
+
+    #[test]
+    fn scalar_bits_preserve_width_signed_zero_subnormals_and_infinities() {
+        for bits in [
+            0,
+            0x8000_0000,
+            1,
+            0x007f_ffff,
+            0x0080_0000,
+            0x7f7f_ffff,
+            0x7f80_0000,
+            0xff80_0000,
+            0x7f80_0001_u32,
+        ] {
+            let expr = numeric_literal(EX_FLOAT_CONST, &bits.to_le_bytes(), 0);
+            assert_eq!(expr, Expr::Literal(LiteralValue::Float32(bits)));
+            let Expr::Literal(value) = expr else {
+                unreachable!()
+            };
+            if !f32::from_bits(bits).is_nan() {
+                assert_eq!(value.to_string().parse::<f32>().unwrap().to_bits(), bits);
+            }
+        }
+        for bits in [
+            0,
+            0x8000_0000_0000_0000,
+            1,
+            0x000f_ffff_ffff_ffff,
+            0x0010_0000_0000_0000,
+            0x7fef_ffff_ffff_ffff,
+            0x7ff0_0000_0000_0000,
+            0xfff0_0000_0000_0000,
+            0x7ff0_0000_0000_0001_u64,
+        ] {
+            let expr = numeric_literal(EX_DOUBLE_CONST, &bits.to_le_bytes(), 0);
+            assert_eq!(expr, Expr::Literal(LiteralValue::Float64(bits)));
+            let Expr::Literal(value) = expr else {
+                unreachable!()
+            };
+            if !f64::from_bits(bits).is_nan() {
+                assert_eq!(value.to_string().parse::<f64>().unwrap().to_bits(), bits);
+            }
+        }
+    }
+
+    #[test]
+    fn ue4_composite_retains_signaling_nan_payloads_before_promotion() {
+        let component_bits = [0x7f80_0001_u32, 0x8000_0000, 0x0000_0001];
+        let payload = component_bits
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let expr = numeric_literal(EX_VECTOR_CONST, &payload, 0);
+        assert_eq!(
+            expr,
+            Expr::Literal(LiteralValue::Composite {
+                name: "Vec".into(),
+                components: component_bits
+                    .into_iter()
+                    .map(LiteralValue::Float32)
+                    .collect(),
+            })
+        );
+        let serialised = serde_json::to_string(&expr).unwrap();
+        assert_eq!(serde_json::from_str::<Expr>(&serialised).unwrap(), expr);
+        assert!(rendered_literal(expr).contains("NaN32(0x7f800001)"));
     }
 }

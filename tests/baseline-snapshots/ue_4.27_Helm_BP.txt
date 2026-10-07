@@ -4,85 +4,164 @@ Components:
   DefaultSceneRoot (SceneComponent)
   Scene (SceneComponent)
     Stand (StaticMeshComponent)
-      StaticMesh: helm_elemnt_02
+      StaticMesh: /Game/LastResort/Blueprints/Vehicles/Ships/Schooner/Parts/Helm/helm_elemnt_02.helm_elemnt_02
       bGenerateOverlapEvents: false
-      BodyInstance: CollisionProfileName: Custom, PhysMaterialOverride: 11_Wood_Physic_Mat
+      BodyInstance: BodyInstance {CollisionProfileName: Name("Custom"),
+          PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat}
     PawnBlockingCollision7 (CapsuleComponent)
       CapsuleRadius: 18.0000
-      AreaClass: NavArea_Obstacle
+      AreaClass: /Script/NavigationSystem.NavArea_Obstacle
       bGenerateOverlapEvents: false
-      BodyInstance: CollisionProfileName: Custom
-      RelativeLocation: (3.8049, 0.0000, 146.6086)
-      RelativeRotation: (90.0000, 0.0000, 0.0000)
+      BodyInstance: BodyInstance {CollisionProfileName: Name("Custom"),
+          CollisionResponses: CollisionResponse {ResponseArray: Array<StructProperty>[ResponseChannel {Channel: Name("WorldStatic"),
+          Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("WorldDynamic"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Visibility"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Camera"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("PhysicsBody"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Vehicle"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Destructible"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Hand"), Response: ECollisionResponse::ECR_Ignore}]}}
+      RelativeLocation: Vector {X: 3.8049316, Y: 0.0000, Z: 146.60861}
+      RelativeRotation: Rotator {Pitch: 90.0000, Yaw: 0.0000, Roll: 0.0000}
     PawnBlockingCollision1 (BoxComponent)
-      BoxExtent: (4.0000, 21.0000, 6.0000)
-      AreaClass: NavArea_Obstacle
+      BoxExtent: Vector {X: 4.0000, Y: 21.0000, Z: 6.0000}
+      AreaClass: /Script/NavigationSystem.NavArea_Obstacle
       bGenerateOverlapEvents: false
-      BodyInstance: CollisionProfileName: Custom, PhysMaterialOverride: 11_Wood_Physic_Mat
-      RelativeLocation: (41.2000, -17.2749, 177.2303)
-      RelativeRotation: (0.0000, 0.0000, -31.0001)
+      BodyInstance: BodyInstance {CollisionProfileName: Name("Custom"),
+          CollisionResponses: CollisionResponse {ResponseArray: Array<StructProperty>[ResponseChannel {Channel: Name("WorldStatic"),
+          Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("WorldDynamic"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Visibility"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Camera"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("PhysicsBody"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Vehicle"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Destructible"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Hand"), Response: ECollisionResponse::ECR_Ignore}]},
+          PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat}
+      RelativeLocation: Vector {X: 41.2000, Y: -17.274881, Z: 177.23033}
+      RelativeRotation: Rotator {Pitch: 0.0000, Yaw: 0.0000, Roll: -31.000109}
     PawnBlockingCollision6 (BoxComponent)
-      BoxExtent: (4.0000, 21.0000, 6.0000)
-      AreaClass: NavArea_Obstacle
+      BoxExtent: Vector {X: 4.0000, Y: 21.0000, Z: 6.0000}
+      AreaClass: /Script/NavigationSystem.NavArea_Obstacle
       bGenerateOverlapEvents: false
-      BodyInstance: CollisionProfileName: Custom, PhysMaterialOverride: 11_Wood_Physic_Mat
-      RelativeLocation: (41.2000, -16.9612, 117.0921)
-      RelativeRotation: (0.0000, 0.0000, -151.0000)
+      BodyInstance: BodyInstance {CollisionProfileName: Name("Custom"),
+          CollisionResponses: CollisionResponse {ResponseArray: Array<StructProperty>[ResponseChannel {Channel: Name("WorldStatic"),
+          Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("WorldDynamic"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Visibility"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Camera"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("PhysicsBody"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Vehicle"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Destructible"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Hand"), Response: ECollisionResponse::ECR_Ignore}]},
+          PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat}
+      RelativeLocation: Vector {X: 41.2000, Y: -16.961174, Z: 117.092064}
+      RelativeRotation: Rotator {Pitch: 0.0000, Yaw: 0.0000, Roll: -151.00003}
     PawnBlockingCollision4 (BoxComponent)
-      BoxExtent: (4.0000, 21.0000, 6.0000)
-      AreaClass: NavArea_Obstacle
+      BoxExtent: Vector {X: 4.0000, Y: 21.0000, Z: 6.0000}
+      AreaClass: /Script/NavigationSystem.NavArea_Obstacle
       bGenerateOverlapEvents: false
-      BodyInstance: CollisionProfileName: Custom, PhysMaterialOverride: 11_Wood_Physic_Mat
-      RelativeLocation: (41.2000, 17.2749, 177.2303)
-      RelativeRotation: (0.0000, 0.0000, 31.0001)
+      BodyInstance: BodyInstance {CollisionProfileName: Name("Custom"),
+          CollisionResponses: CollisionResponse {ResponseArray: Array<StructProperty>[ResponseChannel {Channel: Name("WorldStatic"),
+          Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("WorldDynamic"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Visibility"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Camera"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("PhysicsBody"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Vehicle"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Destructible"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Hand"), Response: ECollisionResponse::ECR_Ignore}]},
+          PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat}
+      RelativeLocation: Vector {X: 41.2000, Y: 17.274881, Z: 177.23033}
+      RelativeRotation: Rotator {Pitch: 0.0000, Yaw: 0.0000, Roll: 31.000078}
     PawnBlockingCollision5 (BoxComponent)
-      BoxExtent: (4.0000, 21.0000, 6.0000)
-      AreaClass: NavArea_Obstacle
+      BoxExtent: Vector {X: 4.0000, Y: 21.0000, Z: 6.0000}
+      AreaClass: /Script/NavigationSystem.NavArea_Obstacle
       bGenerateOverlapEvents: false
-      BodyInstance: CollisionProfileName: Custom, PhysMaterialOverride: 11_Wood_Physic_Mat
-      RelativeLocation: (41.2000, -34.8780, 146.4964)
-      RelativeRotation: (0.0000, 0.0000, 90.0000)
+      BodyInstance: BodyInstance {CollisionProfileName: Name("Custom"),
+          CollisionResponses: CollisionResponse {ResponseArray: Array<StructProperty>[ResponseChannel {Channel: Name("WorldStatic"),
+          Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("WorldDynamic"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Visibility"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Camera"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("PhysicsBody"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Vehicle"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Destructible"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Hand"), Response: ECollisionResponse::ECR_Ignore}]},
+          PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat}
+      RelativeLocation: Vector {X: 41.2000, Y: -34.877983, Z: 146.49644}
+      RelativeRotation: Rotator {Pitch: 0.0000, Yaw: 0.0000, Roll: 89.999954}
     PawnBlockingCollision3 (BoxComponent)
-      BoxExtent: (4.0000, 21.0000, 6.0000)
-      AreaClass: NavArea_Obstacle
+      BoxExtent: Vector {X: 4.0000, Y: 21.0000, Z: 6.0000}
+      AreaClass: /Script/NavigationSystem.NavArea_Obstacle
       bGenerateOverlapEvents: false
-      BodyInstance: CollisionProfileName: Custom, PhysMaterialOverride: 11_Wood_Physic_Mat
-      RelativeLocation: (41.2000, 16.9612, 117.0921)
-      RelativeRotation: (0.0000, 0.0000, 151.0000)
+      BodyInstance: BodyInstance {CollisionProfileName: Name("Custom"),
+          CollisionResponses: CollisionResponse {ResponseArray: Array<StructProperty>[ResponseChannel {Channel: Name("WorldStatic"),
+          Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("WorldDynamic"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Visibility"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Camera"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("PhysicsBody"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Vehicle"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Destructible"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Hand"), Response: ECollisionResponse::ECR_Ignore}]},
+          PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat}
+      RelativeLocation: Vector {X: 41.2000, Y: 16.961174, Z: 117.092064}
+      RelativeRotation: Rotator {Pitch: 0.0000, Yaw: 0.0000, Roll: 151.00003}
     PawnBlockingCollision2 (BoxComponent)
-      BoxExtent: (4.0000, 21.0000, 6.0000)
-      AreaClass: NavArea_Obstacle
+      BoxExtent: Vector {X: 4.0000, Y: 21.0000, Z: 6.0000}
+      AreaClass: /Script/NavigationSystem.NavArea_Obstacle
       bGenerateOverlapEvents: false
-      BodyInstance: CollisionProfileName: Custom, PhysMaterialOverride: 11_Wood_Physic_Mat
-      RelativeLocation: (41.2000, 34.8780, 146.4964)
-      RelativeRotation: (0.0000, 0.0000, 90.0000)
+      BodyInstance: BodyInstance {CollisionProfileName: Name("Custom"),
+          CollisionResponses: CollisionResponse {ResponseArray: Array<StructProperty>[ResponseChannel {Channel: Name("WorldStatic"),
+          Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("WorldDynamic"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Visibility"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Camera"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("PhysicsBody"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Vehicle"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Destructible"), Response: ECollisionResponse::ECR_Ignore},
+          ResponseChannel {Channel: Name("Hand"), Response: ECollisionResponse::ECR_Ignore}]},
+          PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat}
+      RelativeLocation: Vector {X: 41.2000, Y: 34.877983, Z: 146.49644}
+      RelativeRotation: Rotator {Pitch: 0.0000, Yaw: 0.0000, Roll: 89.999954}
     Wheel (GrippableStaticMeshComponent)
-      VRGripInterfaceSettings: bAllowMultipleGrips: true
-      StaticMesh: helm_elemnt_01
+      VRGripInterfaceSettings: BPInterfaceProperties {bAllowMultipleGrips: true,
+          AdvancedGripSettings: BPAdvGripSettings {PhysicsSettings: BPAdvGripPhysicsSettings {bUsePhysicsSettings: true,
+          PhysicsConstraintType: EPhysicsGripConstraintType::ForceConstraint,
+          PhysicsGripLocationSettings: EPhysicsGripCOMType::COM_GripAtControllerLoc, bTurnOffGravityDuringGrip: true}}}
+      StaticMesh: /Game/LastResort/Blueprints/Vehicles/Ships/Schooner/Parts/Helm/helm_elemnt_01.helm_elemnt_01
       bGenerateOverlapEvents: false
-      BodyInstance: ObjectType: ECC_PhysicsBody, CollisionProfileName: PhysicsActor, AngularDamping: 8.0000,
-          PhysMaterialOverride: 11_Wood_Physic_Mat, bSimulatePhysics: true, bOverrideMass: true, bEnableGravity: false
-      RelativeLocation: (-0.0000, 0.0000, 146.6086)
+      BodyInstance: BodyInstance {ObjectType: ECollisionChannel::ECC_PhysicsBody,
+          CollisionProfileName: Name("PhysicsActor"), AngularDamping: 8.0000,
+          PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat, bSimulatePhysics: true,
+          bOverrideMass: true, bEnableGravity: false}
+      RelativeLocation: Vector {X: -0.000045, Y: 0.0000, Z: 146.60861}
     WheelConstraint (ChildActorComponent)
-      ChildActorClass: WinchConstraint_BP_C
-      RelativeLocation: (-0.0000, 0.0000, 146.6086)
+      ChildActorClass: /Game/LastResort/Blueprints/Vehicles/Ships/Common/WinchConstraint_BP.WinchConstraint_BP_C
+      RelativeLocation: Vector {X: -0.000045, Y: 0.0000, Z: 146.60861}
       [template: WinchConstraint_BP_C]
-        WinchMesh: helm_elemnt_01
+        WinchMesh: /Game/LastResort/Blueprints/Vehicles/Ships/Schooner/Parts/Helm/helm_elemnt_01.helm_elemnt_01
         WinchComponentName: "Wheel"
         AttachmentComponentName: "Stand"
         InitialRotationAlpha: 0.5000
-        RotatingCue: HelmRotate_Cue
-        LimitHitCue: HelmMaxRotation_Cue
+        RotatingCue: /Game/LastResort/Audio/Cues/Ships/Parts/Helm/HelmRotate_Cue.HelmRotate_Cue
+        LimitHitCue: /Game/LastResort/Audio/Cues/Ships/Parts/Helm/HelmMaxRotation_Cue.HelmMaxRotation_Cue
 
 Variables:
   WinchConstraintInstance: WinchConstraint_BP_C*
 
-Functions:
-  GetSteeringAngle(out SteeringAngle: float) [Public|HasOutParms|BlueprintPure|Const]
-    self.WinchConstraintInstance.GetRotationAlpha($RotationAlpha)
-    out SteeringAngle = (($RotationAlpha * 2.0000) - 1.0000)
+Default values:
+  bCanProxyPhysics = true
 
-  UserConstructionScript() [Event|Public|BlueprintPure]
+Functions:
+  GetSteeringAngle(out SteeringAngle: float) [Public|HasOutParms|BlueprintEvent|BlueprintPure]
+    self.WinchConstraintInstance.GetRotationAlpha(out $RotationAlpha)
+    $Subtract_FloatFloat = (($RotationAlpha * 2.0000) - 1.0000)
+    out SteeringAngle = $Subtract_FloatFloat
+
+  UserConstructionScript() [Event|Public|BlueprintEvent]
     $Cast_AsWinch_Constraint_BP = Cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)
     if ($Cast_AsWinch_Constraint_BP as bool) {
         self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP

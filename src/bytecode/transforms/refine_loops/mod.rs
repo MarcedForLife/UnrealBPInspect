@@ -51,6 +51,33 @@ pub fn refine_loops(stmts: &mut Vec<Stmt>) {
     refine_loops_vec(stmts, &[]);
 }
 
+/// Keep the non-bound part of a foreach condition after its index scaffold
+/// is removed. In particular, an inner loop may set an outer loop's flag.
+fn foreach_break_guard(cond: &Expr, body: &[Stmt], ancestors: &[&[Stmt]]) -> Option<Expr> {
+    let scopes = scope_stack(body, ancestors);
+    let resolved = resolve_cond_chain(cond, &scopes);
+    let Expr::Binary {
+        op: crate::bytecode::expr::BinaryOp::And,
+        lhs,
+        rhs,
+    } = resolved
+    else {
+        return None;
+    };
+    for operand in [lhs.as_ref(), rhs.as_ref()] {
+        let resolved = resolve_cond_chain(operand, &scopes);
+        if let Some(flag) = crate::bytecode::transforms::visit::negated_operand(resolved) {
+            if matches!(
+                flag,
+                Expr::Var(_) | Expr::FieldAccess { .. } | Expr::Literal(_)
+            ) {
+                return Some(flag.clone());
+            }
+        }
+    }
+    None
+}
+
 /// Walk a `Vec<Stmt>` body, refining While nodes and also absorbing the
 /// immediately-preceding counter assignment into each ForC's `init` field.
 ///
@@ -252,7 +279,7 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
             cond,
             body,
             completion,
-            ..
+            offset,
         } => {
             // Try ForEach first — it's the more specific shape and subsumes ForC.
             let cond_expr = match cond {
@@ -264,7 +291,11 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                 }
             };
 
-            // Check if we can extract a counter increment from the trailing body.
+            // Recognized ForEach owns its condition plumbing. Other loops must
+            // retain explicit recomputation, including the final temp value.
+            let original_body = body.clone();
+            strip_trailing_cond_recomputation(body, cond_expr, ancestors);
+            let stripped_recomputation = body.len() != original_body.len();
             let increment = extract_increment(body, cond_expr, ancestors);
 
             if let Some(inc_stmts) = increment {
@@ -272,6 +303,7 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                 if let Some((item, array)) =
                     match_foreach_shape(cond_expr, &inc_stmts, body, ancestors)
                 {
+                    let break_guard = foreach_break_guard(cond_expr, body, ancestors);
                     // Collect the counter aliases before stripping (which
                     // drops the defining fetch and may remove the
                     // index-mirror the alias scan reads).
@@ -310,8 +342,25 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                             substitute_foreach_fetches(body, &array, aliases, &item, ancestors);
                         }
                     }
+                    if let Some(guard) = break_guard {
+                        body.insert(
+                            0,
+                            Stmt::Branch {
+                                cond: guard,
+                                then_body: vec![Stmt::Break { offset: *offset }],
+                                else_body: Vec::new(),
+                                offset: *offset,
+                            },
+                        );
+                    }
                     *kind = LoopKind::ForEach { item, array };
                     *cond = None;
+                    recurse_loop_children(body, completion, ancestors);
+                    return;
+                }
+
+                if stripped_recomputation {
+                    *body = original_body;
                     recurse_loop_children(body, completion, ancestors);
                     return;
                 }
@@ -342,7 +391,10 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                 // refined body and completion.
                 recurse_loop_children(body, completion, ancestors);
             } else {
-                // Stays While — recurse into body.
+                // Failed recognition must not discard condition writes.
+                if stripped_recomputation {
+                    *body = original_body;
+                }
                 recurse_loop_children(body, completion, ancestors);
             }
         }
@@ -410,14 +462,6 @@ pub(super) fn extract_increment(
     cond: &Expr,
     ancestors: &[&[Stmt]],
 ) -> Option<Vec<Stmt>> {
-    // Blueprint emits a tail-of-iteration recomputation of the loop cond at
-    // the end of every Loop body so the back-edge JumpIfNot can read a
-    // fresh value. These assignments survive into refine_loops (the inliner
-    // runs after). Strip the trailing run of cond recomputations before the
-    // counter-increment extraction so this pass does not greedily absorb
-    // plumbing into the increment slot.
-    strip_trailing_cond_recomputation(body, cond, ancestors);
-
     let last_lhs_name = body
         .last()
         .and_then(stmt_assignment_lhs_name)

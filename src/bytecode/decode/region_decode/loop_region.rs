@@ -502,7 +502,7 @@ fn loop_transitive_coverage(
 ///
 /// LoopKind: `try_decode_loop` emits `LoopKind::While` for every
 /// recognised loop. ForC / ForEach refinement runs later in
-/// `transforms::refine_loops` after temp inlining.
+/// `transforms::refine_loops` over explicit condition recomputation.
 pub(super) fn try_emit_loop_region(
     region: &Region,
     region_id: RegionId,
@@ -550,9 +550,51 @@ pub(super) fn try_emit_loop_region(
         try_decode_loop(&mut pos, range_end, ctx)?
     };
 
+    let continuation = decode_loop_continuation(&loop_stmt, pos, region, region_id, walk);
     let mut out = preamble;
     out.push(loop_stmt);
+    out.extend(continuation);
     Some(out)
+}
+
+/// The region walker claims its own exit block after emitting the loop. Keep
+/// every instruction there except offsets already present in its completion.
+fn decode_loop_continuation(
+    loop_stmt: &Stmt,
+    resume: usize,
+    region: &Region,
+    region_id: RegionId,
+    walk: RegionWalkCtx,
+) -> Vec<Stmt> {
+    let RegionWalkCtx { cfg, ctx, .. } = walk;
+    // A loop whose only continuation is the function return can own that
+    // block while its region exit is the synthetic sink. Preserve the raw
+    // epilogue before the region's coverage is consumed.
+    if ctx.bytecode.get(resume).copied() == Some(EX_RETURN) {
+        let mut cursor = resume;
+        if let Ok(Some(statement)) = super::super::block::decode_one(&mut cursor, ctx) {
+            super::super::ctx::mark_claimed(ctx, resume, cursor, OwnerId::CfgRegion { region_id });
+            return vec![statement];
+        }
+    }
+    let Some(tree) = ctx.region_tree else {
+        return Vec::new();
+    };
+    let Some(exit) = cfg.blocks.get(region.exit) else {
+        return Vec::new();
+    };
+    if exit.start != resume || !is_own_exit_with_content(region_id, tree, cfg) {
+        return Vec::new();
+    }
+    let excluded = match loop_stmt {
+        Stmt::Loop {
+            completion: Some(body),
+            ..
+        } => stmt_offset_exclude_set(body),
+        _ => Vec::new(),
+    };
+    let _owner = ctx.with_decoding_owner(OwnerId::CfgRegion { region_id });
+    decode_subrange_excluding(exit.start, exit.end, ctx, &excluded)
 }
 
 /// Emit a rotated-trampoline (do-while) ForEach as a `While` loop the
@@ -639,6 +681,8 @@ fn emit_rotated_trampoline_loop(
         ctx,
     ));
 
+    let preamble = decode_subrange(head_block_start, layout.head_offset, ctx);
+    body.extend(preamble.clone());
     if let Stmt::Loop { body: slot, .. } = &mut loop_stmt {
         *slot = body;
     }
@@ -647,8 +691,8 @@ fn emit_rotated_trampoline_loop(
     // Array_Length(array))` and the `Array_Length` fetch) sits before the
     // JIN. Decode it as a sibling preceding the loop so `refine_loops`
     // chain-resolution can recover the canonical `counter < Array_Length`
-    // condition and lift the `While` to `ForEach`.
-    let preamble = decode_subrange(head_block_start, layout.head_offset, ctx);
+    // condition and lift the `While` to `ForEach`. Its clone above preserves
+    // the increment's fallthrough into the header on subsequent iterations.
 
     // Suppress the root walk's re-emit of every region now folded into the
     // loop: the dispatched siblings, their descendants, and the loop's own
@@ -769,4 +813,92 @@ pub(super) fn try_emit_switch_region(
     let mut out = preamble;
     out.push(switch_stmt);
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::opcodes::{EX_CALL_MATH, EX_END_FUNCTION_PARMS};
+    use crate::bytecode::stmt::LoopKind;
+
+    #[test]
+    fn owned_exit_uses_completion_offsets_instead_of_completion_presence() {
+        let bytecode = [EX_CALL_MATH, 1, 0, 0, 0, EX_END_FUNCTION_PARMS];
+        let cfg = ControlFlowGraph {
+            blocks: vec![
+                BasicBlock {
+                    id: 0,
+                    start: 0,
+                    end: 0,
+                    opcodes: vec![],
+                },
+                BasicBlock {
+                    id: 1,
+                    start: 0,
+                    end: 6,
+                    opcodes: vec![0],
+                },
+                BasicBlock {
+                    id: 2,
+                    start: 6,
+                    end: 6,
+                    opcodes: vec![],
+                },
+            ],
+            successors: BTreeMap::from([(0, vec![1]), (1, vec![2]), (2, vec![])]),
+            predecessors: BTreeMap::from([(0, vec![]), (1, vec![0]), (2, vec![1])]),
+            entry: 0,
+            sink: 2,
+        };
+        let tree = RegionTree {
+            regions: vec![Region {
+                id: 0,
+                entry: 0,
+                exit: 1,
+                parent: None,
+                children: vec![],
+                kind: RegionKind::Loop,
+            }],
+            root: 0,
+            block_to_region: BTreeMap::from([(0, 0), (1, 0)]),
+        };
+        let names = crate::binary::NameTable::from_names(vec![]);
+        let exports = vec!["Notify".into()];
+        let context = DecodeCtx {
+            cfg: Some(&cfg),
+            region_tree: Some(&tree),
+            ..DecodeCtx::new(&bytecode, &names, &[], &exports, 0)
+        };
+        let dominators = compute_dominators(&cfg);
+        let walk = RegionWalkCtx {
+            cfg: &cfg,
+            ctx: &context,
+            idom: &dominators,
+        };
+        let call = |offset| Stmt::Call {
+            func: Expr::Var("Notify".into()),
+            args: vec![],
+            offset,
+        };
+        for (completion, expected_count) in [
+            (None, 1),
+            (Some(vec![]), 1),
+            (Some(vec![call(99)]), 1),
+            (Some(vec![call(0)]), 0),
+        ] {
+            let loop_stmt = Stmt::Loop {
+                kind: LoopKind::While,
+                cond: None,
+                body: vec![],
+                completion,
+                offset: 0,
+            };
+            let tail = decode_loop_continuation(&loop_stmt, 0, &tree.regions[0], 0, walk);
+            assert_eq!(tail.len(), expected_count);
+            assert!(tail.iter().all(
+                |stmt| matches!(stmt, Stmt::Call { func: Expr::Var(name), .. } if name == "Notify")
+            ));
+            assert!(decode_loop_continuation(&loop_stmt, 1, &tree.regions[0], 0, walk).is_empty());
+        }
+    }
 }

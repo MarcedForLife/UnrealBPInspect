@@ -3,111 +3,168 @@ Blueprint: Helm_BP (extends Actor)
 Components:
   DefaultSceneRoot (SceneComponent)
   Stand (StaticMeshComponent)
-    StaticMesh: helm_elemnt_02
+    StaticMesh: /Game/LastResort/Blueprints/Vehicles/Ships/Schooner/Parts/Helm/helm_elemnt_02.helm_elemnt_02
     bGenerateOverlapEvents: false
-    BodyInstance: CollisionProfileName: Custom, PhysMaterialOverride: 11_Wood_Physic_Mat
+    BodyInstance: BodyInstance {CollisionProfileName: Name("Custom"),
+        PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat}
     VREPhysicsConstraint (VREPhysicsConstraintComponent)
-      ComponentName1: ComponentName: Stand
-      ComponentName2: ComponentName: Wheel
-      RelativeLocation: (-0.0000, 0.0000, 146.6086)
+      ComponentName1: ConstrainComponentPropName {ComponentName: Name("Stand")}
+      ComponentName2: ConstrainComponentPropName {ComponentName: Name("Wheel")}
+      ConstraintInstance: ConstraintInstance {SecAxis2: Vector {X: 0.0000, Y: 0.9492060542106628,
+          Z: 0.31465521454811096},
+          AngularRotationOffset: Rotator {Pitch: 0.0000, Yaw: 0.0000, Roll: -18.34000015258789},
+          ProfileInstance: ConstraintProfileProperties {ProjectionLinearTolerance: 0.0000,
+          ProjectionAngularTolerance: 0.0000,
+          ConeLimit: ConeConstraint {Swing1Motion: EAngularConstraintMotion::ACM_Locked,
+          Swing2Motion: EAngularConstraintMotion::ACM_Locked},
+          TwistLimit: TwistConstraint {TwistLimitDegrees: 180.0000, bSoftConstraint: false}, bDisableCollision: true,
+          AngularDrive: AngularDriveConstraint {TwistDrive: ConstraintDrive {Stiffness: 1.0000},
+          SwingDrive: ConstraintDrive {Stiffness: 1.0000}, SlerpDrive: ConstraintDrive {Stiffness: 1.0000},
+          AngularDriveMode: EAngularDriveMode::TwistAndSwing}}}
+      RelativeLocation: Vector {X: -0.00004600000102072954, Y: 0.0000, Z: 146.60861206054688}
     Wheel (GrippableStaticMeshComponent)
-      VRGripInterfaceSettings: bAllowMultipleGrips: true,
+      VRGripInterfaceSettings: BPInterfaceProperties {bAllowMultipleGrips: true,
           SlotDefaultGripType: EGripCollisionType::InteractiveCollisionWithPhysics,
           FreeDefaultGripType: EGripCollisionType::InteractiveCollisionWithPhysics, ConstraintStiffness: 0.0000,
-          ConstraintDamping: 0.0000, ConstraintBreakDistance: 60.0000
-      StaticMesh: helm_elemnt_01
+          ConstraintDamping: 0.0000, ConstraintBreakDistance: 60.0000,
+          AdvancedGripSettings: BPAdvGripSettings {PhysicsSettings: BPAdvGripPhysicsSettings {bUsePhysicsSettings: true,
+          PhysicsConstraintType: EPhysicsGripConstraintType::ForceConstraint,
+          PhysicsGripLocationSettings: EPhysicsGripCOMType::COM_GripAtControllerLoc, LinearMaxForceCoefficient: 1.0000,
+          AngularMaxForceCoefficient: 1.0000}}}
+      StaticMesh: /Game/LastResort/Blueprints/Vehicles/Ships/Schooner/Parts/Helm/helm_elemnt_01.helm_elemnt_01
       bGenerateOverlapEvents: false
-      CanCharacterStepUpOn: ECB_No
-      BodyInstance: ObjectType: ECC_PhysicsBody, CollisionProfileName: Custom, AngularDamping: 8.0000,
-          PhysMaterialOverride: 11_Wood_Physic_Mat, bSimulatePhysics: true, bOverrideMass: true
-      RelativeLocation: (-0.0000, 0.0000, 146.6086)
+      CanCharacterStepUpOn: ECanBeCharacterBase::ECB_No
+      BodyInstance: BodyInstance {ObjectType: ECollisionChannel::ECC_PhysicsBody, CollisionProfileName: Name("Custom"),
+          CollisionResponses: CollisionResponse {ResponseArray: Array<StructProperty>[ResponseChannel {Channel: Name("Pawn"),
+          Response: ECollisionResponse::ECR_Ignore}]}, AngularDamping: 8.0000,
+          PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat, bSimulatePhysics: true,
+          bOverrideMass: true}
+      RelativeLocation: Vector {X: -0.0000457763671875, Y: 0.0000, Z: 146.60861206054688}
 
 Variables:
   TotalRotation: float
   PreviousRotation: float
   MaxRotation: float = 870.0000
-  WheelRotationCue: SoundCue* = HelmRotate_Cue
+  WheelRotationCue: SoundCue* = /Game/LastResort/Audio/Cues/Ships/Parts/Helm/HelmRotate_Cue.HelmRotate_Cue
   WheelRotationAudioComponent: AudioComponent*
   WheelHitPlayable: bool
-  WheelMaxRotationCue: SoundCue* = HelmMaxRotation_Cue
-  WheeMaxRotationCueReset: float = 0.9800
+  WheelMaxRotationCue: SoundCue* = /Game/LastResort/Audio/Cues/Ships/Parts/Helm/HelmMaxRotation_Cue.HelmMaxRotation_Cue
+  WheeMaxRotationCueReset: float = 0.9800000190734863
+
+Default values:
+  PrimaryActorTick = ActorTickFunction {bCanEverTick: true}
 
 Call graph:
   ReceiveTick → UpdateAudio, UpdateWheelRotation
   UpdateAudio → GetSteeringAngle, GetWheelVelocity
 
 Functions:
-  ClampWheelRotation(CurrentAngle: float) [Public|BlueprintPure]
-    if ((CurrentAngle > self.MaxRotation) || (CurrentAngle < (self.MaxRotation * -1.0000))) {
+  ClampWheelRotation(CurrentAngle: float) [Public|HasDefaults|BlueprintEvent]
+    $Multiply_FloatFloat = (self.MaxRotation * -1.0000)
+    $Greater_FloatFloat = (CurrentAngle > self.MaxRotation)
+    $Less_FloatFloat = (CurrentAngle < $Multiply_FloatFloat)
+    if ($Greater_FloatFloat || $Less_FloatFloat) {
         BreakRotator(self.Wheel.GetComponentRotation(), $Roll, $Pitch, $Yaw)
+        $Subtract_FloatFloat = (self.MaxRotation - CurrentAngle)
+        $Multiply_FloatFloat = (self.MaxRotation * -1.0000)
+        $Greater_FloatFloat = (CurrentAngle > self.MaxRotation)
+        Temp_bool_Variable = $Greater_FloatFloat
+        $Subtract_FloatFloat_1 = ($Multiply_FloatFloat - CurrentAngle)
+        $MakeRotator = MakeRotator(($Roll - (Temp_bool_Variable ? $Subtract_FloatFloat : $Subtract_FloatFloat_1)),
+            $Pitch, $Yaw)
         // "We are applying a relative rotation to world which isn't great"
         // "but it works because the helm never faces the sky or ground."
         // "Will fix later"
-        self.Wheel.SetWorldRotation(MakeRotator(($Roll
-            - ((CurrentAngle > self.MaxRotation)
-            ? (self.MaxRotation - CurrentAngle) : ((self.MaxRotation * -1.0000) - CurrentAngle))), $Pitch, $Yaw),
-            false, $SetWorldRotation_SweepHitResult, true)
+        self.Wheel.SetWorldRotation($MakeRotator, false, $SetWorldRotation_SweepHitResult, true)
     }
 
   // Called by: UpdateAudio
-  GetSteeringAngle(out SteeringAngle: float) [Public|HasOutParms|BlueprintPure|Const]
+  GetSteeringAngle(out SteeringAngle: float) [Public|HasOutParms|BlueprintEvent|BlueprintPure]
     // "Ugh, bit of a hack but I'm"
     // "struggling to get the constraint"
     // "to lock perfectly at max rotation"
     // "and buffering it here"
-    out SteeringAngle = FClamp((self.TotalRotation / (self.MaxRotation - 5.0000)), -1.0000, 1.0000)
+    $Subtract_FloatFloat = (self.MaxRotation - 5.0000)
+    $FClamp = FClamp((self.TotalRotation / $Subtract_FloatFloat), -1.0000, 1.0000)
+    out SteeringAngle = $FClamp
 
   // Called by: UpdateAudio
-  GetWheelVelocity(out Velocity: float) [Public|HasOutParms|BlueprintPure|Const]
-    BreakVector(InverseTransformDirection(self.Stand.GetComponentToWorld(),
-        self.Wheel.GetPhysicsAngularVelocityInDegrees('None')), $X, $Y, $Z)
-    out Velocity = Abs($X)
+  GetWheelVelocity(out Velocity: float) [Public|HasOutParms|HasDefaults|BlueprintEvent|BlueprintPure]
+    $GetComponentToWorld = self.Stand.GetComponentToWorld()
+    $GetPhysicsAngularVelocityInDegrees = self.Wheel.GetPhysicsAngularVelocityInDegrees('None')
+    BreakVector(InverseTransformDirection($GetComponentToWorld, $GetPhysicsAngularVelocityInDegrees), $X, $Y, $Z)
+    $Abs = Abs($X)
+    out Velocity = $Abs
 
   // Called by: ReceiveTick
-  UpdateAudio() [Public|BlueprintPure]
+  UpdateAudio() [Public|BlueprintEvent]
     // Sequence [0]:
     GetWheelVelocity(out $Velocity)
     $Divide_FloatFloat_1 = ($Velocity / 150.0000)
+    $NewPitchMultiplier = FClamp($Divide_FloatFloat_1, 0.0000, 1.2999999523162842)
     // "Play wheel rotation audio"
-    self.WheelRotationAudioComponent.SetPitchMultiplier(FClamp($Divide_FloatFloat_1, 0.0000, 1.3000))
+    self.WheelRotationAudioComponent.SetPitchMultiplier($NewPitchMultiplier)
+    GetWheelVelocity(out $Velocity)
     $Divide_FloatFloat_1 = ($Velocity / 150.0000)
-    self.WheelRotationAudioComponent.SetVolumeMultiplier($Divide_FloatFloat_1)
+    $NewVolumeMultiplier = $Divide_FloatFloat_1
+    self.WheelRotationAudioComponent.SetVolumeMultiplier($NewVolumeMultiplier)
+    GetWheelVelocity(out $Velocity)
     $Divide_FloatFloat_1 = ($Velocity / 150.0000)
-    if ($Divide_FloatFloat_1 >= 0.0100) {
-        if (Not_PreBool(self.WheelRotationAudioComponent.IsPlaying())) {
+    if ($Divide_FloatFloat_1 >= 0.009999999776482582) {
+        $IsPlaying = self.WheelRotationAudioComponent.IsPlaying()
+        if (Not_PreBool($IsPlaying)) {
             self.WheelRotationAudioComponent.Play(0.0000)
         }
     } else {
-        if (self.WheelRotationAudioComponent.IsPlaying()) {
+        $IsPlaying = self.WheelRotationAudioComponent.IsPlaying()
+        if ($IsPlaying) {
             self.WheelRotationAudioComponent.Stop()
         }
     }
     // Sequence [1]:
     GetSteeringAngle(out $SteeringAngle)
-    if (NearlyEqual_FloatFloat(Abs($SteeringAngle), 1.0000, 0.0200) && self.WheelHitPlayable) {
+    $Abs = Abs($SteeringAngle)
+    if (NearlyEqual_FloatFloat($Abs, 1.0000, 0.019999999552965164) && self.WheelHitPlayable) {
+        GetWheelVelocity(out $Velocity)
+        $VolumeMultiplier = FClamp(($Velocity / 100.0000), 0.0000, 2.0000)
         // "Play hit audio when the wheel hits max rotation"
         // "Check if we are hitting the limit"
         $SpawnSoundAttached = SpawnSoundAttached(self.WheelMaxRotationCue, self.VREPhysicsConstraint, 'None',
-            Vec(0.0000,0.0000,0.0000), Rot(0.0000,0.0000,0.0000), 0, false,
-            FClamp(($Velocity / 100.0000), 0.0000, 2.0000), 1.0000, 0.0000, None, None, true)
+            Vec(0.0000,0.0000,0.0000), Rot(0.0000,0.0000,0.0000), 0, false, $VolumeMultiplier, 1.0000, 0.0000, None,
+            None, true)
         // "Check if we have backed off"
         // "the limit enough to reset"
         self.WheelHitPlayable = false
     } else {
-        self.WheelHitPlayable = (Abs($SteeringAngle) <= self.WheeMaxRotationCueReset)
+        GetSteeringAngle(out $SteeringAngle)
+        $Abs = Abs($SteeringAngle)
+        self.WheelHitPlayable = ($Abs <= self.WheeMaxRotationCueReset)
     }
 
   // Called by: ReceiveTick
-  UpdateWheelRotation() [Public|BlueprintPure]
+  UpdateWheelRotation() [Public|BlueprintEvent]
+    // Graph comment (location unresolved)
+    // "Enabled/Disable the twist limit if closer/further than 180 degrees to the max rotation limit"
+    // Graph comment (location unresolved)
+    // "Make sure we set the twist limit if we are below"
+    // "180 degrees until the max rotation"
     $GetCurrentTwist = self.VREPhysicsConstraint.GetCurrentTwist()
     // "Capture the change in rotation since last update"
     RotationDifference = ($GetCurrentTwist - self.PreviousRotation)
+    $Less_FloatFloat = (self.PreviousRotation < 0.0000)
+    $Greater_FloatFloat_2 = (RotationDifference > 180.0000)
     $GetCurrentTwist = self.VREPhysicsConstraint.GetCurrentTwist()
-    if ((RotationDifference > 180.0000) && ((self.PreviousRotation < 0.0000) && ($GetCurrentTwist > 0.0000))) {
+    $Greater_FloatFloat_3 = ($GetCurrentTwist > 0.0000)
+    $BooleanAND = ($Less_FloatFloat && $Greater_FloatFloat_3)
+    if ($Greater_FloatFloat_2 && $BooleanAND) {
         RotationDifference = (RotationDifference - 360.0000)
     } else {
-        if ((RotationDifference < -180.0000)
-            && ((self.PreviousRotation > 0.0000) && (self.VREPhysicsConstraint.GetCurrentTwist() < 0.0000))) {
+        $Greater_FloatFloat = (self.PreviousRotation > 0.0000)
+        $Less_FloatFloat_2 = (RotationDifference < -180.0000)
+        $GetCurrentTwist = self.VREPhysicsConstraint.GetCurrentTwist()
+        $Less_FloatFloat_3 = ($GetCurrentTwist < 0.0000)
+        $BooleanAND_1 = ($Greater_FloatFloat && $Less_FloatFloat_3)
+        if ($Less_FloatFloat_2 && $BooleanAND_1) {
             RotationDifference = (RotationDifference + 360.0000)
         }
     }
@@ -117,26 +174,29 @@ Functions:
     // "the difference in future invocations"
     // "Add the rotation offset"
     self.PreviousRotation = $GetCurrentTwist
-    // "Calculate the current complete rotation from the physics constraint"
+    $Multiply_FloatFloat = (RotationDifference * -1.0000)
     // "The current, unclamped total rotation"
     // "Invert the rotation so that clockwise is positive and"
     // "anti-clockwise is negative (easier on the brain)"
-    self.TotalRotation = (self.TotalRotation + (RotationDifference * -1.0000))
-    if ((self.MaxRotation - Abs(self.TotalRotation)) < 180.0000) {
+    self.TotalRotation = (self.TotalRotation + $Multiply_FloatFloat)
+    // "Calculate the current complete rotation from the physics constraint"
+    $Abs = Abs(self.TotalRotation)
+    if ((self.MaxRotation - $Abs) < 180.0000) {
         BreakRotator(self.VREPhysicsConstraint.GetAngularOffset(), $Roll, $Pitch, $Yaw)
+        $Percent_FloatFloat = Percent_FloatFloat(self.MaxRotation, 360.0000)
+        $Add_FloatFloat_B = $Roll
+        $Add_FloatFloat = ($Percent_FloatFloat + $Add_FloatFloat_B)
+        $Subtract_FloatFloat_B = $Roll
+        $Subtract_FloatFloat = ($Percent_FloatFloat - $Subtract_FloatFloat_B)
         // "Make sure to account for the"
         // "constraints angular offset"
         // "Twist constraint limits don't seem to"
         // "work too close to 180."
         // "So ensure we don't accidently go past that"
-        $Percent_FloatFloat = Percent_FloatFloat(self.MaxRotation, 360.0000)
-        // "Enabled/Disable the twist limit if closer/further than 180 degrees to the max rotation
-        //  limit"
-        // "Make sure we set the twist limit if we are below"
-        // "180 degrees until the max rotation"
-        self.VREPhysicsConstraint.SetAngularTwistLimit(1,
-            FClamp(SelectFloat(($Percent_FloatFloat - $Roll), ($Percent_FloatFloat + $Roll),
-            (self.TotalRotation > 0.0000)), 0.0000, 170.0000))
+        $Greater_FloatFloat_1 = (self.TotalRotation > 0.0000)
+        $TwistLimitAngle = FClamp(SelectFloat($Subtract_FloatFloat, $Add_FloatFloat, $Greater_FloatFloat_1), 0.0000,
+            170.0000)
+        self.VREPhysicsConstraint.SetAngularTwistLimit(1, $TwistLimitAngle)
     } else {
         self.VREPhysicsConstraint.SetAngularTwistLimit(0, 0.0000)
     }

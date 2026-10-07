@@ -85,6 +85,7 @@ fn decode_segment_into(
                 continue;
             }
         }
+        let suppressed = exclude.iter().any(|range| range.contains(&pos));
         // Region-aware IfThenElse dispatch for loop body/completion
         // ranges. When the loop emitter is active and `pos` heads a nested
         // IfThenElse region carved under that loop, route it to the
@@ -96,7 +97,9 @@ fn decode_segment_into(
         if let Some((emitted, advance_end)) =
             super::super::region_decode::try_dispatch_loop_body_region_at(pos, seg_end, ctx)
         {
-            stmts.extend(emitted);
+            if !suppressed {
+                stmts.extend(emitted);
+            }
             pos = advance_end.max(pos + 1).min(seg_end);
             continue;
         }
@@ -109,12 +112,13 @@ fn decode_segment_into(
         if let Some((emitted, advance_end)) =
             super::super::region_decode::try_dispatch_loop_body_loop_region_at(pos, seg_end, ctx)
         {
-            stmts.extend(emitted);
+            if !suppressed {
+                stmts.extend(emitted);
+            }
             pos = advance_end.max(pos + 1).min(seg_end);
             continue;
         }
         let before = pos;
-        let suppressed = exclude.iter().any(|range| range.contains(&before));
         match decode_one_or_branch(&mut pos, seg_end, ctx) {
             Ok(stmt_opt) => {
                 if let Some(stmt) = stmt_opt {

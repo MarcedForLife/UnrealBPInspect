@@ -4,8 +4,9 @@
 
 #[cfg(test)]
 mod tests {
-    use super::super::block::{decode_assignment, decode_call, wrap_out_args};
+    use super::super::block::{decode_assignment, decode_call};
     use super::super::ctx::DecodeCtx;
+    use super::super::expr_decode::{decode_expr, wrap_out_args};
     use crate::binary::NameTable;
     use crate::bytecode::expr::Expr;
     use crate::bytecode::opcodes::*;
@@ -33,7 +34,7 @@ mod tests {
     /// static-library list.
     fn class_literal_methodcall(class: &str, name: &str, args: Vec<Expr>) -> Expr {
         Expr::MethodCall {
-            recv: Box::new(Expr::Literal(class.to_string())),
+            recv: Box::new(Expr::Literal(class.into())),
             name: name.to_string(),
             args,
         }
@@ -185,105 +186,121 @@ mod tests {
         map
     }
 
-    fn ctx_with_signatures<'a>(
-        stream: &'a [u8],
-        name_table: &'a NameTable,
-        signatures: &'a std::collections::BTreeMap<String, crate::types::FunctionSignature>,
-    ) -> DecodeCtx<'a> {
-        DecodeCtx {
-            function_signatures: Some(signatures),
-            ..DecodeCtx::new(stream, name_table, &[], &[], 0)
+    #[test]
+    fn output_wrapping_requires_exact_signature_and_is_idempotent() {
+        let signatures = build_signature_map_with_out_param("ReadValue", 1, 2);
+        let signature = signatures.get("ReadValue");
+        let arguments = vec![Expr::Var("input".into()), Expr::Var("result".into())];
+        let wrapped = wrap_out_args(arguments.clone(), signature);
+        assert_eq!(wrapped[0], arguments[0]);
+        assert_eq!(wrapped[1], Expr::Out(Box::new(arguments[1].clone())));
+        assert_eq!(wrap_out_args(wrapped.clone(), signature), wrapped);
+        assert_eq!(wrap_out_args(arguments.clone(), None), arguments);
+        let expanded = vec![
+            Expr::Var("first".into()),
+            Expr::Var("second".into()),
+            Expr::Var("third".into()),
+        ];
+        assert_eq!(wrap_out_args(expanded.clone(), signature), expanded);
+    }
+
+    #[test]
+    fn imported_nested_call_uses_qualified_signature_before_shortening_name() {
+        let imports = vec![
+            crate::types::ImportEntry {
+                class_package: "Synthetic".into(),
+                class_name: "Class".into(),
+                object_name: "Sensor".into(),
+                outer_index: 0,
+            },
+            crate::types::ImportEntry {
+                class_package: "Synthetic".into(),
+                class_name: "Function".into(),
+                object_name: "ReadValue".into(),
+                outer_index: -1,
+            },
+        ];
+        let mut signatures = build_signature_map_with_out_param("Sensor.ReadValue", 0, 1);
+        signatures.insert(
+            "ReadValue".into(),
+            crate::types::FunctionSignature {
+                params: vec![crate::types::ParamInfo {
+                    name: "input".into(),
+                    type_name: "object".into(),
+                    flags: 0x80,
+                }],
+                return_type: None,
+            },
+        );
+        let name_table = make_name_table(&["Consume", "Result"]);
+        let mut stream = vec![EX_VIRTUAL_FUNCTION];
+        put_fname(&mut stream, 0);
+        stream.push(EX_FINAL_FUNCTION);
+        put_i32(&mut stream, -2);
+        stream.push(EX_LOCAL_VARIABLE);
+        put_field_path(&mut stream, 1);
+        stream.extend([EX_END_FUNCTION_PARMS, EX_END_FUNCTION_PARMS]);
+        let context = DecodeCtx {
+            function_signatures: Some(&signatures),
+            ..make_ctx(&stream, &name_table, &imports, &[], 0)
+        };
+        let Expr::Call { args, .. } = decode_expr(&mut 0, &context) else {
+            panic!("expected outer call")
+        };
+        let Expr::Call { name, args } = &args[0] else {
+            panic!("expected imported inner call")
+        };
+        assert_eq!(name, "ReadValue");
+        assert!(matches!(args[0], Expr::Out(_)));
+
+        signatures.remove("Sensor.ReadValue");
+        let context = DecodeCtx {
+            function_signatures: Some(&signatures),
+            ..make_ctx(&stream, &name_table, &imports, &[], 0)
+        };
+        let Expr::Call { args, .. } = decode_expr(&mut 0, &context) else {
+            panic!("expected call")
+        };
+        let Expr::Call { args, .. } = &args[0] else {
+            panic!("expected imported inner call")
+        };
+        assert!(
+            !matches!(args[0], Expr::Out(_)),
+            "unrelated local signature must not annotate imported call"
+        );
+    }
+    #[test]
+    fn ambiguous_virtual_signature_does_not_borrow_local_output_direction() {
+        let mut signatures = build_signature_map_with_out_param("ReadValue", 0, 1);
+        signatures.insert(
+            "Sensor.ReadValue".into(),
+            crate::types::FunctionSignature {
+                params: vec![crate::types::ParamInfo {
+                    name: "input".into(),
+                    type_name: "object".into(),
+                    flags: 0x80,
+                }],
+                return_type: None,
+            },
+        );
+        let name_table = make_name_table(&["ReadValue", "Result"]);
+        for (opcode, expected_out) in [
+            (EX_VIRTUAL_FUNCTION, false),
+            (EX_LOCAL_VIRTUAL_FUNCTION, true),
+        ] {
+            let mut stream = vec![opcode];
+            put_fname(&mut stream, 0);
+            stream.push(EX_LOCAL_VARIABLE);
+            put_field_path(&mut stream, 1);
+            stream.push(EX_END_FUNCTION_PARMS);
+            let context = DecodeCtx {
+                function_signatures: Some(&signatures),
+                ..make_ctx(&stream, &name_table, &[], &[], 0)
+            };
+            let Expr::Call { args, .. } = decode_expr(&mut 0, &context) else {
+                panic!("expected call")
+            };
+            assert_eq!(matches!(args[0], Expr::Out(_)), expected_out);
         }
-    }
-
-    #[test]
-    fn wrap_out_args_wraps_known_out_position() {
-        let signatures = build_signature_map_with_out_param("MyFunc", 2, 3);
-        let name_table = make_name_table(&[]);
-        let stream: [u8; 0] = [];
-        let ctx = ctx_with_signatures(&stream, &name_table, &signatures);
-        let stmt = Stmt::Call {
-            func: Expr::Var("MyFunc".into()),
-            args: vec![
-                Expr::Var("a".into()),
-                Expr::Var("b".into()),
-                Expr::Var("c".into()),
-            ],
-            offset: 0,
-        };
-        let wrapped = wrap_out_args(stmt, &ctx);
-        let Stmt::Call { args, .. } = wrapped else {
-            panic!("expected Stmt::Call");
-        };
-        assert_eq!(args[0], Expr::Var("a".into()));
-        assert_eq!(args[1], Expr::Var("b".into()));
-        assert_eq!(args[2], Expr::Out(Box::new(Expr::Var("c".into()))));
-    }
-
-    #[test]
-    fn wrap_out_args_unknown_callee_passes_through() {
-        let signatures: std::collections::BTreeMap<String, crate::types::FunctionSignature> =
-            std::collections::BTreeMap::new();
-        let name_table = make_name_table(&[]);
-        let stream: [u8; 0] = [];
-        let ctx = ctx_with_signatures(&stream, &name_table, &signatures);
-        let stmt = Stmt::Call {
-            func: Expr::Var("Unknown".into()),
-            args: vec![Expr::Var("a".into()), Expr::Var("b".into())],
-            offset: 0,
-        };
-        let wrapped = wrap_out_args(stmt, &ctx);
-        let Stmt::Call { args, .. } = wrapped else {
-            panic!("expected Stmt::Call");
-        };
-        assert_eq!(args[0], Expr::Var("a".into()));
-        assert_eq!(args[1], Expr::Var("b".into()));
-    }
-
-    #[test]
-    fn wrap_out_args_does_not_double_wrap() {
-        let signatures = build_signature_map_with_out_param("MyFunc", 1, 2);
-        let name_table = make_name_table(&[]);
-        let stream: [u8; 0] = [];
-        let ctx = ctx_with_signatures(&stream, &name_table, &signatures);
-        // Pre-wrapped Out (e.g. from EX_LOCAL_OUT_VARIABLE on the caller side).
-        let stmt = Stmt::Call {
-            func: Expr::Var("MyFunc".into()),
-            args: vec![
-                Expr::Var("a".into()),
-                Expr::Out(Box::new(Expr::Var("b".into()))),
-            ],
-            offset: 0,
-        };
-        let wrapped = wrap_out_args(stmt, &ctx);
-        let Stmt::Call { args, .. } = wrapped else {
-            panic!("expected Stmt::Call");
-        };
-        // Stays single-wrapped.
-        assert_eq!(args[1], Expr::Out(Box::new(Expr::Var("b".into()))));
-    }
-
-    #[test]
-    fn wrap_out_args_handles_args_longer_than_signature() {
-        // Signature says 2 params, call passes 3. Extra args left alone.
-        let signatures = build_signature_map_with_out_param("MyFunc", 1, 2);
-        let name_table = make_name_table(&[]);
-        let stream: [u8; 0] = [];
-        let ctx = ctx_with_signatures(&stream, &name_table, &signatures);
-        let stmt = Stmt::Call {
-            func: Expr::Var("MyFunc".into()),
-            args: vec![
-                Expr::Var("a".into()),
-                Expr::Var("b".into()),
-                Expr::Var("extra".into()),
-            ],
-            offset: 0,
-        };
-        let wrapped = wrap_out_args(stmt, &ctx);
-        let Stmt::Call { args, .. } = wrapped else {
-            panic!("expected Stmt::Call");
-        };
-        assert_eq!(args[1], Expr::Out(Box::new(Expr::Var("b".into()))));
-        assert_eq!(args[2], Expr::Var("extra".into()));
     }
 }

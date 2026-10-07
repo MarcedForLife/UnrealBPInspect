@@ -36,7 +36,7 @@ pub fn invert_empty_then_branches(body: &mut Vec<Stmt>) {
             return true;
         };
         if then_body.is_empty() && !else_body.is_empty() {
-            let placeholder = Expr::Literal(String::new());
+            let placeholder = Expr::Literal(String::new().into());
             let old_cond = std::mem::replace(cond, placeholder);
             *cond = negate_cond(old_cond);
             std::mem::swap(then_body, else_body);
@@ -58,6 +58,7 @@ fn negate_cond(cond: Expr) -> Expr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bytecode::expr::LiteralValue;
     use crate::bytecode::transforms::test_fixtures::{call, lit, var};
 
     fn branch(cond: Expr, then_body: Vec<Stmt>, else_body: Vec<Stmt>) -> Stmt {
@@ -125,7 +126,7 @@ mod tests {
         else {
             panic!("expected Branch");
         };
-        assert!(matches!(cond, Expr::Literal(s) if s == "cond"));
+        assert!(matches!(cond, Expr::Literal(LiteralValue::Text(s)) if s == "cond"));
         assert_eq!(then_body.len(), 1);
         assert!(else_body.is_empty());
     }

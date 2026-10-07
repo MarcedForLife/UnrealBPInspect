@@ -15,8 +15,8 @@
 //!
 //! The thread-local is only ever installed by the summary block emitters, so
 //! the `--dump`/`--json` paths (which call `emit_body` without installing it)
-//! never render comments, the same way the `ACTIVE_SEQUENCE_MASK` thread-local
-//! stays uninstalled on those paths.
+//! never render summary annotations. Sequence pin identity is already retained
+//! in the decoded statement tree and does not depend on this scope.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;

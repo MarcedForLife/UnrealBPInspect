@@ -26,10 +26,9 @@
 /// An expression node in the decoder's statement tree.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Expr {
-    /// A scalar literal whose textual form was produced by the
-    /// constant-opcode decoders (int, float, string, name, vector,
-    /// rotator, etc.).
-    Literal(String),
+    /// A constant value, preserving floating-point width and component bits
+    /// until rendering. Other literal categories retain their textual form.
+    Literal(LiteralValue),
 
     /// A bare variable reference (local, parameter, or member).
     Var(String),
@@ -110,14 +109,9 @@ pub enum Expr {
         default: Box<Expr>,
     },
 
-    /// A folded struct constructor (`Make<Type>(field=value, ...)`).
-    /// Not produced directly by the decoder, populated by the
-    /// statement-level struct-fold transform when it collapses a
-    /// contiguous run of field assignments to a temporary into a
-    /// single-expression constructor. `type_name` records the struct
-    /// type name when the transform can determine it; otherwise the
-    /// transform falls back to `"<unknown>"` so the rendered shape is
-    /// still recognisable.
+    /// An explicit struct constructor supplied by an IR consumer.
+    /// The decoder keeps field writes separate because it lacks the field
+    /// layout and initialization evidence needed to infer a constructor.
     StructConstruct {
         type_name: String,
         fields: Vec<(String, Expr)>,
@@ -131,6 +125,83 @@ pub enum Expr {
         raw_bytes: Vec<u8>,
         offset: usize,
     },
+}
+
+/// Constant data carried through transformations without display rounding.
+/// Floating-point payloads are IEEE 754 bits, so equality and JSON preserve
+/// signed zero, infinities, and distinct NaN payloads without special cases.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LiteralValue {
+    Text(String),
+    Float32(u32),
+    Float64(u64),
+    Composite {
+        name: String,
+        components: Vec<LiteralValue>,
+    },
+}
+
+impl From<String> for LiteralValue {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<&str> for LiteralValue {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_owned())
+    }
+}
+
+impl std::fmt::Display for LiteralValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text(text) => formatter.write_str(text),
+            Self::Float32(bits) => {
+                let value = f32::from_bits(*bits);
+                if value.is_nan() {
+                    return write!(formatter, "NaN32(0x{bits:08x})");
+                }
+                let text = format_float(value, |text| {
+                    text.parse::<f32>()
+                        .is_ok_and(|parsed| parsed.to_bits() == *bits)
+                });
+                formatter.write_str(&text)
+            }
+            Self::Float64(bits) => {
+                let value = f64::from_bits(*bits);
+                if value.is_nan() {
+                    return write!(formatter, "NaN64(0x{bits:016x})");
+                }
+                let text = format_float(value, |text| {
+                    text.parse::<f64>()
+                        .is_ok_and(|parsed| parsed.to_bits() == *bits)
+                });
+                formatter.write_str(&text)
+            }
+            Self::Composite { name, components } => {
+                write!(formatter, "{name}(")?;
+                for (index, component) in components.iter().enumerate() {
+                    if index != 0 {
+                        formatter.write_str(",")?;
+                    }
+                    write!(formatter, "{component}")?;
+                }
+                formatter.write_str(")")
+            }
+        }
+    }
+}
+
+/// Retain the established four-decimal display only when it is lossless at
+/// the source width. Rust's default float display supplies a round-trip form.
+fn format_float(value: impl std::fmt::Display, roundtrips: impl Fn(&str) -> bool) -> String {
+    let rounded = format!("{value:.4}");
+    if roundtrips(&rounded) {
+        rounded
+    } else {
+        value.to_string()
+    }
 }
 
 /// One arm of an `Expr::Switch`. Holds a case-value expression and a

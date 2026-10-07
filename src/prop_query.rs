@@ -3,7 +3,8 @@
 //! Provides typed accessors for extracting values from `Vec<Property>`,
 //! including string, integer, object reference, and array variants.
 
-use crate::resolve::{resolve_index, short_class};
+use crate::bytecode::expr::LiteralValue;
+use crate::resolve::resolve_index;
 use crate::types::*;
 
 pub fn find_prop<'a>(props: &'a [Property], name: &str) -> Option<&'a Property> {
@@ -106,38 +107,89 @@ pub fn find_prop_str_items_any<'a>(props: &'a [Property], names: &[&str]) -> Vec
     Vec::new()
 }
 
+/// Inline property values without rounding numbers or hiding collection contents.
 pub fn prop_value_short(
     val: &PropValue,
     imports: &[ImportEntry],
     export_names: &[String],
 ) -> String {
     match val {
-        PropValue::Bool(v) => v.to_string(),
-        PropValue::Int(v) => v.to_string(),
-        PropValue::Int64(v) => v.to_string(),
-        PropValue::Float(v) => format!("{:.4}", v),
-        PropValue::Double(v) => format!("{:.4}", v),
-        PropValue::Str(v) => format!("\"{}\"", v),
-        PropValue::Name(v) => v.clone(),
-        PropValue::Object(idx) => short_class(&resolve_index(imports, export_names, *idx)),
-        PropValue::Enum { value, .. } => value.clone(),
-        PropValue::Byte { value, .. } => value.clone(),
-        PropValue::Array { items, .. } => format!("[{} items]", items.len()),
-        PropValue::Map { entries, .. } => format!("{{{} entries}}", entries.len()),
+        PropValue::Bool(value) => value.to_string(),
+        PropValue::Int(value) => value.to_string(),
+        PropValue::Int64(value) => value.to_string(),
+        PropValue::Float(value) => LiteralValue::Float32(value.to_bits()).to_string(),
+        PropValue::Double(value) => LiteralValue::Float64(value.to_bits()).to_string(),
+        PropValue::Str(value) => format!("{value:?}"),
+        PropValue::Name(value) => format!("Name({value:?})"),
+        PropValue::Text(value) => format!("Text({value:?})"),
+        PropValue::SoftObject(value) => format!("SoftObject({value:?})"),
+        PropValue::Object(index) => resolve_index(imports, export_names, *index),
+        PropValue::Enum { enum_name, value } | PropValue::Byte { enum_name, value } => {
+            if enum_name.is_empty() || enum_name == "None" {
+                value.clone()
+            } else {
+                let prefix = format!("{enum_name}::");
+                if value.starts_with(&prefix) {
+                    value.clone()
+                } else {
+                    format!("{prefix}{value}")
+                }
+            }
+        }
+        PropValue::Array { inner_type, items } => {
+            let values: Vec<String> = items
+                .iter()
+                .map(|item| prop_value_short(item, imports, export_names))
+                .collect();
+            format!("Array<{inner_type}>[{}]", values.join(", "))
+        }
+        PropValue::Map {
+            key_type,
+            value_type,
+            entries,
+        } => {
+            let mut values: Vec<String> = entries
+                .iter()
+                .map(|(key, value)| {
+                    format!(
+                        "{}: {}",
+                        prop_value_short(key, imports, export_names),
+                        prop_value_short(value, imports, export_names)
+                    )
+                })
+                .collect();
+            // Serialized map order does not change the mapping.
+            values.sort();
+            format!("Map<{key_type}, {value_type}>{{{}}}", values.join(", "))
+        }
         PropValue::Struct {
             struct_type,
             fields,
-        } => match struct_type.as_str() {
-            "Vector" | "Rotator" => {
-                let parts: Vec<String> = fields
-                    .iter()
-                    .map(|f| prop_value_short(&f.value, imports, export_names))
-                    .collect();
-                format!("({})", parts.join(", "))
+        } => {
+            let values: Vec<String> = fields
+                .iter()
+                .map(|field| {
+                    format!(
+                        "{}: {}",
+                        field.name,
+                        prop_value_short(&field.value, imports, export_names)
+                    )
+                })
+                .collect();
+            let fields = format!("{{{}}}", values.join(", "));
+            if struct_type.is_empty() {
+                fields
+            } else {
+                format!("{struct_type} {fields}")
             }
-            _ => format!("{} {{...}}", struct_type),
-        },
-        _ => "...".into(),
+        }
+        PropValue::Unknown {
+            type_name,
+            size,
+            payload_sha256,
+        } => {
+            format!("<unknown {type_name}, {size} bytes, sha256={payload_sha256}>")
+        }
     }
 }
 

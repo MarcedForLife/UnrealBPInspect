@@ -14,6 +14,8 @@ use crate::bytecode::stmt::Stmt;
 /// The decoded representation of a single Blueprint asset.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct DecodedAsset {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<crate::types::AssetDiagnostic>,
     pub functions: Vec<Function>,
     pub events: Vec<Event>,
     /// Latent-call resume continuations, keyed by the originating call's

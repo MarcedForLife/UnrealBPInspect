@@ -5,15 +5,13 @@
 //! Return opcodes and decodes their expression operands into typed
 //! `Expr` trees; out-of-scope opcodes surface as `Expr::Unknown`.
 //!
-//! The decoder still takes the raw asset bytes (`asset_data`) so it can
-//! re-read the package-header and name-table sections it needs for
-//! resolution. Bytecode bytes themselves are sourced from
-//! `ParsedAsset::bytecode_by_export`, populated during the prologue walk.
+//! Version metadata, names and bytecode all come from `ParsedAsset`.
+//! `ParsedAsset::bytecode_by_export` contains bytes captured during parsing.
 //!
 //! The module root holds only declarations and re-exports. The decode
 //! orchestration lives in sibling files: `orchestrate` (entry point and
 //! body decode drivers), `transform_stack` (the body transform
-//! pipeline), `header` (version/name-table reads), `ubergraph_scan`
+//! pipeline), `header` (captured bytecode lookup), `ubergraph_scan`
 //! (event-entry discovery and skeleton construction), and `probe`
 //! (test-only reproductions of partition slices).
 
@@ -48,6 +46,8 @@ mod switch_decode;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 mod transform_stack;
+#[cfg(test)]
+pub(crate) use transform_stack::apply_transform_stack_to_body;
 mod ubergraph_scan;
 pub(crate) mod walker;
 #[cfg(test)]
@@ -60,16 +60,12 @@ pub(crate) use mem_disk::build_mem_to_disk_map;
 pub use orchestrate::decode_asset;
 pub(crate) use orchestrate::{
     build_event_cfg_and_region_tree, build_inline_cfg_and_region_tree_flow_scoped,
-    decode_region_body, synthesize_owner_doonce_name, synthesize_owner_flipflop,
+    decode_region_body, synthesize_owner_doonce, synthesize_owner_flipflop,
 };
 // The canonical event-name -> entry-K2Node derivation, also consumed by the
 // summary comment classifier (placement.rs) so EventWrapping detection and
 // decode agree on the event-node set (including the InputAction pattern).
 pub(crate) use ubergraph_scan::build_event_node_index;
-
-// Re-exported for control-flow graph test probes; production callers use `super::header` directly.
-#[cfg(test)]
-pub(crate) use header::read_version_and_name_table;
 
 // Crate-public so the `tests/local_*` integration harness (e.g.
 // `local_linear_region_extraction`) can reproduce the decoder's address

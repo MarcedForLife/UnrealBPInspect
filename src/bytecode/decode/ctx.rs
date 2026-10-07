@@ -134,12 +134,12 @@ pub(crate) struct DecodeCtx<'a> {
     /// recognised by an absorbing construct (IsValid macro, trampoline
     /// cascade, Sequence chain) and therefore off-limits to any decode
     /// context that isn't one of the recorded owners. Each claim records
-    /// the set of constructs that may decode its bytes; everyone else
-    /// skips past the claim's `end`. Stored behind `RefCell` so nested
+    /// the set of constructs that may decode its bytes. Distinct extents
+    /// at the same start are retained separately. Stored behind `RefCell` so nested
     /// decode calls can register and extend claims while the outer walk
     /// is still in progress. None for synthetic test contexts that don't
     /// need claim tracking.
-    pub claimed: Option<&'a RefCell<BTreeMap<usize, Claim>>>,
+    pub claimed: Option<&'a RefCell<BTreeMap<usize, Vec<Claim>>>>,
     /// Identity of the construct currently driving body decode. Set by
     /// an absorbing construct (the IsValid Branch's then-body decode)
     /// before recursing into a sub-range, restored after. The claim
@@ -560,12 +560,8 @@ pub(crate) fn debug_enabled() -> bool {
 /// No-op when `claimed` is `None` (synthetic contexts) or when
 /// `start >= end`.
 ///
-/// When a claim with the exact same `start` already exists with the
-/// same `end`, the new owner is appended to its owner set (deduplicated).
-/// Partial overlaps (same start, different end, or interleaved ranges)
-/// aren't expected with the current call sites; mismatched-end inserts
-/// log under `BP_INSPECT_DEBUG` and overwrite, preserving previous
-/// behaviour for accidental conflicts.
+/// Identical extents share owners. Distinct extents remain separate even
+/// when they start at the same byte, preserving nested ownership boundaries.
 pub(crate) fn mark_claimed(ctx: &DecodeCtx, start: usize, end: usize, owner: OwnerId) {
     if start >= end {
         return;
@@ -574,33 +570,16 @@ pub(crate) fn mark_claimed(ctx: &DecodeCtx, start: usize, end: usize, owner: Own
         return;
     };
     let mut map = claimed.borrow_mut();
-    match map.get_mut(&start) {
-        Some(existing) if existing.end == end => {
-            if !existing.owners.contains(&owner) {
-                existing.owners.push(owner);
-            }
+    let claims = map.entry(start).or_default();
+    if let Some(existing) = claims.iter_mut().find(|claim| claim.end == end) {
+        if !existing.owners.contains(&owner) {
+            existing.owners.push(owner);
         }
-        Some(existing) => {
-            if debug_enabled() {
-                eprintln!(
-                    "mark_claimed: end mismatch at start=0x{:x}: existing end=0x{:x} new end=0x{:x}",
-                    start, existing.end, end
-                );
-            }
-            existing.end = end;
-            if !existing.owners.contains(&owner) {
-                existing.owners.push(owner);
-            }
-        }
-        None => {
-            map.insert(
-                start,
-                Claim {
-                    end,
-                    owners: vec![owner],
-                },
-            );
-        }
+    } else {
+        claims.push(Claim {
+            end,
+            owners: vec![owner],
+        });
     }
 }
 
@@ -630,7 +609,10 @@ pub(crate) fn absorb_overlapping_chains(
 ) {
     let Some(claimed) = ctx.claimed else { return };
     let mut map = claimed.borrow_mut();
-    for (&start, claim) in map.range_mut(claim_start..claim_end) {
+    for (start, claim) in map
+        .range_mut(claim_start..claim_end)
+        .flat_map(|(&start, claims)| claims.iter_mut().map(move |claim| (start, claim)))
+    {
         if claim.end > claim_end {
             continue;
         }
@@ -679,7 +661,8 @@ fn is_absorbing(owner: &OwnerId) -> bool {
 
 /// If `pos` falls inside a claimed range AND the current
 /// `ctx.decoding_owner` isn't listed among that claim's owners, return
-/// the claim's end so the caller can skip past it.
+/// the next ownership boundary so the caller can skip and recheck.
+/// Later starts take precedence, then shorter extents at the same start.
 ///
 /// `disk_sweep` controls how SequenceChain-only claims (claims with
 /// no absorbing owner) are treated:
@@ -699,7 +682,7 @@ fn is_absorbing(owner: &OwnerId) -> bool {
 /// Returns `None` when:
 /// - the context has no claim map,
 /// - `pos` lies outside every claim,
-/// - the current `decoding_owner` matches a claim owner (bypass), or
+/// - the current owner matches the most specific containing claim, or
 /// - `disk_sweep` is `false` and the claim has no absorbing owner.
 pub(crate) fn claimed_end_for(ctx: &DecodeCtx, pos: usize) -> Option<usize> {
     claimed_end_inner(ctx, pos, false)
@@ -714,10 +697,15 @@ pub(crate) fn claimed_end_for_disk_sweep(ctx: &DecodeCtx, pos: usize) -> Option<
 fn claimed_end_inner(ctx: &DecodeCtx, pos: usize, disk_sweep: bool) -> Option<usize> {
     let claimed = ctx.claimed?;
     let map = claimed.borrow();
-    let (&start, claim) = map.range(..=pos).next_back()?;
-    if pos < start || pos >= claim.end {
-        return None;
-    }
+    // The most specific containing extent controls permission. An ended
+    // inner claim cannot hide an enclosing claim that still covers pos.
+    let (start, claim) = map.range(..=pos).rev().find_map(|(&start, claims)| {
+        claims
+            .iter()
+            .filter(|claim| pos < claim.end)
+            .min_by_key(|claim| claim.end)
+            .map(|claim| (start, claim))
+    })?;
     if let Some(owner) = ctx.decoding_owner.get() {
         if claim.owners.contains(&owner) {
             return None;
@@ -731,7 +719,13 @@ fn claimed_end_inner(ctx: &DecodeCtx, pos: usize, disk_sweep: bool) -> Option<us
     if !disk_sweep && !claim.owners.iter().any(is_absorbing) {
         return None;
     }
-    Some(claim.end)
+    // Recheck at the next claim boundary, which may grant this owner access.
+    let next_start = map
+        .range((std::ops::Bound::Excluded(pos), std::ops::Bound::Unbounded))
+        .next()
+        .map(|(&start, _)| start)
+        .unwrap_or(claim.end);
+    Some(claim.end.min(next_start))
 }
 
 /// True when `[claim_start, claim_end)` lies fully inside the transitive
@@ -843,7 +837,7 @@ mod tests {
     fn ctx_with_claims<'a>(
         bytecode: &'a [u8],
         name_table: &'a NameTable,
-        claims: &'a RefCell<BTreeMap<usize, Claim>>,
+        claims: &'a RefCell<BTreeMap<usize, Vec<Claim>>>,
     ) -> DecodeCtx<'a> {
         DecodeCtx {
             claimed: Some(claims),
@@ -965,7 +959,7 @@ mod tests {
         mark_claimed(&ctx, 0x10, 0x20, owner_a);
         mark_claimed(&ctx, 0x10, 0x20, owner_a);
         let map = claims.borrow();
-        let claim = map.get(&0x10).expect("claim present");
+        let claim = &map.get(&0x10).expect("claim present")[0];
         assert_eq!(claim.owners.len(), 1);
         assert_eq!(claim.end, 0x20);
     }
@@ -982,10 +976,103 @@ mod tests {
         assert_eq!(claimed_end_for(&ctx, 0x25), None);
     }
 
+    #[test]
+    fn nested_claim_ends_without_erasing_enclosing_protection() {
+        let claims = RefCell::new(BTreeMap::new());
+        let names = NameTable::from_names(vec![]);
+        let ctx = ctx_with_claims(&[], &names, &claims);
+        let outer = OwnerId::IsValid { jin_disk: 0x100 };
+        let inner = OwnerId::IsValid { jin_disk: 0x200 };
+        mark_claimed(&ctx, 0x10, 0x50, outer);
+        mark_claimed(&ctx, 0x20, 0x30, inner);
+        assert_eq!(claimed_end_for(&ctx, 0x35), Some(0x50));
+        let _owner = ctx.with_decoding_owner(outer);
+        assert_eq!(claimed_end_for(&ctx, 0x25), Some(0x30));
+        assert_eq!(claimed_end_for(&ctx, 0x35), None);
+    }
+
+    #[test]
+    fn claim_skip_stops_before_an_authorized_nested_body() {
+        let claims = RefCell::new(BTreeMap::new());
+        let names = NameTable::from_names(vec![]);
+        let ctx = ctx_with_claims(&[], &names, &claims);
+        let outer = OwnerId::IsValid { jin_disk: 0x100 };
+        let inner = OwnerId::IsValid { jin_disk: 0x200 };
+        mark_claimed(&ctx, 0x10, 0x50, outer);
+        mark_claimed(&ctx, 0x20, 0x30, inner);
+        let _owner = ctx.with_decoding_owner(inner);
+        assert_eq!(claimed_end_for(&ctx, 0x15), Some(0x20));
+        assert_eq!(claimed_end_for(&ctx, 0x20), None);
+        assert_eq!(claimed_end_for(&ctx, 0x30), Some(0x50));
+    }
+
+    #[test]
+    fn same_start_claims_preserve_exact_coownership_in_either_order() {
+        for reverse in [false, true] {
+            let claims = RefCell::new(BTreeMap::new());
+            let names = NameTable::from_names(vec![]);
+            let ctx = ctx_with_claims(&[], &names, &claims);
+            let outer = OwnerId::IsValid { jin_disk: 0x100 };
+            let inner = OwnerId::IsValid { jin_disk: 0x200 };
+            let shared = OwnerId::SharedBody {
+                target_node_id: 3,
+                anchor_disk: 0x10,
+            };
+            let mut registrations = vec![(0x50, outer), (0x30, inner), (0x30, shared)];
+            if reverse {
+                registrations.reverse();
+            }
+            for (end, owner) in registrations {
+                mark_claimed(&ctx, 0x10, end, owner);
+            }
+            {
+                let _owner = ctx.with_decoding_owner(shared);
+                assert_eq!(claimed_end_for(&ctx, 0x20), None);
+                assert_eq!(claimed_end_for(&ctx, 0x40), Some(0x50));
+            }
+            {
+                let _owner = ctx.with_decoding_owner(outer);
+                assert_eq!(claimed_end_for(&ctx, 0x20), Some(0x30));
+                assert_eq!(claimed_end_for(&ctx, 0x40), None);
+            }
+        }
+    }
+
+    #[test]
+    fn partially_overlapping_claim_retains_uncovered_outer_tail() {
+        let claims = RefCell::new(BTreeMap::new());
+        let names = NameTable::from_names(vec![]);
+        let ctx = ctx_with_claims(&[], &names, &claims);
+        let first = OwnerId::IsValid { jin_disk: 0x100 };
+        let second = OwnerId::IsValid { jin_disk: 0x200 };
+        mark_claimed(&ctx, 0x10, 0x30, first);
+        mark_claimed(&ctx, 0x20, 0x40, second);
+        assert_eq!(claimed_end_for(&ctx, 0x15), Some(0x20));
+        let _owner = ctx.with_decoding_owner(first);
+        assert_eq!(claimed_end_for(&ctx, 0x25), Some(0x40));
+        assert_eq!(claimed_end_for(&ctx, 0x35), Some(0x40));
+    }
+
+    #[test]
+    fn absorption_transfers_only_the_matching_sequence_extent() {
+        let claims = RefCell::new(BTreeMap::new());
+        let names = NameTable::from_names(vec![]);
+        let ctx = ctx_with_claims(&[], &names, &claims);
+        let chain = OwnerId::SequenceChain { head_disk: 0x100 };
+        let absorber = OwnerId::IsValid { jin_disk: 0x200 };
+        mark_claimed(&ctx, 0x10, 0x30, chain);
+        mark_claimed(&ctx, 0x10, 0x50, chain);
+        mark_claimed(&ctx, 0x10, 0x30, absorber);
+        absorb_overlapping_chains(&ctx, 0x10, 0x30, absorber);
+        let _owner = ctx.with_decoding_owner(chain);
+        assert_eq!(claimed_end_for_disk_sweep(&ctx, 0x20), Some(0x30));
+        assert_eq!(claimed_end_for_disk_sweep(&ctx, 0x40), None);
+    }
+
     fn ctx_with_region_ranges<'a>(
         bytecode: &'a [u8],
         name_table: &'a NameTable,
-        claims: &'a RefCell<BTreeMap<usize, Claim>>,
+        claims: &'a RefCell<BTreeMap<usize, Vec<Claim>>>,
         region_ranges: &'a BTreeMap<RegionId, Vec<Range<usize>>>,
     ) -> DecodeCtx<'a> {
         let mut ctx = ctx_with_claims(bytecode, name_table, claims);

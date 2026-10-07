@@ -27,7 +27,7 @@ fn ue4_ctx_with_claims<'a>(
     bytecode: &'a [u8],
     name_table: &'a NameTable,
     mem_to_disk: &'a BTreeMap<usize, usize>,
-    claims: &'a RefCell<BTreeMap<usize, Claim>>,
+    claims: &'a RefCell<BTreeMap<usize, Vec<Claim>>>,
 ) -> DecodeCtx<'a> {
     DecodeCtx {
         mem_to_disk: Some(mem_to_disk),
@@ -423,4 +423,105 @@ fn nested_push_pop_inside_body_balances_to_outer_pop() {
         outer_pop_offset + 1,
         "pos should resume one byte past the OUTER pop, not the inner one"
     );
+}
+
+#[test]
+fn sequence_loop_exit_keeps_both_pin_writes_inside_the_guard_in_execution_order() {
+    let names = NameTable::from_names(vec![
+        "Condition".into(),
+        "BeforeExit".into(),
+        "InnerStop".into(),
+        "OuterStop".into(),
+    ]);
+    let mut stream = vec![EX_POP_FLOW_IF_NOT, EX_LOCAL_VARIABLE];
+    put_field_path(&mut stream, 0);
+    fn append_bool_write(stream: &mut Vec<u8>, name_index: i32) -> usize {
+        let offset = stream.len();
+        stream.extend([EX_LET_BOOL, EX_LOCAL_VARIABLE]);
+        put_field_path(stream, name_index);
+        stream.push(EX_TRUE);
+        offset
+    }
+    let prefix = append_bool_write(&mut stream, 1);
+    stream.push(EX_PUSH_EXECUTION_FLOW);
+    let resume_operand = stream.len();
+    stream.extend([0; 4]);
+    stream.push(EX_WIRE_TRACEPOINT);
+    stream.push(EX_JUMP);
+    let target_operand = stream.len();
+    stream.extend([0; 4]);
+    let resume = append_bool_write(&mut stream, 3);
+    let tail = stream.len();
+    stream.push(EX_POP_EXECUTION_FLOW);
+    let target = append_bool_write(&mut stream, 2);
+    stream.push(EX_POP_EXECUTION_FLOW);
+    let following = stream.len();
+    stream.push(EX_END_OF_SCRIPT);
+    stream[resume_operand..resume_operand + 4].copy_from_slice(&u32_le(resume as u32));
+    stream[target_operand..target_operand + 4].copy_from_slice(&u32_le(target as u32));
+    let map = identity_map(&(0..stream.len()).collect::<Vec<_>>());
+    let claims = RefCell::new(BTreeMap::new());
+    let ctx = ue4_ctx_with_claims(&stream, &names, &map, &claims);
+    ctx.loop_break_guard
+        .set(Some(break_guard(tail, 0, stream.len(), 1)));
+    let mut cursor = 0;
+    let stmt = try_decode_naked_if(&mut cursor, tail, &ctx).expect("guard should decode");
+    let Stmt::Branch {
+        then_body,
+        else_body,
+        ..
+    } = stmt
+    else {
+        panic!("expected guard")
+    };
+    assert!(else_body.is_empty());
+    assert_eq!(
+        then_body.iter().map(Stmt::offset).collect::<Vec<_>>(),
+        vec![prefix, target, resume, 0]
+    );
+    assert!(matches!(then_body.last(), Some(Stmt::Break { .. })));
+    assert_eq!(cursor, tail);
+    assert_eq!(
+        super::ctx::claimed_end_for_disk_sweep(&ctx, target),
+        Some(following)
+    );
+    assert_eq!(
+        super::ctx::claimed_end_for_disk_sweep(&ctx, following),
+        None
+    );
+
+    // Neither the prefix nor the saved resume pin may escape this guard.
+    for escaping_offset in [prefix, resume] {
+        let mut escaping = stream.clone();
+        let escaping_end = if escaping_offset == prefix {
+            resume_operand - 1
+        } else {
+            tail
+        };
+        escaping[escaping_offset..escaping_end].fill(EX_NOTHING);
+        escaping[escaping_offset] = EX_JUMP;
+        escaping[escaping_offset + 1..escaping_offset + 5]
+            .copy_from_slice(&u32_le(following as u32));
+        let escaping_claims = RefCell::new(BTreeMap::new());
+        let escaping_ctx = ue4_ctx_with_claims(&escaping, &names, &map, &escaping_claims);
+        escaping_ctx
+            .loop_break_guard
+            .set(Some(break_guard(tail, 0, escaping.len(), 1)));
+        let mut cursor = 0;
+        assert!(try_decode_naked_if(&mut cursor, tail, &escaping_ctx).is_none());
+        assert_eq!(cursor, 0);
+        assert!(escaping_claims.borrow().is_empty());
+    }
+
+    // An escaping first pin is not a flat returning trampoline.
+    stream[target] = EX_RETURN;
+    let other_claims = RefCell::new(BTreeMap::new());
+    let other_ctx = ue4_ctx_with_claims(&stream, &names, &map, &other_claims);
+    other_ctx
+        .loop_break_guard
+        .set(Some(break_guard(tail, 0, stream.len(), 1)));
+    let mut cursor = 0;
+    assert!(try_decode_naked_if(&mut cursor, tail, &other_ctx).is_none());
+    assert_eq!(cursor, 0);
+    assert!(other_claims.borrow().is_empty());
 }

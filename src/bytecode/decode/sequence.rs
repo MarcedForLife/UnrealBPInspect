@@ -19,6 +19,7 @@
 //! Sequence) is the maximum end of the per-pin partition, looked up from
 //! the pre-built `StructureSkeleton` keyed by the chain head's disk offset.
 
+use crate::bytecode::expr::LiteralValue;
 use std::ops::Range;
 
 use crate::bytecode::opcodes::*;
@@ -196,7 +197,7 @@ fn pin_zero_counter_init_name(pin0: &[Stmt]) -> Option<String> {
         lhs:
             crate::bytecode::expr::Expr::Var(name)
             | crate::bytecode::expr::Expr::FieldAccess { field: name, .. },
-        rhs: crate::bytecode::expr::Expr::Literal(literal),
+        rhs: crate::bytecode::expr::Expr::Literal(LiteralValue::Text(literal)),
         ..
     } = first
     else {

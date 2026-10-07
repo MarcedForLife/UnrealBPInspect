@@ -1,22 +1,15 @@
-//! Region-tree decoder. This is the sole production decode path.
+//! Region-tree decoder, the production entry point for statement decode.
 //!
-//! Walks a `RegionTree` in DFS order, decoding each region's blocks using
-//! the per-opcode decoders (`decode_one_or_branch`). Returns the emitted
-//! `Vec<Stmt>` consumed by downstream passes.
+//! Claims grant recognisers permission to decode byte ranges. They are not
+//! an emission ledger, multiple arms or events may own the same shared body.
+//! Each walk separately tracks visited blocks and consumed opcode ranges.
+//! Every emitter reports its nested statement offsets into that coverage,
+//! including bodies outside its region and cursor advance. Block visitation
+//! only bounds traversal and never grants permission to bypass a claim.
 //!
-//! Per-region translation:
-//! - **Trivial / Linear / IfThen / IfThenElse / Loop / Switch**: visit
-//!   the region's entry block first, then DFS through child regions. At
-//!   each block, decode opcodes via `decode_one_or_branch`. Multi-opcode
-//!   recognisers (Branch, Loop, Sequence, Latch, IsValid, etc.) consume
-//!   spans that overlap child regions, so a `consumed` tracker prevents
-//!   re-emission when the DFS later visits those child blocks. The
-//!   region kind drives only the DFS traversal order, not the per-opcode
-//!   decoding logic.
-//!
-//! Region kinds carry no additional per-Stmt semantics
-//! because the decoders already produce the correct typed
-//! Stmts (Branch, Loop, Switch, etc.) at the terminator address.
+//! Scoped recogniser guards describe the active arm or loop. The dispatched
+//! region set records structured bodies moved into another region during
+//! recursive decode, where the caller's local coverage is unavailable.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Range;
@@ -44,7 +37,10 @@ use super::loop_decode::try_decode_loop;
 use super::naked_if::try_decode_naked_if;
 use super::switch_decode::try_decode_switch;
 
+mod acyclic;
 mod arm_decode;
+#[cfg(test)]
+mod arm_decode_tests;
 mod dispatch;
 mod doonce;
 mod ifthen;
@@ -53,6 +49,7 @@ mod loop_region;
 mod sequencechain;
 mod shared;
 
+use acyclic::decode_acyclic_body;
 use arm_decode::*;
 use dispatch::*;
 use doonce::*;
@@ -92,6 +89,9 @@ pub(super) fn decode_region_tree(
     cfg: &ControlFlowGraph,
     ctx: &DecodeCtx,
 ) -> Vec<Stmt> {
+    if let Some(body) = decode_acyclic_body(cfg, ctx) {
+        return body;
+    }
     let mut stmts: Vec<Stmt> = Vec::new();
     let mut consumed: Vec<Range<usize>> = Vec::new();
     let mut visited_blocks: BTreeSet<BlockId> = BTreeSet::new();
@@ -147,26 +147,17 @@ pub(super) fn walk_region(
     // merge continuation handled inside try_emit_ifthenelse_region.
     let defer_to_inner_sibling = region.kind == RegionKind::IfThenElse
         && find_same_entry_inner_sibling(region_id, region_tree).is_some();
-    if let Some((emitted, pulled_continuation, is_sequence_chain)) = dispatch_region_emitters(
+    if let Some((emitted, pulled_continuation)) = dispatch_region_emitters(
         region,
         region_id,
         region_tree,
         walk,
         !defer_to_inner_sibling,
     ) {
-        if is_sequence_chain {
-            // The SequenceChain emit decodes each pin body, including
-            // pin-0's after-chain fallthrough block, which SESE often
-            // assigns to an ANCESTOR region rather than this one.
-            // `mark_region_consumed` only walks this region's subtree, so
-            // it misses that block and the ancestor's disk-order fallback
-            // re-decodes it (a trailing duplicate, e.g. Seq_TwoPin's third
-            // PrintString). Record every emitted statement offset into the
-            // shared consumed set so no ancestor sweep re-covers a pin body
-            // this emit already produced.
-            for stmt in &emitted {
-                consumed.extend(extra_consumed_ranges_for_stmt(stmt));
-            }
+        // Recognisers may pull bodies outside their region's subtree.
+        // Record their emitted offsets before claiming the region blocks.
+        for stmt in &emitted {
+            consumed.extend(extra_consumed_ranges_for_stmt(stmt));
         }
         stmts.extend(emitted);
         mark_region_consumed(region_tree, region_id, cfg, consumed, visited_blocks);
@@ -536,35 +527,9 @@ fn decode_region_block_if_unclaimed(
     }
 }
 
-/// Report the byte offsets a freshly decoded `stmt` consumed that fall
-/// OUTSIDE the cursor advance `before..pos`.
-///
-/// A `Stmt::Sequence` can be decoded via a jump-target chain (the inline
-/// `try_decode_sequence` path reached through `decode_jump`, or a
-/// cross-event-inlined Sequence whose chain head lives in another event's
-/// skeleton). The cursor advances only past the local opcode, but the
-/// Sequence's pin bodies decode statements at arbitrary disk offsets. If
-/// those offsets are not recorded as consumed, a later disk-order sweep
-/// of the same block (or an ancestor block) re-decodes the same bytes as
-/// siblings, e.g. a `Sequence@0x1de { ResetDoOnce }`
-/// followed by a duplicate `ResetDoOnce` from the re-decoded gate-clear
-/// pair.
-///
-/// The Sequence's own pin statements carry the disk offsets of every
-/// opcode the emitter already consumed, so deriving the consumed set from
-/// the emitted statements is self-contained (no cross-event skeleton
-/// lookup) and reports exactly what was emitted (no over-claim). Each
-/// inner offset becomes a single-byte range `[off..off+1]`; the sweep
-/// gates re-decode on the opcode's start address, so a single-byte mark
-/// is enough to skip it. Offsets inside `before..pos` are dropped (the
-/// cursor advance already covers them). Non-Sequence statements report
-/// nothing.
-/// Record every disk offset a structured `stmt` and its nested
-/// statements consumed as single-byte ranges `[off..off+1]`. Unlike
-/// `extra_consumed_ranges`, there is no cursor window to filter against,
-/// the caller already emitted the whole construct as a unit (a region
-/// emit), so every offset it covered should be marked. Lets an ancestor
-/// disk-order sweep skip bytes a structured emitter already produced.
+/// Statement offsets mark emitted opcodes, including displaced bodies outside
+/// the recognised region. Coverage belongs to the current walk, so another
+/// arm or event can intentionally decode the same shared body independently.
 fn extra_consumed_ranges_for_stmt(stmt: &Stmt) -> Vec<Range<usize>> {
     let mut offsets: Vec<usize> = Vec::new();
     collect_stmt_offsets(stmt, &mut offsets);
@@ -572,19 +537,9 @@ fn extra_consumed_ranges_for_stmt(stmt: &Stmt) -> Vec<Range<usize>> {
 }
 
 pub(super) fn extra_consumed_ranges(stmt: &Stmt, before: usize, pos: usize) -> Vec<Range<usize>> {
-    let Stmt::Sequence { pins, .. } = stmt else {
-        return Vec::new();
-    };
-    let mut offsets: Vec<usize> = Vec::new();
-    for pin in pins {
-        for inner in pin {
-            collect_stmt_offsets(inner, &mut offsets);
-        }
-    }
-    offsets
+    extra_consumed_ranges_for_stmt(stmt)
         .into_iter()
-        .filter(|&off| off < before || off >= pos)
-        .map(|off| off..off + 1)
+        .filter(|range| range.start < before || range.start >= pos)
         .collect()
 }
 
@@ -882,5 +837,168 @@ mod own_exit_continuation_tests {
         let tree = fly_region_tree();
         let cfg = cfg_with_blocks(7, 6, &[]);
         assert!(!is_own_exit_with_content(99, &tree, &cfg));
+    }
+}
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use crate::binary::NameTable;
+    use crate::bytecode::stmt::LoopKind;
+
+    fn return_at(offset: usize) -> Stmt {
+        Stmt::Return {
+            value: None,
+            offset,
+        }
+    }
+
+    #[test]
+    fn displaced_branch_and_nested_loop_bodies_share_the_coverage_contract() {
+        let stmt = Stmt::Branch {
+            cond: Expr::Literal("true".into()),
+            then_body: vec![Stmt::Loop {
+                kind: LoopKind::While,
+                cond: None,
+                body: vec![Stmt::Sequence {
+                    pins: vec![vec![return_at(10)], vec![return_at(80)]],
+                    offset: 40,
+                }],
+                completion: Some(vec![return_at(90)]),
+                offset: 30,
+            }],
+            else_body: vec![return_at(70)],
+            offset: 20,
+        };
+        let consumed = extra_consumed_ranges(&stmt, 20, 25);
+        for offset in [10, 30, 40, 70, 80, 90] {
+            assert!(address_in_consumed(&consumed, offset));
+        }
+        assert!(!address_in_consumed(&consumed, 20));
+        assert!(!address_in_consumed(&consumed, 50));
+    }
+
+    #[test]
+    fn byte_walk_skips_emitted_body_but_preserves_unrelated_statements() {
+        let bytecode = [
+            EX_RETURN,
+            crate::bytecode::opcodes::EX_NOTHING,
+            EX_RETURN,
+            crate::bytecode::opcodes::EX_NOTHING,
+        ];
+        let names = NameTable::from_names(vec![]);
+        let ctx = DecodeCtx::new(&bytecode, &names, &[], &[], 0);
+        let branch = Stmt::Branch {
+            cond: Expr::Literal("true".into()),
+            then_body: vec![return_at(0)],
+            else_body: vec![],
+            offset: 8,
+        };
+        let mut consumed = extra_consumed_ranges(&branch, 8, 9);
+        let mut stmts = Vec::new();
+        decode_opcode_at(0, bytecode.len(), &ctx, &mut stmts, &mut consumed);
+        decode_opcode_at(2, bytecode.len(), &ctx, &mut stmts, &mut consumed);
+        assert_eq!(stmts.len(), 1);
+        assert_eq!(stmts[0].offset(), 2);
+
+        // A separate arm has separate coverage and may share the same body.
+        let mut sibling = Vec::new();
+        decode_opcode_at(0, bytecode.len(), &ctx, &mut sibling, &mut Vec::new());
+        assert_eq!(sibling.len(), 1);
+        assert_eq!(sibling[0].offset(), 0);
+    }
+
+    #[test]
+    fn excluded_loop_body_region_does_not_reemit_its_branch() {
+        let bytecode = [
+            EX_JUMP_IF_NOT,
+            8,
+            0,
+            0,
+            0,
+            crate::bytecode::opcodes::EX_TRUE,
+            EX_RETURN,
+            crate::bytecode::opcodes::EX_NOTHING,
+            EX_RETURN,
+            crate::bytecode::opcodes::EX_NOTHING,
+        ];
+        let cfg = ControlFlowGraph {
+            blocks: vec![
+                BasicBlock {
+                    id: 0,
+                    start: 0,
+                    end: 6,
+                    opcodes: vec![0],
+                },
+                BasicBlock {
+                    id: 1,
+                    start: 6,
+                    end: 8,
+                    opcodes: vec![6],
+                },
+                BasicBlock {
+                    id: 2,
+                    start: 8,
+                    end: 10,
+                    opcodes: vec![8],
+                },
+                BasicBlock {
+                    id: 3,
+                    start: 10,
+                    end: 10,
+                    opcodes: vec![],
+                },
+            ],
+            successors: BTreeMap::from([(0, vec![2, 1]), (1, vec![3]), (2, vec![3])]),
+            predecessors: BTreeMap::from([(1, vec![0]), (2, vec![0]), (3, vec![1, 2])]),
+            entry: 0,
+            sink: 3,
+        };
+        let tree = RegionTree {
+            regions: vec![
+                Region {
+                    id: 0,
+                    entry: 0,
+                    exit: 3,
+                    parent: None,
+                    children: vec![1],
+                    kind: RegionKind::Loop,
+                },
+                Region {
+                    id: 1,
+                    entry: 0,
+                    exit: 3,
+                    parent: Some(0),
+                    children: vec![],
+                    kind: RegionKind::IfThenElse,
+                },
+            ],
+            root: 0,
+            block_to_region: BTreeMap::from([(0, 0), (1, 0), (2, 0)]),
+        };
+        let names = NameTable::from_names(vec![]);
+        let ctx = DecodeCtx {
+            cfg: Some(&cfg),
+            region_tree: Some(&tree),
+            ..DecodeCtx::new(&bytecode, &names, &[], &[], 0)
+        };
+        let _loop_scope = ctx.with_loop_completion_region(0);
+        assert!(try_dispatch_loop_body_region_at(0, bytecode.len(), &ctx).is_some());
+        let emitted = decode_subrange(0, bytecode.len(), &ctx);
+        assert_eq!(emitted.len(), 1);
+        let Stmt::Branch {
+            then_body,
+            else_body,
+            ..
+        } = &emitted[0]
+        else {
+            panic!("expected the nested region branch");
+        };
+        assert_eq!(then_body.len(), 1);
+        assert_eq!(else_body.len(), 1);
+        assert!(
+            decode_subrange_excluding(0, bytecode.len(), &ctx, std::slice::from_ref(&(0..1)))
+                .is_empty()
+        );
     }
 }

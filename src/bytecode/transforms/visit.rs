@@ -87,251 +87,9 @@ pub(crate) fn rewrite_stmts_postorder<F: FnMut(&mut Stmt)>(body: &mut [Stmt], vi
 /// every direct sub-body inside `stmt` in [`Stmt::child_bodies_all`] slot
 /// order (same variant coverage, ForC init/increment included). `stmt`
 /// itself is NOT visited; leaf variants are no-ops.
-///
-/// Slot-aware counterpart: [`for_each_sub_body`], which tags each sub-body
-/// with its [`ScopeSlot`] identity so callers can encode scope paths.
 pub(crate) fn walk_stmt_children<F: FnMut(&[Stmt])>(stmt: &Stmt, visit: &mut F) {
     for sub_body in stmt.child_bodies_all() {
         visit(sub_body);
-    }
-}
-
-/// One step on a scope path: which top-level statement of the parent
-/// scope owns the nested sub-body, and which sub-body slot.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct ScopeStep {
-    pub(crate) stmt_idx: usize,
-    pub(crate) slot: ScopeSlot,
-}
-
-/// Sub-body slots a `Stmt` may own. Variants are ordered so derived
-/// `PartialOrd`/`Ord` give a deterministic comparison; ordering among
-/// siblings inside the same `Stmt` is irrelevant since two distinct
-/// sub-bodies under the same parent are never visited as the same step.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum ScopeSlot {
-    BranchThen,
-    BranchElse,
-    LoopBody,
-    LoopCompletion,
-    LoopForcInit,
-    LoopForcIncrement,
-    SequencePin(usize),
-    SwitchCase(usize),
-    SwitchDefault,
-    LatchInit,
-    LatchBody,
-}
-
-/// Invoke `visit` once per owned sub-body of `stmt`, passing the matching
-/// `ScopeSlot` and an immutable slice of the sub-body. Mirrors the
-/// dispatch in `walk_stmt_children_mut` but exposes the slot identity so
-/// scope paths can encode which sub-body a use lives in.
-///
-/// Slot-aware counterpart of [`walk_stmt_children`]: it yields the same
-/// sub-bodies in the same order, each tagged with its `ScopeSlot`.
-pub(crate) fn for_each_sub_body<F: FnMut(ScopeSlot, &[Stmt])>(stmt: &Stmt, mut visit: F) {
-    match stmt {
-        Stmt::Branch {
-            then_body,
-            else_body,
-            ..
-        } => {
-            visit(ScopeSlot::BranchThen, then_body);
-            visit(ScopeSlot::BranchElse, else_body);
-        }
-        Stmt::Sequence { pins, .. } => {
-            for (pin_idx, pin_body) in pins.iter().enumerate() {
-                visit(ScopeSlot::SequencePin(pin_idx), pin_body);
-            }
-        }
-        Stmt::Loop {
-            body,
-            completion,
-            kind,
-            ..
-        } => {
-            visit(ScopeSlot::LoopBody, body);
-            if let Some(comp) = completion {
-                visit(ScopeSlot::LoopCompletion, comp);
-            }
-            if let LoopKind::ForC { init, increment } = kind {
-                visit(ScopeSlot::LoopForcInit, init);
-                visit(ScopeSlot::LoopForcIncrement, increment);
-            }
-        }
-        Stmt::Switch { cases, default, .. } => {
-            for (case_idx, case) in cases.iter().enumerate() {
-                visit(ScopeSlot::SwitchCase(case_idx), &case.body);
-            }
-            if let Some(default_body) = default {
-                visit(ScopeSlot::SwitchDefault, default_body);
-            }
-        }
-        Stmt::Latch { init, body, .. } => {
-            visit(ScopeSlot::LatchInit, init);
-            visit(ScopeSlot::LatchBody, body);
-        }
-        Stmt::Assignment { .. }
-        | Stmt::Call { .. }
-        | Stmt::Return { .. }
-        | Stmt::Break { .. }
-        | Stmt::EventCall { .. }
-        | Stmt::Unknown { .. } => {}
-    }
-}
-
-/// Mutable counterpart of [`for_each_sub_body`]; same slot order.
-pub(crate) fn for_each_sub_body_mut<F: FnMut(ScopeSlot, &mut Vec<Stmt>)>(
-    stmt: &mut Stmt,
-    mut visit: F,
-) {
-    match stmt {
-        Stmt::Branch {
-            then_body,
-            else_body,
-            ..
-        } => {
-            visit(ScopeSlot::BranchThen, then_body);
-            visit(ScopeSlot::BranchElse, else_body);
-        }
-        Stmt::Sequence { pins, .. } => {
-            for (pin_idx, pin_body) in pins.iter_mut().enumerate() {
-                visit(ScopeSlot::SequencePin(pin_idx), pin_body);
-            }
-        }
-        Stmt::Loop {
-            body,
-            completion,
-            kind,
-            ..
-        } => {
-            visit(ScopeSlot::LoopBody, body);
-            if let Some(comp) = completion {
-                visit(ScopeSlot::LoopCompletion, comp);
-            }
-            if let LoopKind::ForC { init, increment } = kind {
-                visit(ScopeSlot::LoopForcInit, init);
-                visit(ScopeSlot::LoopForcIncrement, increment);
-            }
-        }
-        Stmt::Switch { cases, default, .. } => {
-            for (case_idx, case) in cases.iter_mut().enumerate() {
-                visit(ScopeSlot::SwitchCase(case_idx), &mut case.body);
-            }
-            if let Some(default_body) = default {
-                visit(ScopeSlot::SwitchDefault, default_body);
-            }
-        }
-        Stmt::Latch { init, body, .. } => {
-            visit(ScopeSlot::LatchInit, init);
-            visit(ScopeSlot::LatchBody, body);
-        }
-        Stmt::Assignment { .. }
-        | Stmt::Call { .. }
-        | Stmt::Return { .. }
-        | Stmt::Break { .. }
-        | Stmt::EventCall { .. }
-        | Stmt::Unknown { .. } => {}
-    }
-}
-
-/// Descend from the root `body` along `path` and return a mutable
-/// reference to the target scope's `Vec<Stmt>`. Returns `None` if any
-/// step does not match the encoded slot (defensive, shouldn't happen
-/// with paths produced by `collect_in_body`).
-pub(crate) fn descend_mut<'body>(
-    body: &'body mut Vec<Stmt>,
-    path: &[ScopeStep],
-) -> Option<&'body mut Vec<Stmt>> {
-    let mut cursor: &mut Vec<Stmt> = body;
-    for step in path {
-        let stmt = cursor.get_mut(step.stmt_idx)?;
-        cursor = sub_body_mut(stmt, &step.slot)?;
-    }
-    Some(cursor)
-}
-
-/// Mutable accessor for the `Vec<Stmt>` inside `stmt` matching `slot`.
-pub(crate) fn sub_body_mut<'stmt>(
-    stmt: &'stmt mut Stmt,
-    slot: &ScopeSlot,
-) -> Option<&'stmt mut Vec<Stmt>> {
-    match (stmt, slot) {
-        (Stmt::Branch { then_body, .. }, ScopeSlot::BranchThen) => Some(then_body),
-        (Stmt::Branch { else_body, .. }, ScopeSlot::BranchElse) => Some(else_body),
-        (Stmt::Sequence { pins, .. }, ScopeSlot::SequencePin(pin_idx)) => pins.get_mut(*pin_idx),
-        (Stmt::Loop { body, .. }, ScopeSlot::LoopBody) => Some(body),
-        (Stmt::Loop { completion, .. }, ScopeSlot::LoopCompletion) => completion.as_mut(),
-        (
-            Stmt::Loop {
-                kind: LoopKind::ForC { init, .. },
-                ..
-            },
-            ScopeSlot::LoopForcInit,
-        ) => Some(init),
-        (
-            Stmt::Loop {
-                kind: LoopKind::ForC { increment, .. },
-                ..
-            },
-            ScopeSlot::LoopForcIncrement,
-        ) => Some(increment),
-        (Stmt::Switch { cases, .. }, ScopeSlot::SwitchCase(case_idx)) => {
-            cases.get_mut(*case_idx).map(|case| &mut case.body)
-        }
-        (Stmt::Switch { default, .. }, ScopeSlot::SwitchDefault) => default.as_mut(),
-        (Stmt::Latch { init, .. }, ScopeSlot::LatchInit) => Some(init),
-        (Stmt::Latch { body, .. }, ScopeSlot::LatchBody) => Some(body),
-        _ => None,
-    }
-}
-
-/// Read-only counterpart of `descend_mut`.
-pub(crate) fn descend_ref<'body>(body: &'body [Stmt], path: &[ScopeStep]) -> Option<&'body [Stmt]> {
-    let mut cursor: &[Stmt] = body;
-    for step in path {
-        let stmt = cursor.get(step.stmt_idx)?;
-        cursor = sub_body_ref(stmt, &step.slot)?;
-    }
-    Some(cursor)
-}
-
-/// Read-only accessor for the `Vec<Stmt>` inside `stmt` matching `slot`.
-pub(crate) fn sub_body_ref<'stmt>(stmt: &'stmt Stmt, slot: &ScopeSlot) -> Option<&'stmt [Stmt]> {
-    match (stmt, slot) {
-        (Stmt::Branch { then_body, .. }, ScopeSlot::BranchThen) => Some(then_body.as_slice()),
-        (Stmt::Branch { else_body, .. }, ScopeSlot::BranchElse) => Some(else_body.as_slice()),
-        (Stmt::Sequence { pins, .. }, ScopeSlot::SequencePin(pin_idx)) => {
-            pins.get(*pin_idx).map(|body| body.as_slice())
-        }
-        (Stmt::Loop { body, .. }, ScopeSlot::LoopBody) => Some(body.as_slice()),
-        (Stmt::Loop { completion, .. }, ScopeSlot::LoopCompletion) => {
-            completion.as_ref().map(|body| body.as_slice())
-        }
-        (
-            Stmt::Loop {
-                kind: LoopKind::ForC { init, .. },
-                ..
-            },
-            ScopeSlot::LoopForcInit,
-        ) => Some(init.as_slice()),
-        (
-            Stmt::Loop {
-                kind: LoopKind::ForC { increment, .. },
-                ..
-            },
-            ScopeSlot::LoopForcIncrement,
-        ) => Some(increment.as_slice()),
-        (Stmt::Switch { cases, .. }, ScopeSlot::SwitchCase(case_idx)) => {
-            cases.get(*case_idx).map(|case| case.body.as_slice())
-        }
-        (Stmt::Switch { default, .. }, ScopeSlot::SwitchDefault) => {
-            default.as_ref().map(|body| body.as_slice())
-        }
-        (Stmt::Latch { init, .. }, ScopeSlot::LatchInit) => Some(init.as_slice()),
-        (Stmt::Latch { body, .. }, ScopeSlot::LatchBody) => Some(body.as_slice()),
-        _ => None,
     }
 }
 
@@ -354,7 +112,7 @@ pub(crate) fn scope_stack<'a>(prefix: &'a [Stmt], ancestors: &[&'a [Stmt]]) -> V
 /// `child_ancestors` is innermost-first: the statement's preceding
 /// siblings (`body[..i]`) as the innermost slice, then `ancestors`
 /// unchanged. This captures the `split_at_mut` borrow-split that several
-/// chain-resolving transforms (cascade_fold, demote_invariant_loops,
+/// chain-resolving transforms (cascade_fold,
 /// latch_recognition, lower_sentinel_cascade, refine_loops) share so a
 /// rewrite at one statement can resolve `Var` chains through every outer
 /// scope. The immutable prefix and the mutable current-statement borrow
@@ -451,7 +209,7 @@ fn any_expr_children<F: FnMut(&Expr) -> bool>(expr: &Expr, pred: &mut F) -> bool
 }
 
 /// Returns `true` if any node in the expression tree is `Expr::Unknown`.
-/// Used by transforms (inliner, dead-stmt, struct-fold, ternary-fold) to
+/// Used by transforms (inliner, dead-stmt, ternary-fold) to
 /// reject candidates whose RHS contains an unrecognised opcode.
 pub(crate) fn expr_contains_unknown(expr: &Expr) -> bool {
     any_expr(expr, &mut |node| matches!(node, Expr::Unknown { .. }))
@@ -989,7 +747,7 @@ where
 /// SkipUses semantics (the default walker) is correct for transforms that
 /// rewrite uses without touching defs (substitution, dead-stmt scans). A
 /// minority of transforms must rewrite the lhs too: var_names renames the
-/// ForC counter on both sides of `i = i + 1`, and struct_fold's use-count
+/// ForC counter on both sides of `i = i + 1`, and storage-aware use-count
 /// must observe `Var(temp)` appearing inside an `Assignment::lhs`'s
 /// `FieldAccess { recv, .. }` to detect remaining writes that would
 /// invalidate a fold. Those callers use this variant instead.
@@ -1336,7 +1094,7 @@ fn find_top_level_var_assignment<'a>(scopes: &[&'a [Stmt]], name: &str) -> Optio
 #[cfg(test)]
 mod tests {
     use super::{resolve_expr_chain, resolve_var_chain};
-    use crate::bytecode::expr::{BinaryOp, Expr};
+    use crate::bytecode::expr::{BinaryOp, Expr, LiteralValue};
     use crate::bytecode::stmt::Stmt;
     use crate::bytecode::transforms::test_fixtures::{assign, call, lit, var};
 
@@ -1427,7 +1185,7 @@ mod tests {
         let scopes = scopes_of(&body);
         let resolved = resolve_var_chain(&scopes, "X").expect("first wins");
         match resolved {
-            Expr::Literal(text) => assert_eq!(text, "first"),
+            Expr::Literal(LiteralValue::Text(text)) => assert_eq!(text, "first"),
             other => panic!("expected first literal, got {other:?}"),
         }
     }
@@ -1469,7 +1227,7 @@ mod tests {
         let scopes: Vec<&[Stmt]> = vec![&inner, &outer];
         let resolved = resolve_var_chain(&scopes, "X").expect("inner wins");
         match resolved {
-            Expr::Literal(text) => assert_eq!(text, "inner"),
+            Expr::Literal(LiteralValue::Text(text)) => assert_eq!(text, "inner"),
             other => panic!("expected inner literal, got {other:?}"),
         }
     }
@@ -1510,8 +1268,8 @@ mod tests {
         else {
             panic!("expected Binary Add");
         };
-        assert!(matches!(*lhs, Expr::Literal(ref text) if text == "3"));
-        assert!(matches!(*rhs, Expr::Literal(ref text) if text == "4"));
+        assert!(matches!(*lhs, Expr::Literal(LiteralValue::Text(ref text)) if text == "3"));
+        assert!(matches!(*rhs, Expr::Literal(LiteralValue::Text(ref text)) if text == "4"));
     }
 
     /// `resolve_expr_chain` follows a multi-hop chain inside a
@@ -1531,7 +1289,7 @@ mod tests {
         else {
             panic!("expected Binary Add");
         };
-        assert!(matches!(*lhs, Expr::Literal(ref text) if text == "5"));
+        assert!(matches!(*lhs, Expr::Literal(LiteralValue::Text(ref text)) if text == "5"));
         assert!(matches!(*rhs, Expr::Var(ref name) if name == "Y"));
     }
 

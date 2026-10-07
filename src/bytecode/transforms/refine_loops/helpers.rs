@@ -1,10 +1,11 @@
 use crate::bytecode::expr::Expr;
+use crate::bytecode::expr::LiteralValue;
 use crate::bytecode::stmt::{LoopKind, Stmt};
 use crate::bytecode::transforms::visit::{any_expr, peel_transparent, resolve_var_chain};
 
 /// True for the literal `1`.
 pub(super) fn is_one_literal(expr: &Expr) -> bool {
-    matches!(expr, Expr::Literal(text) if text == "1")
+    matches!(expr, Expr::Literal(LiteralValue::Text(text)) if text == "1")
 }
 
 /// True when `expr` is a `Var(name)` or `FieldAccess { field: name }` matching `expected`.

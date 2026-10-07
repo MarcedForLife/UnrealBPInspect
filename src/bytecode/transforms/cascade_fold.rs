@@ -139,13 +139,19 @@ fn try_fold_at(stmt: &mut Stmt, common_lhs: &Expr, head_case_value: Option<Expr>
         return None;
     }
 
-    let cases = links
-        .into_iter()
-        .map(|link| SwitchCase {
-            values: vec![link.case_value],
-            body: link.body,
-        })
-        .collect();
+    let mut cases: Vec<SwitchCase> = Vec::new();
+    for link in links {
+        // Identical source statements can be reached by several case labels.
+        // Equality includes offsets, so distinct call sites stay distinct.
+        if let Some(previous) = cases.last_mut().filter(|case| case.body == link.body) {
+            previous.values.push(link.case_value);
+        } else {
+            cases.push(SwitchCase {
+                values: vec![link.case_value],
+                body: link.body,
+            });
+        }
+    }
 
     let default = if default_body.is_empty() {
         None
@@ -248,7 +254,7 @@ fn drain_chain(
             let _ = cond;
             pre_cloned
         } else {
-            match std::mem::replace(cond, Expr::Literal(String::new())) {
+            match std::mem::replace(cond, Expr::Literal(String::new().into())) {
                 Expr::Binary { rhs, .. } => *rhs,
                 // Should not happen, matches_link_direct confirmed the shape.
                 other => other,
@@ -400,6 +406,35 @@ mod tests {
             then_body,
             else_body,
             offset: 0x10,
+        }
+    }
+
+    #[test]
+    fn shared_case_body_groups_labels_without_merging_distinct_call_sites() {
+        for (second_offset, expected_cases) in [(20, 1), (30, 2)] {
+            let shared = Stmt::Call {
+                func: var("Notify"),
+                args: Vec::new(),
+                offset: 20,
+            };
+            let other = Stmt::Call {
+                func: var("Notify"),
+                args: Vec::new(),
+                offset: second_offset,
+            };
+            let inner = branch(eq(var("Mode"), lit("2")), vec![other], Vec::new());
+            let outer = branch(eq(var("Mode"), lit("1")), vec![shared], vec![inner]);
+            let mut body = vec![outer];
+            fold_switch_cascades(&mut body);
+            let Stmt::Switch { cases, .. } = &body[0] else {
+                panic!("expected switch")
+            };
+            assert_eq!(cases.len(), expected_cases);
+            assert_eq!(cases.iter().map(|case| case.values.len()).sum::<usize>(), 2);
+            assert!(cases.iter().all(|case| case.body.len() == 1));
+            if expected_cases == 1 {
+                assert_eq!(cases[0].values, vec![lit("1"), lit("2")]);
+            }
         }
     }
 

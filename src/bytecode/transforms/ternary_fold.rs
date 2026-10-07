@@ -29,6 +29,7 @@
 //! and prevents an inner fold from masking an outer two-arm Branch.
 
 use crate::bytecode::expr::Expr;
+use crate::bytecode::expr::LiteralValue;
 use crate::bytecode::stmt::Stmt;
 use crate::bytecode::transforms::visit::{
     expr_contains_unknown, rewrite_stmts_preorder, walk_body_exprs_mut, Action,
@@ -116,8 +117,8 @@ fn try_fold_bool_switch(expr: &Expr) -> Option<Expr> {
 /// can land in non-bool switches and should not trigger this fold.
 fn bool_literal_value(expr: &Expr) -> Option<bool> {
     match expr {
-        Expr::Literal(text) if text == "true" => Some(true),
-        Expr::Literal(text) if text == "false" => Some(false),
+        Expr::Literal(LiteralValue::Text(text)) if text == "true" => Some(true),
+        Expr::Literal(LiteralValue::Text(text)) if text == "false" => Some(false),
         _ => None,
     }
 }

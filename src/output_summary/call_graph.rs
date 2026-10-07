@@ -7,19 +7,22 @@ use crate::bytecode::names::EXECUTE_UBERGRAPH_PREFIX;
 use crate::resolve::class_of;
 use crate::types::ParsedAsset;
 
+use super::filter::block_matches_filter;
 use super::ubergraph::display_event_name;
 
 pub(crate) fn format_call_graph(
     buf: &mut String,
     callees_map: &mut HashMap<String, Vec<String>>,
     action_key_events: &HashMap<String, String>,
+    filters: &[String],
+    matched_funcs: &HashSet<String>,
 ) {
     if callees_map.is_empty() {
         return;
     }
     let mut entries: Vec<(&String, &mut Vec<String>)> = callees_map.iter_mut().collect();
     entries.sort_by_key(|(a, _)| *a);
-    writeln!(buf, "Call graph:").unwrap();
+    let mut items = String::new();
     for (caller, callees) in &mut entries {
         callees.sort();
         let caller_display = display_event_name(caller, action_key_events);
@@ -27,15 +30,23 @@ pub(crate) fn format_call_graph(
             .iter()
             .map(|c| display_event_name(c, action_key_events))
             .collect();
-        writeln!(
-            buf,
-            "  {} \u{2192} {}",
+        let item = format!(
+            "  {} \u{2192} {}\n",
             caller_display,
             callees_display.join(", ")
-        )
-        .unwrap();
+        );
+        if block_matches_filter(&item, filters)
+            || matched_funcs.contains(caller.as_str())
+            || callees.iter().any(|callee| matched_funcs.contains(callee))
+        {
+            items.push_str(&item);
+        }
     }
-    writeln!(buf).unwrap();
+    if !items.is_empty() {
+        writeln!(buf, "Call graph:").unwrap();
+        buf.push_str(&items);
+        writeln!(buf).unwrap();
+    }
 }
 
 /// Collect the set of local function names, including ubergraph event names.
