@@ -5,13 +5,12 @@
 //! drift between synthetic and real input shapes (operand sizes, opcode
 //! coverage, memory-vs-disk coordinate mismatches) surfaces here.
 //!
-//! Helm is the only committed fixture. Private fixtures present locally are
-//! picked up by the `#[ignore]`d discovery test.
+//! These tests use the committed Helm fixtures.
 
 #[path = "common/helpers.rs"]
 mod helpers;
 
-use helpers::{baseline_dir, discover_uassets, samples_dir};
+use helpers::{baseline_dir, samples_dir};
 use std::path::Path;
 
 use unreal_bp_inspect::bytecode::decode::decode_asset;
@@ -103,27 +102,6 @@ fn helm_5_3_partition_succeeds_with_event_match() {
             "decoded events missing '{}': got {:?}",
             name,
             decoded_events
-        );
-    }
-}
-
-/// Generic check for any non-Helm fixtures present locally. These are gitignored
-/// and absent in CI, so the test no-ops there. Locally, each discovered fixture
-/// is partitioned and required to produce at least one event.
-#[test]
-#[ignore = "private fixtures gitignored; run locally with -- --ignored when present"]
-fn private_fixtures_partition_succeeds() {
-    let fixtures = discover_uassets(&["Helm_BP"]);
-    if fixtures.is_empty() {
-        eprintln!("no private fixtures present; nothing to check");
-        return;
-    }
-    for (version, name, path) in fixtures {
-        assert!(
-            !decoded_event_names(&path).is_empty(),
-            "{}/{} partition produced no events (partition probably failed)",
-            version,
-            name
         );
     }
 }

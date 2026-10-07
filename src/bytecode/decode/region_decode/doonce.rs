@@ -68,8 +68,7 @@ pub(super) fn try_emit_doonce_region(
     // region ever ends up owning a non-empty exit block,
     // `mark_region_consumed` will sweep it away the same way the IfThen
     // bug dropped an event's trailing statements. No fixture exhibits this
-    // today, so the gap is documented rather than fixed (refusing to add
-    // unused code per CLAUDE.md). If a future fixture shows a DoOnce
+    // today. If a future fixture shows a DoOnce
     // region with dropped trailing content, replicate the IfThen own-exit
     // pattern here.
     let mut out = preamble;

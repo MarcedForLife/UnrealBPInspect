@@ -1,157 +1,64 @@
-# Unreal Blueprint Debugging Skill
+---
+name: unreal-bp
+description: Inspect, compare, and debug Unreal Engine Blueprint .uasset files with bp-inspect. Use for questions about Blueprint logic, components, defaults, or Blueprint-to-C++ migration based on local assets.
+---
 
-Use `bp-inspect` to read and understand Unreal Engine Blueprint `.uasset` files from the command line.
+# Unreal Blueprint inspection
 
-## When to use this
+Use `bp-inspect` to inspect saved Blueprint assets without opening Unreal Editor. It reads files and emits pseudocode, properties, or JSON. It does not edit Blueprints or inspect a running game.
 
-- User asks about Blueprint logic, behaviour, or bugs
-- User wants to understand what a Blueprint does without opening the editor
-- User needs to migrate Blueprint logic to C++
-- User is debugging physics, collision, component setup, or variable state in a Blueprint
-- User references a `.uasset` file in their project
+## Start with the asset
 
-## Prerequisites
+Check `bp-inspect --version`. If the binary is missing, use the project's [installation instructions](https://github.com/MarcedForLife/UnrealBPInspect#install) within the user's installation preferences. Inspection does not require a network connection. Do not update the binary as part of routine inspection.
 
-`bp-inspect` must be installed and available on PATH. If it's not installed, run:
+Use the supplied asset path. If the file is unknown, search the relevant Content folder with the agent's file search or `rg --files Content -g '*.uasset'`. Not every `.uasset` is a Blueprint. Narrow the selection before decoding a whole project.
 
-```bash
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/MarcedForLife/UnrealBPInspect/main/install.sh | sh
-
-# Windows PowerShell
-irm https://raw.githubusercontent.com/MarcedForLife/UnrealBPInspect/main/install.ps1 | iex
+```sh
+bp-inspect "Content/Blueprints/Enemy_BP.uasset"
+bp-inspect "Content/Blueprints/Enemy_BP.uasset" --filter ApplyDamage
+bp-inspect "Content/Blueprints/Enemy_BP.uasset" --filter health,armor
 ```
 
-To update to the latest version:
+Start with the summary, or a filter when the user names a function or variable. Summary filtering uses case-insensitive substrings across names and bodies, with comma-separated alternatives. It can include callers and omit non-matching variables or components. Return to the unfiltered summary when those defaults or relationships matter.
 
-```bash
-bp-inspect --update
+## Read the result
+
+- Components show attachment hierarchy and saved properties, including child actor templates where available.
+- Variables show declared types and available defaults from the class default object. These are not runtime values. A missing default does not establish that the value is zero or unset.
+- The call graph helps trace calls within the decoded Blueprint. Inspect referenced assets separately when behaviour depends on another Blueprint.
+- Functions and events contain reconstructed pseudocode. It can include branches, switch cases, ForEach, counted and while loops, breaks, Sequence pins, DoOnce, FlipFlop, and latent continuations.
+- `self.Name` refers to instance state. `$Name` is usually a compiler-generated temporary. `// "..."` carries an editor comment. DoOnce and FlipFlop labels are inferred and need not match editor titles.
+
+Treat pseudocode as an interpretation of compiled data. `UNKNOWN` diagnostics, unresolved expressions, or an unexpectedly empty body are reasons to qualify the explanation and inspect further. Do not invent missing logic or assume a displayed construct is a literal C++ implementation.
+
+## Inspect properties and JSON
+
+```sh
+bp-inspect "Content/Blueprints/Enemy_BP.uasset" --json
+bp-inspect "Content/Blueprints/Enemy_BP.uasset" --dump
 ```
 
-## Commands
+Use JSON for property queries and `--dump` for diagnostic import, export, and property details. JSON contains `imports`, `exports`, and `functions`. Each function has `name`, `signature`, `flags`, and `bytecode`, an array of rendered lines rather than an abstract syntax tree. Editor comments are summary-only. In JSON and dump modes, filters match export names, not the summary's body-text matches.
 
-### Get a full overview
+One resolved input file produces a JSON object. Multiple files produce an array with a `file` field on each successful result. Directory inputs are recursive. Batch parsing keeps successful results but returns exit code 2 if any file fails. Inspect stderr for the failed paths before claiming the whole batch parsed. Older releases can return 0 on partial failure, so check stderr with those versions too.
 
-```bash
-bp-inspect <path>.uasset
+## Compare revisions
+
+```sh
+bp-inspect --diff "Old_Enemy_BP.uasset" "New_Enemy_BP.uasset"
+bp-inspect --diff "Old_Enemy_BP.uasset" "New_Enemy_BP.uasset" --filter ApplyDamage --context 5
 ```
 
-Returns: class hierarchy, component tree with properties (meshes, physics, transforms), variable declarations with types, function signatures with structured bytecode pseudo-code (if/else blocks, indented), and graph node summaries for graphs not already shown as functions.
+Pass the older file first. Exit code 0 means the summaries match. Exit code 1 means differences and 2 means an error. Errors are written to stderr. Older releases also use 1 for errors, so check stderr when using those versions. A decoded diff can omit binary changes that do not affect the summary.
 
-Start here. This gives you everything you need for most questions.
+For Git revisions, use an existing textconv setup or extract each revision to a separate temporary file. Preserve the binary bytes when extracting and leave the working asset intact.
 
-### Drill into a specific function
+## Explain or migrate
 
-```bash
-bp-inspect <path>.uasset --filter <FunctionName>
-```
+Ground findings in the asset path, function or event, and relevant output. Separate observed control flow from suspected bugs. For behaviour that depends on runtime state, inherited defaults, missing assets, or unsupported decoding, state what still needs checking in Unreal Editor.
 
-Filters functions and graphs to the named export while keeping class context (components, variables). Use when the full summary is too noisy or you need to focus on one function.
+For C++ migration, use the output to identify components, properties, functions, and event flow. Verify engine API signatures, ownership, reflection flags, replication, and latent behaviour against the project before translating. Pseudocode and displayed flags are not a compilable implementation.
 
-Multiple names can be comma-separated: `--filter GetSteeringAngle,UserConstructionScript`
+## Format limits
 
-### Scan a directory
-
-```bash
-bp-inspect <directory>/
-```
-
-Recursively finds and processes all `.uasset` files. Each file gets a header. Multiple files and directories can be mixed. Works with all output modes.
-
-### Get structured data
-
-```bash
-bp-inspect <path>.uasset --json
-```
-
-Full structured data as JSON with top-level `imports`, `exports`, and `functions` arrays. Functions have pre-extracted signatures, flags, and structured bytecode. Use when you need to programmatically inspect properties, or when the default view doesn't show a specific detail you need.
-
-### Compare two Blueprints
-
-```bash
-bp-inspect --diff <before>.uasset <after>.uasset
-```
-
-Outputs a unified diff of the decoded summaries. Exit code 0 means identical, 1 means differences found. Use `--filter` to compare specific functions, and `--context N` to control surrounding lines.
-
-### Find Blueprint files
-
-```bash
-find <ProjectRoot>/Content -name "*.uasset" | head -20
-```
-
-UE4 Blueprint `.uasset` files live under the `Content/` directory. Not all `.uasset` files are Blueprints -- some are meshes, textures, etc. `bp-inspect` will parse what it can and skip non-Blueprint data.
-
-## Reading the output
-
-### Components section
-
-Indentation shows the scene graph hierarchy (parent-child attachment). Each component shows:
-- Type in parentheses: `Stand (StaticMeshComponent)`
-- Sub-object properties: meshes, transforms, physics config, collision profiles
-- Child actor templates: configured defaults for spawned child actors
-
-### Variables section
-
-Class member variables with resolved types. Components are filtered out (shown in Components section). Default values from the CDO are shown inline when present: `MyVar: float = 0.5`
-
-### Functions section
-
-Each function shows:
-- Signature: `FunctionName(params) [Flags]`
-- Decoded bytecode as pseudo-code, indented below
-
-Pseudo-code conventions:
-- `self.VarName` -- instance variable access
-- `$Name` -- compiler-generated temporary (shortened from verbose Blueprint names)
-- `cast<Type>(expr)` -- dynamic cast
-- `ClassName::FunctionName(args)` -- static/library function call
-- `obj.FunctionName(args)` -- context call on an object
-- `if (cond) { ... }` / `if (cond) { ... } else { ... }` -- structured control flow, matching Blueprint Branch node structure
-- `while (cond) { body; increment; }` -- for/ForEach loops (reordered from scattered bytecode into logical order)
-- `// sequence [N]:` -- sequence node pins in execution order
-- `// "Comment text"` -- Blueprint comment boxes and node bubble comments, placed inline near the code they describe
-
-### Graph section
-
-EdGraph node list showing the visual Blueprint graph structure. Graphs that already appear as functions with bytecode are suppressed to avoid redundancy. The EventGraph (which has no matching function) still shows. Less detailed than bytecode but shows node types (pure calls, events, variable gets/sets, casts).
-
-## Common workflows
-
-### Understanding what a Blueprint does
-
-1. Run `bp-inspect` to get the full picture
-2. Read the Components section for the physical structure
-3. Read the Variables section for state
-4. Read the Functions section for logic -- the pseudo-code reads like simplified code
-
-### Debugging a specific function
-
-1. Run with `--filter FunctionName`
-2. Read the pseudo-code line by line
-3. Cross-reference variable types from the Variables/Components sections
-4. Check component properties for physics/collision configuration if relevant
-
-### Blueprint to C++ migration
-
-1. Run `bp-inspect` to understand the full Blueprint
-2. Components section maps to `CreateDefaultSubobject<T>()` calls in the constructor
-3. Component properties map to constructor defaults (`SetRelativeLocation`, `SetCollisionProfileName`, etc.)
-4. Variables section maps to `UPROPERTY()` declarations
-5. Function pseudo-code maps to the C++ implementation -- the operations translate directly
-6. Function flags indicate `UFUNCTION()` specifiers: `BlueprintPure` -> `BlueprintPure`, `BlueprintCallable` -> `BlueprintCallable`, `Const` -> `const`
-
-### Comparing two Blueprints
-
-```bash
-bp-inspect --diff A.uasset B.uasset
-```
-
-Use `--filter FunctionName` to focus the diff on a specific function. Exit code 0 means no changes, 1 means differences found.
-
-## Limitations
-
-- UE4 uncooked `.uasset` files fully supported; UE5 uncooked assets supported (4.27, 5.3, 5.5 tested)
-- Cooked assets (split `.uasset`/`.uexp`) are not yet supported
-- Some complex bytecode expressions may show as `??(0xNN)` -- the common opcodes are covered
-- Default property values only show non-null values from the CDO
+Uncooked UE4 and UE5 assets have partial support, with committed fixtures for 4.27, 5.3, and 5.5. Other versions are unverified. Animation and Widget Blueprint functions and events may decode, but animation state machines and widget hierarchies are not displayed. Cooked `.uasset`/`.uexp` pairs and IoStore are unsupported.

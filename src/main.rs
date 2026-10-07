@@ -58,35 +58,33 @@ enum OutputMode {
     Json,
 }
 
-fn collect_uasset_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+fn collect_uasset_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut result = Vec::new();
     for path in paths {
         if path.is_dir() {
-            collect_from_dir(path, &mut result);
+            collect_from_dir(path, &mut result)?;
         } else {
             result.push(path.clone());
         }
     }
     result.sort();
-    result
+    Ok(result)
 }
 
-fn collect_from_dir(dir: &Path, out: &mut Vec<PathBuf>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("Warning: cannot read directory {}: {}", dir.display(), e);
-            return;
-        }
-    };
-    for entry in entries.flatten() {
+fn collect_from_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let entries = std::fs::read_dir(dir)
+        .with_context(|| format!("cannot read directory {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("cannot read entry in {}", dir.display()))?;
         let path = entry.path();
-        if path.is_dir() {
-            collect_from_dir(&path, out);
+        // Do not recurse through directory symlinks, which can form cycles.
+        if entry.file_type()?.is_dir() {
+            collect_from_dir(&path, out)?;
         } else if path.extension().is_some_and(|ext| ext == "uasset") {
             out.push(path);
         }
     }
+    Ok(())
 }
 
 fn process_file(path: &Path, mode: &OutputMode, filters: &[String], debug: bool) -> Result<String> {
@@ -140,13 +138,13 @@ fn run(cli: Cli) -> Result<bool> {
         .map(|f| f.split(',').map(|s| s.trim().to_lowercase()).collect())
         .unwrap_or_default();
 
-    let files = collect_uasset_paths(&cli.paths);
-    if files.is_empty() {
-        bail!("No .uasset files found");
+    if cli.diff {
+        return run_diff(&cli.paths, &filters, cli.context);
     }
 
-    if cli.diff {
-        return run_diff(&files, &filters, cli.context);
+    let files = collect_uasset_paths(&cli.paths)?;
+    if files.is_empty() {
+        bail!("No .uasset files found");
     }
 
     let single = files.len() == 1;
@@ -188,13 +186,11 @@ fn run_diff(files: &[PathBuf], filters: &[String], context: usize) -> Result<boo
     Ok(true)
 }
 
-/// Print the per-batch "N of M files failed" notice to stderr when some files
-/// failed but at least one succeeded. `successes` is the count that produced
-/// output, so `successes + failures` is the total file count.
-fn report_batch_failures(failures: usize, successes: usize) {
+fn report_batch_failures(failures: usize, successes: usize) -> Result<()> {
     if failures > 0 {
-        eprintln!("{} of {} files failed", failures, failures + successes);
+        bail!("{} of {} files failed", failures, failures + successes);
     }
+    Ok(())
 }
 
 fn run_batch_json(
@@ -225,7 +221,7 @@ fn run_batch_json(
     let serialized = serde_json::to_string_pretty(&results)
         .context("serializing aggregated batch JSON results")?;
     println!("{}", serialized);
-    report_batch_failures(failures, results.len());
+    report_batch_failures(failures, results.len())?;
     Ok(true)
 }
 
@@ -259,7 +255,7 @@ fn run_batch_text(
     if successes == 0 {
         bail!("all files failed to parse");
     }
-    report_batch_failures(failures, successes);
+    report_batch_failures(failures, successes)?;
     Ok(true)
 }
 
@@ -270,7 +266,7 @@ fn main() {
         Ok(false) => std::process::exit(1),
         Err(e) => {
             eprintln!("{:#}", e);
-            std::process::exit(1);
+            std::process::exit(2);
         }
     }
 }

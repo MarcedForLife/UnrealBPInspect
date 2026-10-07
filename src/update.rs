@@ -1,7 +1,8 @@
 //! Self-update from GitHub releases (`--update`).
 
 use anyhow::{bail, Context, Result};
-use std::io::Read;
+use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
 use std::path::Path;
 
 const REPO: &str = "MarcedForLife/UnrealBPInspect";
@@ -59,12 +60,6 @@ pub fn run_update(target_version: Option<&str>) -> Result<()> {
         .context("No tag_name in release response")?;
     let release_version = release_tag.strip_prefix('v').unwrap_or(release_tag);
 
-    // Compare versions (skip check when pinning to a specific version)
-    if target_version.is_none() && release_version == CURRENT_VERSION {
-        eprintln!("Already up to date (v{})", CURRENT_VERSION);
-        return Ok(());
-    }
-
     if release_version == CURRENT_VERSION {
         eprintln!("Already on v{}", CURRENT_VERSION);
         return Ok(());
@@ -75,28 +70,11 @@ pub fn run_update(target_version: Option<&str>) -> Result<()> {
     // Determine asset name for current platform
     let asset_name = platform_asset()?;
 
-    // Find download URL from release assets
     let assets = resp["assets"].as_array().context("No assets in release")?;
-    let asset = assets
-        .iter()
-        .find(|a| a["name"].as_str() == Some(asset_name))
-        .with_context(|| format!("No release binary for this platform: {}", asset_name))?;
-    let download_url = asset["browser_download_url"]
-        .as_str()
-        .context("No download URL for asset")?;
-
-    // Download the new binary
     eprintln!("  Downloading {}...", asset_name);
-    let mut bytes = Vec::new();
-    ureq::get(download_url)
-        .header("User-Agent", "bp-inspect")
-        .call()
-        .context("Failed to download update")?
-        .body_mut()
-        .as_reader()
-        .read_to_end(&mut bytes)
-        .context("Failed to read update data")?;
-
+    let bytes = download_asset(assets, asset_name)?;
+    let checksums = download_asset(assets, "checksums.txt")?;
+    validate_checksum(&bytes, asset_name, std::str::from_utf8(&checksums)?)?;
     validate_binary(&bytes)?;
 
     // Replace current binary
@@ -105,6 +83,49 @@ pub fn run_update(target_version: Option<&str>) -> Result<()> {
     self_replace(&current_exe, &bytes)?;
 
     eprintln!("Updated to v{}", release_version);
+    Ok(())
+}
+
+fn download_asset(assets: &[serde_json::Value], name: &str) -> Result<Vec<u8>> {
+    let asset = assets
+        .iter()
+        .find(|asset| asset["name"].as_str() == Some(name))
+        .with_context(|| format!("Missing release asset: {name}"))?;
+    let url = asset["browser_download_url"]
+        .as_str()
+        .context("No download URL for asset")?;
+    let mut bytes = Vec::new();
+    ureq::get(url)
+        .header("User-Agent", "bp-inspect")
+        .call()
+        .with_context(|| format!("Failed to download {name}"))?
+        .body_mut()
+        .as_reader()
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("Failed to read {name}"))?;
+    Ok(bytes)
+}
+
+fn validate_checksum(bytes: &[u8], name: &str, checksums: &str) -> Result<()> {
+    let matches: Vec<&str> = checksums
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let checksum = fields.next()?;
+            let filename = fields.next()?.trim_start_matches('*');
+            (filename == name && fields.next().is_none()).then_some(checksum)
+        })
+        .collect();
+    let [expected] = matches.as_slice() else {
+        bail!("Expected exactly one checksum for {name}");
+    };
+    let actual = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if !actual.eq_ignore_ascii_case(expected) {
+        bail!("SHA-256 checksum mismatch for {name}");
+    }
     Ok(())
 }
 
@@ -150,24 +171,97 @@ fn self_replace(exe_path: &Path, new_bytes: &[u8]) -> Result<()> {
     let dir = exe_path
         .parent()
         .context("Cannot determine executable directory")?;
-    let tmp_path = dir.join(".bp-inspect-update.tmp");
-
-    std::fs::write(&tmp_path, new_bytes).context("Failed to write update file")?;
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(dir).context("Failed to create update file")?;
+    temporary
+        .write_all(new_bytes)
+        .context("Failed to write update file")?;
+    temporary.as_file().sync_all()?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o755))?;
-        std::fs::rename(&tmp_path, exe_path).context("Failed to replace binary")?;
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o755))?;
     }
+    let temporary = temporary.into_temp_path();
 
     #[cfg(windows)]
     {
         let old_path = dir.join("bp-inspect.old.exe");
-        let _ = std::fs::remove_file(&old_path);
+        if old_path.exists() {
+            std::fs::remove_file(&old_path).context("Failed to remove previous backup")?;
+        }
         std::fs::rename(exe_path, &old_path).context("Failed to move old binary")?;
-        std::fs::rename(&tmp_path, exe_path).context("Failed to install new binary")?;
+        if let Err(error) = temporary.persist(exe_path) {
+            std::fs::rename(&old_path, exe_path)
+                .context("Failed to restore old binary after update failure")?;
+            return Err(error).context("Failed to install new binary; old binary restored");
+        }
+        // A running Windows executable can remain locked until this process exits.
+        let _ = std::fs::remove_file(old_path);
     }
+    #[cfg(not(windows))]
+    temporary
+        .persist(exe_path)
+        .context("Failed to replace binary")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checksum_requires_matching_content_and_unique_asset() {
+        let checksum = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let manifest = format!("{checksum}  bp-inspect-linux-x86_64\n");
+        assert!(validate_checksum(b"abc", "bp-inspect-linux-x86_64", &manifest).is_ok());
+        assert!(validate_checksum(b"abd", "bp-inspect-linux-x86_64", &manifest).is_err());
+        assert!(validate_checksum(b"abc", "bp-inspect-macos-aarch64", &manifest).is_err());
+        assert!(validate_checksum(b"abc", "bp-inspect-linux-x86_64", &manifest.repeat(2)).is_err());
+        assert!(validate_checksum(b"abc", "bp-inspect-linux-x86_64", "malformed").is_err());
+    }
+
+    #[test]
+    fn replacement_installs_bytes_and_cleans_temporary_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("bp-inspect");
+        std::fs::write(&executable, b"old executable").unwrap();
+        self_replace(&executable, b"new executable").unwrap();
+        assert_eq!(std::fs::read(&executable).unwrap(), b"new executable");
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(executable).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+    }
+
+    #[test]
+    fn replacement_failure_preserves_existing_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("bp-inspect");
+        std::fs::create_dir(&executable).unwrap();
+        std::fs::write(executable.join("keep"), b"untouched").unwrap();
+        // Windows can rename a directory aside, so use a missing parent there.
+        #[cfg(not(windows))]
+        assert!(self_replace(&executable, b"new executable").is_err());
+        #[cfg(windows)]
+        assert!(self_replace(
+            &directory.path().join("missing/bp-inspect"),
+            b"new executable"
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read(executable.join("keep")).unwrap(),
+            b"untouched"
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
 }
