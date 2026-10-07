@@ -10,10 +10,6 @@ use crate::prop_query::{find_prop_bool, find_prop_i32, find_prop_str};
 use crate::resolve::{enclosing_graph_name, resolve_index, short_class};
 use crate::types::{ParsedAsset, Property};
 
-/// Reroute (knot) nodes label wire routing, not logic, so their bubble
-/// comments are dropped during extraction.
-const K2NODE_KNOT_CLASS: &str = "K2Node_Knot";
-
 /// Class of the per-page graph container. Its `object_name` is the page name
 /// every node on it resolves to; the container itself is not a node.
 const EDGRAPH_CLASS: &str = "EdGraph";
@@ -69,10 +65,8 @@ pub(crate) fn build_comment_model(parsed: &ParsedAsset, export_names: &[String])
             graph_page: Some(page.clone()),
         });
 
-        if class != K2NODE_KNOT_CLASS {
-            if let Some(bubble) = bubble_comment(props, one_based, x, y, Some(page)) {
-                model.boxes.push(bubble);
-            }
+        if let Some(bubble) = bubble_comment(props, one_based, x, y, Some(page)) {
+            model.boxes.push(bubble);
         }
     }
     model
@@ -91,7 +85,7 @@ fn node_pos(props: &[Property]) -> (i32, i32) {
 /// (the editor omits empty comments from logic the same way).
 fn non_empty_comment_text(props: &[Property]) -> Option<String> {
     let text = find_prop_str(props, "NodeComment")?;
-    if text.is_empty() {
+    if text.trim().is_empty() {
         None
     } else {
         Some(text)
@@ -338,18 +332,19 @@ mod tests {
     }
 
     #[test]
-    fn knot_bubble_dropped() {
+    fn knot_bubble_keeps_authored_text_and_owner() {
         let (parsed, names) = asset(
             "EventGraph",
-            K2NODE_KNOT_CLASS,
+            "K2Node_Knot",
             vec![vec![
                 bool_prop("bCommentBubbleVisible", true),
                 str_prop("NodeComment", "reroute label"),
             ]],
         );
         let model = build_comment_model(&parsed, &names);
-        assert!(model.boxes.is_empty());
-        // The knot's geometry is still recorded for containment.
+        assert_eq!(model.boxes.len(), 1);
+        assert_eq!(model.boxes[0].owner_export, Some(2));
+        assert_eq!(model.boxes[0].text, "reroute label");
         assert_eq!(model.nodes.len(), 1);
     }
 

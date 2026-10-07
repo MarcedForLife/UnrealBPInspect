@@ -9,14 +9,35 @@ use super::{PlacedComment, PlacementClass};
 /// then text. Inline placements additionally key on the statement offset
 /// first so two anchors in the same block keep statement order.
 pub(super) fn sort_placed(placed: &mut [PlacedComment]) {
-    placed.sort_by(|a, b| {
-        a.block
-            .cmp(&b.block)
-            .then_with(|| class_rank(&a.class).cmp(&class_rank(&b.class)))
-            .then_with(|| inline_offset(&a.class).cmp(&inline_offset(&b.class)))
-            .then_with(|| a.box_y.cmp(&b.box_y))
-            .then_with(|| a.box_x.cmp(&b.box_x))
-            .then_with(|| a.text.cmp(&b.text))
+    for comment in placed.iter_mut() {
+        comment.locations.sort_by(|left, right| {
+            left.block
+                .cmp(&right.block)
+                .then_with(|| class_rank(&left.class).cmp(&class_rank(&right.class)))
+                .then_with(|| inline_offset(&left.class).cmp(&inline_offset(&right.class)))
+                .then_with(|| inline_path(&left.class).cmp(inline_path(&right.class)))
+        });
+        comment.locations.dedup();
+    }
+    placed.sort_by(|left, right| {
+        let left_location = left.locations.first();
+        let right_location = right.locations.first();
+        left_location
+            .map(|location| &location.block)
+            .cmp(&right_location.map(|location| &location.block))
+            .then_with(|| {
+                left_location
+                    .map(|location| class_rank(&location.class))
+                    .cmp(&right_location.map(|location| class_rank(&location.class)))
+            })
+            .then_with(|| {
+                left_location
+                    .map(|location| inline_offset(&location.class))
+                    .cmp(&right_location.map(|location| inline_offset(&location.class)))
+            })
+            .then_with(|| left.box_y.cmp(&right.box_y))
+            .then_with(|| left.box_x.cmp(&right.box_x))
+            .then_with(|| left.text.cmp(&right.text))
     });
 }
 
@@ -24,6 +45,7 @@ pub(super) fn sort_placed(placed: &mut [PlacedComment]) {
 /// within one block (header annotations precede body annotations).
 fn class_rank(class: &PlacementClass) -> u8 {
     match class {
+        PlacementClass::Unresolved => 3,
         PlacementClass::EventWrapping => 0,
         PlacementClass::FunctionLevel => 1,
         PlacementClass::InlineAtStatement { .. } => 2,
@@ -34,7 +56,16 @@ fn class_rank(class: &PlacementClass) -> u8 {
 /// already sort ahead via `class_rank`).
 fn inline_offset(class: &PlacementClass) -> usize {
     match class {
-        PlacementClass::InlineAtStatement { statement_offset } => *statement_offset,
+        PlacementClass::InlineAtStatement {
+            statement_offset, ..
+        } => *statement_offset,
         _ => 0,
+    }
+}
+
+fn inline_path(class: &PlacementClass) -> &[usize] {
+    match class {
+        PlacementClass::InlineAtStatement { statement_path, .. } => statement_path,
+        _ => &[],
     }
 }

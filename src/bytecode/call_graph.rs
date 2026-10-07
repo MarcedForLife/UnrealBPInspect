@@ -204,6 +204,9 @@ mod tests {
 
     fn make_asset(functions: Vec<Function>, events: Vec<Event>) -> DecodedAsset {
         DecodedAsset {
+            function_origins: Default::default(),
+            event_origins: Default::default(),
+            resume_origins: Default::default(),
             diagnostics: Vec::new(),
             functions,
             events,

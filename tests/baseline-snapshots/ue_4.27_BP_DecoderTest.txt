@@ -27,6 +27,33 @@ Call graph:
   OnRightAxis → Attempt, Release
   OnRightReleased → Release
 
+Graph comments:
+  Events Conv_DirectDoOnce_A, Conv_DirectDoOnce_B:
+    // "Two events converging on one shared DoOnce, wired straight into its exec pin"
+  Events Conv_DirectDoOnce_A, Conv_DirectDoOnce_B, Conv_DivergentTail_A, Conv_DivergentTail_B, Conv_SharedCall_A,
+      Conv_SharedCall_B, Conv_SharedFlipFlop_A, Conv_SharedFlipFlop_B, Conv_SharedSequence_A, Conv_SharedSequence_B:
+    // "Cross-event convergence"
+  Events Conv_DivergentTail_A, Conv_DivergentTail_B:
+    // "Two events each run their own Sequence whose then-0 converges on one shared node, then whose
+    //  then-1 continues to event-specific content"
+  Events Conv_SharedCall_A, Conv_SharedCall_B:
+    // "Two events converging on one shared call, no gate or macro between them"
+  Events Conv_SharedFlipFlop_A, Conv_SharedFlipFlop_B:
+    // "Two events converging on one shared FlipFlop"
+  Events Conv_SharedSequence_A, Conv_SharedSequence_B:
+    // "Two events converging on one shared two-pin Sequence"
+  Events Latch_DoOnce, Latch_DoOnceInForEach, Latch_FlipFlop, Latent_OneDelay, Latent_TwoDelays:
+    // "Latches and delays"
+  Events OnLeftAxis, OnLeftReleased:
+    // "Left side of a paired axis input. Above the threshold runs Attempt, dropping below resets
+    //  Attempt and runs Release."
+    // "Attempt and Release are shared with the right side, called here with bIsLeft = true.
+    //  OnLeftReleased also triggers the Release path"
+  Events OnLeftAxis, OnLeftReleased, OnRightAxis, OnRightReleased:
+    // "Complex nested symetrical flow gates with event convergence"
+  Events OnRightAxis, OnRightReleased:
+    // "Mirror of the left side, calling the shared Attempt and Release with bIsLeft = false"
+
 Functions:
   // Called by: OnLeftAxis, OnRightAxis
   Attempt(bIsLeft: bool) [Public|BlueprintEvent]
@@ -229,8 +256,6 @@ Functions:
             PrintString(self, "Default", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
     }
 
-  // "Cross-event convergence"
-  // "Two events converging on one shared DoOnce, wired straight into its exec pin"
   Conv_DirectDoOnce_A():
     DoOnce(DoOnce_3) {
         PrintString(self, "Conv direct", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
@@ -241,8 +266,6 @@ Functions:
         PrintString(self, "Conv direct", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
     }
 
-  // "Two events each run their own Sequence whose then-0 converges on one shared node, then whose
-  //  then-1 continues to event-specific content"
   Conv_DivergentTail_A():
     // Sequence [0]:
     PrintString(self, "Shared mid", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
@@ -255,14 +278,12 @@ Functions:
     // Sequence [1]:
     PrintString(self, "B tail", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
-  // "Two events converging on one shared call, no gate or macro between them"
   Conv_SharedCall_A():
     PrintString(self, "Shared call", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
   Conv_SharedCall_B():
     PrintString(self, "Shared call", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
-  // "Two events converging on one shared FlipFlop"
   Conv_SharedFlipFlop_A():
     FlipFlop("Temp_bool_Variable") {
         if (Temp_bool_Variable) {
@@ -281,7 +302,6 @@ Functions:
         }
     }
 
-  // "Two events converging on one shared two-pin Sequence"
   Conv_SharedSequence_A():
     // Sequence [0]:
     PrintString(self, "Seq 0", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
@@ -294,7 +314,6 @@ Functions:
     // Sequence [1]:
     PrintString(self, "Seq 1", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
-  // "Latches and delays"
   // "A DoOnce that gets Reset later in the same call"
   Latch_DoOnce():
     DoOnce(DoOnce_4) {
@@ -337,11 +356,6 @@ Functions:
     Delay(self, 0.2000)
     PrintString(self, "C", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
-  // "Complex nested symetrical flow gates with event convergence"
-  // "Left side of a paired axis input. Above the threshold runs Attempt, dropping below resets
-  //  Attempt and runs Release."
-  // "Attempt and Release are shared with the right side, called here with bIsLeft = true.
-  //  OnLeftReleased also triggers the Release path"
   OnLeftAxis():
     self.LeftAxis = $CustomEvent_Axis_1
     if (self.LeftAxis >= self.AxisThreshold) {
@@ -361,7 +375,6 @@ Functions:
         Release(true)
     }
 
-  // "Mirror of the left side, calling the shared Attempt and Release with bIsLeft = false"
   OnRightAxis():
     self.RightAxis = $CustomEvent_Axis
     if (self.RightAxis >= self.AxisThreshold) {

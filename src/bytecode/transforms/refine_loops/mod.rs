@@ -353,6 +353,22 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                             },
                         );
                     }
+                    let remaining: std::collections::BTreeSet<_> =
+                        crate::bytecode::body_origins::BodyOrigins::statements(body)
+                            .values()
+                            .map(|stmt| stmt.offset())
+                            .collect();
+                    for source in
+                        crate::bytecode::body_origins::BodyOrigins::statements(&original_body)
+                            .values()
+                    {
+                        if !remaining.contains(&source.offset()) {
+                            crate::bytecode::body_origins::BodyOrigins::record(
+                                source.offset(),
+                                *offset,
+                            );
+                        }
+                    }
                     *kind = LoopKind::ForEach { item, array };
                     *cond = None;
                     recurse_loop_children(body, completion, ancestors);

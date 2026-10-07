@@ -135,10 +135,22 @@ fn try_lower_branch_via_chain(
 
     // Steps 3-5: locate and remove the temp's def, yielding the cloned
     // `Eq` operands for the new Branch cond.
+    let source_offset = body.iter().find_map(|stmt| match stmt {
+        Stmt::Assignment {
+            lhs: Expr::Var(name),
+            ..
+        } if name == &temp_name => Some(stmt.offset()),
+        _ => None,
+    });
+    let target_offset = body[branch_idx].offset();
     let Some((def_idx, eq_lhs, eq_rhs)) = remove_chain_def(body, &temp_name, resolved_ne_operands)
     else {
         return false;
     };
+
+    if let Some(source_offset) = source_offset {
+        crate::bytecode::body_origins::BodyOrigins::record(source_offset, target_offset);
+    }
 
     // Step 6: take the Branch fields and build the canonical
     // `if (X == N) <original_else> else <original_then>` shape. The def

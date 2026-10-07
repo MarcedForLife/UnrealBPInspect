@@ -2,7 +2,6 @@
 //! exposes the body-line bridge the --dump/--json property override reuses.
 
 pub(crate) mod comments;
-mod scoped_value;
 mod sections;
 pub mod summary;
 

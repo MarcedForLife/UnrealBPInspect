@@ -5,23 +5,15 @@ use super::super::audit::{DropReason, PlacementTrace, Strategy};
 use super::super::render::render_comment_lines;
 use super::super::{CommentBox, CommentModel};
 use super::anchor::{
-    anchor_to_first_resolvable, anchor_to_node, anchor_via_exec_follow,
-    anchor_via_exec_follow_outward, anchor_via_pin_follow,
+    anchor_to_node, anchor_via_exec_follow, anchor_via_exec_follow_outward, anchor_via_pin_follow,
 };
-use super::context::{box_contains_exec_root, exec_entry_point, ClassifyContext};
-use super::{Classification, PlacedComment, PlacementClass, TraceRecorder};
+use super::context::{box_contains_exec_root, sorted_exec_entries, ClassifyContext};
+use super::{Classification, CommentLocation, PlacedComment, PlacementClass, TraceRecorder};
 
 /// Coverage half of the function-level promotion rule: a box must cover more
 /// than this percentage of a graph page's identifiable nodes (strictly
 /// greater-than) AND contain the page's exec-root (see
 /// [`box_contains_exec_root`]) to promote to a whole-graph description.
-///
-/// The threshold is data-justified, not fitted. Across the fixture corpus the
-/// per-box coverage ratio is bimodal: whole-graph boxes cluster at 1.0 and
-/// every other box sits below 0.4, a clean gap with nothing in between, so any
-/// cut in `(0.4, 1.0)` selects the same boxes. 80% sits inside that gap. The
-/// exec-root requirement is what actually distinguishes the two clusters
-/// structurally; the threshold only excludes near-total-but-partial coverage.
 const COVERAGE_THRESHOLD_PERCENT: usize = 80;
 
 /// Indent applied to an event-wrapping comment, sitting directly above the
@@ -105,28 +97,48 @@ pub(super) fn classify(
         (Some(outcome), trace)
     };
 
-    // EventWrapping: the box contains one or more event-entry nodes. A box
-    // spanning many events is a canvas region label ("Latches and delays"
-    // over a cluster of events); a linear summary can't bracket the group,
-    // so it anchors to the first contained event in render order and renders
-    // as a plain `// "text"` marker like any other event-wrapping comment.
+    // A box can describe several independently identified event headers.
     let event_nodes: Vec<&String> = contained
         .iter()
         .filter_map(|node| context.event_node_to_name.get(node))
         .collect();
     if !event_nodes.is_empty() {
-        // First contained event in export order wins (contained is sorted),
-        // a deterministic stand-in for the box's first contained event.
-        let event_name = event_nodes
-            .into_iter()
-            .min()
-            .cloned()
-            .expect("event_nodes is non-empty");
+        // A single InputAction node can back several events. Keep every
+        // event identity when deciding whether a box has one clear owner.
+        let names: Vec<String> = context
+            .parsed
+            .exports
+            .iter()
+            .map(|(header, _)| header.object_name.clone())
+            .collect();
+        let events: Vec<String> =
+            crate::bytecode::decode::build_event_node_index(context.parsed, &names)
+                .into_iter()
+                .filter(|(_, node)| contained.contains(node))
+                .map(|(name, _)| name)
+                .collect();
+        if events.is_empty()
+            || events.iter().any(|name| {
+                !context
+                    .decoded
+                    .events
+                    .iter()
+                    .any(|event| event.name == *name)
+            })
+        {
+            recorder.record(Strategy::Dropped(DropReason::OwnerEventUnresolved));
+            return finish_box(Classification::unresolved(comment));
+        }
         let lines = render_comment_lines(&comment.text, EVENT_WRAP_INDENT);
         recorder.record(Strategy::EventWrapping);
         let outcome = Classification::Placed(Box::new(PlacedComment {
-            block: event_name,
-            class: PlacementClass::EventWrapping,
+            locations: events
+                .into_iter()
+                .map(|block| CommentLocation {
+                    block,
+                    class: PlacementClass::EventWrapping,
+                })
+                .collect(),
             lines,
             box_x: comment.x,
             box_y: comment.y,
@@ -143,12 +155,15 @@ pub(super) fn classify(
     if page_total > 0
         && contained.len() * 100 / page_total > COVERAGE_THRESHOLD_PERCENT
         && box_contains_exec_root(&contained, context.parsed)
+        && context.body_for_block(&page).is_some()
     {
         let lines = render_comment_lines(&comment.text, FUNCTION_LEVEL_INDENT);
         recorder.record(Strategy::FunctionLevel);
         let outcome = Classification::Placed(Box::new(PlacedComment {
-            block: page.clone(),
-            class: PlacementClass::FunctionLevel,
+            locations: vec![CommentLocation {
+                block: page.clone(),
+                class: PlacementClass::FunctionLevel,
+            }],
             lines,
             box_x: comment.x,
             box_y: comment.y,
@@ -157,8 +172,42 @@ pub(super) fn classify(
         return finish_box(outcome);
     }
 
+    // Every independent entry must resolve. Keep separate locations instead
+    // of pretending that the statements between them belong to the box.
+    let entries = sorted_exec_entries(&contained, context);
+    if entries.len() > 1 {
+        let mut combined: Option<Box<PlacedComment>> = None;
+        for entry in &entries {
+            let Classification::Placed(placed) = anchor_to_node(
+                comment,
+                &page,
+                *entry,
+                Strategy::InlineEntry,
+                context,
+                &recorder,
+            ) else {
+                return finish_box(Classification::unresolved(comment));
+            };
+            if placed
+                .locations
+                .iter()
+                .any(|location| location.class == PlacementClass::Unresolved)
+            {
+                return finish_box(Classification::unresolved(comment));
+            }
+            if let Some(combined) = &mut combined {
+                combined.locations.extend(placed.locations);
+            } else {
+                combined = Some(placed);
+            }
+        }
+        if let Some(combined) = combined {
+            return finish_box(Classification::Placed(combined));
+        }
+    }
+
     // InlineAtEntry: anchor to the top-left execution entry point of the box.
-    let outcome = match exec_entry_point(&contained, context) {
+    let outcome = match entries.first().copied() {
         // No exec boundary crossing: a box of pure expression nodes, or a
         // self-contained exec block. Pure expressions render inside their
         // consuming statement, so follow the data pins out before giving up.
@@ -170,11 +219,8 @@ pub(super) fn classify(
             context,
             &recorder,
         ),
-        // The geometric entry is the top-left exec node, but it may be a pure
-        // node or a node whose member name didn't survive byte attribution.
-        // When it does not resolve, fall back to the first contained exec node
-        // that does, in deterministic (y, x, export) order, then to exec
-        // follow-through, then to pin-following.
+        // Follow a unique entry through routing nodes when it has no direct
+        // statement, then try data consumers if execution evidence runs out.
         Some(entry) => anchor_to_node(
             comment,
             &page,
@@ -183,10 +229,6 @@ pub(super) fn classify(
             context,
             &recorder,
         )
-        .or_else(|| {
-            anchor_to_first_resolvable(comment, &page, &contained, entry, context, &recorder)
-                .unwrap_or(Classification::Unanchored)
-        })
         .or_else(|| anchor_via_exec_follow(comment, &page, &contained, context, &recorder))
         .or_else(|| {
             anchor_via_pin_follow(
@@ -212,7 +254,7 @@ fn drop_trace(comment: &CommentBox, page: &str, reason: DropReason) -> Placement
         contained: None,
         page_total: None,
         depth: 0,
-        placement: None,
+        locations: Vec::new(),
     }
 }
 
@@ -228,16 +270,29 @@ fn trace_for(
     recorder: &TraceRecorder,
     outcome: &Classification,
 ) -> PlacementTrace {
-    let (strategy, placement) = match outcome {
+    let (strategy, locations) = match outcome {
         Classification::Placed(placed) => {
-            let strategy = recorder
-                .strategy()
-                .unwrap_or(Strategy::Dropped(DropReason::NoCoveringStatement));
-            let offset = match placed.class {
-                PlacementClass::InlineAtStatement { statement_offset } => Some(statement_offset),
-                _ => None,
+            let strategy = if placed
+                .locations
+                .iter()
+                .any(|location| location.class == PlacementClass::Unresolved)
+            {
+                match recorder.strategy() {
+                    Some(Strategy::Dropped(reason)) => Strategy::Dropped(reason),
+                    _ => Strategy::Dropped(DropReason::NoCoveringStatement),
+                }
+            } else {
+                recorder
+                    .strategy()
+                    .unwrap_or(Strategy::Dropped(DropReason::NoCoveringStatement))
             };
-            (strategy, Some((placed.block.clone(), offset)))
+            let locations = placed
+                .locations
+                .iter()
+                .filter(|location| location.class != PlacementClass::Unresolved)
+                .cloned()
+                .collect();
+            (strategy, locations)
         }
         Classification::Unanchored => {
             let reason = recorder
@@ -247,7 +302,7 @@ fn trace_for(
                     _ => None,
                 })
                 .unwrap_or(DropReason::PinFollowDeadEnd);
-            (Strategy::Dropped(reason), None)
+            (Strategy::Dropped(reason), Vec::new())
         }
     };
     PlacementTrace {
@@ -257,6 +312,6 @@ fn trace_for(
         contained,
         page_total,
         depth: recorder.depth(),
-        placement,
+        locations,
     }
 }

@@ -18,6 +18,7 @@ pub mod resolve;
 pub mod transforms;
 
 pub mod asset;
+pub(crate) mod body_origins;
 pub mod call_graph;
 pub mod cfg;
 pub mod decode;
@@ -28,6 +29,7 @@ pub mod expr;
 pub mod k2node_byte_map;
 pub mod partition;
 pub mod pin_attribution;
+pub(crate) mod scoped_value;
 pub mod stmt;
 pub mod structure;
 

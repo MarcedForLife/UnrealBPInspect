@@ -152,10 +152,29 @@ const STACK: &[Pass] = &[
 ];
 
 /// Run the full transform pipeline ([`STACK`]) over one decoded body.
-pub(crate) fn apply_transform_stack_to_body(body: &mut Vec<Stmt>) {
+pub(crate) fn apply_transform_stack_to_body(
+    body: &mut Vec<Stmt>,
+) -> crate::bytecode::body_origins::BodyOrigins {
+    let mut origins = crate::bytecode::body_origins::BodyOrigins::new(body);
     for pass in STACK {
-        (pass.run)(body);
+        // These passes only rewrite expressions or names. Statement occurrence
+        // paths remain identical, even when several statements share an offset.
+        if matches!(
+            pass.name,
+            "lower_binary_ops"
+                | "lower_static_library_calls"
+                | "lower_array_get_out"
+                | "strip_latent_action_info"
+                | "fold_bool_switches"
+                | "rename_outparam_temps"
+                | "normalize_var_names"
+        ) {
+            (pass.run)(body);
+        } else {
+            origins.apply(body, pass.run);
+        }
     }
+    origins
 }
 
 #[cfg(test)]

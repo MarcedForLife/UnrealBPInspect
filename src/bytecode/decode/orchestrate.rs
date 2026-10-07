@@ -13,6 +13,7 @@ use std::ops::Range;
 
 use crate::binary::NameTable;
 use crate::bytecode::asset::{DecodedAsset, Event, Function};
+use crate::bytecode::body_origins::BodyOrigins;
 use crate::bytecode::decode::ctx::debug_enabled;
 use crate::bytecode::names::{EXECUTE_UBERGRAPH_PREFIX, K2NODE_EXECUTION_SEQUENCE};
 use crate::bytecode::partition::{
@@ -61,6 +62,9 @@ pub fn decode_asset(asset: &ParsedAsset) -> DecodedAsset {
                 ),
             });
             DecodedAsset {
+                function_origins: Default::default(),
+                event_origins: Default::default(),
+                resume_origins: Default::default(),
                 diagnostics,
                 functions: vec![],
                 events: vec![],
@@ -193,7 +197,16 @@ fn decode_asset_inner(asset: &ParsedAsset) -> DecodedAsset {
     events.sort_by(|a, b| a.name.cmp(&b.name));
     functions.sort_by(|a, b| a.name.cmp(&b.name));
 
-    apply_transform_stack(&mut functions, &mut events);
+    let (mut function_origins, mut event_origins) =
+        apply_transform_stack(&mut functions, &mut events);
+    let function_bodies_before: BTreeMap<_, _> = functions
+        .iter()
+        .map(|function| (function.name.clone(), function.body.clone()))
+        .collect();
+    let event_bodies_before: BTreeMap<_, _> = events
+        .iter()
+        .map(|event| (event.name.clone(), event.body.clone()))
+        .collect();
 
     // Graph-identity DoOnce wrap synthesis, apply half. The planning half
     // ran per event while each `DecodeCtx` was alive; now that the bulk
@@ -226,9 +239,11 @@ fn decode_asset_inner(asset: &ParsedAsset) -> DecodedAsset {
 
     // Resolve shared gate names only after every event and latent continuation
     // has completed structural transforms and graph-based latch synthesis.
-    for body in resume_bodies.values_mut() {
-        apply_transform_stack_to_body(body);
-    }
+    let mut resume_origins: BTreeMap<_, _> = resume_bodies
+        .iter_mut()
+        .map(|(&offset, body)| (offset, apply_transform_stack_to_body(body)))
+        .collect();
+    let resume_bodies_before = resume_bodies.clone();
     crate::bytecode::transforms::latch_recognition::rewrite_asset_wide_reset_doonce_names(
         &mut functions,
         &mut events,
@@ -261,7 +276,30 @@ fn decode_asset_inner(asset: &ParsedAsset) -> DecodedAsset {
         }
     }
 
+    for function in &functions {
+        function_origins.get_mut(&function.name).unwrap().update(
+            &function_bodies_before[&function.name],
+            &function.body,
+            &[],
+        );
+    }
+    for event in &events {
+        event_origins.get_mut(&event.name).unwrap().update(
+            &event_bodies_before[&event.name],
+            &event.body,
+            &[],
+        );
+    }
+    for (offset, body) in &resume_bodies {
+        resume_origins
+            .get_mut(offset)
+            .unwrap()
+            .update(&resume_bodies_before[offset], body, &[]);
+    }
     DecodedAsset {
+        function_origins,
+        event_origins,
+        resume_origins,
         diagnostics,
         functions,
         events,
@@ -1107,18 +1145,31 @@ fn reachable_statement_offsets(
 /// Apply the transform pipeline to every function and event body.
 ///
 /// Transform order is documented per-pass in `apply_transform_stack_to_body`.
-fn apply_transform_stack(functions: &mut [Function], events: &mut [Event]) {
-    for function in functions {
-        apply_transform_stack_to_body(&mut function.body);
-        // Functions return implicitly at the tail; the explicit
-        // Stmt::Return left over from the literal opcode walk is visual
-        // noise. Events legitimately end in returns (multicast delegate
-        // calls, etc.) so the strip is function-only.
-        crate::bytecode::transforms::dead_stmt::strip_implicit_trailing_return(&mut function.body);
-    }
-    for event in events {
-        apply_transform_stack_to_body(&mut event.body);
-    }
+fn apply_transform_stack(
+    functions: &mut [Function],
+    events: &mut [Event],
+) -> (BTreeMap<String, BodyOrigins>, BTreeMap<String, BodyOrigins>) {
+    let function_origins = functions
+        .iter_mut()
+        .map(|function| {
+            let mut origins = apply_transform_stack_to_body(&mut function.body);
+            origins.apply(
+                &mut function.body,
+                crate::bytecode::transforms::dead_stmt::strip_implicit_trailing_return,
+            );
+            (function.name.clone(), origins)
+        })
+        .collect();
+    let event_origins = events
+        .iter_mut()
+        .map(|event| {
+            (
+                event.name.clone(),
+                apply_transform_stack_to_body(&mut event.body),
+            )
+        })
+        .collect();
+    (function_origins, event_origins)
 }
 
 /// Build the SESE region tree over an already-constructed `cfg`: dominators,

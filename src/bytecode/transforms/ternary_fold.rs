@@ -165,6 +165,9 @@ fn try_fold_branch_into_ternary(stmt: &mut Stmt) {
     let else_rhs = else_assign.1;
     let cond_clone = cond.clone();
     let stmt_offset = *offset;
+    for source in [then_body[0].offset(), else_body[0].offset()] {
+        crate::bytecode::body_origins::BodyOrigins::record(source, stmt_offset);
+    }
 
     *stmt = Stmt::Assignment {
         lhs,

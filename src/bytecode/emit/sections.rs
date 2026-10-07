@@ -108,7 +108,16 @@ pub(crate) fn emit_prefix_sections(
             &context,
             &decoded.resume_bodies,
         );
-        if block_matches_filter(&block, filters) {
+        let shared_text_matches = context
+            .comments
+            .event_wrapping
+            .iter()
+            .any(|(names, lines)| {
+                names.len() > 1
+                    && names.contains(&event.name)
+                    && block_matches_filter(&lines.join("\n"), filters)
+            });
+        if block_matches_filter(&block, filters) || shared_text_matches {
             matched_funcs.insert(event.name.clone());
             blocks.push(block);
         }
@@ -120,6 +129,35 @@ pub(crate) fn emit_prefix_sections(
         filters,
         &matched_funcs,
     );
+    let mut shared_lines = Vec::new();
+    for (names, lines) in &context.comments.event_wrapping {
+        if names.len() < 2 || !names.iter().any(|name| matched_funcs.contains(name)) {
+            continue;
+        }
+        let display_names = names
+            .iter()
+            .map(|name| display_event_name(name, &context.action_key_events))
+            .collect::<Vec<_>>();
+        shared_lines.push(format!("  Events {}:", display_names.join(", ")));
+        shared_lines.extend(lines.iter().cloned());
+    }
+    if !shared_lines.is_empty() {
+        output.push_str("Graph comments:\n");
+        for line in shared_lines {
+            output.push_str(&line);
+            output.push('\n');
+        }
+        output.push('\n');
+    }
+    let unresolved = context.comments.unresolved_lines(filters);
+    if !unresolved.is_empty() {
+        output.push_str("Graph comments (location unresolved):\n");
+        for line in unresolved {
+            output.push_str(&line);
+            output.push('\n');
+        }
+        output.push('\n');
+    }
     if !blocks.is_empty() || filters.is_empty() {
         output.push_str("Functions:\n");
     }

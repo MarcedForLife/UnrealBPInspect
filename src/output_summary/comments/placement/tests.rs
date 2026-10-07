@@ -46,6 +46,9 @@ fn node_geom(export_index: usize, x: i32, y: i32, page: &str) -> NodeGeometry {
 /// A decoded asset with one event body and no byte map.
 fn decoded_with_event(name: &str, body: Vec<Stmt>) -> DecodedAsset {
     DecodedAsset {
+        function_origins: Default::default(),
+        event_origins: Default::default(),
+        resume_origins: Default::default(),
         diagnostics: Vec::new(),
         functions: vec![],
         events: vec![Event {
@@ -90,6 +93,7 @@ fn exec_pin(direction: u8, target: Option<usize>) -> EdGraphPin {
                 }]
             })
             .unwrap_or_default(),
+        ..Default::default()
     }
 }
 
@@ -116,6 +120,7 @@ fn pure_node_pins(target: usize) -> NodePinData {
                 node: target,
                 pin_id: [0; 16],
             }],
+            ..Default::default()
         }],
     }
 }
@@ -143,6 +148,9 @@ fn decoded_with_mapped_function(
     let mut byte_maps = ByteMaps::default();
     byte_maps.functions.insert(name.into(), byte_map);
     DecodedAsset {
+        function_origins: Default::default(),
+        event_origins: Default::default(),
+        resume_origins: Default::default(),
         diagnostics: Vec::new(),
         functions: vec![Function {
             name: name.into(),
@@ -170,19 +178,12 @@ fn function_level_when_box_covers_over_threshold() {
             node_geom(5, 30, 30, "MyFunc"),
         ],
     };
-    let decoded = DecodedAsset {
-        diagnostics: Vec::new(),
-        functions: vec![],
-        events: vec![],
-        resume_bodies: Default::default(),
-        resume_owner_events: Default::default(),
-        byte_maps: Default::default(),
-    };
+    let decoded = decoded_with_mapped_function("MyFunc", vec![], 2, 0);
     let mut parsed = empty_parsed();
     parsed.pin_data.insert(2, exec_root_pins(3));
     let plan = build_placement_plan(&decoded, &parsed, &[], &model);
     assert_eq!(plan.count_class(&PlacementClass::FunctionLevel), 1);
-    assert_eq!(plan.placed[0].block, "MyFunc");
+    assert_eq!(plan.placed[0].locations[0].block, "MyFunc");
     assert_eq!(plan.placed[0].lines, vec!["    // \"whole graph desc\""]);
 }
 
@@ -232,7 +233,7 @@ fn below_threshold_box_without_anchor_is_unanchored() {
     let decoded = decoded_with_event("MyFunc", vec![call(0, "f")]);
     let parsed = empty_parsed();
     let plan = build_placement_plan(&decoded, &parsed, &[], &model);
-    assert_eq!(plan.placed.len(), 0);
+    assert_eq!(plan.count_class(&PlacementClass::Unresolved), 1);
     assert_eq!(plan.unanchored, 1);
 }
 
@@ -260,11 +261,12 @@ fn bubble_on_pure_node_anchors_via_pin_follow() {
     let plan = build_placement_plan(&decoded, &parsed, &[], &model);
     assert_eq!(plan.unanchored, 0);
     assert_eq!(plan.placed.len(), 1);
-    assert_eq!(plan.placed[0].block, "MyFunc");
+    assert_eq!(plan.placed[0].locations[0].block, "MyFunc");
     assert_eq!(
-        plan.placed[0].class,
+        plan.placed[0].locations[0].class,
         PlacementClass::InlineAtStatement {
-            statement_offset: 20
+            statement_offset: 20,
+            statement_path: vec![0, 1],
         }
     );
 }
@@ -291,9 +293,10 @@ fn all_pure_box_anchors_through_knot_chain() {
     assert_eq!(plan.unanchored, 0);
     assert_eq!(plan.placed.len(), 1);
     assert_eq!(
-        plan.placed[0].class,
+        plan.placed[0].locations[0].class,
         PlacementClass::InlineAtStatement {
-            statement_offset: 20
+            statement_offset: 20,
+            statement_path: vec![0, 1],
         }
     );
 }
@@ -332,6 +335,9 @@ fn ubergraph_page_node_anchors_inside_resume_body() {
         },
     );
     let decoded = DecodedAsset {
+        function_origins: Default::default(),
+        event_origins: Default::default(),
+        resume_origins: Default::default(),
         diagnostics: Vec::new(),
         functions: vec![],
         events: vec![Event {
@@ -350,11 +356,12 @@ fn ubergraph_page_node_anchors_inside_resume_body() {
     let plan = build_placement_plan(&decoded, &parsed, &[], &model);
     assert_eq!(plan.unanchored, 0);
     assert_eq!(plan.placed.len(), 1);
-    assert_eq!(plan.placed[0].block, "Ev");
+    assert_eq!(plan.placed[0].locations[0].block, "Ev");
     assert_eq!(
-        plan.placed[0].class,
+        plan.placed[0].locations[0].class,
         PlacementClass::InlineAtStatement {
-            statement_offset: 50
+            statement_offset: 50,
+            statement_path: vec![1, 0],
         }
     );
 }
@@ -396,9 +403,10 @@ fn knot_entry_box_anchors_via_exec_follow() {
     assert_eq!(plan.unanchored, 0);
     assert_eq!(plan.placed.len(), 1);
     assert_eq!(
-        plan.placed[0].class,
+        plan.placed[0].locations[0].class,
         PlacementClass::InlineAtStatement {
-            statement_offset: 20
+            statement_offset: 20,
+            statement_path: vec![0, 1],
         }
     );
 }
@@ -420,12 +428,12 @@ fn pin_follow_dead_end_stays_unanchored() {
     let mut parsed = empty_parsed();
     parsed.pin_data.insert(2, pure_node_pins(9));
     let plan = build_placement_plan(&decoded, &parsed, &[], &model);
-    assert_eq!(plan.placed.len(), 0);
+    assert_eq!(plan.count_class(&PlacementClass::Unresolved), 1);
     assert_eq!(plan.unanchored, 1);
 }
 
 #[test]
-fn box_without_contained_nodes_is_dropped_silently() {
+fn box_without_contained_nodes_retains_its_text() {
     let model = CommentModel {
         boxes: vec![box_at("empty box", 0, 0, 5, 5, "MyFunc")],
         nodes: vec![node_geom(2, 100, 100, "MyFunc")],
@@ -433,8 +441,9 @@ fn box_without_contained_nodes_is_dropped_silently() {
     let decoded = decoded_with_event("MyFunc", vec![]);
     let parsed = empty_parsed();
     let plan = build_placement_plan(&decoded, &parsed, &[], &model);
-    assert_eq!(plan.placed.len(), 0);
-    assert_eq!(plan.unanchored, 0);
+    assert_eq!(plan.count_class(&PlacementClass::Unresolved), 1);
+    assert_eq!(plan.unanchored, 1);
+    assert_eq!(plan.placed[0].text, model.boxes[0].text);
 }
 
 #[test]
@@ -449,21 +458,14 @@ fn placed_comments_sorted_by_block_then_position() {
         ],
         nodes: vec![node_geom(2, 0, 0, "AFunc"), node_geom(3, 0, 0, "BFunc")],
     };
-    let decoded = DecodedAsset {
-        diagnostics: Vec::new(),
-        functions: vec![],
-        events: vec![],
-        resume_bodies: Default::default(),
-        resume_owner_events: Default::default(),
-        byte_maps: Default::default(),
-    };
+    let decoded = decoded_with_mapped_function("MyFunc", vec![], 2, 0);
     let mut parsed = empty_parsed();
     parsed.pin_data.insert(2, exec_root_pins(99));
     parsed.pin_data.insert(3, exec_root_pins(99));
     let plan = build_placement_plan(&decoded, &parsed, &[], &model);
     assert_eq!(plan.placed.len(), 2);
-    assert_eq!(plan.placed[0].block, "AFunc");
-    assert_eq!(plan.placed[1].block, "BFunc");
+    assert_eq!(plan.placed[0].locations[0].block, "AFunc");
+    assert_eq!(plan.placed[1].locations[0].block, "BFunc");
 }
 
 /// Whole-pipeline check against the committed BP_DecoderTest fixture: parse,
@@ -492,20 +494,16 @@ fn decodertest_class_split() {
     let function_level = plan.count_class(&PlacementClass::FunctionLevel);
     let inline = plan.count_class(&PlacementClass::InlineAtStatement {
         statement_offset: 0,
+        statement_path: Vec::new(),
     });
 
-    // 17 EventWrapping, 18 function-level, 0 inline, every box placed.
-    // 14 of the EventWrapping boxes are single/small-group annotations;
-    // the other 3 are the multi-event region labels ("Latches and
-    // delays" / "Cross-event convergence" / "Complex nested symetrical
-    // flow gates with event convergence", spanning 5/10/4 events), which
-    // anchor to their first contained event in render order (a linear
-    // summary cannot bracket the group).
+    // Multi-event region labels remain visible without implying ownership
+    // by the first event in render order.
     assert_eq!(model.boxes.len(), 35, "DecoderTest comment-box count");
     assert_eq!(event_wrapping, 17, "EventWrapping count");
     assert_eq!(function_level, 18, "function-level count");
     assert_eq!(inline, 0, "inline count");
-    assert_eq!(plan.unanchored, 0, "unanchored count");
+    assert_eq!(plan.unanchored, 0, "unresolved count");
     assert_eq!(plan.placed.len(), 35, "total placed");
 }
 
@@ -523,14 +521,7 @@ fn trace_records_function_level_strategy() {
             node_geom(5, 30, 30, "MyFunc"),
         ],
     };
-    let decoded = DecodedAsset {
-        diagnostics: Vec::new(),
-        functions: vec![],
-        events: vec![],
-        resume_bodies: Default::default(),
-        resume_owner_events: Default::default(),
-        byte_maps: Default::default(),
-    };
+    let decoded = decoded_with_mapped_function("MyFunc", vec![], 2, 0);
     let mut parsed = empty_parsed();
     parsed.pin_data.insert(2, exec_root_pins(3));
     let plan = build_placement_plan(&decoded, &parsed, &[], &model);
@@ -539,7 +530,13 @@ fn trace_records_function_level_strategy() {
     assert_eq!(plan.trace[0].contained, Some(4));
     assert_eq!(plan.trace[0].page_total, Some(4));
     assert_eq!(plan.trace[0].depth, 0);
-    assert_eq!(plan.trace[0].placement, Some(("MyFunc".to_string(), None)));
+    assert_eq!(
+        plan.trace[0].locations,
+        vec![CommentLocation {
+            block: "MyFunc".into(),
+            class: PlacementClass::FunctionLevel
+        }]
+    );
 }
 
 /// One trace entry exists per box, in box order, even for drops. The
@@ -602,14 +599,7 @@ fn audit_trace_is_a_pure_side_channel() {
             node_geom(5, 30, 30, "MyFunc"),
         ],
     };
-    let decoded = DecodedAsset {
-        diagnostics: Vec::new(),
-        functions: vec![],
-        events: vec![],
-        resume_bodies: Default::default(),
-        resume_owner_events: Default::default(),
-        byte_maps: Default::default(),
-    };
+    let decoded = decoded_with_mapped_function("MyFunc", vec![], 2, 0);
     let mut parsed = empty_parsed();
     parsed.pin_data.insert(2, exec_root_pins(3));
 
@@ -627,4 +617,450 @@ fn audit_trace_is_a_pure_side_channel() {
     without_trace.trace.clear();
     assert_eq!(without_trace.placed, first.placed);
     assert_eq!(without_trace.unanchored, first.unanchored);
+}
+
+#[test]
+fn pure_node_fanout_retains_every_proven_consumer() {
+    let model = CommentModel {
+        boxes: vec![CommentBox {
+            is_bubble: true,
+            owner_export: Some(2),
+            ..box_at("shared input", 0, 0, 0, 0, "Example")
+        }],
+        nodes: vec![],
+    };
+    let mut decoded = decoded_with_mapped_function(
+        "Example",
+        vec![call(10, "First"), call(20, "Second")],
+        3,
+        10,
+    );
+    let byte_map = decoded.byte_maps.functions.get_mut("Example").unwrap();
+    let mut second = byte_map.partitions[&3].clone();
+    second.node_id = 4;
+    second.ranges = std::iter::once(20..21).collect();
+    byte_map.partitions.insert(4, second);
+    let mut parsed = empty_parsed();
+    let mut outputs = pure_node_pins(3);
+    outputs.pins[0].linked_to.push(LinkedPin {
+        node: 4,
+        pin_id: [0; 16],
+    });
+    parsed.pin_data.insert(2, outputs);
+    let plan = build_placement_plan(&decoded, &parsed, &[], &model);
+    assert_eq!(plan.placed.len(), 1);
+    assert_eq!(plan.placed[0].locations.len(), 2);
+    assert_eq!(plan.unanchored, 0);
+    assert_eq!(
+        plan.placed[0].locations[0]
+            .statement(&decoded)
+            .unwrap()
+            .offset(),
+        10
+    );
+    assert_eq!(
+        plan.placed[0].locations[1]
+            .statement(&decoded)
+            .unwrap()
+            .offset(),
+        20
+    );
+    assert_eq!(plan.placed[0].text, "shared input");
+
+    // A longer second path retains the same two consumers.
+    parsed.pin_data.get_mut(&2).unwrap().pins[0].linked_to[1].node = 5;
+    parsed.pin_data.insert(5, pure_node_pins(4));
+    let plan = build_placement_plan(&decoded, &parsed, &[], &model);
+    assert_eq!(plan.placed[0].locations.len(), 2);
+    assert_eq!(plan.unanchored, 0);
+    assert_eq!(
+        plan.placed[0].locations[0]
+            .statement(&decoded)
+            .unwrap()
+            .offset(),
+        10
+    );
+    assert_eq!(
+        plan.placed[0].locations[1]
+            .statement(&decoded)
+            .unwrap()
+            .offset(),
+        20
+    );
+    // One proven consumer is insufficient when another path ends without evidence.
+    parsed.pin_data.get_mut(&5).unwrap().pins[0].linked_to[0].node = 99;
+    let plan = build_placement_plan(&decoded, &parsed, &[], &model);
+    assert_eq!(plan.unanchored, 1);
+    assert_eq!(
+        plan.placed[0].locations[0].class,
+        PlacementClass::Unresolved
+    );
+}
+
+#[test]
+fn missing_graph_page_keeps_text_without_claiming_a_function() {
+    let mut comment = box_at("author note", 0, 0, 10, 10, "Example");
+    comment.graph_page = None;
+    let model = CommentModel {
+        boxes: vec![comment],
+        nodes: vec![],
+    };
+    let plan = build_placement_plan(
+        &decoded_with_event("Event", vec![]),
+        &empty_parsed(),
+        &[],
+        &model,
+    );
+    assert_eq!(
+        plan.placed[0].locations[0].class,
+        PlacementClass::Unresolved
+    );
+    assert_eq!(plan.placed[0].locations[0].block, "<unknown graph>");
+    assert_eq!(plan.placed[0].text, "author note");
+}
+
+#[test]
+fn shared_node_does_not_choose_a_resume_owner_by_sort_order() {
+    let model = CommentModel {
+        boxes: vec![CommentBox {
+            is_bubble: true,
+            owner_export: Some(7),
+            ..box_at("shared continuation", 0, 0, 0, 0, "EventGraph")
+        }],
+        nodes: vec![],
+    };
+    let mut decoded = decoded_with_mapped_function("Example", vec![], 7, 50);
+    decoded.byte_maps.ubergraph = decoded.byte_maps.functions.remove("Example");
+    decoded.functions.clear();
+    for (name, offset) in [("First", 10), ("Second", 20)] {
+        decoded.events.push(Event {
+            name: name.into(),
+            body: vec![],
+            export_index: None,
+        });
+        decoded
+            .resume_bodies
+            .insert(offset, vec![call(50, "Shared")]);
+        decoded.resume_owner_events.insert(offset, name.into());
+    }
+    let plan = build_placement_plan(&decoded, &empty_parsed(), &[], &model);
+    assert_eq!(
+        plan.placed[0].locations[0].class,
+        PlacementClass::Unresolved
+    );
+    assert_eq!(plan.placed[0].locations[0].block, "EventGraph");
+}
+
+#[test]
+fn box_covering_multiple_events_keeps_every_proven_header() {
+    use crate::types::{ExportHeader, ImportEntry, PropValue, Property};
+    let mut parsed = empty_parsed();
+    parsed.imports.push(ImportEntry {
+        class_package: String::new(),
+        class_name: "Class".into(),
+        object_name: "K2Node_CustomEvent".into(),
+        outer_index: 0,
+    });
+    let mut decoded = decoded_with_event("First", vec![]);
+    decoded.events.push(Event {
+        name: "Second".into(),
+        body: vec![],
+        export_index: None,
+    });
+    for name in ["First", "Second"] {
+        parsed.exports.push((
+            ExportHeader {
+                class_index: -1,
+                super_index: 0,
+                outer_index: 0,
+                object_name: name.into(),
+                serial_offset: 0,
+                serial_size: 0,
+            },
+            vec![Property {
+                name: "CustomFunctionName".into(),
+                value: PropValue::Name(name.into()),
+            }],
+        ));
+    }
+    let model = CommentModel {
+        boxes: vec![box_at("Shared actions", 0, 0, 100, 100, "EventGraph")],
+        nodes: vec![
+            node_geom(1, 0, 0, "EventGraph"),
+            node_geom(2, 50, 0, "EventGraph"),
+        ],
+    };
+    let names = vec!["First".into(), "Second".into()];
+    let plan = build_placement_plan(&decoded, &parsed, &names, &model);
+    assert_eq!(
+        plan.placed[0].locations,
+        vec![
+            CommentLocation {
+                block: "First".into(),
+                class: PlacementClass::EventWrapping
+            },
+            CommentLocation {
+                block: "Second".into(),
+                class: PlacementClass::EventWrapping
+            },
+        ]
+    );
+    assert_eq!(plan.placed[0].text, "Shared actions");
+    assert_eq!(plan.unanchored, 0);
+    decoded.events.pop();
+    let partial = build_placement_plan(&decoded, &parsed, &names, &model);
+    assert_eq!(partial.unanchored, 1);
+    assert_eq!(
+        partial.placed[0].locations[0].class,
+        PlacementClass::Unresolved
+    );
+}
+
+#[test]
+fn box_with_multiple_execution_entries_keeps_only_proven_statements() {
+    let mut decoded = decoded_with_mapped_function(
+        "Example",
+        vec![call(10, "First"), call(15, "Unrelated"), call(20, "Second")],
+        2,
+        10,
+    );
+    let byte_map = decoded.byte_maps.functions.get_mut("Example").unwrap();
+    let mut second = byte_map.partitions[&2].clone();
+    second.node_id = 3;
+    second.ranges = std::iter::once(20..21).collect();
+    byte_map.partitions.insert(3, second);
+    let mut parsed = empty_parsed();
+    for node in [2, 3] {
+        parsed.pin_data.insert(
+            node,
+            NodePinData {
+                pins: vec![exec_pin(PIN_DIRECTION_INPUT, Some(99))],
+            },
+        );
+    }
+    let model = CommentModel {
+        boxes: vec![box_at("Both paths", 0, 0, 100, 100, "Example")],
+        nodes: vec![
+            node_geom(2, 0, 0, "Example"),
+            node_geom(3, 50, 0, "Example"),
+        ],
+    };
+    let plan = build_placement_plan(&decoded, &parsed, &[], &model);
+    assert_eq!(plan.placed[0].locations.len(), 2);
+    assert_eq!(plan.unanchored, 0);
+    assert_eq!(
+        plan.placed[0].locations[0]
+            .statement(&decoded)
+            .unwrap()
+            .offset(),
+        10
+    );
+    assert_eq!(
+        plan.placed[0].locations[1]
+            .statement(&decoded)
+            .unwrap()
+            .offset(),
+        20
+    );
+    decoded
+        .byte_maps
+        .functions
+        .get_mut("Example")
+        .unwrap()
+        .partitions
+        .remove(&3);
+    let partial = build_placement_plan(&decoded, &parsed, &[], &model);
+    assert_eq!(partial.unanchored, 1);
+    assert_eq!(
+        partial.placed[0].locations[0].class,
+        PlacementClass::Unresolved
+    );
+    assert_eq!(
+        partial.trace[0].strategy,
+        Strategy::Dropped(DropReason::NoCoveringStatement)
+    );
+}
+
+#[test]
+fn shared_event_comment_renders_once_and_filters_by_any_owner() {
+    use crate::types::{ExportHeader, ImportEntry, PropValue, Property};
+    let mut parsed = empty_parsed();
+    for class in ["EdGraph", "K2Node_CustomEvent", "EdGraphNode_Comment"] {
+        parsed.imports.push(ImportEntry {
+            class_package: String::new(),
+            class_name: "Class".into(),
+            object_name: class.into(),
+            outer_index: 0,
+        });
+    }
+    let header = |class_index, outer_index, name: &str| ExportHeader {
+        class_index,
+        outer_index,
+        object_name: name.into(),
+        super_index: 0,
+        serial_offset: 0,
+        serial_size: 0,
+    };
+    parsed.exports.push((header(-1, 0, "EventGraph"), vec![]));
+    let mut decoded = decoded_with_event("First", vec![call(10, "FirstWork")]);
+    for (name, x) in [("First", 0), ("Second", 50), ("Other", 200)] {
+        parsed.exports.push((
+            header(-2, 1, name),
+            vec![
+                Property {
+                    name: "CustomFunctionName".into(),
+                    value: PropValue::Name(name.into()),
+                },
+                Property {
+                    name: "NodePosX".into(),
+                    value: PropValue::Int(x),
+                },
+            ],
+        ));
+        if name != "First" {
+            decoded.events.push(Event {
+                name: name.into(),
+                export_index: None,
+                body: vec![call(20, &format!("{name}Work"))],
+            });
+        }
+    }
+    parsed.exports.push((
+        header(-3, 1, "Comment"),
+        vec![
+            Property {
+                name: "NodeComment".into(),
+                value: PropValue::Str("Shared controls".into()),
+            },
+            Property {
+                name: "NodeWidth".into(),
+                value: PropValue::Int(100),
+            },
+            Property {
+                name: "NodeHeight".into(),
+                value: PropValue::Int(100),
+            },
+        ],
+    ));
+    for filter in ["", "First", "Second", "SecondWork", "Shared controls"] {
+        let filters = if filter.is_empty() {
+            vec![]
+        } else {
+            vec![filter.into()]
+        };
+        let output = crate::bytecode::emit::summary::filter_summary(&decoded, &parsed, &filters);
+        assert_eq!(
+            output.matches("Shared controls").count(),
+            1,
+            "{filter}: {output}"
+        );
+        assert!(output.contains("Events First, Second:"), "{output}");
+        if filter == "Shared controls" {
+            assert!(output.contains("First():") && output.contains("Second():"));
+        }
+        if !filter.is_empty() {
+            assert!(!output.contains("Other():"), "{output}");
+        }
+    }
+    let output =
+        crate::bytecode::emit::summary::filter_summary(&decoded, &parsed, &["Other".into()]);
+    assert!(!output.contains("Shared controls"));
+}
+
+#[test]
+fn legacy_offsets_do_not_broadcast_to_distinct_statement_paths() {
+    let decoded = decoded_with_event("Example", vec![call(10, "First"), call(10, "Second")]);
+    let mut locations = vec![CommentLocation {
+        block: "Example".into(),
+        class: PlacementClass::InlineAtStatement {
+            statement_offset: 10,
+            statement_path: vec![],
+        },
+    }];
+    assert!(!resolve_locations(&mut locations, &decoded));
+    locations[0].class = PlacementClass::InlineAtStatement {
+        statement_offset: 10,
+        statement_path: vec![0, 1],
+    };
+    assert!(resolve_locations(&mut locations, &decoded));
+    assert!(std::ptr::eq(
+        locations[0].statement(&decoded).unwrap(),
+        &decoded.events[0].body[1]
+    ));
+}
+
+#[test]
+fn one_input_action_node_can_own_both_event_headers() {
+    use crate::types::{ExportHeader, ImportEntry, PropValue, Property};
+    let mut parsed = empty_parsed();
+    for name in ["K2Node_InputAction", "/Script/CoreUObject.Function"] {
+        parsed.imports.push(ImportEntry {
+            class_package: String::new(),
+            class_name: "Class".into(),
+            object_name: name.into(),
+            outer_index: 0,
+        });
+    }
+    let header = |class_index, name: &str| ExportHeader {
+        class_index,
+        outer_index: 0,
+        object_name: name.into(),
+        super_index: 0,
+        serial_offset: 0,
+        serial_size: 0,
+    };
+    parsed.exports.push((
+        header(-1, "InputNode"),
+        vec![Property {
+            name: "InputActionName".into(),
+            value: PropValue::Name("Use".into()),
+        }],
+    ));
+    let mut decoded = decoded_with_event("InpActEvt_Use_K2Node_InputActionEvent_0", vec![]);
+    decoded.events.push(Event {
+        name: "InpActEvt_Use_K2Node_InputActionEvent_1".into(),
+        body: vec![],
+        export_index: None,
+    });
+    for event in &decoded.events {
+        parsed.exports.push((header(-2, &event.name), vec![]));
+    }
+    let names = parsed
+        .exports
+        .iter()
+        .map(|(header, _)| header.object_name.clone())
+        .collect::<Vec<_>>();
+    let model = CommentModel {
+        boxes: vec![box_at("Input handling", 0, 0, 100, 100, "EventGraph")],
+        nodes: vec![node_geom(1, 0, 0, "EventGraph")],
+    };
+    let plan = build_placement_plan(&decoded, &parsed, &names, &model);
+    assert_eq!(plan.unanchored, 0);
+    assert_eq!(plan.placed.len(), 1);
+    assert_eq!(plan.placed[0].locations.len(), 2);
+    assert!(plan.placed[0]
+        .locations
+        .iter()
+        .all(|location| location.class == PlacementClass::EventWrapping));
+}
+
+#[test]
+fn malformed_statement_paths_and_mismatched_offsets_do_not_resolve() {
+    let decoded = decoded_with_event("Example", vec![call(10, "Work")]);
+    for (statement_offset, statement_path) in [
+        (11, vec![0, 0]),
+        (10, vec![0]),
+        (10, vec![0, 0, 0]),
+        (10, vec![1, 0]),
+        (10, vec![0, 99]),
+    ] {
+        let location = CommentLocation {
+            block: "Example".into(),
+            class: PlacementClass::InlineAtStatement {
+                statement_offset,
+                statement_path,
+            },
+        };
+        assert!(location.statement(&decoded).is_none());
+    }
 }

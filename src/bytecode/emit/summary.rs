@@ -218,15 +218,23 @@ fn emit_stmt(
     indent_level: usize,
     resume_bodies: &BTreeMap<usize, Vec<Stmt>>,
 ) {
-    // Inline comment annotations anchored to this statement's offset sit
+    // Inline comment annotations anchored to this exact statement sit
     // directly above it, rendered with this statement's own indent so they
     // line up with the construct they annotate. The active map is installed
     // only by the summary block emitters, so the dump/JSON paths never see it.
     let indent = indent_str(indent_level);
-    if let Some(lines) = inline_comment_lines(stmt.offset(), &indent) {
-        for line in lines {
-            output.push_str(&line);
-            output.push('\n');
+    let mut statements = vec![stmt];
+    if let Stmt::Loop {
+        kind: LoopKind::ForC { init, increment },
+        ..
+    } = stmt
+    {
+        statements.extend(init.iter().chain(increment));
+    }
+    let mut emitted = std::collections::BTreeSet::new();
+    for statement in statements {
+        if emitted.insert(statement as *const Stmt as usize) {
+            emit_comment_lines(output, inline_comment_lines(statement, &indent).as_deref());
         }
     }
     match stmt {
@@ -579,6 +587,10 @@ fn emit_flipflop_body(
     {
         if else_body.is_empty() {
             let label_indent = indent_str(indent_level + 1);
+            emit_comment_lines(
+                output,
+                inline_comment_lines(&body[0], &label_indent).as_deref(),
+            );
             output.push_str(&label_indent);
             output.push_str("A|B: {\n");
             emit_body(output, then_body, indent_level + 2, resume_bodies);

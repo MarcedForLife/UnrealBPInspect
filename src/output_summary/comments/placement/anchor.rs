@@ -9,9 +9,11 @@ use crate::types::EdGraphPin;
 
 use super::super::audit::{DropReason, Strategy};
 use super::super::CommentBox;
-use super::call_attribution::{branch_statement_for_node, call_statements_by_node};
-use super::context::{node_has_external_exec_input, sorted_exec_entries, ClassifyContext};
-use super::{Classification, PlacedComment, PlacementClass, TraceRecorder};
+use super::call_attribution::{
+    branch_statement_for_node, call_statements_by_node, contains_statement,
+};
+use super::context::{node_has_external_exec_input, ClassifyContext};
+use super::{Classification, CommentLocation, PlacedComment, PlacementClass, TraceRecorder};
 
 /// After the box's exec entry points fail to anchor, walk exec-output pin
 /// links from them deeper into the contained set, breadth-first, trying each
@@ -127,11 +129,10 @@ struct LinkWalk<'a> {
 
 /// Breadth-first walk over `walk.follow_pin`-selected output links from `start`,
 /// trying each reached node as an anchor. The walk is bounded by graph
-/// reachability: a node enters the `visited` set once, so the frontier empties
-/// after at most as many rounds as there are reachable nodes, with no fitted
-/// depth cap. Candidates at one depth are tried in export-index order, so the
-/// nearest match wins deterministically. `strategy` tags the audit trace for
-/// the winning anchor; the depth reached is recorded on success.
+/// reachability: a node enters the `visited` set once. Candidates at the
+/// nearest resolvable depth must agree on one placement. Conflicting or
+/// partially resolved fan-out remains unresolved instead of choosing a wire
+/// by export order. The audit records the successful strategy and depth.
 ///
 /// `walk.contained_set` bounds the walk: `None` follows every reachable link
 /// (graph-reachability only), `Some(set)` follows only links whose target is
@@ -151,69 +152,82 @@ fn anchor_via_link_follow(
     } = walk;
     let mut visited: BTreeSet<usize> = start.iter().copied().collect();
     let mut frontier: Vec<usize> = start.to_vec();
-    let mut depth = 0usize;
+    let mut successors = std::collections::BTreeMap::<usize, BTreeSet<usize>>::new();
+    let mut resolved = BTreeSet::new();
+    let mut locations = Vec::new();
+    let mut depth = 0;
     while !frontier.is_empty() {
         depth += 1;
-        let mut next: Vec<usize> = Vec::new();
-        for &node in &frontier {
-            let Some(pin_data) = context.parsed.pin_data.get(&node) else {
-                continue;
-            };
-            for link in pin_data
-                .pins
-                .iter()
+        let mut next = BTreeSet::new();
+        for node in frontier {
+            let targets: BTreeSet<usize> = context
+                .parsed
+                .pin_data
+                .get(&node)
+                .into_iter()
+                .flat_map(|data| data.pins.iter())
                 .filter(|pin| follow_pin(pin))
-                .flat_map(|pin| pin.linked_to.iter())
-            {
-                let in_bounds = contained_set.is_none_or(|set| set.contains(&link.node));
-                if in_bounds && visited.insert(link.node) {
-                    next.push(link.node);
+                .flat_map(|pin| &pin.linked_to)
+                .filter(|link| contained_set.is_none_or(|contained| contained.contains(&link.node)))
+                .map(|link| link.node)
+                .collect();
+            next.extend(
+                targets
+                    .iter()
+                    .copied()
+                    .filter(|target| visited.insert(*target)),
+            );
+            successors.insert(node, targets);
+        }
+        frontier = Vec::new();
+        for candidate in next {
+            match anchor_to_node(comment, page, candidate, strategy, context, recorder) {
+                Classification::Placed(placed) => {
+                    if placed
+                        .locations
+                        .iter()
+                        .any(|location| location.class == PlacementClass::Unresolved)
+                    {
+                        recorder.record(Strategy::Dropped(DropReason::NoCoveringStatement));
+                        return Classification::unresolved(comment);
+                    }
+                    resolved.insert(candidate);
+                    locations.extend(placed.locations);
                 }
+                Classification::Unanchored => frontier.push(candidate),
             }
         }
-        next.sort_unstable();
-        for &candidate in &next {
-            if let placed @ Classification::Placed(_) =
-                anchor_to_node(comment, page, candidate, strategy, context, recorder)
-            {
-                recorder.record_depth(depth);
-                return placed;
-            }
-        }
-        frontier = next;
     }
-    // Reachability exhausted with no anchor (a dead-end data/exec chain).
+    // Every outgoing path must terminate at a proven consumer. Backward
+    // propagation also handles converging wires without treating them as cycles.
+    loop {
+        let previous = resolved.len();
+        for (&node, targets) in &successors {
+            if !targets.is_empty() && targets.iter().all(|target| resolved.contains(target)) {
+                resolved.insert(node);
+            }
+        }
+        if resolved.len() == previous {
+            break;
+        }
+    }
+    if !locations.is_empty() && start.iter().all(|node| resolved.contains(node)) {
+        recorder.record(strategy);
+        recorder.record_depth(depth);
+        return Classification::Placed(Box::new(PlacedComment {
+            locations,
+            lines: Vec::new(),
+            text: comment.text.clone(),
+            box_x: comment.x,
+            box_y: comment.y,
+        }));
+    }
     recorder.record(Strategy::Dropped(DropReason::PinFollowDeadEnd));
-    Classification::Unanchored
-}
-
-/// Try each contained execution entry point after `already_tried`, in the same
-/// `(y, x, export)` order [`sorted_exec_entries`] uses, returning the first that
-/// resolves to a covering statement. `None` when none resolve.
-pub(super) fn anchor_to_first_resolvable(
-    comment: &CommentBox,
-    page: &str,
-    contained: &[usize],
-    already_tried: usize,
-    context: &ClassifyContext,
-    recorder: &TraceRecorder,
-) -> Option<Classification> {
-    for node in sorted_exec_entries(contained, context) {
-        if node == already_tried {
-            continue;
-        }
-        if let Classification::Placed(placed) = anchor_to_node(
-            comment,
-            page,
-            node,
-            Strategy::InlineFirstResolvable,
-            context,
-            recorder,
-        ) {
-            return Some(Classification::Placed(placed));
-        }
+    if locations.is_empty() {
+        Classification::Unanchored
+    } else {
+        Classification::unresolved(comment)
     }
-    None
 }
 
 /// Resolve `node` (a contained or owner export) to the statement it produced
@@ -237,6 +251,12 @@ pub(super) fn anchor_to_node(
     context: &ClassifyContext,
     recorder: &TraceRecorder,
 ) -> Classification {
+    if let Some(placement) = anchor_via_origins(comment, page, node, context) {
+        recorder.record(if matches!(&placement, Classification::Placed(placed) if placed.locations.iter().any(|location| location.class == PlacementClass::Unresolved)) {
+            Strategy::Dropped(DropReason::NoCoveringStatement)
+        } else { direct_strategy });
+        return placement;
+    }
     let Some(body) = context.body_for_block(page) else {
         return anchor_via_owner_event(comment, node, context, recorder);
     };
@@ -244,33 +264,29 @@ pub(super) fn anchor_to_node(
         recorder.record(direct_strategy);
         return Classification::Placed(build_inline_placement(comment, page, stmt.offset()));
     }
+    if node_class(node, context.parsed).as_deref() == Some("K2Node_IfThenElse") {
+        recorder.record(Strategy::Dropped(DropReason::NoCoveringStatement));
+        return Classification::unresolved(comment);
+    }
     // Byte attribution deliberately merges ambiguous same-name calls. The
     // annotation layer can distinguish their linked data inputs without
     // changing ownership used by the decoder.
-    if let Some(matches) = call_statements_by_node(node, body, context.parsed) {
+    if let Some(matches) = call_statements_by_node(node, &[body], context.parsed) {
         if let Some(stmt) = matches.get(&node) {
             recorder.record(direct_strategy);
             return Classification::Placed(build_inline_placement(comment, page, stmt.offset()));
         }
-        recorder.record(Strategy::FunctionLevel);
-        let mut lines = vec!["    // Graph comment (location unresolved)".to_string()];
-        lines.extend(super::super::render::render_comment_lines(
-            &comment.text,
-            "    ",
-        ));
-        return Classification::Placed(Box::new(PlacedComment {
-            block: page.to_string(),
-            class: PlacementClass::FunctionLevel,
-            lines,
-            text: comment.text.clone(),
-            box_x: comment.x,
-            box_y: comment.y,
-        }));
+        recorder.record(Strategy::Dropped(DropReason::NoCoveringStatement));
+        return Classification::unresolved(comment);
     }
     let Some(byte_map) = context.byte_map_for_block(page) else {
         recorder.record(Strategy::Dropped(DropReason::NoByteMap));
         return Classification::Unanchored;
     };
+    if has_ambiguous_attribution(node, byte_map, context.parsed) {
+        recorder.record(Strategy::Dropped(DropReason::NoCoveringStatement));
+        return Classification::unresolved(comment);
+    }
     let Some(stmt) = byte_map.statement_for_node(node, body) else {
         recorder.record(Strategy::Dropped(DropReason::NoCoveringStatement));
         return Classification::Unanchored;
@@ -279,14 +295,84 @@ pub(super) fn anchor_to_node(
     Classification::Placed(build_inline_placement(comment, page, stmt.offset()))
 }
 
-/// Anchor a box whose `graph_page` is an ubergraph editor page name rather
-/// than a decoded block name. The ubergraph partition for `node` carries the
-/// events whose pin trees reach it (`owner_events`); try each owning event in
-/// sorted order and anchor inside the first decoded body whose statement span
-/// contains the node's bytes. The span requirement stops a multi-owner node
-/// (shared scaffold) from anchoring to the trailing statement of a sibling
-/// event that merely precedes it.
+/// Match graph calls and branches within events on the source page, including
+/// latent continuations. Byte ranges are a fallback for other node types.
 fn anchor_via_owner_event(
+    comment: &CommentBox,
+    node: usize,
+    context: &ClassifyContext,
+    recorder: &TraceRecorder,
+) -> Classification {
+    let names: Vec<String> = context
+        .parsed
+        .exports
+        .iter()
+        .map(|(header, _)| header.object_name.clone())
+        .collect();
+    let event_nodes = crate::bytecode::decode::build_event_node_index(context.parsed, &names);
+    let on_page = |name: &str| {
+        event_nodes.get(name).is_none_or(|&entry| {
+            crate::resolve::enclosing_graph_name(context.parsed, &names, entry)
+                == comment.graph_page
+        })
+    };
+    let event_bodies: Vec<(&str, &[Stmt])> = context
+        .decoded
+        .events
+        .iter()
+        .filter(|event| on_page(&event.name))
+        .map(|event| (event.name.as_str(), event.body.as_slice()))
+        .chain(
+            context
+                .decoded
+                .resume_bodies
+                .iter()
+                .filter_map(|(offset, body)| {
+                    context
+                        .decoded
+                        .resume_owner_events
+                        .get(offset)
+                        .filter(|owner| on_page(owner))
+                        .map(|owner| (owner.as_str(), body.as_slice()))
+                }),
+        )
+        .collect();
+    let bodies: Vec<&[Stmt]> = event_bodies.iter().map(|(_, body)| *body).collect();
+    if let Some(matches) = call_statements_by_node(node, &bodies, context.parsed) {
+        if let Some(stmt) = matches.get(&node) {
+            if let Some((event_name, _)) = event_bodies
+                .iter()
+                .find(|(_, body)| contains_statement(body, stmt))
+            {
+                recorder.record(Strategy::OwnerEventStrict);
+                return Classification::Placed(build_inline_placement(
+                    comment,
+                    event_name,
+                    stmt.offset(),
+                ));
+            }
+        }
+        recorder.record(Strategy::Dropped(DropReason::OwnerEventUnresolved));
+        return Classification::unresolved(comment);
+    }
+    let branches: Vec<(&str, &Stmt)> = event_bodies
+        .iter()
+        .filter_map(|(name, body)| {
+            branch_statement_for_node(node, body, context.parsed).map(|stmt| (*name, stmt))
+        })
+        .collect();
+    if let [(name, stmt)] = branches[..] {
+        recorder.record(Strategy::OwnerEventStrict);
+        return Classification::Placed(build_inline_placement(comment, name, stmt.offset()));
+    }
+    if node_class(node, context.parsed).as_deref() == Some("K2Node_IfThenElse") {
+        recorder.record(Strategy::Dropped(DropReason::OwnerEventUnresolved));
+        return Classification::unresolved(comment);
+    }
+    anchor_via_event_bytes(comment, node, context, recorder)
+}
+
+fn anchor_via_event_bytes(
     comment: &CommentBox,
     node: usize,
     context: &ClassifyContext,
@@ -296,6 +382,10 @@ fn anchor_via_owner_event(
         recorder.record(Strategy::Dropped(DropReason::NoByteMap));
         return Classification::Unanchored;
     };
+    if has_ambiguous_attribution(node, ubergraph, context.parsed) {
+        recorder.record(Strategy::Dropped(DropReason::OwnerEventUnresolved));
+        return Classification::unresolved(comment);
+    }
     let Some(partition) = ubergraph.partitions.get(&node) else {
         recorder.record(Strategy::Dropped(DropReason::OwnerEventUnresolved));
         return Classification::Unanchored;
@@ -325,31 +415,32 @@ fn anchor_via_owner_event(
                 .decoded
                 .resume_owner_events
                 .get(call_offset)
+                .filter(|event_name| {
+                    partition.owner_events.is_empty()
+                        || partition.owner_events.contains(*event_name)
+                })
                 .map(|event_name| (event_name, resume_body.as_slice()))
         })
         .collect();
-    for (event_name, body) in owner_bodies.iter().chain(&chunk_bodies) {
-        if let Some(stmt) = ubergraph.statement_for_node_in_span(node, body) {
-            recorder.record(Strategy::OwnerEventStrict);
-            return Classification::Placed(build_inline_placement(
-                comment,
-                event_name,
-                stmt.offset(),
-            ));
+    for strategy in [Strategy::OwnerEventStrict, Strategy::OwnerEventPerRange] {
+        let candidates: BTreeSet<(&str, usize)> = owner_bodies
+            .iter()
+            .chain(&chunk_bodies)
+            .filter_map(|(event_name, body)| {
+                let stmt = match strategy {
+                    Strategy::OwnerEventStrict => ubergraph.statement_for_node_in_span(node, body),
+                    _ => ubergraph.statement_for_node_in_span_per_range(node, body),
+                }?;
+                Some((event_name.as_str(), stmt.offset()))
+            })
+            .collect();
+        if candidates.len() > 1 {
+            recorder.record(Strategy::Dropped(DropReason::OwnerEventUnresolved));
+            return Classification::unresolved(comment);
         }
-    }
-    // Per-range fallback, only after the strict gate rejected every body so
-    // existing anchors never move. Chunks before owner bodies: a near-miss
-    // node's true bytes live in its resume chunk, while a collision-merged
-    // partition can carry stray range starts inside any owner's span.
-    for (event_name, body) in chunk_bodies.iter().chain(&owner_bodies) {
-        if let Some(stmt) = ubergraph.statement_for_node_in_span_per_range(node, body) {
-            recorder.record(Strategy::OwnerEventPerRange);
-            return Classification::Placed(build_inline_placement(
-                comment,
-                event_name,
-                stmt.offset(),
-            ));
+        if let Some((event_name, offset)) = candidates.into_iter().next() {
+            recorder.record(strategy);
+            return Classification::Placed(build_inline_placement(comment, event_name, offset));
         }
     }
     recorder.record(Strategy::Dropped(DropReason::OwnerEventUnresolved));
@@ -367,11 +458,185 @@ fn build_inline_placement(
     statement_offset: usize,
 ) -> Box<PlacedComment> {
     Box::new(PlacedComment {
-        block: block.to_string(),
-        class: PlacementClass::InlineAtStatement { statement_offset },
+        locations: vec![CommentLocation {
+            block: block.to_string(),
+            class: PlacementClass::InlineAtStatement {
+                statement_offset,
+                statement_path: Vec::new(),
+            },
+        }],
         lines: Vec::new(),
         box_x: comment.x,
         box_y: comment.y,
         text: comment.text.clone(),
     })
+}
+
+fn node_class(node: usize, parsed: &crate::types::ParsedAsset) -> Option<String> {
+    let (header, _) = parsed.exports.get(node.checked_sub(1)?)?;
+    let name = if header.class_index > 0 {
+        &parsed
+            .exports
+            .get((header.class_index - 1) as usize)?
+            .0
+            .object_name
+    } else {
+        let import = header.class_index.checked_neg()?.checked_sub(1)?;
+        &parsed
+            .imports
+            .get(usize::try_from(import).ok()?)?
+            .object_name
+    };
+    Some(crate::resolve::short_class(name))
+}
+
+fn has_ambiguous_attribution(
+    node: usize,
+    byte_map: &crate::bytecode::k2node_byte_map::K2NodeByteMap,
+    parsed: &crate::types::ParsedAsset,
+) -> bool {
+    let Some(class) = node_class(node, parsed) else {
+        return false;
+    };
+    if !matches!(
+        class.as_str(),
+        "K2Node_CallFunction" | "K2Node_VariableSet" | "K2Node_DynamicCast"
+    ) {
+        return false;
+    }
+    let Some(partition) = byte_map.partitions.get(&node) else {
+        return false;
+    };
+    byte_map.partitions.iter().any(|(&other, candidate)| {
+        other != node
+            && node_class(other, parsed).as_deref() == Some(class.as_str())
+            && partition.ranges.iter().any(|range| {
+                candidate.ranges.iter().any(|other_range| {
+                    range.start < other_range.end && other_range.start < range.end
+                })
+            })
+    })
+}
+
+fn anchor_via_origins(
+    comment: &CommentBox,
+    page: &str,
+    node: usize,
+    context: &ClassifyContext,
+) -> Option<Classification> {
+    use crate::bytecode::body_origins::BodyOrigins;
+    let decoded = context.decoded;
+    let names: Vec<String> = context
+        .parsed
+        .exports
+        .iter()
+        .map(|(header, _)| header.object_name.clone())
+        .collect();
+    let event_nodes = crate::bytecode::decode::build_event_node_index(context.parsed, &names);
+    let mut bodies: Vec<(&str, usize, &BodyOrigins, &[Stmt])> = Vec::new();
+    for function in &decoded.functions {
+        if function.name == page {
+            if let Some(origins) = decoded.function_origins.get(page) {
+                bodies.push((&function.name, 0, origins, &function.body));
+            }
+        }
+    }
+    if bodies.is_empty() {
+        for event in &decoded.events {
+            let same_page = event_nodes.get(&event.name).is_some_and(|&entry| {
+                crate::resolve::enclosing_graph_name(context.parsed, &names, entry).as_deref()
+                    == Some(page)
+            });
+            if !same_page && event.name != page {
+                continue;
+            }
+            if let Some(origins) = decoded.event_origins.get(&event.name) {
+                bodies.push((&event.name, 0, origins, &event.body));
+            }
+            for (index, (offset, body)) in decoded
+                .resume_bodies
+                .iter()
+                .filter(|(offset, _)| decoded.resume_owner_events.get(offset) == Some(&event.name))
+                .enumerate()
+            {
+                if let Some(origins) = decoded.resume_origins.get(offset) {
+                    bodies.push((&event.name, index + 1, origins, body));
+                }
+            }
+        }
+    }
+    if bodies.is_empty() {
+        return None;
+    }
+    let original_bodies: Vec<&[Stmt]> = bodies
+        .iter()
+        .map(|(_, _, origins, _)| origins.original_body.as_slice())
+        .collect();
+    let matched_call = call_statements_by_node(node, &original_bodies, context.parsed)
+        .and_then(|mapping| mapping.get(&node).copied());
+    let mut locations = Vec::new();
+    let mut had_source = false;
+    for (block, root, origins, body) in bodies {
+        let mut sources = super::call_attribution::statement_for_node(
+            node,
+            &origins.original_body,
+            context.parsed,
+        );
+        if let Some(stmt) =
+            matched_call.filter(|stmt| contains_statement(&origins.original_body, stmt))
+        {
+            sources = vec![stmt];
+        }
+        for source in sources {
+            had_source = true;
+            locations.extend(locations_for_source(block, root, origins, body, source));
+        }
+    }
+    if !had_source {
+        return None;
+    }
+    if locations.is_empty() {
+        return Some(Classification::unresolved(comment));
+    }
+    Some(Classification::Placed(Box::new(PlacedComment {
+        locations,
+        lines: Vec::new(),
+        text: comment.text.clone(),
+        box_x: comment.x,
+        box_y: comment.y,
+    })))
+}
+
+fn locations_for_source(
+    block: &str,
+    root: usize,
+    origins: &crate::bytecode::body_origins::BodyOrigins,
+    body: &[Stmt],
+    source: &Stmt,
+) -> Vec<CommentLocation> {
+    use crate::bytecode::body_origins::BodyOrigins;
+    let Some((source_path, _)) = BodyOrigins::statements(&origins.original_body)
+        .into_iter()
+        .find(|(_, stmt)| std::ptr::eq(*stmt, source))
+    else {
+        return Vec::new();
+    };
+    let final_statements = BodyOrigins::statements(body);
+    origins
+        .statement_origins
+        .iter()
+        .filter(|(_, sources)| sources.contains(&source_path))
+        .filter_map(|(path, _)| {
+            let stmt = final_statements.get(path)?;
+            let mut statement_path = vec![root];
+            statement_path.extend(path);
+            Some(CommentLocation {
+                block: block.to_string(),
+                class: PlacementClass::InlineAtStatement {
+                    statement_offset: stmt.offset(),
+                    statement_path,
+                },
+            })
+        })
+        .collect()
 }

@@ -1,5 +1,4 @@
-//! Shared RAII guard for the emit layer's scoped thread-locals (the sequence
-//! mask in `summary` and the inline-comment map in `comments`).
+//! Shared RAII guard for scoped decoder and emitter thread-local state.
 //!
 //! Each thread-local owns its value (an `Option<T>` inside a `RefCell`).
 //! [`ScopedValue::set`] moves a new value in, saving the previous binding, and

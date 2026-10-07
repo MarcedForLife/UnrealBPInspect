@@ -11,6 +11,7 @@
 //! run but consumed only here, so correctness of the placement plan does not
 //! depend on it.
 
+use super::placement::{CommentLocation, PlacementClass};
 use std::collections::BTreeMap;
 
 /// The cascade strategy that anchored (or failed to anchor) one comment.
@@ -32,8 +33,6 @@ pub(crate) enum Strategy {
     FunctionLevel,
     /// Box anchored to its top-left exec entry node's statement.
     InlineEntry,
-    /// Box anchored to the first contained exec node that resolved.
-    InlineFirstResolvable,
     /// Box anchored by walking exec-output links inside the contained set.
     ExecFollow,
     /// Box anchored by following data-output pins out of the contained set.
@@ -56,12 +55,11 @@ impl Strategy {
             Strategy::EventWrapping => "event-wrapping",
             Strategy::FunctionLevel => "function-level",
             Strategy::InlineEntry => "inline-entry",
-            Strategy::InlineFirstResolvable => "inline-first-resolvable",
             Strategy::ExecFollow => "exec-follow",
             Strategy::PinFollow => "pin-follow",
             Strategy::OwnerEventStrict => "owner-event-strict",
             Strategy::OwnerEventPerRange => "owner-event-per-range",
-            Strategy::Dropped(_) => "dropped",
+            Strategy::Dropped(_) => "unresolved",
         }
     }
 }
@@ -115,9 +113,8 @@ pub(crate) struct PlacementTrace {
     /// Follow depth actually used by pin-follow / exec-follow; `0` for direct
     /// and header anchors.
     pub depth: usize,
-    /// Resolved `(block, statement_offset)` for inline placements, the block
-    /// name for header placements, `None` for drops.
-    pub placement: Option<(String, Option<usize>)>,
+    /// Every proven statement/header location, empty for unresolved comments.
+    pub locations: Vec<CommentLocation>,
 }
 
 /// Truncate text to a single short snippet line for the per-comment audit row.
@@ -162,11 +159,27 @@ fn format_trace_line(trace: &PlacementTrace) -> String {
         (Some(contained), None) => format!("{contained}/-"),
         _ => "-".to_string(),
     };
-    let outcome = match (&trace.placement, trace.strategy) {
-        (Some((block, Some(offset))), _) => format!("-> {block}@0x{offset:x}"),
-        (Some((block, None)), _) => format!("-> {block} (header)"),
-        (None, Strategy::Dropped(reason)) => format!("DROP {}", reason.tag()),
-        (None, _) => "DROP".to_string(),
+    let outcome = if trace.locations.is_empty() {
+        match trace.strategy {
+            Strategy::Dropped(reason) => format!("UNRESOLVED {}", reason.tag()),
+            _ => "UNRESOLVED".to_string(),
+        }
+    } else {
+        trace
+            .locations
+            .iter()
+            .map(|location| match &location.class {
+                PlacementClass::InlineAtStatement {
+                    statement_offset,
+                    statement_path,
+                } => format!(
+                    "-> {}@0x{statement_offset:x} {statement_path:?}",
+                    location.block
+                ),
+                _ => format!("-> {} (header)", location.block),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     format!(
         "[{page}] {strategy:<22} cov={coverage:<7} depth={depth} {outcome}  \"{snippet}\"",
@@ -206,11 +219,11 @@ fn format_aggregate(traces: &[PlacementTrace]) -> String {
     for (tag, count) in &strategy_counts {
         out.push_str(&format!("  {tag:<24} {count}\n"));
     }
-    out.push_str(&format!("dropped: {dropped_total}\n"));
+    out.push_str(&format!("unresolved: {dropped_total}\n"));
     if drop_counts.is_empty() {
-        out.push_str("drop reasons: none\n");
+        out.push_str("unresolved reasons: none\n");
     } else {
-        out.push_str("drop reasons:\n");
+        out.push_str("unresolved reasons:\n");
         for (tag, count) in &drop_counts {
             out.push_str(&format!("  {tag:<24} {count}\n"));
         }
@@ -262,7 +275,7 @@ mod tests {
             contained,
             page_total: total,
             depth: 0,
-            placement: None,
+            locations: Vec::new(),
         }
     }
 
@@ -284,7 +297,7 @@ mod tests {
         ];
         let aggregate = format_aggregate(&traces);
         assert!(aggregate.contains("function-level           1"));
-        assert!(aggregate.contains("dropped: 2"));
+        assert!(aggregate.contains("unresolved: 2"));
         assert!(aggregate.contains("no-byte-map              2"));
         assert!(aggregate.contains("max follow depth: 0"));
         // Two coverage ratios contributed (the page-less drop has no total).

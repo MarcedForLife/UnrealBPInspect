@@ -14,6 +14,12 @@ use crate::bytecode::stmt::Stmt;
 /// The decoded representation of a single Blueprint asset.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct DecodedAsset {
+    #[serde(skip)]
+    pub(crate) function_origins: BTreeMap<String, super::body_origins::BodyOrigins>,
+    #[serde(skip)]
+    pub(crate) event_origins: BTreeMap<String, super::body_origins::BodyOrigins>,
+    #[serde(skip)]
+    pub(crate) resume_origins: BTreeMap<usize, super::body_origins::BodyOrigins>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<crate::types::AssetDiagnostic>,
     pub functions: Vec<Function>,
