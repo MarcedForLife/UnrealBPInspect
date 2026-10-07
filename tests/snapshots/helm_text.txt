@@ -69,7 +69,7 @@
           VarGuid: (Guid) {
             Guid: "[07, fe, e3, 81, bd, 94, 2c, 43, 82, 4c, 82, 51, 97, 18, da, e2]"
           }
-          VarType: (EdGraphPinType) {}
+          VarType: <unknown EdGraphPinType, 65 bytes, sha256=4bac5b79487657b16c2a3dd04fd715fc882bde8c12e111f934aaeb3d41b4ace4>
           FriendlyName: "Winch Constraint Instance"
           Category: "KismetSchemaDefaultDefault"
           PropertyFlags: 67589
@@ -91,17 +91,7 @@
       [2]: Event Graph
       [3]: Config
       [4]: State
-    LastEditedDocuments: [StructProperty; 1 items]
-      [0]: () {
-        LastEditedDocuments: (EditedDocumentInfo) {
-          EditedObjectPath: (SoftObjectPath) {}
-          SavedViewOffset: (Vector2D) {
-            X: -313.8830
-            Y: -392.1807
-          }
-          SavedZoomAmount: 1.0000
-        }
-      }
+    LastEditedDocuments: <unknown ArrayProperty<StructProperty>, 569 bytes, sha256=426da3ba7de68af374e140aec3a62752af765d353d4c0ce9f3c7fc20f9ff985a>
     ComponentTemplateNameIndex: {NameProperty->IntProperty; 1 entries}
       [0].key: StaticMeshComponent
       [0].val: 1
@@ -114,7 +104,7 @@
 
   [2] Helm_BP_C (class: /Script/Engine.BlueprintGeneratedClass, parent: /Script/Engine.Actor)
     SimpleConstructionScript: -> SimpleConstructionScript_0
-    PropertyGuids: <MapProperty, 32 bytes>
+    PropertyGuids: <unknown MapProperty<NameProperty, StructProperty>, 32 bytes, sha256=404cc9e134b5052c532d8e754c1a2cec972a020a7e30c6bd74ba16f4dcfe1031>
     Super: Actor
     Members: [StrProperty; 12 items]
       [0]: "WheelConstraint: ChildActorComponent*"
@@ -141,25 +131,19 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 1 items]
-          [0]: () {
-            ResponseArray: (ResponseChannel) {
-              Channel: WorldStatic
-              Response: ECR_Ignore (ECollisionResponse)
-            }
-          }
+        ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes, sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
     RelativeLocation: (Vector) {
       X: 41.2000
-      Y: -17.2749
-      Z: 177.2303
+      Y: -17.274881
+      Z: 177.23033
     }
     RelativeRotation: (Rotator) {
       Pitch: 0.0000
       Yaw: 0.0000
-      Roll: -31.0001
+      Roll: -31.000109
     }
 
   [4] PawnBlockingCollision2_GEN_VARIABLE (class: /Script/Engine.BoxComponent)
@@ -173,25 +157,19 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 1 items]
-          [0]: () {
-            ResponseArray: (ResponseChannel) {
-              Channel: WorldStatic
-              Response: ECR_Ignore (ECollisionResponse)
-            }
-          }
+        ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes, sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
     RelativeLocation: (Vector) {
       X: 41.2000
-      Y: 34.8780
-      Z: 146.4964
+      Y: 34.877983
+      Z: 146.49644
     }
     RelativeRotation: (Rotator) {
       Pitch: 0.0000
       Yaw: 0.0000
-      Roll: 90.0000
+      Roll: 89.999954
     }
 
   [5] PawnBlockingCollision3_GEN_VARIABLE (class: /Script/Engine.BoxComponent)
@@ -205,25 +183,19 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 1 items]
-          [0]: () {
-            ResponseArray: (ResponseChannel) {
-              Channel: WorldStatic
-              Response: ECR_Ignore (ECollisionResponse)
-            }
-          }
+        ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes, sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
     RelativeLocation: (Vector) {
       X: 41.2000
-      Y: 16.9612
-      Z: 117.0921
+      Y: 16.961174
+      Z: 117.092064
     }
     RelativeRotation: (Rotator) {
       Pitch: 0.0000
       Yaw: 0.0000
-      Roll: 151.0000
+      Roll: 151.00003
     }
 
   [6] PawnBlockingCollision4_GEN_VARIABLE (class: /Script/Engine.BoxComponent)
@@ -237,25 +209,19 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 1 items]
-          [0]: () {
-            ResponseArray: (ResponseChannel) {
-              Channel: WorldStatic
-              Response: ECR_Ignore (ECollisionResponse)
-            }
-          }
+        ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes, sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
     RelativeLocation: (Vector) {
       X: 41.2000
-      Y: 17.2749
-      Z: 177.2303
+      Y: 17.274881
+      Z: 177.23033
     }
     RelativeRotation: (Rotator) {
       Pitch: 0.0000
       Yaw: 0.0000
-      Roll: 31.0001
+      Roll: 31.000078
     }
 
   [7] PawnBlockingCollision5_GEN_VARIABLE (class: /Script/Engine.BoxComponent)
@@ -269,25 +235,19 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 1 items]
-          [0]: () {
-            ResponseArray: (ResponseChannel) {
-              Channel: WorldStatic
-              Response: ECR_Ignore (ECollisionResponse)
-            }
-          }
+        ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes, sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
     RelativeLocation: (Vector) {
       X: 41.2000
-      Y: -34.8780
-      Z: 146.4964
+      Y: -34.877983
+      Z: 146.49644
     }
     RelativeRotation: (Rotator) {
       Pitch: 0.0000
       Yaw: 0.0000
-      Roll: 90.0000
+      Roll: 89.999954
     }
 
   [8] PawnBlockingCollision6_GEN_VARIABLE (class: /Script/Engine.BoxComponent)
@@ -301,25 +261,19 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 1 items]
-          [0]: () {
-            ResponseArray: (ResponseChannel) {
-              Channel: WorldStatic
-              Response: ECR_Ignore (ECollisionResponse)
-            }
-          }
+        ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes, sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>
       }
       PhysMaterialOverride: -> /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat
     }
     RelativeLocation: (Vector) {
       X: 41.2000
-      Y: -16.9612
-      Z: 117.0921
+      Y: -16.961174
+      Z: 117.092064
     }
     RelativeRotation: (Rotator) {
       Pitch: 0.0000
       Yaw: 0.0000
-      Roll: -151.0000
+      Roll: -151.00003
     }
 
   [9] PawnBlockingCollision7_GEN_VARIABLE (class: /Script/Engine.CapsuleComponent)
@@ -329,19 +283,13 @@
     BodyInstance: (BodyInstance) {
       CollisionProfileName: Custom
       CollisionResponses: (CollisionResponse) {
-        ResponseArray: [StructProperty; 1 items]
-          [0]: () {
-            ResponseArray: (ResponseChannel) {
-              Channel: WorldStatic
-              Response: ECR_Ignore (ECollisionResponse)
-            }
-          }
+        ResponseArray: <unknown ArrayProperty<StructProperty>, 709 bytes, sha256=3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae>
       }
     }
     RelativeLocation: (Vector) {
-      X: 3.8049
+      X: 3.8049316
       Y: 0.0000
-      Z: 146.6086
+      Z: 146.60861
     }
     RelativeRotation: (Rotator) {
       Pitch: 90.0000
@@ -353,9 +301,9 @@
     ChildActorClass: -> /Game/LastResort/Blueprints/Vehicles/Ships/Common/WinchConstraint_BP.WinchConstraint_BP_C
     ChildActorTemplate: -> WheelController_GEN_VARIABLE_Winch_BP_C_CAT
     RelativeLocation: (Vector) {
-      X: -0.0000
+      X: -0.000045
       Y: 0.0000
-      Z: 146.6086
+      Z: 146.60861
     }
 
   [11] EventGraph (class: /Script/Engine.EdGraph)
@@ -432,9 +380,9 @@
       bEnableGravity: false
     }
     RelativeLocation: (Vector) {
-      X: -0.0000
+      X: -0.000045
       Y: 0.0000
-      Z: 146.6086
+      Z: 146.60861
     }
 
   [17] Default__Helm_BP_C (class: Helm_BP_C)

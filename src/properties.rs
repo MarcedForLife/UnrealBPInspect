@@ -4,6 +4,7 @@
 //! UE5.2+ (version >= 1012) uses `FPropertyTypeName` (recursive type descriptor, flags byte).
 
 use anyhow::{ensure, Context, Result};
+use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::binary::*;
@@ -333,6 +334,7 @@ fn read_value_with_meta(
     meta: &PropertyMeta,
     value_data_end: u64,
 ) -> Result<PropValue> {
+    let value_start = reader.position();
     if let Some(val) = read_primitive_value(reader, ctx.name_table, type_name)? {
         return Ok(val);
     }
@@ -361,8 +363,21 @@ fn read_value_with_meta(
         }
 
         PropertyType::Struct => {
+            if matches!(
+                meta.struct_type.as_str(),
+                "EdGraphPinType" | "SoftObjectPath" | "IntPoint"
+            ) {
+                return read_unknown_value(reader, &meta.struct_type, value_start, value_data_end);
+            }
             let struct_end = reader.position() + size as u64;
             let fields = read_struct_value(reader, ctx, &meta.struct_type, size, struct_end)?;
+            ensure!(
+                reader.position() <= struct_end,
+                "struct exceeds its declared size"
+            );
+            if reader.position() < struct_end {
+                return read_unknown_value(reader, &meta.struct_type, value_start, struct_end);
+            }
             reader.seek(SeekFrom::Start(struct_end))?;
             Ok(PropValue::Struct {
                 struct_type: meta.struct_type.clone(),
@@ -370,59 +385,50 @@ fn read_value_with_meta(
             })
         }
 
-        PropertyType::Array => {
-            let count = read_i32(reader)?;
-            ensure!(count >= 0, "negative collection count");
-            let items = read_array_items(reader, ctx, &meta.inner_type, count, value_data_end)?;
-            Ok(PropValue::Array {
-                inner_type: meta.inner_type.clone(),
-                items,
-            })
-        }
-
-        PropertyType::Map => {
-            let _num_keys_to_remove = read_i32(reader)?;
-            let count = read_i32(reader)?;
-            ensure!(count >= 0, "negative map count");
-            let mut entries = Vec::new();
-            for _ in 0..count {
+        PropertyType::Array | PropertyType::Set => {
+            if PropertyType::from_fname(type_name) == PropertyType::Set {
+                let removed_count = read_i32(reader)?;
                 ensure!(
-                    reader.position() < value_data_end,
-                    "map has fewer entries than declared"
+                    reader.position() <= value_data_end,
+                    "set removal count exceeds its declared size"
                 );
-                let key = read_typed_value(reader, ctx, &meta.key_type, value_data_end)?;
-                let opaque = PropertyType::from_fname(&meta.value_type) == PropertyType::Struct
-                    && !has_property_tag(reader, ctx);
-                if opaque {
-                    // UE4 map tags omit the native struct identity. Keep the
-                    // entire map explicitly opaque rather than reporting one
-                    // apparently decoded entry and dropping the remaining keys.
-                    reader.seek(SeekFrom::Start(value_data_end))?;
-                    return Ok(PropValue::Unknown {
-                        type_name: type_name.to_string(),
-                        size,
-                    });
+                ensure!(removed_count >= 0, "negative set removal count");
+                if removed_count != 0 {
+                    return read_unknown_value(
+                        reader,
+                        &format!("{type_name}<{}>", meta.inner_type),
+                        value_start,
+                        value_data_end,
+                    );
                 }
-                let val = read_typed_value(reader, ctx, &meta.value_type, value_data_end)?;
-                entries.push((key, val));
             }
-            Ok(PropValue::Map {
-                key_type: meta.key_type.clone(),
-                value_type: meta.value_type.clone(),
-                entries,
-            })
-        }
-
-        PropertyType::Set => {
-            let _num_to_remove = read_i32(reader)?;
             let count = read_i32(reader)?;
             ensure!(count >= 0, "negative collection count");
             let items = read_array_items(reader, ctx, &meta.inner_type, count, value_data_end)?;
+            ensure!(
+                reader.position() <= value_data_end,
+                "collection exceeds its declared size"
+            );
+            if reader.position() < value_data_end
+                || items.len() != count as usize
+                || items
+                    .iter()
+                    .any(|item| matches!(item, PropValue::Unknown { .. }))
+            {
+                return read_unknown_value(
+                    reader,
+                    &format!("{type_name}<{}>", meta.inner_type),
+                    value_start,
+                    value_data_end,
+                );
+            }
             Ok(PropValue::Array {
                 inner_type: meta.inner_type.clone(),
                 items,
             })
         }
+
+        PropertyType::Map => read_map_value(reader, ctx, type_name, meta, value_data_end),
 
         PropertyType::Delegate => {
             format_delegate_binding(reader, ctx.name_table).map(PropValue::Str)
@@ -445,14 +451,95 @@ fn read_value_with_meta(
             })
         }
 
-        _ => {
-            reader.seek(SeekFrom::Current(size as i64))?;
-            Ok(PropValue::Unknown {
-                type_name: type_name.to_string(),
-                size,
-            })
-        }
+        _ => read_unknown_value(reader, type_name, value_start, value_data_end),
     }
+}
+
+fn read_map_value(
+    reader: &mut Reader,
+    ctx: &PropCtx,
+    type_name: &str,
+    meta: &PropertyMeta,
+    value_data_end: u64,
+) -> Result<PropValue> {
+    let value_start = reader.position();
+    let descriptor = format!("{type_name}<{}, {}>", meta.key_type, meta.value_type);
+    let removed_count = read_i32(reader)?;
+    ensure!(
+        reader.position() <= value_data_end,
+        "map removal count exceeds its declared size"
+    );
+    ensure!(removed_count >= 0, "negative map removal count");
+    if removed_count != 0 {
+        return read_unknown_value(reader, &descriptor, value_start, value_data_end);
+    }
+    let count = read_i32(reader)?;
+    ensure!(count >= 0, "negative map count");
+    let mut entries = Vec::new();
+    for _ in 0..count {
+        ensure!(
+            reader.position() < value_data_end,
+            "map has fewer entries than declared"
+        );
+        let key = read_typed_value(reader, ctx, &meta.key_type, value_data_end)?;
+        ensure!(
+            reader.position() <= value_data_end,
+            "map key exceeds its declared size"
+        );
+        let opaque_key = matches!(key, PropValue::Unknown { .. });
+        let opaque = PropertyType::from_fname(&meta.value_type) == PropertyType::Struct
+            && !has_property_tag(reader, ctx);
+        if opaque_key || opaque {
+            // Without element boundaries, preserve the complete map.
+            return read_unknown_value(reader, &descriptor, value_start, value_data_end);
+        }
+        let val = read_typed_value(reader, ctx, &meta.value_type, value_data_end)?;
+        ensure!(
+            reader.position() <= value_data_end,
+            "map value exceeds its declared size"
+        );
+        if matches!(val, PropValue::Unknown { .. }) {
+            return read_unknown_value(reader, &descriptor, value_start, value_data_end);
+        }
+        entries.push((key, val));
+    }
+    ensure!(
+        reader.position() <= value_data_end,
+        "map exceeds its declared size"
+    );
+    if reader.position() < value_data_end {
+        return read_unknown_value(reader, &descriptor, value_start, value_data_end);
+    }
+    Ok(PropValue::Map {
+        key_type: meta.key_type.clone(),
+        value_type: meta.value_type.clone(),
+        entries,
+    })
+}
+
+fn read_unknown_value(
+    reader: &mut Reader,
+    type_name: &str,
+    start_offset: u64,
+    end_offset: u64,
+) -> Result<PropValue> {
+    let start = usize::try_from(start_offset)?;
+    let end = usize::try_from(end_offset)?;
+    let payload = reader
+        .get_ref()
+        .get(start..end)
+        .context("opaque property payload exceeds available data")?;
+    let size = i32::try_from(payload.len())?;
+    let payload_sha256 = Sha256::digest(payload)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    reader.seek(SeekFrom::Start(end_offset))?;
+    Ok(PropValue::Unknown {
+        type_name: type_name.to_owned(),
+        size,
+        payload_sha256,
+    })
 }
 
 fn has_property_tag(reader: &Reader, ctx: &PropCtx) -> bool {
@@ -494,10 +581,7 @@ fn read_typed_value(
                 fields,
             })
         }
-        _ => Ok(PropValue::Unknown {
-            type_name: type_name.to_string(),
-            size: 0,
-        }),
+        _ => read_unknown_value(reader, type_name, reader.position(), end_offset),
     }
 }
 
@@ -570,11 +654,6 @@ fn read_struct_value(
                     value: PropValue::Float(alpha),
                 },
             ])
-        }
-        "EdGraphPinType" | "SoftObjectPath" | "IntPoint" => {
-            // These native layouts do not contain tagged property streams.
-            reader.seek(SeekFrom::Start(end_offset))?;
-            Ok(Vec::new())
         }
         "Guid" => {
             let guid = read_guid(reader)?;
@@ -759,5 +838,381 @@ mod tests {
         )
         .is_err());
         assert!(properties.is_empty());
+    }
+
+    #[test]
+    fn opaque_hash_covers_only_the_bounded_payload() {
+        let bytes = b"leftabcright";
+        let mut reader = std::io::Cursor::new(bytes.as_slice());
+        reader.set_position(4);
+        let value = read_unknown_value(&mut reader, "OpaqueProperty", 4, 7).unwrap();
+        let PropValue::Unknown {
+            size,
+            payload_sha256,
+            ..
+        } = value
+        else {
+            unreachable!()
+        };
+        assert_eq!(size, 3);
+        assert_eq!(
+            payload_sha256,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(reader.position(), 7);
+        assert!(read_unknown_value(&mut reader, "OpaqueProperty", 4, 99).is_err());
+        assert!(read_unknown_value(&mut reader, "OpaqueProperty", 7, 4).is_err());
+    }
+
+    fn opaque_collection(type_name: &str, payload: &[u8], meta: &PropertyMeta) -> PropValue {
+        let name_table = NameTable::from_names(vec!["None".into()]);
+        let context = PropCtx {
+            name_table: &name_table,
+            ver: AssetVersion {
+                file_ver: 522,
+                file_ver_ue5: 0,
+            },
+        };
+        let mut reader = std::io::Cursor::new(payload);
+        let value = read_value_with_meta(
+            &mut reader,
+            &context,
+            type_name,
+            payload.len() as i32,
+            meta,
+            payload.len() as u64,
+        )
+        .unwrap();
+        assert_eq!(reader.position(), payload.len() as u64);
+        value
+    }
+
+    #[test]
+    fn unsupported_collection_elements_preserve_the_entire_payload_and_types() {
+        for (type_name, prefix) in [
+            ("ArrayProperty", vec![2i32]),
+            ("SetProperty", vec![0, 2]),
+            ("MapProperty", vec![0, 2]),
+        ] {
+            let mut payload: Vec<u8> = prefix
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect();
+            payload.extend_from_slice(b"opaque bytes for two elements");
+            let mut hashes = Vec::new();
+            for inner in ["OpaqueFirstProperty", "OpaqueSecondProperty"] {
+                let meta = PropertyMeta {
+                    inner_type: inner.into(),
+                    key_type: inner.into(),
+                    value_type: "IntProperty".into(),
+                    ..Default::default()
+                };
+                let value = opaque_collection(type_name, &payload, &meta);
+                let PropValue::Unknown {
+                    type_name: descriptor,
+                    size,
+                    payload_sha256,
+                } = value
+                else {
+                    panic!("unsupported elements must not pretend to be parsed");
+                };
+                assert_eq!(size, payload.len() as i32);
+                assert!(descriptor.contains(inner));
+                assert_eq!(payload_sha256.len(), 64);
+                hashes.push(payload_sha256);
+            }
+            assert_eq!(
+                hashes[0], hashes[1],
+                "type metadata is separate from payload bytes"
+            );
+            let meta = PropertyMeta {
+                inner_type: "OpaqueFirstProperty".into(),
+                key_type: "OpaqueFirstProperty".into(),
+                value_type: "IntProperty".into(),
+                ..Default::default()
+            };
+            *payload.last_mut().unwrap() ^= 1;
+            let PropValue::Unknown { payload_sha256, .. } =
+                opaque_collection(type_name, &payload, &meta)
+            else {
+                unreachable!()
+            };
+            assert_ne!(hashes[0], payload_sha256);
+        }
+    }
+
+    #[test]
+    fn native_structs_are_explicitly_opaque_with_distinct_type_descriptors() {
+        for struct_type in ["IntPoint", "SoftObjectPath", "EdGraphPinType"] {
+            let meta = PropertyMeta {
+                struct_type: struct_type.into(),
+                ..Default::default()
+            };
+            let value = opaque_collection("StructProperty", b"abc", &meta);
+            let PropValue::Unknown {
+                type_name,
+                size,
+                payload_sha256,
+            } = value
+            else {
+                unreachable!()
+            };
+            assert_eq!(type_name, struct_type);
+            assert_eq!(size, 3);
+            assert_eq!(
+                payload_sha256,
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_unknown_properties_hash_their_payload_in_both_tag_formats() {
+        let name_table = NameTable::from_names(vec![
+            "None".into(),
+            "Payload".into(),
+            "OpaqueProperty".into(),
+        ]);
+        for file_ver_ue5 in [0, 1012] {
+            let context = PropCtx {
+                name_table: &name_table,
+                ver: AssetVersion {
+                    file_ver: 522,
+                    file_ver_ue5,
+                },
+            };
+            let mut bytes = Vec::new();
+            for value in [1i32, 0, 2, 0] {
+                bytes.extend(value.to_le_bytes());
+            }
+            if context.ver.has_complete_type_name() {
+                bytes.extend(0i32.to_le_bytes());
+            }
+            bytes.extend(3i32.to_le_bytes());
+            if !context.ver.has_complete_type_name() {
+                bytes.extend(0i32.to_le_bytes());
+            }
+            bytes.push(0);
+            bytes.extend_from_slice(b"abc");
+            bytes.extend([0; 8]);
+            let mut reader = std::io::Cursor::new(bytes.as_slice());
+            let meta = PropertyMeta {
+                struct_type: "Container".into(),
+                ..Default::default()
+            };
+            let value = read_value_with_meta(
+                &mut reader,
+                &context,
+                "StructProperty",
+                bytes.len() as i32,
+                &meta,
+                bytes.len() as u64,
+            )
+            .unwrap();
+            let PropValue::Struct { fields, .. } = value else {
+                unreachable!()
+            };
+            assert_eq!(fields.len(), 1);
+            let PropValue::Unknown {
+                size,
+                payload_sha256,
+                ..
+            } = &fields[0].value
+            else {
+                unreachable!()
+            };
+            assert_eq!(*size, 3);
+            assert_eq!(
+                payload_sha256,
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            );
+        }
+    }
+
+    #[test]
+    fn unread_native_bytes_cannot_disappear_behind_an_empty_tagged_value() {
+        let map_bytes: Vec<u8> = [0i32, 1, 7, 0, 0, 99]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let meta = PropertyMeta {
+            key_type: "IntProperty".into(),
+            value_type: "StructProperty".into(),
+            ..Default::default()
+        };
+        let map = opaque_collection("MapProperty", &map_bytes, &meta);
+        assert!(matches!(map, PropValue::Unknown { size, .. } if size == map_bytes.len() as i32));
+        let struct_bytes: Vec<u8> = [0i32, 0, 99]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let meta = PropertyMeta {
+            struct_type: "Container".into(),
+            ..Default::default()
+        };
+        let structure = opaque_collection("StructProperty", &struct_bytes, &meta);
+        assert!(
+            matches!(structure, PropValue::Unknown { size, .. } if size == struct_bytes.len() as i32)
+        );
+    }
+
+    #[test]
+    fn opaque_map_fallback_does_not_hide_a_key_crossing_the_payload_boundary() {
+        let name_table = NameTable::from_names(vec!["None".into()]);
+        let context = PropCtx {
+            name_table: &name_table,
+            ver: AssetVersion {
+                file_ver: 522,
+                file_ver_ue5: 0,
+            },
+        };
+        let bytes: Vec<u8> = [0i32, 1, 7, 99]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let mut reader = std::io::Cursor::new(bytes.as_slice());
+        let meta = PropertyMeta {
+            key_type: "IntProperty".into(),
+            value_type: "StructProperty".into(),
+            ..Default::default()
+        };
+        assert!(read_value_with_meta(&mut reader, &context, "MapProperty", 10, &meta, 10).is_err());
+    }
+
+    #[test]
+    fn incomplete_struct_array_hash_includes_the_declared_element_count() {
+        let name_table = NameTable::from_names(vec![
+            "None".into(),
+            "Entries".into(),
+            "StructProperty".into(),
+            "Guid".into(),
+        ]);
+        let context = PropCtx {
+            name_table: &name_table,
+            ver: AssetVersion {
+                file_ver: 522,
+                file_ver_ue5: 0,
+            },
+        };
+        let meta = PropertyMeta {
+            inner_type: "StructProperty".into(),
+            ..Default::default()
+        };
+        let mut hashes = Vec::new();
+        for count in [1i32, 22, 23] {
+            let mut payload = count.to_le_bytes().to_vec();
+            for word in [1i32, 0, 2, 0, 16, 0, 3, 0] {
+                payload.extend(word.to_le_bytes());
+            }
+            payload.extend([0; 16]); // Native struct GUID.
+            payload.push(0); // No property GUID.
+            payload.extend(0u8..16); // One native Guid payload.
+            payload.extend([0; 8]); // None terminator.
+            let mut reader = std::io::Cursor::new(payload.as_slice());
+            let value = read_value_with_meta(
+                &mut reader,
+                &context,
+                "ArrayProperty",
+                payload.len() as i32,
+                &meta,
+                payload.len() as u64,
+            )
+            .unwrap();
+            if count == 1 {
+                assert!(matches!(value, PropValue::Array { items, .. } if items.len() == 1));
+            } else {
+                let PropValue::Unknown {
+                    size,
+                    payload_sha256,
+                    type_name,
+                } = value
+                else {
+                    panic!("one wrapper cannot establish all declared element boundaries");
+                };
+                assert_eq!(size, payload.len() as i32);
+                assert_eq!(type_name, "ArrayProperty<StructProperty>");
+                hashes.push(payload_sha256);
+            }
+            assert_eq!(reader.position(), payload.len() as u64);
+        }
+        assert_ne!(
+            hashes[0], hashes[1],
+            "same-size count-only edits must change the complete payload hash"
+        );
+    }
+
+    #[test]
+    fn unsupported_removal_prefixes_preserve_complete_map_and_set_hashes() {
+        let meta = PropertyMeta {
+            inner_type: "IntProperty".into(),
+            key_type: "IntProperty".into(),
+            value_type: "IntProperty".into(),
+            ..Default::default()
+        };
+        for type_name in ["MapProperty", "SetProperty"] {
+            let empty = [0u8; 8];
+            assert!(!matches!(
+                opaque_collection(type_name, &empty, &meta),
+                PropValue::Unknown { .. }
+            ));
+            let mut hashes = Vec::new();
+            for removed_count in [1i32, 2] {
+                let payload: Vec<u8> = [removed_count, 0]
+                    .iter()
+                    .flat_map(|word| word.to_le_bytes())
+                    .collect();
+                let value = opaque_collection(type_name, &payload, &meta);
+                let PropValue::Unknown {
+                    size,
+                    payload_sha256,
+                    type_name: descriptor,
+                } = value
+                else {
+                    panic!(
+                        "undecoded removal entries cannot be represented as an empty collection"
+                    );
+                };
+                assert_eq!(size, payload.len() as i32);
+                assert!(descriptor.starts_with(type_name));
+                hashes.push(payload_sha256);
+            }
+            assert_ne!(hashes[0], hashes[1]);
+        }
+    }
+
+    #[test]
+    fn removal_counts_must_fit_their_payload_and_be_nonnegative() {
+        let name_table = NameTable::from_names(vec!["None".into()]);
+        let context = PropCtx {
+            name_table: &name_table,
+            ver: AssetVersion {
+                file_ver: 522,
+                file_ver_ue5: 0,
+            },
+        };
+        let meta = PropertyMeta {
+            inner_type: "IntProperty".into(),
+            key_type: "IntProperty".into(),
+            value_type: "IntProperty".into(),
+            ..Default::default()
+        };
+        for type_name in ["MapProperty", "SetProperty"] {
+            for (removed_count, payload_end) in [(-1i32, 8), (1, 2)] {
+                let payload: Vec<u8> = [removed_count, 0]
+                    .iter()
+                    .flat_map(|word| word.to_le_bytes())
+                    .collect();
+                let mut reader = std::io::Cursor::new(payload.as_slice());
+                assert!(read_value_with_meta(
+                    &mut reader,
+                    &context,
+                    type_name,
+                    payload_end as i32,
+                    &meta,
+                    payload_end
+                )
+                .is_err());
+            }
+        }
     }
 }

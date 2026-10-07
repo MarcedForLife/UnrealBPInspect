@@ -153,7 +153,13 @@ fn value_to_json(value: &PropValue, imports: &[ImportEntry], export_names: &[Str
         }),
         PropValue::Text(v) => json!(v),
         PropValue::SoftObject(v) => json!(v),
-        PropValue::Unknown { type_name, size } => json!({"unknown_type": type_name, "size": size}),
+        PropValue::Unknown {
+            type_name,
+            size,
+            payload_sha256,
+        } => json!({
+            "unknown_type": type_name, "size": size, "payload_sha256": payload_sha256,
+        }),
     }
 }
 

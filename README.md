@@ -166,6 +166,8 @@ Expression literals retain floating-point source bits. Pseudocode uses enough di
 
 The parser retains the asset version and name table for decoding. Recoverable failures preserve available output, include JSON diagnostics and return exit code 2. Summary filtering operates on decoded items, and batch JSON aggregates structured results.
 
+Property output preserves numeric precision and complete parsed collection contents. Opaque values retain `payload_sha256`, so diffs expose changes even when their type and size remain the same.
+
 ## Development
 
 ```sh

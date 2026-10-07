@@ -73,7 +73,7 @@ fn filters_match_bodies_and_keep_related_call_graph_edges() {
     let bytes = common::load_fixture("ue_4.27/BP_DecoderTest.uasset");
     let parsed = parse_asset(&bytes, false).unwrap();
     let decoded = decode_asset(&parsed);
-    let filtered = filter_summary(&decoded, &parsed, &["ResetDoOnce(Release)".into()]);
+    let filtered = filter_summary(&decoded, &parsed, &["Attempt(".into()]);
     assert!(filtered.contains("OnLeftAxis("), "{filtered}");
     assert!(filtered.contains("OnRightAxis("), "{filtered}");
     assert!(
@@ -187,7 +187,7 @@ fn multiline_default_match_retains_its_name_and_value() {
     assert!(filtered.contains("Default values:"), "{filtered}");
     assert!(filtered.contains("ReviewDefault ="), "{filtered}");
     assert!(
-        filtered.contains("first\n\nFunctions:\ndefaultneedle"),
+        filtered.contains("first\\n\\nFunctions:\\ndefaultneedle"),
         "{filtered}"
     );
     assert!(!filtered.contains("Seq_WithEmptyPin()"), "{filtered}");

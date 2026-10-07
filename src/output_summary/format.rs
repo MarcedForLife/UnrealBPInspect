@@ -37,36 +37,6 @@ fn fmt_prop_list(
         if skip.contains(&prop.name.as_str()) {
             continue;
         }
-        if let PropValue::Struct {
-            struct_type,
-            fields,
-        } = &prop.value
-        {
-            match struct_type.as_str() {
-                "Vector" | "Rotator" => {
-                    let val = prop_value_short(&prop.value, ctx.imports, ctx.export_names);
-                    writeln!(buf, "{}{}: {}", indent, prop.name, val).unwrap();
-                }
-                _ => {
-                    let summary: Vec<String> = fields
-                        .iter()
-                        .filter_map(|f| match &f.value {
-                            PropValue::Struct { .. }
-                            | PropValue::Array { .. }
-                            | PropValue::Map { .. } => None,
-                            _ => {
-                                let val = prop_value_short(&f.value, ctx.imports, ctx.export_names);
-                                Some(format!("{}: {}", f.name, val))
-                            }
-                        })
-                        .collect();
-                    if !summary.is_empty() {
-                        writeln!(buf, "{}{}: {}", indent, prop.name, summary.join(", ")).unwrap();
-                    }
-                }
-            }
-            continue;
-        }
         let val = prop_value_short(&prop.value, ctx.imports, ctx.export_names);
         writeln!(buf, "{}{}: {}", indent, prop.name, val).unwrap();
     }
@@ -260,7 +230,9 @@ pub(crate) fn format_variables(
     for (hdr, props) in &asset.exports {
         if hdr.object_name.starts_with("Default__") && !props.is_empty() {
             for prop in props {
-                if matches!(prop.name.as_str(), "ActorLabel" | "bCanProxyPhysics") {
+                if matches!(prop.name.as_str(), "ActorLabel" | "UberGraphFrame")
+                    || comp_names.contains(&prop.name.as_str())
+                {
                     continue;
                 }
                 let val_str = prop_value_short(&prop.value, &asset.imports, export_names);
@@ -269,32 +241,34 @@ pub(crate) fn format_variables(
         }
     }
 
-    let (header, items) = if !members.is_empty() {
-        let items = members
-            .iter()
-            .map(|declaration| {
-                let var_name = declaration.split(':').next().unwrap_or("");
-                match defaults.iter().find(|(name, _)| name == var_name) {
-                    Some((_, value)) => format!("  {declaration} = {value}\n"),
-                    None => format!("  {declaration}\n"),
-                }
-            })
-            .collect::<Vec<_>>();
-        ("Variables:", items)
-    } else {
-        let items = defaults
-            .iter()
-            .map(|(name, value)| format!("  {name} = {value}\n"))
-            .collect();
-        ("Default values:", items)
-    };
-    let selected: String = items
-        .into_iter()
-        .filter(|item| block_matches_filter(item, filters))
+    let variables: Vec<String> = members
+        .iter()
+        .map(|declaration| {
+            let var_name = declaration.split(':').next().unwrap_or("");
+            match defaults.iter().find(|(name, _)| name == var_name) {
+                Some((_, value)) => format!("  {declaration} = {value}\n"),
+                None => format!("  {declaration}\n"),
+            }
+        })
         .collect();
-    if !selected.is_empty() {
-        writeln!(buf, "{header}").unwrap();
-        buf.push_str(&selected);
-        writeln!(buf).unwrap();
+    let defaults: Vec<String> = defaults
+        .iter()
+        .filter(|(name, _)| {
+            !members
+                .iter()
+                .any(|declaration| declaration.split(':').next() == Some(name.as_str()))
+        })
+        .map(|(name, value)| format!("  {name} = {value}\n"))
+        .collect();
+    for (header, items) in [("Variables:", variables), ("Default values:", defaults)] {
+        let selected: String = items
+            .into_iter()
+            .filter(|item| block_matches_filter(item, filters))
+            .collect();
+        if !selected.is_empty() {
+            writeln!(buf, "{header}").unwrap();
+            buf.push_str(&selected);
+            writeln!(buf).unwrap();
+        }
     }
 }

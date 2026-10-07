@@ -100,6 +100,8 @@ pub enum PropValue {
     Unknown {
         type_name: String,
         size: i32,
+        /// SHA-256 of exactly the opaque serialized payload bytes.
+        payload_sha256: String,
     },
 }
 

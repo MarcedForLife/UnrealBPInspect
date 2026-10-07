@@ -66,8 +66,9 @@
                         {
                           "name": "VarType",
                           "value": {
-                            "fields": [],
-                            "type": "EdGraphPinType"
+                            "payload_sha256": "4bac5b79487657b16c2a3dd04fd715fc882bde8c12e111f934aaeb3d41b4ace4",
+                            "size": 65,
+                            "unknown_type": "EdGraphPinType"
                           }
                         },
                         {
@@ -149,49 +150,9 @@
         {
           "name": "LastEditedDocuments",
           "value": {
-            "inner_type": "StructProperty",
-            "items": [
-              {
-                "fields": [
-                  {
-                    "name": "LastEditedDocuments",
-                    "value": {
-                      "fields": [
-                        {
-                          "name": "EditedObjectPath",
-                          "value": {
-                            "fields": [],
-                            "type": "SoftObjectPath"
-                          }
-                        },
-                        {
-                          "name": "SavedViewOffset",
-                          "value": {
-                            "fields": [
-                              {
-                                "name": "X",
-                                "value": -313.88299560546875
-                              },
-                              {
-                                "name": "Y",
-                                "value": -392.18072509765625
-                              }
-                            ],
-                            "type": "Vector2D"
-                          }
-                        },
-                        {
-                          "name": "SavedZoomAmount",
-                          "value": 1.0
-                        }
-                      ],
-                      "type": "EditedDocumentInfo"
-                    }
-                  }
-                ],
-                "type": ""
-              }
-            ]
+            "payload_sha256": "426da3ba7de68af374e140aec3a62752af765d353d4c0ce9f3c7fc20f9ff985a",
+            "size": 569,
+            "unknown_type": "ArrayProperty<StructProperty>"
           }
         },
         {
@@ -246,8 +207,9 @@
         {
           "name": "PropertyGuids",
           "value": {
+            "payload_sha256": "404cc9e134b5052c532d8e754c1a2cec972a020a7e30c6bd74ba16f4dcfe1031",
             "size": 32,
-            "unknown_type": "MapProperty"
+            "unknown_type": "MapProperty<NameProperty, StructProperty>"
           }
         },
         {
@@ -324,30 +286,9 @@
                     {
                       "name": "ResponseArray",
                       "value": {
-                        "inner_type": "StructProperty",
-                        "items": [
-                          {
-                            "fields": [
-                              {
-                                "name": "ResponseArray",
-                                "value": {
-                                  "fields": [
-                                    {
-                                      "name": "Channel",
-                                      "value": "WorldStatic"
-                                    },
-                                    {
-                                      "name": "Response",
-                                      "value": "ECR_Ignore"
-                                    }
-                                  ],
-                                  "type": "ResponseChannel"
-                                }
-                              }
-                            ],
-                            "type": ""
-                          }
-                        ]
+                        "payload_sha256": "3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae",
+                        "size": 709,
+                        "unknown_type": "ArrayProperty<StructProperty>"
                       }
                     }
                   ],
@@ -452,30 +393,9 @@
                     {
                       "name": "ResponseArray",
                       "value": {
-                        "inner_type": "StructProperty",
-                        "items": [
-                          {
-                            "fields": [
-                              {
-                                "name": "ResponseArray",
-                                "value": {
-                                  "fields": [
-                                    {
-                                      "name": "Channel",
-                                      "value": "WorldStatic"
-                                    },
-                                    {
-                                      "name": "Response",
-                                      "value": "ECR_Ignore"
-                                    }
-                                  ],
-                                  "type": "ResponseChannel"
-                                }
-                              }
-                            ],
-                            "type": ""
-                          }
-                        ]
+                        "payload_sha256": "3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae",
+                        "size": 709,
+                        "unknown_type": "ArrayProperty<StructProperty>"
                       }
                     }
                   ],
@@ -580,30 +500,9 @@
                     {
                       "name": "ResponseArray",
                       "value": {
-                        "inner_type": "StructProperty",
-                        "items": [
-                          {
-                            "fields": [
-                              {
-                                "name": "ResponseArray",
-                                "value": {
-                                  "fields": [
-                                    {
-                                      "name": "Channel",
-                                      "value": "WorldStatic"
-                                    },
-                                    {
-                                      "name": "Response",
-                                      "value": "ECR_Ignore"
-                                    }
-                                  ],
-                                  "type": "ResponseChannel"
-                                }
-                              }
-                            ],
-                            "type": ""
-                          }
-                        ]
+                        "payload_sha256": "3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae",
+                        "size": 709,
+                        "unknown_type": "ArrayProperty<StructProperty>"
                       }
                     }
                   ],
@@ -708,30 +607,9 @@
                     {
                       "name": "ResponseArray",
                       "value": {
-                        "inner_type": "StructProperty",
-                        "items": [
-                          {
-                            "fields": [
-                              {
-                                "name": "ResponseArray",
-                                "value": {
-                                  "fields": [
-                                    {
-                                      "name": "Channel",
-                                      "value": "WorldStatic"
-                                    },
-                                    {
-                                      "name": "Response",
-                                      "value": "ECR_Ignore"
-                                    }
-                                  ],
-                                  "type": "ResponseChannel"
-                                }
-                              }
-                            ],
-                            "type": ""
-                          }
-                        ]
+                        "payload_sha256": "3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae",
+                        "size": 709,
+                        "unknown_type": "ArrayProperty<StructProperty>"
                       }
                     }
                   ],
@@ -836,30 +714,9 @@
                     {
                       "name": "ResponseArray",
                       "value": {
-                        "inner_type": "StructProperty",
-                        "items": [
-                          {
-                            "fields": [
-                              {
-                                "name": "ResponseArray",
-                                "value": {
-                                  "fields": [
-                                    {
-                                      "name": "Channel",
-                                      "value": "WorldStatic"
-                                    },
-                                    {
-                                      "name": "Response",
-                                      "value": "ECR_Ignore"
-                                    }
-                                  ],
-                                  "type": "ResponseChannel"
-                                }
-                              }
-                            ],
-                            "type": ""
-                          }
-                        ]
+                        "payload_sha256": "3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae",
+                        "size": 709,
+                        "unknown_type": "ArrayProperty<StructProperty>"
                       }
                     }
                   ],
@@ -964,30 +821,9 @@
                     {
                       "name": "ResponseArray",
                       "value": {
-                        "inner_type": "StructProperty",
-                        "items": [
-                          {
-                            "fields": [
-                              {
-                                "name": "ResponseArray",
-                                "value": {
-                                  "fields": [
-                                    {
-                                      "name": "Channel",
-                                      "value": "WorldStatic"
-                                    },
-                                    {
-                                      "name": "Response",
-                                      "value": "ECR_Ignore"
-                                    }
-                                  ],
-                                  "type": "ResponseChannel"
-                                }
-                              }
-                            ],
-                            "type": ""
-                          }
-                        ]
+                        "payload_sha256": "3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae",
+                        "size": 709,
+                        "unknown_type": "ArrayProperty<StructProperty>"
                       }
                     }
                   ],
@@ -1076,30 +912,9 @@
                     {
                       "name": "ResponseArray",
                       "value": {
-                        "inner_type": "StructProperty",
-                        "items": [
-                          {
-                            "fields": [
-                              {
-                                "name": "ResponseArray",
-                                "value": {
-                                  "fields": [
-                                    {
-                                      "name": "Channel",
-                                      "value": "WorldStatic"
-                                    },
-                                    {
-                                      "name": "Response",
-                                      "value": "ECR_Ignore"
-                                    }
-                                  ],
-                                  "type": "ResponseChannel"
-                                }
-                              }
-                            ],
-                            "type": ""
-                          }
-                        ]
+                        "payload_sha256": "3bbe7d383886cf0bc5ee3fa2fa733463a609f63b8808a23f0be322faad8163ae",
+                        "size": 709,
+                        "unknown_type": "ArrayProperty<StructProperty>"
                       }
                     }
                   ],

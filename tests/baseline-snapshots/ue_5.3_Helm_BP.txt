@@ -3,34 +3,56 @@ Blueprint: Helm_BP (extends Actor)
 Components:
   DefaultSceneRoot (SceneComponent)
   Stand (StaticMeshComponent)
-    StaticMesh: helm_elemnt_02
+    StaticMesh: /Game/LastResort/Blueprints/Vehicles/Ships/Schooner/Parts/Helm/helm_elemnt_02.helm_elemnt_02
     bGenerateOverlapEvents: false
-    BodyInstance: CollisionProfileName: Custom, PhysMaterialOverride: 11_Wood_Physic_Mat
+    BodyInstance: BodyInstance {CollisionProfileName: Name("Custom"),
+        PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat}
     VREPhysicsConstraint (VREPhysicsConstraintComponent)
-      ComponentName1: ComponentName: Stand
-      ComponentName2: ComponentName: Wheel
-      RelativeLocation: (-0.0000, 0.0000, 146.6086)
+      ComponentName1: ConstrainComponentPropName {ComponentName: Name("Stand")}
+      ComponentName2: ConstrainComponentPropName {ComponentName: Name("Wheel")}
+      ConstraintInstance: ConstraintInstance {SecAxis2: Vector {X: 0.0000, Y: 0.9492060542106628,
+          Z: 0.31465521454811096},
+          AngularRotationOffset: Rotator {Pitch: 0.0000, Yaw: 0.0000, Roll: -18.34000015258789},
+          ProfileInstance: ConstraintProfileProperties {ProjectionLinearTolerance: 0.0000,
+          ProjectionAngularTolerance: 0.0000,
+          ConeLimit: ConeConstraint {Swing1Motion: EAngularConstraintMotion::ACM_Locked,
+          Swing2Motion: EAngularConstraintMotion::ACM_Locked},
+          TwistLimit: TwistConstraint {TwistLimitDegrees: 180.0000, bSoftConstraint: false}, bDisableCollision: true,
+          AngularDrive: AngularDriveConstraint {TwistDrive: ConstraintDrive {Stiffness: 1.0000},
+          SwingDrive: ConstraintDrive {Stiffness: 1.0000}, SlerpDrive: ConstraintDrive {Stiffness: 1.0000},
+          AngularDriveMode: EAngularDriveMode::TwistAndSwing}}}
+      RelativeLocation: Vector {X: -0.00004600000102072954, Y: 0.0000, Z: 146.60861206054688}
     Wheel (GrippableStaticMeshComponent)
-      VRGripInterfaceSettings: bAllowMultipleGrips: true,
+      VRGripInterfaceSettings: BPInterfaceProperties {bAllowMultipleGrips: true,
           SlotDefaultGripType: EGripCollisionType::InteractiveCollisionWithPhysics,
           FreeDefaultGripType: EGripCollisionType::InteractiveCollisionWithPhysics, ConstraintStiffness: 0.0000,
-          ConstraintDamping: 0.0000, ConstraintBreakDistance: 60.0000
-      StaticMesh: helm_elemnt_01
+          ConstraintDamping: 0.0000, ConstraintBreakDistance: 60.0000,
+          AdvancedGripSettings: BPAdvGripSettings {PhysicsSettings: BPAdvGripPhysicsSettings {bUsePhysicsSettings: true,
+          PhysicsConstraintType: EPhysicsGripConstraintType::ForceConstraint,
+          PhysicsGripLocationSettings: EPhysicsGripCOMType::COM_GripAtControllerLoc, LinearMaxForceCoefficient: 1.0000,
+          AngularMaxForceCoefficient: 1.0000}}}
+      StaticMesh: /Game/LastResort/Blueprints/Vehicles/Ships/Schooner/Parts/Helm/helm_elemnt_01.helm_elemnt_01
       bGenerateOverlapEvents: false
-      CanCharacterStepUpOn: ECB_No
-      BodyInstance: ObjectType: ECC_PhysicsBody, CollisionProfileName: Custom, AngularDamping: 8.0000,
-          PhysMaterialOverride: 11_Wood_Physic_Mat, bSimulatePhysics: true, bOverrideMass: true
-      RelativeLocation: (-0.0000, 0.0000, 146.6086)
+      CanCharacterStepUpOn: ECanBeCharacterBase::ECB_No
+      BodyInstance: BodyInstance {ObjectType: ECollisionChannel::ECC_PhysicsBody, CollisionProfileName: Name("Custom"),
+          CollisionResponses: CollisionResponse {ResponseArray: Array<StructProperty>[{ResponseArray: ResponseChannel {Channel: Name("Pawn"),
+          Response: ECollisionResponse::ECR_Ignore}}]}, AngularDamping: 8.0000,
+          PhysMaterialOverride: /Game/LastResort/Misc/11_Wood_Physic_Mat.11_Wood_Physic_Mat, bSimulatePhysics: true,
+          bOverrideMass: true}
+      RelativeLocation: Vector {X: -0.0000457763671875, Y: 0.0000, Z: 146.60861206054688}
 
 Variables:
   TotalRotation: float
   PreviousRotation: float
   MaxRotation: float = 870.0000
-  WheelRotationCue: SoundCue* = HelmRotate_Cue
+  WheelRotationCue: SoundCue* = /Game/LastResort/Audio/Cues/Ships/Parts/Helm/HelmRotate_Cue.HelmRotate_Cue
   WheelRotationAudioComponent: AudioComponent*
   WheelHitPlayable: bool
-  WheelMaxRotationCue: SoundCue* = HelmMaxRotation_Cue
-  WheeMaxRotationCueReset: float = 0.9800
+  WheelMaxRotationCue: SoundCue* = /Game/LastResort/Audio/Cues/Ships/Parts/Helm/HelmMaxRotation_Cue.HelmMaxRotation_Cue
+  WheeMaxRotationCueReset: float = 0.9800000190734863
+
+Default values:
+  PrimaryActorTick = ActorTickFunction {bCanEverTick: true}
 
 Call graph:
   ReceiveTick → UpdateAudio, UpdateWheelRotation

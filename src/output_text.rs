@@ -2,6 +2,7 @@
 
 use std::fmt::Write;
 
+use crate::prop_query::prop_value_short;
 use crate::resolve::{class_of, matches_filter, resolve_import_path, resolve_index};
 use crate::types::*;
 
@@ -76,8 +77,10 @@ fn format_value(buf: &mut String, name: &str, value: &PropValue, ctx: &TextDumpC
         PropValue::Bool(v) => writeln!(buf, "{}{}: {}", pad, name, v).unwrap(),
         PropValue::Int(v) => writeln!(buf, "{}{}: {}", pad, name, v).unwrap(),
         PropValue::Int64(v) => writeln!(buf, "{}{}: {}", pad, name, v).unwrap(),
-        PropValue::Float(v) => writeln!(buf, "{}{}: {:.4}", pad, name, v).unwrap(),
-        PropValue::Double(v) => writeln!(buf, "{}{}: {:.4}", pad, name, v).unwrap(),
+        PropValue::Float(_) | PropValue::Double(_) => {
+            let formatted = prop_value_short(value, ctx.imports, ctx.export_names);
+            writeln!(buf, "{pad}{name}: {formatted}").unwrap();
+        }
         PropValue::Str(v) => writeln!(buf, "{}{}: \"{}\"", pad, name, v).unwrap(),
         PropValue::Name(v) => writeln!(buf, "{}{}: {}", pad, name, v).unwrap(),
         PropValue::Object(idx) => {
@@ -108,8 +111,9 @@ fn format_value(buf: &mut String, name: &str, value: &PropValue, ctx: &TextDumpC
         } => format_map(buf, name, key_type, value_type, entries, ctx, indent),
         PropValue::Text(v) => writeln!(buf, "{}{}: \"{}\"", pad, name, v).unwrap(),
         PropValue::SoftObject(v) => writeln!(buf, "{}{}: ~{}", pad, name, v).unwrap(),
-        PropValue::Unknown { type_name, size } => {
-            writeln!(buf, "{}{}: <{}, {} bytes>", pad, name, type_name, size).unwrap();
+        PropValue::Unknown { .. } => {
+            let formatted = prop_value_short(value, ctx.imports, ctx.export_names);
+            writeln!(buf, "{pad}{name}: {formatted}").unwrap();
         }
     }
 }

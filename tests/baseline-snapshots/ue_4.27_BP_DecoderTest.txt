@@ -18,6 +18,9 @@ Variables:
   LeftAxis: float
   RightAxis: float
 
+Default values:
+  PrimaryActorTick = ActorTickFunction {bCanEverTick: true}
+
 Call graph:
   OnLeftAxis → Attempt, Release
   OnLeftReleased → Release
