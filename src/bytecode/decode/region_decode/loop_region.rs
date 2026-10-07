@@ -502,7 +502,7 @@ fn loop_transitive_coverage(
 ///
 /// LoopKind: `try_decode_loop` emits `LoopKind::While` for every
 /// recognised loop. ForC / ForEach refinement runs later in
-/// `transforms::refine_loops` after temp inlining.
+/// `transforms::refine_loops` over explicit condition recomputation.
 pub(super) fn try_emit_loop_region(
     region: &Region,
     region_id: RegionId,
@@ -639,6 +639,8 @@ fn emit_rotated_trampoline_loop(
         ctx,
     ));
 
+    let preamble = decode_subrange(head_block_start, layout.head_offset, ctx);
+    body.extend(preamble.clone());
     if let Stmt::Loop { body: slot, .. } = &mut loop_stmt {
         *slot = body;
     }
@@ -647,8 +649,8 @@ fn emit_rotated_trampoline_loop(
     // Array_Length(array))` and the `Array_Length` fetch) sits before the
     // JIN. Decode it as a sibling preceding the loop so `refine_loops`
     // chain-resolution can recover the canonical `counter < Array_Length`
-    // condition and lift the `While` to `ForEach`.
-    let preamble = decode_subrange(head_block_start, layout.head_offset, ctx);
+    // condition and lift the `While` to `ForEach`. Its clone above preserves
+    // the increment's fallthrough into the header on subsequent iterations.
 
     // Suppress the root walk's re-emit of every region now folded into the
     // loop: the dispatched siblings, their descendants, and the loop's own

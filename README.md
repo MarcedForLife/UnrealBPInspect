@@ -168,6 +168,8 @@ The parser retains the asset version and name table for decoding. Recoverable fa
 
 Property output preserves numeric precision and complete parsed collection contents. Opaque values retain `payload_sha256`, so diffs expose changes even when their type and size remain the same.
 
+Temporary assignments and loop-condition recomputations remain when moving or removing them could change evaluation order. Calls are not shared without proof that their results remain valid.
+
 ## Development
 
 ```sh

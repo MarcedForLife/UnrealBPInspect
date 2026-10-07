@@ -746,3 +746,40 @@ fn l5_onleftaxis_thenarm_attempt_before_release_reset() {
         right
     );
 }
+
+#[test]
+fn simple_for_recomputes_its_bound_after_the_increment() {
+    let body = function_body(decoder_test_emit(), "Loop_ForSimple");
+    let inner = first_loop_inner(&body);
+    let condition = "$LessEqual_IntInt = (Temp_int_Variable <= 3)";
+    assert!(
+        inner.contains(condition),
+        "loop condition must be refreshed: {body}"
+    );
+    assert!(
+        inner
+            .find("Temp_int_Variable = (Temp_int_Variable + 1)")
+            .unwrap()
+            < inner.find(condition).unwrap(),
+        "increment must precede the next condition: {body}"
+    );
+    assert!(
+        body.find("Temp_int_Variable = 0").unwrap() < body.find(condition).unwrap(),
+        "initialization must precede the first condition: {body}"
+    );
+}
+
+#[test]
+fn while_recomputes_its_condition_after_changing_the_counter() {
+    let body = function_body(decoder_test_emit(), "Loop_While");
+    let inner = first_loop_inner(&body);
+    let condition = "$Less_IntInt = (LoopCounter < 5)";
+    assert!(
+        inner.contains(condition),
+        "loop condition must be refreshed: {body}"
+    );
+    assert!(
+        inner.find("LoopCounter = (LoopCounter + 1)").unwrap() < inner.find(condition).unwrap(),
+        "increment must precede the next condition: {body}"
+    );
+}

@@ -119,20 +119,13 @@ const STACK: &[Pass] = &[
     },
     Pass {
         name: "cse_inline_cluster",
-        doc: "Clean up the single-use artifacts the recognition/fold passes leave, as one fixed \
-              sequence (NOT a fixpoint loop; the steps are non-idempotent lowerings): \
-              (1) inline single-use temps; (2) cse_pure_calls dedups the pure-call duplicates the \
-              BP compiler emits per consumer site (e.g. GetWheelVelocity, BreakHitResult); \
-              (3) hoist_repeated_projections hoists repeated projections; (4) re-run the inliner so \
-              the `$X = $Cse_N` aliases CSE just created collapse before dead-stmt; \
-              (5) inline_uniform_multidef_param_temps inlines a multi-def temp whose defs all assign \
-              the same read-only parameter, which CSE leaves referencing soon-to-be-dead defs.",
+        doc: "Inline adjacent single-use temps in evaluation order, share repeated projections \
+              within one call, then inline resulting aliases. Cross-statement sharing needs \
+              effects and alias information that the IR does not retain.",
         run: |body| {
             tf::expr_transforms::inline_single_use_temps(body);
-            tf::cse_pure_calls::cse_pure_calls(body);
             tf::cse_projections::hoist_repeated_projections(body);
             tf::expr_transforms::inline_single_use_temps(body);
-            tf::expr_transforms::inline_uniform_multidef_param_temps(body);
         },
     },
     Pass {
@@ -187,7 +180,11 @@ pub(crate) fn apply_transform_stack_to_body(body: &mut Vec<Stmt>) {
 
 #[cfg(test)]
 mod tests {
-    use super::STACK;
+    use super::{apply_transform_stack_to_body, STACK};
+    use crate::bytecode::expr::Expr;
+    use crate::bytecode::stmt::{LoopKind, Stmt};
+    use crate::bytecode::transforms::test_fixtures::{assign, call, lit, var};
+    use crate::bytecode::transforms::visit::{walk_body_exprs, walk_stmt_children};
 
     fn pos(name: &str) -> usize {
         STACK
@@ -266,5 +263,228 @@ mod tests {
     fn rename_outparam_after_cluster_before_var_names() {
         assert!(pos("cse_inline_cluster") < pos("rename_outparam_temps"));
         assert!(pos("rename_outparam_temps") < pos("normalize_var_names"));
+    }
+
+    fn break_vector() -> Stmt {
+        call(
+            "BreakVector",
+            vec![var("self.Direction"), var("$BreakVector_X")],
+        )
+    }
+
+    fn consumer() -> Stmt {
+        call("Consume", vec![var("$BreakVector_X")])
+    }
+
+    fn call_count(body: &[Stmt], call_name: &str) -> usize {
+        let mut count = 0;
+        for stmt in body {
+            if matches!(stmt, Stmt::Call { func: Expr::Var(name), .. } if name == call_name) {
+                count += 1;
+            }
+            walk_stmt_children(stmt, &mut |children| {
+                count += call_count(children, call_name)
+            });
+        }
+        count
+    }
+
+    fn expression_call_count(body: &[Stmt], call_name: &str) -> usize {
+        let mut count = 0;
+        walk_body_exprs(body, &mut |expr| {
+            if matches!(expr, Expr::Call { name, .. } if name == call_name) {
+                count += 1;
+            }
+        });
+        count
+    }
+
+    #[test]
+    fn sibling_branches_keep_their_own_output_computations() {
+        let mut body = vec![Stmt::Branch {
+            cond: var("self.Enabled"),
+            then_body: vec![break_vector(), consumer()],
+            else_body: vec![break_vector(), consumer()],
+            offset: 0,
+        }];
+
+        apply_transform_stack_to_body(&mut body);
+
+        let Stmt::Branch {
+            then_body,
+            else_body,
+            ..
+        } = &body[0]
+        else {
+            panic!("expected both branch arms to remain");
+        };
+        assert_eq!(call_count(then_body, "BreakVector"), 1);
+        assert_eq!(call_count(else_body, "BreakVector"), 1);
+        assert_eq!(call_count(then_body, "Consume"), 1);
+        assert_eq!(call_count(else_body, "Consume"), 1);
+    }
+
+    #[test]
+    fn branch_local_computation_does_not_replace_post_branch_call() {
+        let mut body = vec![
+            Stmt::Branch {
+                cond: var("self.Enabled"),
+                then_body: vec![break_vector(), consumer()],
+                else_body: vec![],
+                offset: 0,
+            },
+            break_vector(),
+            consumer(),
+        ];
+
+        apply_transform_stack_to_body(&mut body);
+
+        assert_eq!(call_count(&body, "BreakVector"), 2);
+    }
+
+    #[test]
+    fn loop_evaluations_remain_inside_the_loop() {
+        let mut body = vec![
+            break_vector(),
+            consumer(),
+            Stmt::Loop {
+                kind: LoopKind::While,
+                cond: None,
+                body: vec![break_vector(), consumer()],
+                completion: Some(vec![break_vector(), consumer()]),
+                offset: 0,
+            },
+        ];
+
+        apply_transform_stack_to_body(&mut body);
+
+        let loop_stmt = body
+            .iter()
+            .find(|stmt| matches!(stmt, Stmt::Loop { .. }))
+            .expect("loop must remain");
+        let Stmt::Loop {
+            body: loop_body,
+            completion,
+            ..
+        } = loop_stmt
+        else {
+            unreachable!();
+        };
+        assert_eq!(call_count(loop_body, "BreakVector"), 1);
+        assert_eq!(call_count(completion.as_ref().unwrap(), "BreakVector"), 1);
+        assert_eq!(call_count(&body, "BreakVector"), 3);
+    }
+
+    #[test]
+    fn input_and_output_writes_require_fresh_evaluations() {
+        for intervening in [
+            assign("self.Direction", lit("NewDirection")),
+            assign("$BreakVector_X", lit("42")),
+        ] {
+            let mut body = vec![
+                break_vector(),
+                consumer(),
+                intervening,
+                break_vector(),
+                consumer(),
+            ];
+
+            apply_transform_stack_to_body(&mut body);
+
+            assert_eq!(call_count(&body, "BreakVector"), 2);
+        }
+    }
+
+    #[test]
+    fn unknown_calls_and_events_require_fresh_evaluations() {
+        for intervening in [
+            call("MutateDirection", vec![]),
+            Stmt::EventCall {
+                event_name: "UpdateDirection".into(),
+                offset: 0,
+            },
+        ] {
+            let mut body = vec![
+                break_vector(),
+                consumer(),
+                intervening,
+                break_vector(),
+                consumer(),
+            ];
+
+            apply_transform_stack_to_body(&mut body);
+
+            assert_eq!(call_count(&body, "BreakVector"), 2);
+        }
+    }
+
+    #[test]
+    fn output_pin_prefix_does_not_establish_bare_call_purity() {
+        for explicit_out in [false, true] {
+            let output = var("$CustomAction_Result");
+            let output = if explicit_out {
+                Expr::Out(Box::new(output))
+            } else {
+                output
+            };
+            let invocation = call("CustomAction", vec![output]);
+            let mut body = vec![invocation.clone(), invocation];
+
+            apply_transform_stack_to_body(&mut body);
+
+            assert_eq!(call_count(&body, "CustomAction"), 2);
+        }
+    }
+
+    #[test]
+    fn adjacent_calls_named_like_builtins_still_require_callee_identity() {
+        let mut body = vec![break_vector(), break_vector()];
+
+        apply_transform_stack_to_body(&mut body);
+
+        assert_eq!(call_count(&body, "BreakVector"), 2);
+    }
+
+    #[test]
+    fn assignment_output_prefix_does_not_establish_determinism() {
+        for call_name in ["RandomFloat", "CustomAction", "GetVelocity"] {
+            let first_output = format!("${call_name}_ReturnValue");
+            let second_output = format!("${call_name}_ReturnValue_1");
+            let evaluation = Expr::Call {
+                name: call_name.into(),
+                args: vec![],
+            };
+            let mut body = vec![
+                assign(&first_output, evaluation.clone()),
+                assign(&second_output, evaluation),
+                call("Consume", vec![var(&first_output), var(&second_output)]),
+            ];
+
+            apply_transform_stack_to_body(&mut body);
+
+            assert_eq!(expression_call_count(&body, call_name), 2, "{call_name}");
+        }
+    }
+    #[test]
+    fn repeated_read_only_projection_still_hoists_in_one_statement() {
+        let projection = Expr::FieldAccess {
+            recv: Box::new(var("self.State")),
+            field: "Value".into(),
+        };
+        let mut body = vec![call(
+            "Consume",
+            vec![projection.clone(), projection.clone(), projection],
+        )];
+
+        apply_transform_stack_to_body(&mut body);
+
+        let mut projection_count = 0;
+        walk_body_exprs(&body, &mut |expr| {
+            if matches!(expr, Expr::FieldAccess { field, .. } if field == "Value") {
+                projection_count += 1;
+            }
+        });
+        assert_eq!(projection_count, 1);
+        assert_eq!(call_count(&body, "Consume"), 1);
     }
 }

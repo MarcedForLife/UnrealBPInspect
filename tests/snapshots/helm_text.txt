@@ -341,9 +341,10 @@
 
   [14] GetSteeringAngle (class: /Script/CoreUObject.Function)
     Signature: "GetSteeringAngle(out SteeringAngle: float)"
-    BytecodeSummary: [StrProperty; 2 items]
+    BytecodeSummary: [StrProperty; 3 items]
       [0]: "    self.WinchConstraintInstance.GetRotationAlpha($RotationAlpha)"
-      [1]: "    out SteeringAngle = (($RotationAlpha * 2.0000) - 1.0000)"
+      [1]: "    $Subtract_FloatFloat = (($RotationAlpha * 2.0000) - 1.0000)"
+      [2]: "    out SteeringAngle = $Subtract_FloatFloat"
     FunctionFlags: "Public|HasOutParms|BlueprintPure|Const"
 
   [15] UserConstructionScript (class: /Script/CoreUObject.Function, parent: /Script/Engine.Actor.UserConstructionScript)

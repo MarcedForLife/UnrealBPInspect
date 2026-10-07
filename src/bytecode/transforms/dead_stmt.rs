@@ -1,30 +1,46 @@
-//! Dead-statement removal for the IR.
-//!
-//! Removes `Stmt::Assignment { lhs: Var(name), .. }` whose `name` is
-//! never referenced after the assignment AND whose right-hand side has
-//! no observable side effects. Different from temp inlining, which
-//! requires exactly one use, this pass picks up the zero-use leftovers
-//! that inlining leaves behind (and any genuinely unused locals the
-//! compiler emitted that no later transform consumed).
-//!
-//! Side-effect detection is conservative. The right-hand side is
-//! considered side-effect-free only if every node in it is one of:
-//! `Literal`, `Var`, `FieldAccess`, `Index`, `Binary`, `Unary`, `Cast`,
-//! `ArrayLit`, `Ternary`, `StructConstruct`, `Interface`. Any
-//! `Call`, `MethodCall`, `Out`, `Persistent`, `Resume`, or `Unknown`
-//! node forces the assignment to stay so observable behaviour at the
-//! assignment site is preserved.
+//! Removal of unreferenced temporary assignments.
+
+use std::collections::BTreeMap;
 
 use crate::bytecode::expr::Expr;
-use crate::bytecode::stmt::{LoopKind, Stmt};
-use crate::bytecode::transforms::var_refs::{self, Defs, VarScope};
-use crate::bytecode::transforms::visit::{any_expr, expr_contains_unknown};
+use crate::bytecode::stmt::Stmt;
+use crate::bytecode::transforms::var_refs::collect_loop_items;
+use crate::bytecode::transforms::visit::{
+    any_expr, walk_body_exprs_visit_lhs, walk_stmt_children, walk_stmt_children_mut,
+};
 
-/// Walk a statement body and drop dead `Stmt::Assignment` statements.
-/// Recurses into every nested body so nested dead assignments are
-/// removed independently.
+/// Count references across the function because a nested definition can feed
+/// a sibling branch, later statement, or the next loop iteration. Only bare
+/// assignment definitions are excluded, so compound destinations remain live.
 pub fn remove_dead_assignments(body: &mut Vec<Stmt>) {
-    remove_in_body(body);
+    for _ in 0..16 {
+        let mut references = BTreeMap::new();
+        walk_body_exprs_visit_lhs(body, &mut |expr| {
+            if let Expr::Var(name) = expr {
+                *references.entry(name.clone()).or_insert(0) += 1;
+            }
+        });
+        collect_loop_items(body, &mut references);
+        collect_assigned_names(body, &mut references);
+        if !remove_in_body(body, &references) {
+            break;
+        }
+    }
+}
+
+fn collect_assigned_names(body: &[Stmt], references: &mut BTreeMap<String, usize>) {
+    for stmt in body {
+        if let Stmt::Assignment {
+            lhs: Expr::Var(name),
+            ..
+        } = stmt
+        {
+            *references.get_mut(name).expect("definition was counted") -= 1;
+        }
+        walk_stmt_children(stmt, &mut |children| {
+            collect_assigned_names(children, references)
+        });
+    }
 }
 
 /// Drop a terminal `Stmt::Return { value: None }` from a function body.
@@ -70,178 +86,47 @@ fn is_single_bare_return(body: &[Stmt]) -> bool {
     matches!(body, [Stmt::Return { value: None, .. }])
 }
 
-fn remove_in_body(body: &mut Vec<Stmt>) {
-    // Recurse first, so dead assignments inside nested bodies are
-    // pruned before we evaluate use counts at this level. (The use
-    // count of names referenced only inside a nested dead assignment
-    // would otherwise hold the outer assignment alive.)
+fn remove_in_body(body: &mut Vec<Stmt>, references: &BTreeMap<String, usize>) -> bool {
+    let mut changed = false;
     for stmt in body.iter_mut() {
-        recurse_children(stmt);
+        walk_stmt_children_mut(stmt, &mut |children| {
+            changed |= remove_in_body(children, references);
+        });
     }
-
-    // Walk forward, removing assignments whose lhs Var is never used
-    // in any later statement. We scan from the front so each removal
-    // is evaluated against the original body shape.
-    let mut idx = 0;
-    while idx < body.len() {
-        if let Some(name) = pure_dead_assignment_name(&body[idx], idx, body) {
-            // Only remove if the name is a candidate for elimination
-            // (excludes member fields, Self, None, single-letter loop
-            // counters, etc.).
-            if is_dead_candidate_name(&name) {
-                body.remove(idx);
-                continue;
-            }
-        }
-        idx += 1;
-    }
-}
-
-fn recurse_children(stmt: &mut Stmt) {
-    match stmt {
-        Stmt::Branch {
-            then_body,
-            else_body,
+    // Keep graph-state assignments preceding a break, including compiler
+    // latch flags whose next use may live outside the decoded body.
+    let contains_break = body.iter().any(|stmt| matches!(stmt, Stmt::Break { .. }));
+    let original_len = body.len();
+    body.retain(|stmt| {
+        let Stmt::Assignment {
+            lhs: Expr::Var(name),
+            rhs,
             ..
-        } => {
-            remove_in_body(then_body);
-            remove_in_body(else_body);
-        }
-        Stmt::Sequence { pins, .. } => {
-            for pin in pins.iter_mut() {
-                remove_in_body(pin);
-            }
-        }
-        Stmt::Loop {
-            body,
-            completion,
-            kind,
-            ..
-        } => {
-            remove_in_body(body);
-            if let Some(comp) = completion {
-                remove_in_body(comp);
-            }
-            // ForC `init` and `increment` are structural slots: the counter
-            // variable is "used" by the loop condition even though no later
-            // statement in those sub-vecs references it. Applying
-            // dead-assignment analysis inside these slots would eliminate the
-            // counter assignment and the increment, which breaks the loop.
-            // Only recurse into nested sub-bodies inside init/increment (in
-            // case there's a branch or sequence inside one), but do NOT apply
-            // the dead-removal pass at the top level of those vecs.
-            if let LoopKind::ForC { init, increment } = kind {
-                for stmt in init.iter_mut() {
-                    recurse_children(stmt);
-                }
-                for stmt in increment.iter_mut() {
-                    recurse_children(stmt);
-                }
-            }
-        }
-        Stmt::Switch { cases, default, .. } => {
-            for case in cases.iter_mut() {
-                remove_in_body(&mut case.body);
-            }
-            if let Some(stmts) = default {
-                remove_in_body(stmts);
-            }
-        }
-        Stmt::Latch { init, body, .. } => {
-            remove_in_body(init);
-            remove_in_body(body);
-        }
-        Stmt::Assignment { .. }
-        | Stmt::Call { .. }
-        | Stmt::Return { .. }
-        | Stmt::Break { .. }
-        | Stmt::EventCall { .. }
-        | Stmt::Unknown { .. } => {}
-    }
+        } = stmt
+        else {
+            return true;
+        };
+        contains_break
+            || !is_dead_candidate_name(name)
+            || references.get(name) != Some(&0)
+            || expr_has_side_effects(rhs)
+    });
+    changed || body.len() != original_len
 }
 
-/// If `body[idx]` is an `Assignment { lhs: Var(name), rhs }` whose
-/// rhs has no observable side effects and whose name appears nowhere
-/// in the body after `idx`, return the name. Otherwise return `None`.
-fn pure_dead_assignment_name(stmt: &Stmt, idx: usize, body: &[Stmt]) -> Option<String> {
-    let Stmt::Assignment {
-        lhs: Expr::Var(name),
-        rhs,
-        ..
-    } = stmt
-    else {
-        return None;
-    };
-    if expr_has_side_effects(rhs) {
-        return None;
-    }
-    if expr_contains_unknown(rhs) {
-        return None;
-    }
-    for later in &body[idx + 1..] {
-        if stmt_references_var(later, name) {
-            return None;
-        }
-        // An assignment followed by a `break` in the same arm is the
-        // loop-break shape (`$flag = false; break`). The write reflects
-        // editor-graph state set before exiting the loop; keep it rather
-        // than treating it as dead. `Stmt::Break` only appears on
-        // multi-break paths, so this never affects non-break bodies.
-        if matches!(later, Stmt::Break { .. }) {
-            return None;
-        }
-    }
-    Some(name.clone())
-}
-
-/// Returns `true` if the expression tree contains any node whose
-/// evaluation has observable side effects: function/method calls,
-/// out-parameter wrappers, or persistent/resume markers. (`Unknown`
-/// operands are rejected separately, upstream, via `expr_contains_unknown`.)
+/// Field/index reads and casts may fail. Without effect metadata only
+/// literal and variable values, and containers of them, are discardable.
 fn expr_has_side_effects(expr: &Expr) -> bool {
     any_expr(expr, &mut |node| {
-        matches!(
+        !matches!(
             node,
-            Expr::Call { .. }
-                | Expr::MethodCall { .. }
-                | Expr::Out(_)
-                | Expr::Persistent(_)
-                | Expr::Resume { .. }
+            Expr::Literal(_) | Expr::Var(_) | Expr::ArrayLit(_) | Expr::StructConstruct { .. }
         )
     })
 }
 
-/// Returns `true` if any expression USE node in `stmt` is `Expr::Var(name)`.
-/// Assignment lhs occurrences are skipped by the shared walker, since
-/// they are defs not uses; a later `name = ...` does not keep the
-/// earlier dead assignment alive.
-fn stmt_references_var(stmt: &Stmt, name: &str) -> bool {
-    var_refs::count_var(
-        std::slice::from_ref(stmt),
-        name,
-        VarScope::Deep,
-        Defs::SkipLhs,
-    ) > 0
-}
-
-/// Names eligible for dead-stmt elimination. Shares the temp inliner's
-/// [`is_compiler_temp_name`](crate::bytecode::transforms::name_shape::is_compiler_temp_name)
-/// allow-list so only compiler temporaries are swept; member fields, the
-/// implicit `Self`, bare loop counters, and persistent member/local graph
-/// variables are preserved even when they look unused within the
-/// surrounding case/branch (a later sibling, often after a Branch rather
-/// than inside an arm, can read them where the same-scope liveness scan
-/// misses the read).
-///
-/// `Temp_*` shapes stay eligible: this is load-bearing for a benign
-/// partitioner boundary. A Sequence pin whose JUMP body is far upstream of
-/// the chain head (a scattered-chain shape) can mis-capture a stray
-/// single-statement gate-reset fragment (`Temp_bool_IsClosed = false`)
-/// into its pin body. The real pin content is correctly event-flow-attributed
-/// elsewhere, so stripping that dead `Temp_bool_*` fragment here keeps the
-/// mis-attribution cosmetic rather than emitting a spurious gate line. The
-/// allow-list keeps `Temp_*` eligible, so a scattered-chain else arm must
-/// not regrow a `Temp_bool_IsClosed = false`.
+/// Keep persistent fields and locals even when they have no explicit reads.
+/// Only compiler-generated temporary names are candidates for removal.
 fn is_dead_candidate_name(name: &str) -> bool {
     if matches!(name, "Self" | "None") {
         return false;

@@ -48,6 +48,8 @@ mod switch_decode;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 mod transform_stack;
+#[cfg(test)]
+pub(crate) use transform_stack::apply_transform_stack_to_body;
 mod ubergraph_scan;
 pub(crate) mod walker;
 #[cfg(test)]

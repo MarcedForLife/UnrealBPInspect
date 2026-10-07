@@ -17,15 +17,14 @@
 //!   as a use of that temp.
 //!
 //! Deliberately OUT of scope, with their own helpers: the common
-//! subexpression elimination (CSE) family in `cse_projections.rs` (it needs a
-//! third lhs policy, visiting the lhs sub-expressions but not the lhs root)
-//! and `flipflop_naming`'s rename (`SkipLhs`, and it intentionally leaves the
+//! `flipflop_naming`'s rename (`SkipLhs`, and it intentionally leaves the
 //! `ForEach` item slot alone).
 
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::{LoopKind, Stmt};
 use crate::bytecode::transforms::visit::{
-    walk_body_exprs, walk_body_exprs_visit_lhs, walk_expr, walk_stmt_exprs_mut_visit_lhs, Action,
+    walk_body_exprs, walk_body_exprs_visit_lhs, walk_expr, walk_stmt_children,
+    walk_stmt_exprs_mut_visit_lhs, Action,
 };
 use std::collections::BTreeMap;
 
@@ -180,13 +179,20 @@ pub(crate) fn rename_var_in_stmt(stmt: &mut Stmt, old: &str, new: &str) {
     });
 }
 
-/// A structural key for `expr`, used by the CSE (common subexpression
-/// elimination) passes to bucket equal subexpressions in a `BTreeMap`/`BTreeSet`
-/// of `String`. `None` (a swallowed serialize error) means "not a CSE
-/// candidate". `Expr` derives only `PartialEq` (no `Eq`/`Hash`), so keying is
-/// string-based.
-pub(crate) fn expr_key(expr: &Expr) -> Option<String> {
-    serde_json::to_string(expr).ok()
+/// Include loop bindings, which live outside expression trees.
+pub(crate) fn collect_loop_items(body: &[Stmt], references: &mut BTreeMap<String, usize>) {
+    for stmt in body {
+        if let Stmt::Loop {
+            kind: LoopKind::ForEach { item, .. },
+            ..
+        } = stmt
+        {
+            *references.entry(item.clone()).or_insert(0) += 1;
+        }
+        walk_stmt_children(stmt, &mut |children| {
+            collect_loop_items(children, references)
+        });
+    }
 }
 
 #[cfg(test)]

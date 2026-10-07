@@ -1121,7 +1121,8 @@
             "inner_type": "StrProperty",
             "items": [
               "    self.WinchConstraintInstance.GetRotationAlpha($RotationAlpha)",
-              "    out SteeringAngle = (($RotationAlpha * 2.0000) - 1.0000)"
+              "    $Subtract_FloatFloat = (($RotationAlpha * 2.0000) - 1.0000)",
+              "    out SteeringAngle = $Subtract_FloatFloat"
             ]
           }
         },
@@ -2376,7 +2377,8 @@
     {
       "bytecode": [
         "    self.WinchConstraintInstance.GetRotationAlpha($RotationAlpha)",
-        "    out SteeringAngle = (($RotationAlpha * 2.0000) - 1.0000)"
+        "    $Subtract_FloatFloat = (($RotationAlpha * 2.0000) - 1.0000)",
+        "    out SteeringAngle = $Subtract_FloatFloat"
       ],
       "export_index": 14,
       "flags": "Public|HasOutParms|BlueprintPure|Const",

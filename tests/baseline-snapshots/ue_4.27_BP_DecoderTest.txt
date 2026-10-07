@@ -129,9 +129,13 @@ Functions:
 
   Loop_ForSimple() [Public|BlueprintPure]
     // "An index for-loop with no break, then a call afterwards"
-    for (Temp_int_Variable = 0 to 3) {
+    Temp_int_Variable = 0
+    $LessEqual_IntInt = (Temp_int_Variable <= 3)
+    while ($LessEqual_IntInt) {
         PrintString(self, IntToString(Temp_int_Variable), true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000),
             2.0000)
+        Temp_int_Variable = (Temp_int_Variable + 1)
+        $LessEqual_IntInt = (Temp_int_Variable <= 3)
     }
     // Completed:
     PrintString(self, "Done", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
@@ -151,8 +155,10 @@ Functions:
 
   Loop_While() [Public|BlueprintPure]
     // "A while-loop driven by a counter"
-    while (LoopCounter < 5) {
+    $Less_IntInt = (LoopCounter < 5)
+    while ($Less_IntInt) {
         LoopCounter = (LoopCounter + 1)
+        $Less_IntInt = (LoopCounter < 5)
     }
     // Completed:
     PrintString(self, "Done", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)

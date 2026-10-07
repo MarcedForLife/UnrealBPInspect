@@ -15,7 +15,6 @@ pub(super) use crate::helpers::indent_of;
 pub mod cascade_fold;
 pub mod collapse_nested_doonce;
 pub mod cse_projections;
-pub mod cse_pure_calls;
 pub mod dead_stmt;
 pub mod demote_invariant_loops;
 pub mod expr_transforms;

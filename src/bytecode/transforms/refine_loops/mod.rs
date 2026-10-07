@@ -264,7 +264,11 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                 }
             };
 
-            // Check if we can extract a counter increment from the trailing body.
+            // Recognized ForEach owns its condition plumbing. Other loops must
+            // retain explicit recomputation, including the final temp value.
+            let original_body = body.clone();
+            strip_trailing_cond_recomputation(body, cond_expr, ancestors);
+            let stripped_recomputation = body.len() != original_body.len();
             let increment = extract_increment(body, cond_expr, ancestors);
 
             if let Some(inc_stmts) = increment {
@@ -316,6 +320,12 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                     return;
                 }
 
+                if stripped_recomputation {
+                    *body = original_body;
+                    recurse_loop_children(body, completion, ancestors);
+                    return;
+                }
+
                 // A counter-only WHILE loop (body is nothing but the counter
                 // increment) is a `while`, not a `for`. Promoting it to ForC
                 // hoists its sole statement into the increment slot and leaves
@@ -342,7 +352,10 @@ fn refine_one(stmt: &mut Stmt, ancestors: &[&[Stmt]]) {
                 // refined body and completion.
                 recurse_loop_children(body, completion, ancestors);
             } else {
-                // Stays While — recurse into body.
+                // Failed recognition must not discard condition writes.
+                if stripped_recomputation {
+                    *body = original_body;
+                }
                 recurse_loop_children(body, completion, ancestors);
             }
         }
@@ -410,14 +423,6 @@ pub(super) fn extract_increment(
     cond: &Expr,
     ancestors: &[&[Stmt]],
 ) -> Option<Vec<Stmt>> {
-    // Blueprint emits a tail-of-iteration recomputation of the loop cond at
-    // the end of every Loop body so the back-edge JumpIfNot can read a
-    // fresh value. These assignments survive into refine_loops (the inliner
-    // runs after). Strip the trailing run of cond recomputations before the
-    // counter-increment extraction so this pass does not greedily absorb
-    // plumbing into the increment slot.
-    strip_trailing_cond_recomputation(body, cond, ancestors);
-
     let last_lhs_name = body
         .last()
         .and_then(stmt_assignment_lhs_name)
