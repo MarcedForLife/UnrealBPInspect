@@ -5,12 +5,10 @@
 //! (params, return types, nested control flow bodies) consistently
 //! across asset versions so cross-version diffs stay clean.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use crate::bytecode::asset::DecodedAsset;
 use crate::bytecode::emit::comments::{inline_comment_lines, with_block_comments};
-use crate::bytecode::emit::scoped_value::ScopedValue;
 use crate::bytecode::emit::sections::{emit_prefix_sections, filter_flags_for_summary, EmitCtx};
 use crate::bytecode::expr::{
     binary_op_symbol, unary_op_symbol, BinaryOp, CastKind, Expr, SwitchExprCase,
@@ -20,20 +18,6 @@ use crate::bytecode::transforms::fold_long_lines;
 use crate::enums::{resolve_enum_args, resolve_enum_comparison};
 use crate::output_summary::ubergraph::clean_event_header;
 use crate::types::ParsedAsset;
-
-thread_local! {
-    /// Editor then-pin connected-mask for the block currently being
-    /// emitted, or `None` for blocks that aren't gate-eligible (zero or
-    /// multiple `K2Node_ExecutionSequence` nodes). Set by
-    /// [`emit_function_block`] / [`emit_event_block`] around each block's
-    /// body so the `Stmt::Sequence` arm can render disconnected then-pins
-    /// as `// Sequence [N] (empty):` headers with faithful editor-index
-    /// numbering, without threading the mask through every Stmt variant.
-    /// The mask is stored by value (cloned in at scope entry) so the consult
-    /// path holds no borrow.
-    static ACTIVE_SEQUENCE_MASK: RefCell<Option<Vec<bool>>> =
-        const { RefCell::new(None) };
-}
 
 /// Look up a latent call's resume body by the call's disk offset.
 /// Returns `None` when the call carries no harvested continuation.
@@ -48,37 +32,6 @@ fn lookup_resume_body(
 /// carries an interleaved resume continuation.
 pub(crate) fn is_latent_function(name: &str) -> bool {
     crate::bytecode::names::LATENT_FUNCTIONS.contains(&name)
-}
-
-/// Set the active block's editor then-pin mask for the duration of `body`,
-/// restoring the previous binding on the way out. `mask` is `None` for
-/// blocks that aren't gate-eligible.
-fn with_sequence_mask<R>(mask: Option<&Vec<bool>>, body: impl FnOnce() -> R) -> R {
-    let next = mask.cloned();
-    let _guard = ScopedValue::set(&ACTIVE_SEQUENCE_MASK, next);
-    body()
-}
-
-/// Faithful editor pin numbering for a `Stmt::Sequence`, when the active
-/// block's then-pin mask makes it unambiguous.
-///
-/// Returns `Some(mask)` only when all three gate conditions hold:
-/// - a mask is installed (the block has exactly one ExecutionSequence node),
-/// - its connected-pin count equals `decoded_pin_count` (the decoded
-///   `Stmt::Sequence` covers exactly the wired pins), and
-/// - it has more total then-pins than decoded pins (a real gap to recover).
-///
-/// Otherwise `None`, and the caller renders the compact decoded numbering.
-fn faithful_sequence_mask(decoded_pin_count: usize) -> Option<Vec<bool>> {
-    ScopedValue::with_current(&ACTIVE_SEQUENCE_MASK, |mask| {
-        let connected = mask.iter().filter(|wired| **wired).count();
-        if connected == decoded_pin_count && mask.len() > decoded_pin_count {
-            Some(mask.clone())
-        } else {
-            None
-        }
-    })
-    .flatten()
 }
 
 /// Render only the function and event bodies in the decoder's native
@@ -116,28 +69,19 @@ pub(crate) fn emit_summary(asset: &DecodedAsset) -> String {
 /// pseudocode shape. Used by the baseline regression harness to compare
 /// against the committed snapshots.
 pub fn emit_summary_with_asset(decoded: &DecodedAsset, parsed: &ParsedAsset) -> String {
-    let resume_bodies = &decoded.resume_bodies;
+    filter_summary(decoded, parsed, &[])
+}
+
+/// Select complete summary items before joining and wrapping their text.
+pub fn filter_summary(decoded: &DecodedAsset, parsed: &ParsedAsset, filters: &[String]) -> String {
+    let filters: Vec<String> = filters.iter().map(|filter| filter.to_lowercase()).collect();
     let mut output = String::new();
-    let ctx = emit_prefix_sections(&mut output, decoded, parsed);
-    let mut emitted = 0usize;
-    for function in &decoded.functions {
-        section_separator(&mut output, &mut emitted);
-        emit_function_block(
-            &mut output,
-            &function.name,
-            &function.body,
-            &ctx,
-            resume_bodies,
-        );
+    let blocks = emit_prefix_sections(&mut output, decoded, parsed, &filters);
+    output.push_str(&blocks.join("\n"));
+    if !blocks.is_empty() || filters.is_empty() {
+        output.push('\n');
     }
-    for event in &decoded.events {
-        section_separator(&mut output, &mut emitted);
-        emit_event_block(&mut output, &event.name, &event.body, &ctx, resume_bodies);
-    }
-    // Trailing blank line after the last function block.
-    output.push('\n');
-    // Fold prefix-section lines to keep them under 120 chars.
-    let mut lines: Vec<String> = output.split('\n').map(|line| line.to_string()).collect();
+    let mut lines: Vec<String> = output.split('\n').map(str::to_string).collect();
     fold_long_lines(&mut lines);
     lines.join("\n")
 }
@@ -161,20 +105,11 @@ pub fn render_body_lines(body: &[Stmt], resume_bodies: &BTreeMap<usize, Vec<Stmt
         .collect()
 }
 
-/// Emit a blank-line separator between consecutive function/event blocks.
-/// The first block emits no leading blank line.
-fn section_separator(output: &mut String, emitted: &mut usize) {
-    if *emitted > 0 {
-        output.push('\n');
-    }
-    *emitted += 1;
-}
-
 /// Emit one regular function block: optional `// Called by:` line,
 /// signature header (`  Name(args) [flags]`), then the body indented by
 /// one extra level. Falls back to `<name>()` when the export's
 /// `Signature` property is missing.
-fn emit_function_block(
+pub(super) fn emit_function_block(
     output: &mut String,
     name: &str,
     body: &[Stmt],
@@ -205,9 +140,7 @@ fn emit_function_block(
     // Function-level descriptions sit directly below the signature.
     emit_comment_lines(output, ctx.comments.function_level_lines(name));
     with_block_comments(&ctx.comments, name, || {
-        with_sequence_mask(ctx.sequence_masks.get(name), || {
-            emit_body(output, body, 1, resume_bodies);
-        });
+        emit_body(output, body, 1, resume_bodies);
     });
 }
 
@@ -225,7 +158,7 @@ fn emit_comment_lines(output: &mut String, lines: Option<&[String]>) {
 /// the body indented by one extra level. Event names are normalised
 /// through `clean_event_header` so `InpActEvt_*` sections render as
 /// `InputAction_*_Pressed/Released`.
-fn emit_event_block(
+pub(super) fn emit_event_block(
     output: &mut String,
     raw_name: &str,
     body: &[Stmt],
@@ -250,9 +183,7 @@ fn emit_event_block(
     // An event graph can also carry a whole-graph function-level description.
     emit_comment_lines(output, ctx.comments.function_level_lines(raw_name));
     with_block_comments(&ctx.comments, raw_name, || {
-        with_sequence_mask(ctx.sequence_masks.get(raw_name), || {
-            emit_body(output, body, 1, resume_bodies);
-        });
+        emit_body(output, body, 1, resume_bodies);
     });
 }
 
@@ -427,19 +358,7 @@ fn emit_stmt(
 /// Render a `Stmt::Sequence`'s pin bodies inline at the parent indent.
 ///
 /// The `// Sequence [N]:` comment is a legibility aid for the human reader,
-/// no consumer parses it. Two numbering modes:
-///
-/// - Faithful editor numbering (when [`faithful_sequence_mask`] resolves
-///   for this block): walk the editor then-pins in order. A disconnected
-///   pin emits an explicit `// Sequence [N] (empty):` header with no body;
-///   a connected pin consumes the next decoded body and keeps the existing
-///   suppression (labelled only when there is more than one decoded pin and
-///   the body is non-empty). This recovers the editor pin index across gaps
-///   so a disconnected slot keeps its number and later pins stay faithful.
-/// - Compact numbering (fallback): index the decoded pins directly. A pin
-///   whose body decoded to nothing emits no label, preserving the original
-///   index so a gap signals the empty pin rather than misleading the reader
-///   with a labelled-but-bodyless entry.
+/// Empty IR slots preserve disconnected editor pins across output modes.
 fn emit_sequence(
     output: &mut String,
     pins: &[Vec<Stmt>],
@@ -447,41 +366,14 @@ fn emit_sequence(
     resume_bodies: &BTreeMap<usize, Vec<Stmt>>,
 ) {
     let indent = "    ".repeat(indent_level);
-    let multi_pin = pins.len() > 1;
-    let faithful = faithful_sequence_mask(pins.len());
-
-    // A block's single ExecutionSequence maps to a single Sequence; clear the
-    // mask while recursing into pin bodies so a nested Sequence (e.g. one
-    // synthesised inside a loop or latch) falls back to compact numbering
-    // instead of inheriting this block's editor mask.
-    with_sequence_mask(None, || {
-        if let Some(mask) = &faithful {
-            let mut cursor = 0usize;
-            for (editor_index, wired) in mask.iter().enumerate() {
-                if *wired {
-                    let pin = &pins[cursor];
-                    cursor += 1;
-                    if multi_pin && !pin.is_empty() {
-                        output.push_str(&indent);
-                        output.push_str(&format!("// Sequence [{editor_index}]:\n"));
-                    }
-                    emit_body(output, pin, indent_level, resume_bodies);
-                } else {
-                    output.push_str(&indent);
-                    output.push_str(&format!("// Sequence [{editor_index}] (empty):\n"));
-                }
-            }
-            return;
+    for (pin_index, pin) in pins.iter().enumerate() {
+        if pin.is_empty() {
+            output.push_str(&format!("{indent}// Sequence [{pin_index}] (empty):\n"));
+        } else if pins.len() > 1 {
+            output.push_str(&format!("{indent}// Sequence [{pin_index}]:\n"));
         }
-
-        for (pin_index, pin) in pins.iter().enumerate() {
-            if multi_pin && !pin.is_empty() {
-                output.push_str(&indent);
-                output.push_str(&format!("// Sequence [{pin_index}]:\n"));
-            }
-            emit_body(output, pin, indent_level, resume_bodies);
-        }
-    });
+        emit_body(output, pin, indent_level, resume_bodies);
+    }
 }
 
 /// Render a `Stmt::Loop` body. The header form depends on the

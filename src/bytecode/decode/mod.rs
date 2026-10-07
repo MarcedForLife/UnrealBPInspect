@@ -67,10 +67,6 @@ pub(crate) use orchestrate::{
 // decode agree on the event-node set (including the InputAction pattern).
 pub(crate) use ubergraph_scan::build_event_node_index;
 
-// Re-exported for control-flow graph test probes; production callers use `super::header` directly.
-#[cfg(test)]
-pub(crate) use header::read_version_and_name_table;
-
 // Crate-public so the `tests/local_*` integration harness (e.g.
 // `local_linear_region_extraction`) can reproduce the decoder's address
 // space; integration tests link against the lib and cannot see

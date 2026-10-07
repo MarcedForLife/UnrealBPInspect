@@ -189,7 +189,18 @@ pub struct FunctionSignature {
     pub return_type: Option<String>,
 }
 
+/// A recoverable parse or decode failure. Export indices are 1-based.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AssetDiagnostic {
+    pub export_index: Option<usize>,
+    pub reason: String,
+}
+
 pub struct ParsedAsset {
+    pub version: AssetVersion,
+    pub name_table: crate::binary::NameTable,
+    /// Reported failures, independent of unsupported values shown explicitly in output.
+    pub diagnostics: Vec<AssetDiagnostic>,
     pub imports: Vec<ImportEntry>,
     pub exports: Vec<(ExportHeader, Vec<Property>)>,
     /// Pin connection data per export index (1-based). Only populated for

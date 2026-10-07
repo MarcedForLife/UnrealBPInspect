@@ -1248,10 +1248,12 @@ fn read_unicode_string(bytecode: &[u8], pos: &mut usize) -> Vec<u16> {
         let high = bytecode[*pos + 1];
         *pos += 2;
         if low == 0 && high == 0 {
-            break;
+            return units;
         }
         units.push(u16::from_le_bytes([low, high]));
     }
+    // Account for the missing complete code unit, including a lone final byte.
+    *pos = pos.saturating_add(2);
     units
 }
 

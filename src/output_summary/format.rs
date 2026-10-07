@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
+use super::filter::block_matches_filter;
+
 use crate::prop_query::{
     find_prop, find_prop_object, find_prop_object_array, find_prop_str, find_prop_str_items,
     prop_value_short,
@@ -152,6 +154,7 @@ pub(crate) fn format_component_tree(
     buf: &mut String,
     asset: &ParsedAsset,
     export_names: &[String],
+    filters: &[String],
 ) -> Vec<(String, String)> {
     let mut scs_nodes: HashMap<String, (String, String, Vec<String>)> = HashMap::new();
     let mut components: Vec<(String, String)> = Vec::new();
@@ -207,11 +210,19 @@ pub(crate) fn format_component_tree(
             comp_props: &comp_props,
             cat_exports: &cat_exports,
         };
-        writeln!(buf, "Components:").unwrap();
+        let mut items = String::new();
         for root in &root_nodes {
-            fmt_comp_tree(buf, root, 0, &scs_nodes, &ctx);
+            let mut item = String::new();
+            fmt_comp_tree(&mut item, root, 0, &scs_nodes, &ctx);
+            if block_matches_filter(&item, filters) {
+                items.push_str(&item);
+            }
         }
-        writeln!(buf).unwrap();
+        if !items.is_empty() {
+            writeln!(buf, "Components:").unwrap();
+            buf.push_str(&items);
+            writeln!(buf).unwrap();
+        }
     }
 
     components
@@ -223,6 +234,7 @@ pub(crate) fn format_variables(
     asset: &ParsedAsset,
     export_names: &[String],
     component_names: &[(String, String)],
+    filters: &[String],
 ) {
     let comp_names: Vec<&str> = component_names.iter().map(|(n, _)| n.as_str()).collect();
 
@@ -257,22 +269,32 @@ pub(crate) fn format_variables(
         }
     }
 
-    if !members.is_empty() {
-        writeln!(buf, "Variables:").unwrap();
-        for decl in &members {
-            let var_name = decl.split(':').next().unwrap_or("");
-            if let Some((_, val)) = defaults.iter().find(|(n, _)| n == var_name) {
-                writeln!(buf, "  {} = {}", decl, val).unwrap();
-            } else {
-                writeln!(buf, "  {}", decl).unwrap();
-            }
-        }
-        writeln!(buf).unwrap();
-    } else if !defaults.is_empty() {
-        writeln!(buf, "Default values:").unwrap();
-        for (name, val) in &defaults {
-            writeln!(buf, "  {} = {}", name, val).unwrap();
-        }
+    let (header, items) = if !members.is_empty() {
+        let items = members
+            .iter()
+            .map(|declaration| {
+                let var_name = declaration.split(':').next().unwrap_or("");
+                match defaults.iter().find(|(name, _)| name == var_name) {
+                    Some((_, value)) => format!("  {declaration} = {value}\n"),
+                    None => format!("  {declaration}\n"),
+                }
+            })
+            .collect::<Vec<_>>();
+        ("Variables:", items)
+    } else {
+        let items = defaults
+            .iter()
+            .map(|(name, value)| format!("  {name} = {value}\n"))
+            .collect();
+        ("Default values:", items)
+    };
+    let selected: String = items
+        .into_iter()
+        .filter(|item| block_matches_filter(item, filters))
+        .collect();
+    if !selected.is_empty() {
+        writeln!(buf, "{header}").unwrap();
+        buf.push_str(&selected);
         writeln!(buf).unwrap();
     }
 }

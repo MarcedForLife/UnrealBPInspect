@@ -907,6 +907,12 @@ mod tests {
     #[test]
     fn empty_asset_inputs_produce_empty_map() {
         let asset = ParsedAsset {
+            version: crate::types::AssetVersion {
+                file_ver: 522,
+                file_ver_ue5: 0,
+            },
+            name_table: crate::binary::NameTable::from_names(Vec::new()),
+            diagnostics: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
             pin_data: HashMap::new(),
@@ -958,6 +964,12 @@ mod tests {
     fn tracepoints_attributed_to_event_node() {
         use crate::bytecode::opcodes::EX_RETURN;
         let asset = ParsedAsset {
+            version: crate::types::AssetVersion {
+                file_ver: 522,
+                file_ver_ue5: 0,
+            },
+            name_table: crate::binary::NameTable::from_names(Vec::new()),
+            diagnostics: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
             pin_data: HashMap::new(),
@@ -1021,6 +1033,12 @@ mod tests {
     #[test]
     fn latent_resume_empty_resume_blocks_no_effect() {
         let asset = ParsedAsset {
+            version: crate::types::AssetVersion {
+                file_ver: 522,
+                file_ver_ue5: 0,
+            },
+            name_table: crate::binary::NameTable::from_names(Vec::new()),
+            diagnostics: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
             pin_data: HashMap::new(),
@@ -1070,6 +1088,12 @@ mod tests {
     #[test]
     fn fallback_empty_on_empty_inputs() {
         let asset = ParsedAsset {
+            version: crate::types::AssetVersion {
+                file_ver: 522,
+                file_ver_ue5: 0,
+            },
+            name_table: crate::binary::NameTable::from_names(Vec::new()),
+            diagnostics: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
             pin_data: HashMap::new(),
@@ -1133,6 +1157,12 @@ mod tests {
     fn multi_owner_input_action_roundtrip() {
         use crate::bytecode::opcodes::EX_RETURN;
         let asset = ParsedAsset {
+            version: crate::types::AssetVersion {
+                file_ver: 522,
+                file_ver_ue5: 0,
+            },
+            name_table: crate::binary::NameTable::from_names(Vec::new()),
+            diagnostics: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
             pin_data: HashMap::new(),

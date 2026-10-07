@@ -114,9 +114,7 @@
 
   [2] Helm_BP_C (class: /Script/Engine.BlueprintGeneratedClass, parent: /Script/Engine.Actor)
     SimpleConstructionScript: -> SimpleConstructionScript_0
-    PropertyGuids: {NameProperty->StructProperty; 1 entries}
-      [0].key: WinchConstraintInstance
-      [0].val: () {}
+    PropertyGuids: <MapProperty, 32 bytes>
     Super: Actor
     Members: [StrProperty; 12 items]
       [0]: "WheelConstraint: ChildActorComponent*"

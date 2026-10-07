@@ -8,7 +8,7 @@ use std::ops::Range;
 use crate::bytecode::partition::{build_opcode_graph_with_resume, EventEntry};
 use crate::types::ParsedAsset;
 
-use super::header::{lookup_export_bytecode, read_version_and_name_table};
+use super::header::lookup_export_bytecode;
 use super::mem_disk::build_mem_to_disk_map;
 use super::ubergraph_scan::{collect_event_entries, translate_entries_to_disk};
 use crate::bytecode::names::EXECUTE_UBERGRAPH_PREFIX;
@@ -35,11 +35,9 @@ pub struct UbergraphProbeData {
 /// Returns `None` if the asset has no ubergraph export, no bytecode, or
 /// partition fails. Mirrors the production code path so a probe sees
 /// the same address space the real decoder uses.
-pub fn probe_ubergraph_partition(
-    asset: &ParsedAsset,
-    asset_data: &[u8],
-) -> Option<UbergraphProbeData> {
-    let (ue5, name_table) = read_version_and_name_table(asset_data)?;
+pub fn probe_ubergraph_partition(asset: &ParsedAsset) -> Option<UbergraphProbeData> {
+    let ue5 = asset.version.file_ver_ue5;
+    let name_table = asset.name_table.clone();
 
     let export_names: Vec<String> = asset
         .exports
@@ -55,7 +53,7 @@ pub fn probe_ubergraph_partition(
     let ug_name = ug_hdr.object_name.clone();
     let ug_export_index = ug_idx + 1;
 
-    let bytecode = lookup_export_bytecode(asset, ug_export_index, &ug_name)?;
+    let bytecode = lookup_export_bytecode(asset, ug_export_index)?;
     let entries = collect_event_entries(asset, &export_names, &ug_name, &name_table, ue5);
 
     let (mem_to_disk, _err) = build_mem_to_disk_map(&bytecode, &name_table, ue5);

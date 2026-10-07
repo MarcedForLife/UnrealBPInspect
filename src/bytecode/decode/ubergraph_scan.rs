@@ -52,7 +52,6 @@ fn scan_ubergraph_dispatch(
     asset: &ParsedAsset,
     export_names: &[String],
     export_index: usize,
-    name: &str,
     ug_name: &str,
     name_table: &NameTable,
     ue5: i32,
@@ -60,7 +59,7 @@ fn scan_ubergraph_dispatch(
     use crate::bytecode::expr::Expr;
     use crate::bytecode::stmt::Stmt;
 
-    let bytecode = lookup_export_bytecode(asset, export_index, name)?;
+    let bytecode = lookup_export_bytecode(asset, export_index)?;
 
     // Dispatch stubs are flat: `[persistent]` copies, one or more
     // `ExecuteUbergraph_*` calls, and a trailing return. No jumps, so the
@@ -220,7 +219,6 @@ pub(super) fn collect_event_entries(
             asset,
             export_names,
             export_idx + 1,
-            &hdr.object_name,
             ug_name,
             name_table,
             ue5,
@@ -527,20 +525,11 @@ pub(super) fn is_ubergraph_stub(
     asset: &ParsedAsset,
     export_names: &[String],
     export_index: usize,
-    name: &str,
     ug_name: &str,
     name_table: &NameTable,
     ue5: i32,
 ) -> bool {
-    scan_ubergraph_dispatch(
-        asset,
-        export_names,
-        export_index,
-        name,
-        ug_name,
-        name_table,
-        ue5,
-    )
-    .map(|scan| scan.is_pure_dispatch)
-    .unwrap_or(false)
+    scan_ubergraph_dispatch(asset, export_names, export_index, ug_name, name_table, ue5)
+        .map(|scan| scan.is_pure_dispatch)
+        .unwrap_or(false)
 }

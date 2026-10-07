@@ -49,11 +49,15 @@ pub fn to_json(asset: &ParsedAsset, filters: &[String]) -> Value {
         .map(|(i, (hdr, props))| function_to_json(i, hdr, props))
         .collect();
 
-    json!({
+    let mut output = json!({
         "imports": imports_json,
         "exports": exports_json,
         "functions": functions_json,
-    })
+    });
+    if !asset.diagnostics.is_empty() {
+        output["diagnostics"] = json!(asset.diagnostics);
+    }
+    output
 }
 
 /// Build JSON for a single export entry.

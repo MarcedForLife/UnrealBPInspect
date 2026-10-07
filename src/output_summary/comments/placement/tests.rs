@@ -46,6 +46,7 @@ fn node_geom(export_index: usize, x: i32, y: i32, page: &str) -> NodeGeometry {
 /// A decoded asset with one event body and no byte map.
 fn decoded_with_event(name: &str, body: Vec<Stmt>) -> DecodedAsset {
     DecodedAsset {
+        diagnostics: Vec::new(),
         functions: vec![],
         events: vec![Event {
             name: name.into(),
@@ -60,6 +61,12 @@ fn decoded_with_event(name: &str, body: Vec<Stmt>) -> DecodedAsset {
 
 fn empty_parsed() -> ParsedAsset {
     ParsedAsset {
+        version: crate::types::AssetVersion {
+            file_ver: 522,
+            file_ver_ue5: 0,
+        },
+        name_table: crate::binary::NameTable::from_names(Vec::new()),
+        diagnostics: Vec::new(),
         imports: vec![],
         exports: vec![],
         pin_data: Default::default(),
@@ -136,6 +143,7 @@ fn decoded_with_mapped_function(
     let mut byte_maps = ByteMaps::default();
     byte_maps.functions.insert(name.into(), byte_map);
     DecodedAsset {
+        diagnostics: Vec::new(),
         functions: vec![Function {
             name: name.into(),
             body,
@@ -163,6 +171,7 @@ fn function_level_when_box_covers_over_threshold() {
         ],
     };
     let decoded = DecodedAsset {
+        diagnostics: Vec::new(),
         functions: vec![],
         events: vec![],
         resume_bodies: Default::default(),
@@ -323,6 +332,7 @@ fn ubergraph_page_node_anchors_inside_resume_body() {
         },
     );
     let decoded = DecodedAsset {
+        diagnostics: Vec::new(),
         functions: vec![],
         events: vec![Event {
             name: "Ev".into(),
@@ -440,6 +450,7 @@ fn placed_comments_sorted_by_block_then_position() {
         nodes: vec![node_geom(2, 0, 0, "AFunc"), node_geom(3, 0, 0, "BFunc")],
     };
     let decoded = DecodedAsset {
+        diagnostics: Vec::new(),
         functions: vec![],
         events: vec![],
         resume_bodies: Default::default(),
@@ -468,7 +479,7 @@ fn decodertest_class_split() {
         .join("samples/ue_4.27/BP_DecoderTest.uasset");
     let bytes = std::fs::read(&path).expect("read DecoderTest fixture");
     let parsed = parse_asset(&bytes, false).expect("parse DecoderTest");
-    let decoded = crate::bytecode::decode::decode_asset(&parsed, &bytes);
+    let decoded = crate::bytecode::decode::decode_asset(&parsed);
     let export_names: Vec<String> = parsed
         .exports
         .iter()
@@ -513,6 +524,7 @@ fn trace_records_function_level_strategy() {
         ],
     };
     let decoded = DecodedAsset {
+        diagnostics: Vec::new(),
         functions: vec![],
         events: vec![],
         resume_bodies: Default::default(),
@@ -591,6 +603,7 @@ fn audit_trace_is_a_pure_side_channel() {
         ],
     };
     let decoded = DecodedAsset {
+        diagnostics: Vec::new(),
         functions: vec![],
         events: vec![],
         resume_bodies: Default::default(),

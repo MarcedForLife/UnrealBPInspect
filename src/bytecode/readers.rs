@@ -113,16 +113,35 @@ pub fn read_bc_string(bytecode: &[u8], pos: &mut usize) -> String {
         let byte = bytecode[*pos];
         *pos += 1;
         if byte == 0 {
-            break;
+            return String::from_utf8_lossy(&bytes).to_string();
         }
         bytes.push(byte);
     }
+    // A terminator is part of the operand, so EOF is a failed read.
+    *pos = pos.saturating_add(1);
     String::from_utf8_lossy(&bytes).to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn string_reader_requires_a_terminator_and_stops_at_it() {
+        for (bytes, expected, end) in [
+            (&b"\0"[..], "", 1),
+            (&b"abc\0tail"[..], "abc", 4),
+            (&b""[..], "", 1),
+            (&b"abc"[..], "abc", 4),
+        ] {
+            let mut position = 0;
+            assert_eq!(read_bc_string(bytes, &mut position), expected);
+            assert_eq!(position, end);
+        }
+        let mut position = usize::MAX;
+        assert_eq!(read_bc_string(&[], &mut position), "");
+        assert_eq!(position, usize::MAX);
+    }
 
     #[test]
     fn truncated_numeric_reads_preserve_attempted_end_without_overflow() {

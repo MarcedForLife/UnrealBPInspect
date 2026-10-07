@@ -101,6 +101,12 @@ fn read_package_header(reader: &mut Reader) -> Result<PackageHeader> {
     let _licensee_ver = read_i32(reader)?;
     // Custom versions: each entry is 16-byte GUID + int32 version = 20 bytes
     let custom_ver_count = read_i32(reader)?;
+    ensure!(
+        custom_ver_count >= 0
+            && custom_ver_count as u64
+                <= (reader.get_ref().len() as u64).saturating_sub(reader.position()) / 20,
+        "invalid custom version count {custom_ver_count}"
+    );
     reader.seek(SeekFrom::Current(custom_ver_count as i64 * 20))?;
     let _total_header_size = read_i32(reader)?;
     let _folder_name = read_fstring(reader)?;
@@ -129,6 +135,20 @@ fn read_package_header(reader: &mut Reader) -> Result<PackageHeader> {
     let export_offset = read_i32(reader)?;
     let import_count = read_i32(reader)?;
     let import_offset = read_i32(reader)?;
+    for (table, count, offset) in [
+        ("name", name_count, name_offset),
+        ("import", import_count, import_offset),
+        ("export", export_count, export_offset),
+    ] {
+        ensure!(
+            count >= 0 && offset >= 0 && offset as usize <= reader.get_ref().len(),
+            "invalid {table} table range"
+        );
+        ensure!(
+            count as usize <= reader.get_ref().len().saturating_sub(offset as usize) / 8,
+            "invalid {table} table count {count}"
+        );
+    }
 
     Ok(PackageHeader {
         ver: AssetVersion {
@@ -249,8 +269,7 @@ fn read_export_headers(
 
 /// Parse a complete `.uasset` byte slice into a [`ParsedAsset`].
 ///
-/// Individual export parse failures are logged (when `debug` is true)
-/// and produce empty property lists.
+/// Malformed exports retain any successfully read properties.
 pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
     let file_size = data.len();
     let mut reader = std::io::Cursor::new(data);
@@ -310,6 +329,9 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
         );
     }
     Ok(ParsedAsset {
+        version: ver,
+        name_table,
+        diagnostics: parsed_exports.diagnostics,
         imports,
         exports: parsed_exports.exports,
         pin_data: parsed_exports.pin_data,
@@ -323,6 +345,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
 /// EdGraph pin data per K2Node, the function call signatures, and the raw
 /// captured bytecode keyed by 1-based export index.
 struct ParsedExports {
+    diagnostics: Vec<AssetDiagnostic>,
     exports: Vec<(ExportHeader, Vec<Property>)>,
     pin_data: HashMap<usize, NodePinData>,
     function_signatures: BTreeMap<String, FunctionSignature>,
@@ -352,7 +375,8 @@ fn parse_one_export(
     pctx: &ParseCtx,
     ver: AssetVersion,
     pin_scan_hint: &mut Option<u64>,
-) -> Result<ExportProducts> {
+    products: &mut ExportProducts,
+) -> Result<()> {
     reader.seek(SeekFrom::Start(hdr.serial_offset as u64))?;
     let end = hdr.serial_offset as u64 + hdr.serial_size as u64;
     let class_name = class_of(pctx.imports, pctx.export_names, hdr);
@@ -366,7 +390,10 @@ fn parse_one_export(
     }
 
     if kind == ExportKind::Other {
-        let props = read_properties(reader, pctx.name_table, end, ver);
+        ensure!(
+            read_properties(reader, pctx.name_table, end, ver, &mut products.props)?,
+            "missing property terminator"
+        );
         let short = short_class(&class_name);
         let mut pin_data = None;
         if short.starts_with(K2NODE_PREFIX) || short == "EdGraphNode_Comment" {
@@ -380,25 +407,24 @@ fn parse_one_export(
                 pin_data = Some(NodePinData { pins });
             }
         }
-        return Ok(ExportProducts {
-            props,
-            signature: None,
-            bytecode: None,
-            pin_data,
-        });
+        products.pin_data = pin_data;
+        return Ok(());
     }
 
     let is_function = kind == ExportKind::Function;
-    let props = read_properties(reader, pctx.name_table, end, ver);
+    ensure!(
+        read_properties(reader, pctx.name_table, end, ver, &mut products.props)?,
+        "missing property terminator"
+    );
     let props_end_pos = reader.position();
 
-    let mut extra_props = props;
+    let extra_props = &mut products.props;
 
     // UStruct header: Next, Super, Children
     parse_ustruct_header(
         reader,
         pctx,
-        &mut extra_props,
+        extra_props,
         props_end_pos,
         end,
         &hdr.object_name,
@@ -428,10 +454,13 @@ fn parse_one_export(
     }
 
     // Script bytecode
-    let bytecode = capture_bytecode(reader, pctx, end, &hdr.object_name)?;
+    products.signature = signature;
+    products.bytecode = capture_bytecode(reader, pctx, end, &hdr.object_name)?
+        .filter(|(bytes, _)| is_function || !bytes.is_empty());
 
     // Function flags (after bytecode, only for Function exports)
-    if is_function && reader.position() + 4 <= end {
+    if is_function {
+        ensure!(reader.position() + 4 <= end, "missing function flags");
         let func_flags = read_u32(reader)?;
         if func_flags != 0 {
             extra_props.push(Property {
@@ -439,17 +468,16 @@ fn parse_one_export(
                 value: PropValue::Str(format_func_flags(func_flags)),
             });
         }
-        if func_flags & FUNC_NET != 0 && reader.position() + 4 <= end {
+        if func_flags & FUNC_NET != 0 {
+            ensure!(
+                reader.position() + 4 <= end,
+                "missing replicated function offset"
+            );
             let _rep_offset = read_i32(reader)?;
         }
     }
 
-    Ok(ExportProducts {
-        props: extra_props,
-        signature,
-        bytecode,
-        pin_data: None,
-    })
+    Ok(())
 }
 
 /// Walk every export's serialized data, reading its tagged properties,
@@ -465,43 +493,75 @@ fn parse_exports(
     ver: AssetVersion,
     file_size: usize,
 ) -> ParsedExports {
+    let mut diagnostics = Vec::new();
     let mut exports = Vec::with_capacity(export_headers.len());
     let mut pin_data_map: HashMap<usize, NodePinData> = HashMap::new();
     let mut function_signatures: BTreeMap<String, FunctionSignature> = BTreeMap::new();
     let mut bytecode_by_export: BTreeMap<usize, (Vec<u8>, u32)> = BTreeMap::new();
     let mut pin_scan_hint: Option<u64> = None;
     for (ei, hdr) in export_headers.iter().enumerate() {
-        if hdr.serial_size <= 0
+        if hdr.serial_size == 0 && (0..=file_size as i64).contains(&hdr.serial_offset) {
+            exports.push((hdr.clone(), Vec::new()));
+            continue;
+        }
+        if hdr.serial_size < 0
             || hdr.serial_offset < 0
-            || (hdr.serial_offset + hdr.serial_size) > file_size as i64
+            || hdr
+                .serial_offset
+                .checked_add(hdr.serial_size)
+                .is_none_or(|end| end > file_size as i64)
         {
+            diagnostics.push(AssetDiagnostic {
+                export_index: Some(ei + 1),
+                reason: format!(
+                    "{} has invalid serialized range {} + {} for {} file bytes",
+                    hdr.object_name, hdr.serial_offset, hdr.serial_size, file_size
+                ),
+            });
             exports.push((hdr.clone(), Vec::new()));
             continue;
         }
 
-        match parse_one_export(reader, hdr, pctx, ver, &mut pin_scan_hint) {
-            Ok(products) => {
-                exports.push((hdr.clone(), products.props));
-                if let Some(sig) = products.signature {
-                    function_signatures.insert(hdr.object_name.clone(), sig);
-                }
-                if let Some(bytecode) = products.bytecode {
-                    bytecode_by_export.insert(ei + 1, bytecode);
-                }
-                if let Some(pin_data) = products.pin_data {
-                    pin_data_map.insert(ei + 1, pin_data);
-                }
-            }
-            Err(e) => {
-                if pctx.debug {
-                    eprintln!("  {} parse error: {}", hdr.object_name, e);
-                }
-                exports.push((hdr.clone(), Vec::new()));
-            }
+        let mut products = ExportProducts {
+            props: Vec::new(),
+            signature: None,
+            bytecode: None,
+            pin_data: None,
+        };
+        let mut export_reader = std::io::Cursor::new(
+            &reader.get_ref()[..(hdr.serial_offset + hdr.serial_size) as usize],
+        );
+        if let Err(error) = parse_one_export(
+            &mut export_reader,
+            hdr,
+            pctx,
+            ver,
+            &mut pin_scan_hint,
+            &mut products,
+        ) {
+            diagnostics.push(AssetDiagnostic {
+                export_index: Some(ei + 1),
+                reason: format!(
+                    "{} at file offset {}: {error:#}",
+                    hdr.object_name,
+                    export_reader.position()
+                ),
+            });
+        }
+        exports.push((hdr.clone(), products.props));
+        if let Some(signature) = products.signature {
+            function_signatures.insert(hdr.object_name.clone(), signature);
+        }
+        if let Some(bytecode) = products.bytecode {
+            bytecode_by_export.insert(ei + 1, bytecode);
+        }
+        if let Some(pin_data) = products.pin_data {
+            pin_data_map.insert(ei + 1, pin_data);
         }
     }
 
     ParsedExports {
+        diagnostics,
         exports,
         pin_data: pin_data_map,
         function_signatures,
@@ -558,13 +618,15 @@ fn parse_ustruct_header(
     end: u64,
     name: &str,
 ) -> Result<()> {
-    if props_end_pos + 12 > end {
-        return Ok(());
-    }
+    ensure!(props_end_pos + 12 <= end, "truncated UStruct header");
     let next = read_i32(reader)?;
     let super_ref = read_i32(reader)?;
     let children_count = read_i32(reader)?;
-    if children_count > 0 && children_count < MAX_REASONABLE_COUNT {
+    ensure!(
+        children_count >= 0 && children_count as u64 <= end.saturating_sub(reader.position()) / 4,
+        "invalid UStruct child count {children_count}"
+    );
+    if children_count > 0 {
         reader.seek(SeekFrom::Current(children_count as i64 * 4))?;
     }
     if pctx.debug {
@@ -631,18 +693,19 @@ fn parse_ffield_children(
     name: &str,
 ) -> Result<Vec<(String, String, u64)>> {
     let mut children = Vec::new();
-    if reader.position() + 4 > end {
-        return Ok(children);
-    }
+    ensure!(reader.position() + 4 <= end, "missing field child count");
     let child_prop_count = read_i32(reader)?;
+    ensure!(
+        child_prop_count >= 0
+            && child_prop_count as u64 <= end.saturating_sub(reader.position()) / 16,
+        "invalid field child count {child_prop_count}"
+    );
     if pctx.debug && child_prop_count > 0 {
         eprintln!("  {} child properties: {}", name, child_prop_count);
     }
     // Read declared children
     for _ in 0..child_prop_count {
-        if reader.position() + 16 > end {
-            break;
-        }
+        ensure!(reader.position() + 16 <= end, "truncated field child");
         children.push(read_one_ffield_child(reader, pctx, end)?);
     }
     // Read undeclared trailing children: some UE versions emit more children than declared
@@ -663,25 +726,32 @@ fn parse_ffield_children(
 /// Returns the `(disk_bytes, mem_size)` pair so callers can hand the raw
 /// bytes to the decoder without having to re-locate the block. Decoding
 /// and structuring happen later in the pipeline; this only advances the
-/// reader past the block and captures the bytes. Returns `None` when there's
-/// no bytecode block (header truncated or `storage_size <= 0`).
+/// reader past the block and captures the bytes. A valid zero-sized block
+/// is retained as an empty byte vector.
 fn capture_bytecode(
     reader: &mut Reader,
     pctx: &ParseCtx,
     end: u64,
     name: &str,
 ) -> Result<Option<(Vec<u8>, u32)>> {
-    if reader.position() + 8 > end {
-        return Ok(None);
-    }
+    ensure!(reader.position() + 8 <= end, "truncated bytecode header");
     if pctx.debug {
         debug_peek_script(reader, name, end)?;
     }
 
     let bytecode_size = read_i32(reader)?;
     let storage_size = read_i32(reader)?;
-    if storage_size <= 0 || (reader.position() + storage_size as u64) > end {
-        return Ok(None);
+    ensure!(
+        bytecode_size >= 0 && storage_size >= 0,
+        "negative bytecode size"
+    );
+    ensure!(
+        storage_size as u64 <= end.saturating_sub(reader.position()),
+        "bytecode exceeds export bounds"
+    );
+    if storage_size == 0 {
+        ensure!(bytecode_size == 0, "missing serialized bytecode");
+        return Ok(Some((Vec::new(), 0)));
     }
     let mut bytecode_data = vec![0u8; storage_size as usize];
     reader.read_exact(&mut bytecode_data)?;

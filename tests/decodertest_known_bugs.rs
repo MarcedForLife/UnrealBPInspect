@@ -24,7 +24,7 @@ fn decoder_test_emit() -> &'static str {
             .unwrap_or_else(|err| panic!("read {}: {}", asset_path.display(), err));
         let parsed = parse_asset(&bytes, false)
             .unwrap_or_else(|err| panic!("parse {}: {:?}", asset_path.display(), err));
-        let decoded = decode_asset(&parsed, &bytes);
+        let decoded = decode_asset(&parsed);
         emit_summary_with_asset(&decoded, &parsed)
     })
 }

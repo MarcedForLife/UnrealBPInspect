@@ -164,6 +164,8 @@ Pseudocode includes structured control flow and Blueprint comments. DoOnce and F
 
 Expression literals retain floating-point source bits. Pseudocode uses enough digits to round-trip each numeric literal.
 
+The parser retains the asset version and name table for decoding. Recoverable failures preserve available output, include JSON diagnostics and return exit code 2. Summary filtering operates on decoded items, and batch JSON aggregates structured results.
+
 ## Development
 
 ```sh

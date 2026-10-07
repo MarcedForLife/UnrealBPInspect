@@ -2,11 +2,11 @@
 //!
 //! Function and event bodies are rendered from the typed statement IR by
 //! `bytecode::emit`; this module holds the surrounding section formatting,
-//! the post-processing filter, and event display-name helpers.
+//! item filtering, and event display-name helpers.
 
 pub(crate) mod call_graph;
 pub(crate) mod comments;
-mod filter;
+pub(crate) mod filter;
 pub(crate) mod format;
 pub(crate) mod ubergraph;
 

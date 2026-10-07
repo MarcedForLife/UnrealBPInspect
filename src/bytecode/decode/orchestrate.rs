@@ -8,23 +8,23 @@
 //! FlipFlop/DoOnce synthesis.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
 use crate::binary::NameTable;
 use crate::bytecode::asset::{DecodedAsset, Event, Function};
 use crate::bytecode::decode::ctx::debug_enabled;
-use crate::bytecode::names::EXECUTE_UBERGRAPH_PREFIX;
+use crate::bytecode::names::{EXECUTE_UBERGRAPH_PREFIX, K2NODE_EXECUTION_SEQUENCE};
 use crate::bytecode::partition::{
     build_opcode_graph, build_opcode_graph_with_resume, partition_ubergraph_with_translation,
     EventEntry,
 };
 use crate::bytecode::structure::build_skeleton;
-use crate::resolve::class_of;
-use crate::types::ParsedAsset;
+use crate::resolve::{class_of, enclosing_graph_name, resolve_index, short_class};
+use crate::types::{AssetDiagnostic, ParsedAsset};
 
 use super::ctx::DecodeCtx;
-use super::header::{lookup_export_bytecode, read_version_and_name_table};
+use super::header::lookup_export_bytecode;
 use super::mem_disk::build_mem_to_disk_map;
 use super::transform_stack::apply_transform_stack_to_body;
 use super::ubergraph_scan::{
@@ -35,12 +35,8 @@ use super::ubergraph_scan::{
 
 /// Decode a parsed Blueprint asset into the statement tree IR.
 ///
-/// `asset_data` is the raw `.uasset` file bytes, required only to re-read
-/// the version header and name table. Bytecode bytes come from
-/// `asset.bytecode_by_export`, captured during `parse_asset`. The
-/// `ParsedAsset` provides the already-parsed import/export tables and the
-/// structured property data (including decoded bytecode text lines used
-/// to locate event entry offsets).
+/// Version metadata, name tables and captured bytecode all come from the
+/// same parsed asset, so decoding cannot accidentally mix input files.
 ///
 /// Recognises Assignment (EX_Let*), Call (EX_*Function, EX_CallMath),
 /// and Return, decoding expression operands into typed `Expr` trees.
@@ -51,16 +47,21 @@ use super::ubergraph_scan::{
 /// normally), and the whole pipeline is caught as a last resort (the
 /// asset degrades to no bytecode output instead of aborting the process,
 /// which matters in batch/directory mode).
-pub fn decode_asset(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
-    let decode = std::panic::AssertUnwindSafe(|| decode_asset_inner(asset, asset_data));
+pub fn decode_asset(asset: &ParsedAsset) -> DecodedAsset {
+    let decode = std::panic::AssertUnwindSafe(|| decode_asset_inner(asset));
     match std::panic::catch_unwind(decode) {
         Ok(decoded) => decoded,
         Err(payload) => {
-            eprintln!(
-                "decode: bytecode decode panicked ({}); omitting bytecode for this asset",
-                panic_message(payload.as_ref())
-            );
+            let mut diagnostics = asset.diagnostics.clone();
+            diagnostics.push(AssetDiagnostic {
+                export_index: None,
+                reason: format!(
+                    "bytecode decode panicked: {}",
+                    panic_message(payload.as_ref())
+                ),
+            });
             DecodedAsset {
+                diagnostics,
                 functions: vec![],
                 events: vec![],
                 resume_bodies: BTreeMap::new(),
@@ -98,22 +99,9 @@ fn panicked_body(
     }]
 }
 
-fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
-    let (ue5, name_table) = match read_version_and_name_table(asset_data) {
-        Some(pair) => pair,
-        None => {
-            if debug_enabled() {
-                eprintln!("probe: read_version_and_name_table returned None");
-            }
-            return DecodedAsset {
-                functions: vec![],
-                events: vec![],
-                resume_bodies: BTreeMap::new(),
-                resume_owner_events: BTreeMap::new(),
-                byte_maps: Default::default(),
-            };
-        }
-    };
+fn decode_asset_inner(asset: &ParsedAsset) -> DecodedAsset {
+    let ue5 = asset.version.file_ver_ue5;
+    let name_table = &asset.name_table;
     if debug_enabled() {
         eprintln!("probe: ue5={}", ue5);
     }
@@ -124,6 +112,21 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
         .map(|(hdr, _)| hdr.object_name.clone())
         .collect();
 
+    let mut diagnostics = asset.diagnostics.clone();
+    for (index, (header, _)) in asset.exports.iter().enumerate() {
+        if class_of(&asset.imports, &export_names, header).ends_with(".Function")
+            && asset.function_signatures.contains_key(&header.object_name)
+            && !asset.bytecode_by_export.contains_key(&(index + 1))
+            && !diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.export_index == Some(index + 1))
+        {
+            diagnostics.push(AssetDiagnostic {
+                export_index: Some(index + 1),
+                reason: format!("no captured bytecode for function {}", header.object_name),
+            });
+        }
+    }
     let mut functions = Vec::new();
     let mut events = Vec::new();
     // Graph-identity DoOnce wrap plans, resolved per event while its
@@ -161,7 +164,7 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
     decode_ubergraph_events(
         asset,
         &export_names,
-        &name_table,
+        name_table,
         ue5,
         ubergraph_export,
         &mut events,
@@ -169,6 +172,7 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
         &mut resume_bodies,
         &mut resume_owner_events,
         &mut ubergraph_byte_map,
+        &mut diagnostics,
     );
 
     // Decode standalone function exports (class `.Function`, not the
@@ -177,11 +181,12 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
     decode_standalone_functions(
         asset,
         &export_names,
-        &name_table,
+        name_table,
         ue5,
         ug_name_opt,
         &mut functions,
         &mut function_byte_maps,
+        &mut diagnostics,
     );
 
     // Sort for deterministic output.
@@ -236,7 +241,23 @@ fn decode_asset_inner(asset: &ParsedAsset, asset_data: &[u8]) -> DecodedAsset {
         apply_transform_stack_to_body(body);
     }
 
+    let sequence_masks = collect_sequence_masks(asset, &export_names);
+    for (name, body) in functions
+        .iter_mut()
+        .map(|function| (&function.name, &mut function.body))
+        .chain(
+            events
+                .iter_mut()
+                .map(|event| (&event.name, &mut event.body)),
+        )
+    {
+        if let Some(mask) = sequence_masks.get(name) {
+            restore_sequence_pins(body, mask);
+        }
+    }
+
     DecodedAsset {
+        diagnostics,
         functions,
         events,
         resume_bodies,
@@ -277,12 +298,15 @@ fn decode_ubergraph_events(
     resume_bodies: &mut BTreeMap<usize, Vec<crate::bytecode::stmt::Stmt>>,
     resume_owner_events: &mut BTreeMap<usize, String>,
     ubergraph_byte_map: &mut Option<crate::bytecode::k2node_byte_map::K2NodeByteMap>,
+    diagnostics: &mut Vec<AssetDiagnostic>,
 ) {
     if let Some((ug_idx, (ug_hdr, _ug_props))) = ubergraph_export {
         let ug_name = ug_hdr.object_name.clone();
         let ug_export_index = ug_idx + 1;
 
-        if let Some(bytecode) = lookup_export_bytecode(asset, ug_export_index, &ug_name) {
+        if let Some(bytecode) =
+            lookup_export_bytecode(asset, ug_export_index).filter(|bytes| !bytes.is_empty())
+        {
             let entries = collect_event_entries(asset, export_names, &ug_name, name_table, ue5);
 
             // Event entry offsets in the Bytecode property text are memory
@@ -291,7 +315,10 @@ fn decode_ubergraph_events(
             // disk). Translate every entry mem -> disk before partitioning.
             let (mem_to_disk, mem_disk_err) = build_mem_to_disk_map(&bytecode, name_table, ue5);
             if let Some(err) = mem_disk_err {
-                eprintln!("decode: mem-to-disk walk for {}: {}", ug_name, err);
+                diagnostics.push(AssetDiagnostic {
+                    export_index: Some(ug_export_index),
+                    reason: format!("bytecode address translation failed for {ug_name}: {err}"),
+                });
             }
             if debug_enabled() {
                 let last_disk = mem_to_disk.values().copied().max().unwrap_or(0);
@@ -318,11 +345,8 @@ fn decode_ubergraph_events(
             }
             let translated_entries = translate_entries_to_disk(&entries, &mem_to_disk, &ug_name);
 
-            if !entries.is_empty() && translated_entries.is_empty() {
-                eprintln!(
-                    "decode: dropped all event entries for {} during mem-to-disk translation",
-                    ug_name
-                );
+            if translated_entries.len() < entries.len() {
+                diagnostics.push(AssetDiagnostic { export_index: Some(ug_export_index), reason: format!("dropped {} event entries for {ug_name} during bytecode address translation", entries.len() - translated_entries.len()) });
             }
 
             if !translated_entries.is_empty() {
@@ -484,11 +508,13 @@ fn decode_ubergraph_events(
                             let (body, plans) = match std::panic::catch_unwind(decode) {
                                 Ok(pair) => pair,
                                 Err(payload) => {
-                                    eprintln!(
-                                        "decode: event '{}' panicked during decode ({}); emitting placeholder body",
-                                        event_name,
-                                        panic_message(payload.as_ref())
-                                    );
+                                    diagnostics.push(AssetDiagnostic {
+                                        export_index: Some(ug_export_index),
+                                        reason: format!(
+                                            "event {event_name} decode panicked: {}",
+                                            panic_message(payload.as_ref())
+                                        ),
+                                    });
                                     let offset =
                                         ranges.first().map(|range| range.start).unwrap_or(0);
                                     (panicked_body(payload.as_ref(), offset), None)
@@ -516,7 +542,10 @@ fn decode_ubergraph_events(
                             ));
                     }
                     Err(err) => {
-                        eprintln!("decode: partition failed for {}: {}", ug_name, err);
+                        diagnostics.push(AssetDiagnostic {
+                            export_index: Some(ug_export_index),
+                            reason: format!("partition failed for {ug_name}: {err}"),
+                        });
                     }
                 }
             }
@@ -538,6 +567,7 @@ fn decode_standalone_functions(
     ug_name_opt: Option<&str>,
     functions: &mut Vec<Function>,
     function_byte_maps: &mut BTreeMap<String, crate::bytecode::k2node_byte_map::K2NodeByteMap>,
+    diagnostics: &mut Vec<AssetDiagnostic>,
 ) {
     // Node-class and macro-name indices are graph-agnostic (built over all
     // asset exports), so build them once here and share across every
@@ -563,7 +593,6 @@ fn decode_standalone_functions(
                 asset,
                 export_names,
                 export_idx + 1,
-                &hdr.object_name,
                 ug_name,
                 name_table,
                 ue5,
@@ -573,7 +602,7 @@ fn decode_standalone_functions(
         }
 
         let export_index = export_idx + 1;
-        let read_result = lookup_export_bytecode(asset, export_index, &hdr.object_name);
+        let read_result = lookup_export_bytecode(asset, export_index);
         if debug_enabled() {
             eprintln!(
                 "probe: function '{}' serial=0x{:x}+{} -> {}",
@@ -583,7 +612,7 @@ fn decode_standalone_functions(
                 read_result.as_ref().map(|b| b.len()).unwrap_or(0),
             );
         }
-        if let Some(bytecode) = read_result {
+        if let Some(bytecode) = read_result.filter(|bytes| !bytes.is_empty()) {
             // Build a per-function mem-to-disk map so jump targets within
             // this body can be translated. Standalone function bodies use
             // the same disk vs mem split as ubergraph bytecode whenever
@@ -591,12 +620,13 @@ fn decode_standalone_functions(
             let (fn_mem_to_disk, fn_mem_disk_err) =
                 build_mem_to_disk_map(&bytecode, name_table, ue5);
             if let Some(err) = fn_mem_disk_err {
-                if debug_enabled() {
-                    eprintln!(
-                        "decode: mem-to-disk walk for fn {}: {}",
-                        hdr.object_name, err
-                    );
-                }
+                diagnostics.push(AssetDiagnostic {
+                    export_index: Some(export_index),
+                    reason: format!(
+                        "bytecode address translation failed for {}: {err}",
+                        hdr.object_name
+                    ),
+                });
             }
             let decode = std::panic::AssertUnwindSafe(|| {
                 decode_standalone_function_body(
@@ -617,11 +647,14 @@ fn decode_standalone_functions(
                     body
                 }
                 Err(payload) => {
-                    eprintln!(
-                        "decode: function '{}' panicked during decode ({}); emitting placeholder body",
-                        hdr.object_name,
-                        panic_message(payload.as_ref())
-                    );
+                    diagnostics.push(AssetDiagnostic {
+                        export_index: Some(export_index),
+                        reason: format!(
+                            "function {} decode panicked: {}",
+                            hdr.object_name,
+                            panic_message(payload.as_ref())
+                        ),
+                    });
                     panicked_body(payload.as_ref(), 0)
                 }
             };
@@ -1321,4 +1354,208 @@ fn decode_resume_bodies(
         output.insert(call_offset, body);
     }
     output
+}
+
+/// Build `block_name -> editor then-pin connected-mask` for every block
+/// whose graph contains exactly one `K2Node_ExecutionSequence` node.
+///
+/// The mask records, in editor pin-array order, whether each exec-output
+/// then-pin is wired (`linked_to` non-empty). Blocks with zero or multiple
+/// ExecutionSequence nodes are omitted. Restoration also requires a unique
+/// decoded sequence with the connected pin count. This is an arity match,
+/// not proof of editor-node provenance for synthetic decoded sequences.
+fn collect_sequence_masks(
+    parsed: &ParsedAsset,
+    export_names: &[String],
+) -> HashMap<String, Vec<bool>> {
+    let mut by_block: HashMap<String, Vec<Vec<bool>>> = HashMap::new();
+    for (zero_based, (hdr, _)) in parsed.exports.iter().enumerate() {
+        let one_based = zero_based + 1;
+        let class = short_class(&resolve_index(
+            &parsed.imports,
+            export_names,
+            hdr.class_index,
+        ));
+        if class != K2NODE_EXECUTION_SEQUENCE {
+            continue;
+        }
+        let Some(pin_data) = parsed.pin_data.get(&one_based) else {
+            continue;
+        };
+        let Some(block) = enclosing_graph_name(parsed, export_names, one_based) else {
+            continue;
+        };
+        let mask: Vec<bool> = pin_data
+            .pins
+            .iter()
+            .filter(|pin| pin.is_exec_output())
+            .map(|pin| !pin.linked_to.is_empty())
+            .collect();
+        by_block.entry(block).or_default().push(mask);
+    }
+    by_block
+        .into_iter()
+        .filter_map(|(block, masks)| match masks.as_slice() {
+            [single] => Some((block, single.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Recover disconnected editor pins only when one decoded sequence matches.
+/// Empty slots remain in the IR so every renderer uses the same pin identity.
+fn restore_sequence_pins(body: &mut [crate::bytecode::stmt::Stmt], mask: &[bool]) {
+    use crate::bytecode::stmt::Stmt;
+    let connected = mask.iter().filter(|wired| **wired).count();
+    if connected == 0 || connected == mask.len() {
+        return;
+    }
+    fn count_matches(body: &[Stmt], connected: usize) -> usize {
+        body.iter()
+            .map(|stmt| {
+                usize::from(matches!(stmt, Stmt::Sequence { pins, .. } if pins.len() == connected))
+                    + stmt
+                        .child_bodies_all()
+                        .into_iter()
+                        .map(|child| count_matches(child, connected))
+                        .sum::<usize>()
+            })
+            .sum()
+    }
+    fn restore(body: &mut [Stmt], mask: &[bool], connected: usize) {
+        for stmt in body {
+            if let Stmt::Sequence { pins, .. } = stmt {
+                if pins.len() == connected {
+                    let mut original = std::mem::take(pins).into_iter();
+                    *pins = mask
+                        .iter()
+                        .map(|wired| {
+                            if *wired {
+                                original.next().expect("connected pin count checked")
+                            } else {
+                                Vec::new()
+                            }
+                        })
+                        .collect();
+                    return;
+                }
+            }
+            for child in stmt.child_bodies_all_mut() {
+                restore(child, mask, connected);
+            }
+        }
+    }
+    if count_matches(body, connected) == 1 {
+        restore(body, mask, connected);
+    }
+}
+
+#[cfg(test)]
+mod sequence_pin_tests {
+    use super::restore_sequence_pins;
+    use crate::bytecode::stmt::{LoopKind, Stmt};
+
+    fn return_at(offset: usize) -> Stmt {
+        Stmt::Return {
+            value: None,
+            offset,
+        }
+    }
+
+    fn sequence_at(offset: usize) -> Stmt {
+        Stmt::Sequence {
+            pins: vec![vec![return_at(offset + 1)], vec![return_at(offset + 2)]],
+            offset,
+        }
+    }
+
+    fn sequence_pin_counts(body: &[Stmt]) -> Vec<usize> {
+        let mut counts = Vec::new();
+        for stmt in body {
+            if let Stmt::Sequence { pins, .. } = stmt {
+                counts.push(pins.len());
+            }
+            for child in stmt.child_bodies_all() {
+                counts.extend(sequence_pin_counts(child));
+            }
+        }
+        counts
+    }
+
+    #[test]
+    fn unique_nested_sequence_restores_empty_pins_without_moving_bodies() {
+        let mut body = vec![Stmt::Loop {
+            kind: LoopKind::While,
+            cond: None,
+            body: vec![return_at(1)],
+            completion: Some(vec![sequence_at(10)]),
+            offset: 0,
+        }];
+        restore_sequence_pins(&mut body, &[false, true, false, true, false]);
+        let Stmt::Loop {
+            body: loop_body,
+            completion: Some(completion),
+            ..
+        } = &body[0]
+        else {
+            panic!("expected unchanged loop structure");
+        };
+        assert_eq!(loop_body[0].offset(), 1);
+        let Stmt::Sequence { pins, offset } = &completion[0] else {
+            panic!("expected nested completion sequence");
+        };
+        assert_eq!(*offset, 10);
+        assert_eq!(pins.len(), 5);
+        assert!(pins[0].is_empty());
+        assert_eq!(pins[1][0].offset(), 11);
+        assert!(pins[2].is_empty());
+        assert_eq!(pins[3][0].offset(), 12);
+        assert!(pins[4].is_empty());
+    }
+
+    #[test]
+    fn nested_matching_sequences_leave_pin_identity_unchanged() {
+        let mut body = vec![Stmt::Sequence {
+            pins: vec![vec![sequence_at(10)], vec![return_at(20)]],
+            offset: 0,
+        }];
+        restore_sequence_pins(&mut body, &[true, false, true]);
+        assert_eq!(sequence_pin_counts(&body), vec![2, 2]);
+        let Stmt::Sequence { pins, .. } = &body[0] else {
+            unreachable!()
+        };
+        assert_eq!(pins[0][0].offset(), 10);
+        assert_eq!(pins[1][0].offset(), 20);
+    }
+
+    #[test]
+    fn sibling_matching_sequences_leave_pin_identity_unchanged() {
+        let mut body = vec![sequence_at(10), sequence_at(20)];
+        restore_sequence_pins(&mut body, &[true, false, true]);
+        assert_eq!(sequence_pin_counts(&body), vec![2, 2]);
+    }
+
+    #[test]
+    fn restoring_sequence_pins_is_idempotent() {
+        let mut body = vec![sequence_at(10)];
+        for _ in 0..2 {
+            restore_sequence_pins(&mut body, &[true, false, true]);
+        }
+        let Stmt::Sequence { pins, .. } = &body[0] else {
+            unreachable!()
+        };
+        assert_eq!(pins.len(), 3);
+        assert_eq!(pins[0][0].offset(), 11);
+        assert!(pins[1].is_empty());
+        assert_eq!(pins[2][0].offset(), 12);
+    }
+
+    #[test]
+    fn masks_without_missing_connected_pins_do_not_change_sequences() {
+        for mask in [vec![true, true], vec![false, false, false], vec![]] {
+            let mut body = vec![sequence_at(10)];
+            restore_sequence_pins(&mut body, &mask);
+            assert_eq!(sequence_pin_counts(&body), vec![2]);
+        }
+    }
 }

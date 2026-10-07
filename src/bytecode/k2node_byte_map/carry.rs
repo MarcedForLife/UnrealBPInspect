@@ -283,7 +283,7 @@ mod tests {
             .join("samples/ue_4.27/BP_DecoderTest.uasset");
         let bytes = std::fs::read(&path).expect("read DecoderTest fixture");
         let parsed = parse_asset(&bytes, false).expect("parse DecoderTest");
-        let decoded = crate::bytecode::decode::decode_asset(&parsed, &bytes);
+        let decoded = crate::bytecode::decode::decode_asset(&parsed);
 
         let carried = decoded
             .byte_maps

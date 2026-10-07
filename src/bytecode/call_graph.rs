@@ -204,6 +204,7 @@ mod tests {
 
     fn make_asset(functions: Vec<Function>, events: Vec<Event>) -> DecodedAsset {
         DecodedAsset {
+            diagnostics: Vec::new(),
             functions,
             events,
             resume_bodies: std::collections::BTreeMap::new(),

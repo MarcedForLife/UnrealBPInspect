@@ -117,7 +117,7 @@ fn cfg_reducibility_probe() {
                 continue;
             }
         };
-        let Some(probe) = probe_ubergraph_partition(&parsed, &asset_bytes) else {
+        let Some(probe) = probe_ubergraph_partition(&parsed) else {
             writeln!(log, "no ubergraph: {}", baseline_name).ok();
             continue;
         };
@@ -204,7 +204,7 @@ fn cfg_reachability_probe() {
             Ok(parsed) => parsed,
             Err(_) => continue,
         };
-        let Some(probe) = probe_ubergraph_partition(&parsed, &asset_bytes) else {
+        let Some(probe) = probe_ubergraph_partition(&parsed) else {
             continue;
         };
 
@@ -338,7 +338,7 @@ fn cfg_regions_probe() {
             Ok(parsed) => parsed,
             Err(_) => continue,
         };
-        let Some(probe) = probe_ubergraph_partition(&parsed, &asset_bytes) else {
+        let Some(probe) = probe_ubergraph_partition(&parsed) else {
             continue;
         };
 
@@ -768,7 +768,7 @@ fn reaching_condition_probe() {
             Ok(parsed) => parsed,
             Err(_) => continue,
         };
-        let Some(probe) = probe_ubergraph_partition(&parsed, &asset_bytes) else {
+        let Some(probe) = probe_ubergraph_partition(&parsed) else {
             continue;
         };
 
@@ -842,13 +842,7 @@ fn reaching_condition_probe() {
             );
         }
 
-        render_function_section(
-            &mut report,
-            &parsed,
-            &asset_bytes,
-            &baseline_name,
-            &mut jin_mapping_note,
-        );
+        render_function_section(&mut report, &parsed, &baseline_name, &mut jin_mapping_note);
     }
 
     let mapping = jin_mapping_note
@@ -1018,14 +1012,11 @@ fn build_function_cfg_and_region_tree(
 fn render_function_section(
     report: &mut String,
     asset: &crate::types::ParsedAsset,
-    asset_data: &[u8],
     fixture: &str,
     jin_mapping_note: &mut Option<String>,
 ) {
-    let Some((ue5, name_table)) = crate::bytecode::decode::read_version_and_name_table(asset_data)
-    else {
-        return;
-    };
+    let ue5 = asset.version.file_ver_ue5;
+    let name_table = &asset.name_table;
     let export_names: Vec<String> = asset
         .exports
         .iter()
@@ -1064,7 +1055,7 @@ fn render_function_section(
         }
 
         let (cfg, tree, ipostdom, fn_graph) =
-            build_function_cfg_and_region_tree(bytecode, ue5, &name_table);
+            build_function_cfg_and_region_tree(bytecode, ue5, name_table);
         if cfg.opcode_count() == 0 || !is_reducible(&cfg) {
             // Only note a target by name; a non-target irreducible/empty
             // function is not interesting for this report.
@@ -1491,7 +1482,7 @@ fn rc_vs_structure_survey() {
         writeln!(log, "=== {} ===", fixture_label).ok();
 
         // Ubergraph events via the partition path.
-        if let Some(probe) = probe_ubergraph_partition(&parsed, &asset_bytes) {
+        if let Some(probe) = probe_ubergraph_partition(&parsed) {
             for entry in &probe.disk_entries {
                 let Some(ranges) = probe.event_ranges.get(&entry.name) else {
                     continue;
@@ -1527,9 +1518,9 @@ fn rc_vs_structure_survey() {
         }
 
         // Standalone `.Function` exports via the flow-aware CFG.
-        if let Some((ue5, name_table)) =
-            crate::bytecode::decode::read_version_and_name_table(&asset_bytes)
         {
+            let ue5 = parsed.version.file_ver_ue5;
+            let name_table = &parsed.name_table;
             let export_names: Vec<String> = parsed
                 .exports
                 .iter()
@@ -1555,7 +1546,7 @@ fn rc_vs_structure_survey() {
                     continue;
                 }
                 let (cfg, tree, _ipostdom, fn_graph) =
-                    build_function_cfg_and_region_tree(bytecode, ue5, &name_table);
+                    build_function_cfg_and_region_tree(bytecode, ue5, name_table);
                 if cfg.opcode_count() == 0 || !is_reducible(&cfg) {
                     continue;
                 }

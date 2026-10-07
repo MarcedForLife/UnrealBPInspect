@@ -23,7 +23,7 @@ fn decoded_event_names(asset_path: &Path) -> Vec<String> {
         .unwrap_or_else(|err| panic!("read {}: {}", asset_path.display(), err));
     let parsed = parse_asset(&asset_bytes, false)
         .unwrap_or_else(|err| panic!("parse {}: {}", asset_path.display(), err));
-    decode_asset(&parsed, &asset_bytes)
+    decode_asset(&parsed)
         .events
         .iter()
         .map(|event| event.name.clone())
@@ -61,7 +61,7 @@ fn helm_4_27_decodes_standalone_functions() {
 
     let asset_bytes = std::fs::read(&asset_path).unwrap();
     let parsed = parse_asset(&asset_bytes, false).unwrap();
-    let decoded = decode_asset(&parsed, &asset_bytes);
+    let decoded = decode_asset(&parsed);
 
     // UserConstructionScript may land in either bucket depending on how the
     // standalone event is classified, so check the union.

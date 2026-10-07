@@ -456,7 +456,9 @@ fn decode_return(pos: &mut usize, ctx: &DecodeCtx) -> Stmt {
             _ => {
                 let expr = decode_expr(pos, ctx);
                 match expr {
-                    Expr::Unknown { .. } => None,
+                    Expr::Unknown { reason, .. } => {
+                        return make_unknown_len(offset, ctx, &reason, pos.saturating_sub(offset));
+                    }
                     other => Some(other),
                 }
             }
@@ -470,8 +472,8 @@ fn decode_return(pos: &mut usize, ctx: &DecodeCtx) -> Stmt {
 /// Build a `Stmt::Unknown` from the raw bytes at `offset` with the given byte
 /// length.
 fn make_unknown_len(offset: usize, ctx: &DecodeCtx, reason: &str, length: usize) -> Stmt {
-    let end = (offset + length).min(ctx.bytecode.len());
-    let raw_bytes = ctx.bytecode[offset..end].to_vec();
+    let end = offset.saturating_add(length).min(ctx.bytecode.len());
+    let raw_bytes = ctx.bytecode[offset.min(end)..end].to_vec();
     Stmt::Unknown {
         reason: reason.to_string(),
         raw_bytes,

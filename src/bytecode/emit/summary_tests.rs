@@ -11,6 +11,7 @@ mod tests {
 
     fn empty_asset() -> DecodedAsset {
         DecodedAsset {
+            diagnostics: Vec::new(),
             functions: vec![],
             events: vec![],
             resume_bodies: std::collections::BTreeMap::new(),
@@ -27,6 +28,7 @@ mod tests {
     #[test]
     fn break_stmt_renders_as_break() {
         let asset = DecodedAsset {
+            diagnostics: Vec::new(),
             functions: vec![Function {
                 name: "Loop".into(),
                 export_index: None,
@@ -43,6 +45,7 @@ mod tests {
     #[test]
     fn single_event_with_one_assignment_emits_correctly() {
         let asset = DecodedAsset {
+            diagnostics: Vec::new(),
             functions: vec![],
             events: vec![Event {
                 name: "ReceiveTick".into(),
@@ -64,6 +67,7 @@ mod tests {
     #[test]
     fn unknown_stmt_emits_diagnostic_comment() {
         let asset = DecodedAsset {
+            diagnostics: Vec::new(),
             functions: vec![Function {
                 name: "Foo".into(),
                 export_index: None,
@@ -256,6 +260,7 @@ mod tests {
             else_expr: Box::new(Expr::Var("self.RightHand".into())),
         };
         let asset = DecodedAsset {
+            diagnostics: Vec::new(),
             functions: vec![Function {
                 name: "ReleaseGrip".into(),
                 export_index: None,
@@ -332,6 +337,7 @@ mod tests {
             offset: 0,
         };
         DecodedAsset {
+            diagnostics: Vec::new(),
             functions: vec![],
             events: vec![Event {
                 name: "Test".into(),
@@ -520,6 +526,7 @@ mod tests {
             offset: 0,
         };
         DecodedAsset {
+            diagnostics: Vec::new(),
             functions: vec![],
             events: vec![Event {
                 name: "Test".into(),

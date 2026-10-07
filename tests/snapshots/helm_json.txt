@@ -246,17 +246,8 @@
         {
           "name": "PropertyGuids",
           "value": {
-            "entries": [
-              {
-                "key": "WinchConstraintInstance",
-                "value": {
-                  "fields": [],
-                  "type": ""
-                }
-              }
-            ],
-            "key_type": "NameProperty",
-            "value_type": "StructProperty"
+            "size": 32,
+            "unknown_type": "MapProperty"
           }
         },
         {
