@@ -46,7 +46,7 @@ bp-inspect MyBlueprint.uasset --json
 bp-inspect --diff Old_BP.uasset New_BP.uasset
 ```
 
-Directories are scanned recursively without following directory symlinks. Filtering is case-insensitive and matches component, variable, and function names as well as function bodies. Multiple files produce a JSON array, while a single file produces an object. Failed files are reported on stderr. A batch keeps successful results but returns exit code 2 if any file fails.
+Directories are scanned recursively without following directory symlinks. Filtering is case-insensitive and matches component, variable, and function names as well as function bodies. Multiple files produce a JSON array, while a single file produces an object. Failed files and recoverable parse or decode failures are reported on stderr. Partial results are retained, and JSON includes a `diagnostics` list when failures occurred. Incomplete graph pin arrays are reported and excluded from inference. A batch keeps available results but returns exit code 2 if any file fails or reports diagnostics.
 
 Use `--dump` for the full import, export, and property output, `--debug` for raw table diagnostics, and `--help` for all options. `bp-inspect --update` installs the latest release, or use `--update v1.0.0` for a specific version.
 
@@ -105,11 +105,11 @@ Illustrative function with a ForEach loop, nested branch, and switch cases
     }
 ```
 
-The decoder also recognises counted and while loops, loop breaks, Sequence pins, DoOnce and FlipFlop patterns, and continuations after latent actions such as Delay. Recovery depends on the compiled bytecode pattern.
+The decoder also recognises counted and while loops, loop breaks, Sequence pins, DoOnce and FlipFlop patterns, and continuations after latent actions such as Delay. Recovery depends on the compiled bytecode pattern. Shared continuations stay under the branches that reach them, and nested loop stop conditions remain explicit. Temporary assignments and condition recomputations are retained when simplifying them could change evaluation order.
 
 ### Comparing Blueprints
 
-`--diff` compares summaries in the supplied order. Exit code 0 means identical, 1 means differences, and 2 means an error. Errors are written to stderr. Use `--context <N>` to change the number of context lines, or `--filter` to narrow the comparison.
+`--diff` compares summaries in the supplied order. Exit code 0 means identical, 1 means differences, and 2 means an error or incomplete parse/decode result. Errors are written to stderr. Use `--context <N>` to change the number of context lines, or `--filter` to narrow the comparison.
 
 ```sh
 bp-inspect --diff Old_Enemy_BP.uasset New_Enemy_BP.uasset
@@ -160,19 +160,7 @@ An optional [agent skill](skill/README.md) helps coding agents inspect, compare,
 - Animation and Widget Blueprints have partial support for event graphs and functions. Animation state machines and widget hierarchies are not displayed.
 - Cooked assets split across `.uasset` and `.uexp`, and UE5 IoStore files, are not supported.
 
-Pseudocode includes structured control flow and Blueprint comments. DoOnce and FlipFlop names are inferred from their bodies and may differ from editor node titles.
-
-Expression literals retain floating-point source bits. Pseudocode uses enough digits to round-trip each numeric literal.
-
-The parser retains the asset version and name table for decoding. Recoverable failures preserve available output, include JSON diagnostics and return exit code 2. Summary filtering operates on decoded items, and batch JSON aggregates structured results.
-
-Property output preserves numeric precision and complete parsed collection contents. Opaque values retain `payload_sha256`, so diffs expose changes even when their type and size remain the same.
-
-Temporary assignments and loop-condition recomputations remain when moving or removing them could change evaluation order. Calls are not shared without proof that their results remain valid.
-
-Control-flow reconstruction preserves branch continuations, nested loop exit conditions and Sequence pin boundaries. Synthetic trace tests cover zero-iteration loops and completion order.
-
-Shared DoOnce gates keep the same identity across events and latent continuations. Independent gates remain distinct, and reset operations retain their original guarded order. Synthetic tests exercise repeated invocations and resets.
+Pseudocode includes structured control flow and Blueprint comments. Numeric literals and property defaults retain their original precision. Summaries include parsed array, map and struct contents, so diffs show changes within collections. Unsupported property payloads are marked as unknown and include `payload_sha256`, so equal-size opaque changes remain visible in diffs. DoOnce and FlipFlop names are inferred from their bodies and may differ from editor node titles. Independent DoOnce gates retain distinct identifiers, and reset sites use the same identifier as their gate. Imported output parameters are marked when stored graph pins establish an unambiguous signature. Comments with unresolved call placement remain visible at the function header with an explicit marker.
 
 ## Development
 
@@ -185,7 +173,9 @@ python tests/installers.py
 cargo run --locked -- samples/ue_4.27/Helm_BP.uasset
 ```
 
-Tests use the committed assets in `samples/`. See [test snapshots](tests/snapshots/README.md) for updating expected output after intentional changes. Private assets stay ignored and are not required to build or test. Installer tests use local mock downloads and temporary installation directories.
+Rust integrations call `decode_asset(&parsed)` after `parse_asset`. The parsed asset retains its version and name table, and both parsed and decoded assets expose diagnostics. Expression literals use `LiteralValue`, with exact floating-point bits retained in the serialised expression tree. CLI JSON exposes pseudocode as strings.
+
+Tests use the committed assets in `samples/`. See [test snapshots](tests/snapshots/README.md) for updating expected output after intentional changes. Synthetic bytecode and graph tests compare execution traces for branch continuations, nested loop exits, and gate state across repeated calls and resets. Private assets stay ignored and are not required to build or test. Installer tests use local mock downloads and temporary installation directories.
 
 Open a pull request for changes, or an issue for bugs and sample assets that fail to parse.
 

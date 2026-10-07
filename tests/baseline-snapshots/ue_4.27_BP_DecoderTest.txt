@@ -29,10 +29,10 @@ Call graph:
 
 Functions:
   // Called by: OnLeftAxis, OnRightAxis
-  Attempt(bIsLeft: bool) [Public|BlueprintPure]
+  Attempt(bIsLeft: bool) [Public|BlueprintEvent]
     PrintString(self, BoolToString(bIsLeft), true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
-  Cast_SuccessFail() [Public|BlueprintPure]
+  Cast_SuccessFail() [Public|BlueprintEvent]
     // "A cast with both the Success and Failed pins wired"
     if (Cast<StaticMeshActor>(self.ActorRef) as bool) {
         PrintString(self, "Mesh", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
@@ -40,11 +40,11 @@ Functions:
         PrintString(self, "Not-mesh", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
     }
 
-  If_EmptyArms() [Public|BlueprintPure]
+  If_EmptyArms() [Public|BlueprintEvent]
     if (self.bGateA) {
     }
 
-  If_NestedInElse() [Public|BlueprintPure]
+  If_NestedInElse() [Public|BlueprintEvent]
     // "A branch whose else holds a second branch"
     if (self.bGateA) {
         PrintString(self, "Y", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
@@ -56,7 +56,7 @@ Functions:
         }
     }
 
-  If_ThenElse() [Public|BlueprintPure]
+  If_ThenElse() [Public|BlueprintEvent]
     // "A branch with both pins wired"
     if (self.bGateA) {
         PrintString(self, "Y", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
@@ -64,12 +64,12 @@ Functions:
         PrintString(self, "N", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
     }
 
-  If_ThenOnly() [Public|BlueprintPure]
+  If_ThenOnly() [Public|BlueprintEvent]
     if (self.bGateA) {
         PrintString(self, "Yes", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
     }
 
-  IsValid_InSequence() [Public|BlueprintPure]
+  IsValid_InSequence() [Public|BlueprintEvent]
     // "An IsValid wired as the middle pin of a Sequence, with prints before and after"
     // Sequence [0]:
     PrintString(self, "A", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
@@ -82,7 +82,7 @@ Functions:
     // Sequence [2]:
     PrintString(self, "C", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
-  IsValid_Standalone() [Public|BlueprintPure]
+  IsValid_Standalone() [Public|BlueprintEvent]
     // "A standalone IsValid with valid and not-valid branches"
     if (IsValid(self.ActorRef)) {
         PrintString(self, "Valid", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
@@ -90,26 +90,26 @@ Functions:
         PrintString(self, "Invalid", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
     }
 
-  Linear_ThreeCalls() [Public|BlueprintPure]
+  Linear_ThreeCalls() [Public|BlueprintEvent]
     // "Three calls in a row"
     PrintString(self, "A", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
     PrintString(self, "B", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
     PrintString(self, "C", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
-  Loop_ForEachInt() [Public|BlueprintPure]
+  Loop_ForEachInt() [Public|BlueprintEvent]
     // "A ForEach over an int array"
     for (item in self.IntArray) {
         PrintString(self, IntToString(item), true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
     }
 
-  Loop_ForEachItemName() [Public|BlueprintPure]
+  Loop_ForEachItemName() [Public|HasDefaults|BlueprintEvent]
     // "A ForEach whose item name comes from the array name (GrabbedActors)"
     for (GrabbedActor in GrabbedActors) {
         PrintString(self, GetDisplayName(GrabbedActor), true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000),
             2.0000)
     }
 
-  Loop_ForEachNested() [Public|BlueprintPure]
+  Loop_ForEachNested() [Public|BlueprintEvent]
     // "A ForEach nested inside another ForEach"
     for (OverlappingActor in self.OverlappingActors) {
         for (item in self.IntArray) {
@@ -117,7 +117,7 @@ Functions:
         }
     }
 
-  Loop_ForEachWithBreak() [Public|BlueprintPure]
+  Loop_ForEachWithBreak() [Public|BlueprintEvent]
     // "A ForEach that breaks out of the body partway through"
     Temp_bool_True_if_break_was_hit_Variable = false
     for (item in self.IntArray) {
@@ -131,7 +131,7 @@ Functions:
         }
     }
 
-  Loop_ForSimple() [Public|BlueprintPure]
+  Loop_ForSimple() [Public|BlueprintEvent]
     // "An index for-loop with no break, then a call afterwards"
     Temp_int_Variable = 0
     $LessEqual_IntInt = (Temp_int_Variable <= 3)
@@ -144,7 +144,7 @@ Functions:
     // Completed:
     PrintString(self, "Done", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
-  Loop_ForWithBreak() [Public|BlueprintPure]
+  Loop_ForWithBreak() [Public|BlueprintEvent]
     // "A for-loop that breaks out partway through the body"
     for (Temp_int_Variable = 0 to 9) {
         if (Temp_int_Variable == 5) {
@@ -157,7 +157,7 @@ Functions:
     // Completed:
     PrintString(self, "Done", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
-  Loop_While() [Public|BlueprintPure]
+  Loop_While() [Public|BlueprintEvent]
     // "A while-loop driven by a counter"
     $Less_IntInt = (LoopCounter < 5)
     while ($Less_IntInt) {
@@ -168,10 +168,10 @@ Functions:
     PrintString(self, "Done", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
   // Called by: OnLeftAxis, OnLeftReleased, OnRightAxis, OnRightReleased
-  Release(bIsLeft: bool) [Public|BlueprintPure]
+  Release(bIsLeft: bool) [Public|BlueprintEvent]
     PrintString(self, BoolToString(bIsLeft), true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
-  Seq_FivePin() [Public|BlueprintPure]
+  Seq_FivePin() [Public|BlueprintEvent]
     // "A five-pin Sequence"
     // Sequence [0]:
     PrintString(self, "A", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
@@ -184,14 +184,14 @@ Functions:
     // Sequence [4]:
     PrintString(self, "E", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
-  Seq_TwoPin() [Public|BlueprintPure]
+  Seq_TwoPin() [Public|BlueprintEvent]
     // "A two-pin Sequence"
     // Sequence [0]:
     PrintString(self, "A", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
     // Sequence [1]:
     PrintString(self, "B", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
-  Seq_WithEmptyPin() [Public|BlueprintPure]
+  Seq_WithEmptyPin() [Public|BlueprintEvent]
     // "A four-pin Sequence with the third pin left disconnected"
     // Sequence [0]:
     PrintString(self, "A", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
@@ -201,7 +201,7 @@ Functions:
     // Sequence [3]:
     PrintString(self, "D", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
 
-  Switch_OnByteEnum() [Public|BlueprintPure]
+  Switch_OnByteEnum() [Public|BlueprintEvent]
     // "A switch on a custom Enum"
     Colour = 1
     switch (Colour) {
@@ -213,7 +213,7 @@ Functions:
             PrintString(self, "Blue", true, true, MakeLinearColor(0.0000, 0.6600, 1.0000, 1.0000), 2.0000)
     }
 
-  Switch_OnInt() [Public|BlueprintPure]
+  Switch_OnInt() [Public|BlueprintEvent]
     // "A switch on an int, four cases and a default"
     Current = 2
     switch (Current) {

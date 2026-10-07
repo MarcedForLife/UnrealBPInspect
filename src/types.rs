@@ -61,9 +61,8 @@ pub struct ExportHeader {
 ///   so it fails to compile until the new variant is handled.
 /// - `output_json::value_to_json` (the `--json` renderer) matches exhaustively,
 ///   so it fails to compile until the new variant is handled.
-/// - `prop_query::prop_value_short` (the inline summary renderer) has a
-///   wildcard fallback, so a new variant compiles but renders as `...` until
-///   given its own arm.
+/// - `prop_query::prop_value_short` (the inline summary renderer) also matches
+///   exhaustively and preserves nested values for summary comparisons.
 #[derive(Debug, Clone)]
 pub enum PropValue {
     Bool(bool),
@@ -100,7 +99,7 @@ pub enum PropValue {
     Unknown {
         type_name: String,
         size: i32,
-        /// SHA-256 of exactly the opaque serialized payload bytes.
+        /// Lowercase SHA-256 of the exact opaque payload, excluding its tag.
         payload_sha256: String,
     },
 }
@@ -179,12 +178,12 @@ pub struct ParamInfo {
     pub flags: u64,
 }
 
-/// Parameter list and return type for a single function export.
+/// Parameter list and return type for a local or imported function.
 ///
 /// Used by the bytecode decoder to look up callee signatures so it can
 /// wrap call-site arguments at OUT-parameter positions in `Expr::Out`.
-/// Imported (cross-asset) functions are not represented here, the lookup
-/// falls back gracefully for unknown names.
+/// Imported directions can be recovered from agreeing editor call-node pins.
+/// Their return type is not inferred from those pins.
 #[derive(Debug, Clone, Default)]
 pub struct FunctionSignature {
     pub params: Vec<ParamInfo>,
@@ -211,7 +210,9 @@ pub struct ParsedAsset {
     /// Function name to parameter signature, populated for every Function
     /// export with at least one declared FField child. Keyed by the export's
     /// `object_name`. Multiple exports sharing a name would collide; in
-    /// practice Blueprint functions have unique names within an asset.
+    /// practice Blueprint functions have unique names within an asset. Imported
+    /// signatures recovered from graph pins use fully qualified import paths,
+    /// with an unqualified alias when only one imported owner is known.
     pub function_signatures: BTreeMap<String, FunctionSignature>,
     /// Raw bytecode bytes captured during the prologue walk, keyed by
     /// 1-based export index. Value is `(disk_bytes, mem_size)` where

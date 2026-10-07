@@ -358,3 +358,121 @@ fn cli_reports_unterminated_string_bytecode_without_discarding_the_asset() {
         }
     }
 }
+
+fn asset_with_incomplete_pin_array() -> (Vec<u8>, usize, usize) {
+    let mut bytes = common::load_fixture("ue_4.27/BP_DecoderTest.uasset");
+    let parsed = parse_asset(&bytes, false).unwrap();
+    let (export_index, (header, _), pins) = parsed
+        .exports
+        .iter()
+        .enumerate()
+        .find_map(|(index, export)| {
+            let pins = parsed.pin_data.get(&(index + 1))?;
+            (pins.pins.len() >= 2 && !export.1.is_empty()).then_some((index + 1, export, pins))
+        })
+        .unwrap();
+    let export_start = header.serial_offset as usize;
+    let export_end = export_start + header.serial_size as usize;
+    let second_id = pins.pins[1].pin_id;
+    let mut wrapper = Vec::new();
+    wrapper.extend(0i32.to_le_bytes());
+    wrapper.extend((export_index as i32).to_le_bytes());
+    wrapper.extend(second_id);
+    wrapper.extend((export_index as i32).to_le_bytes());
+    wrapper.extend(second_id);
+    let second_offset = export_start
+        + bytes[export_start..export_end]
+            .windows(wrapper.len())
+            .position(|window| window == wrapper)
+            .unwrap();
+    // The first record remains valid, but the second payload no longer
+    // agrees with its owning wrapper. Publishing one pin would be partial.
+    bytes[second_offset + 28] ^= 0x80;
+    (bytes, export_index, second_offset)
+}
+
+#[test]
+fn incomplete_pin_arrays_are_diagnostics_and_never_reach_inference() {
+    let (bytes, export_index, second_offset) = asset_with_incomplete_pin_array();
+    let parsed = parse_asset(&bytes, false).unwrap();
+    assert!(!parsed.pin_data.contains_key(&export_index));
+    assert!(!parsed.exports[export_index - 1].1.is_empty());
+    assert!(!parsed.pin_data.is_empty());
+    let diagnostic = parsed
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.export_index == Some(export_index))
+        .unwrap();
+    assert!(
+        diagnostic.reason.contains("pin 2 of"),
+        "{}",
+        diagnostic.reason
+    );
+    assert!(
+        diagnostic
+            .reason
+            .contains(&format!("file offset {second_offset}")),
+        "{}",
+        diagnostic.reason
+    );
+    assert!(diagnostic.reason.contains("pin wrapper does not match"));
+    let decoded = decode_asset(&parsed);
+    assert!(decoded.diagnostics.contains(diagnostic));
+    assert!(!decoded.functions.is_empty());
+}
+
+#[test]
+fn cli_reports_incomplete_pin_metadata_in_all_modes_diff_and_batch() {
+    let (bytes, export_index, _) = asset_with_incomplete_pin_array();
+    let directory = tempfile::tempdir().unwrap();
+    let broken = directory.path().join("broken-pins.uasset");
+    std::fs::write(&broken, bytes).unwrap();
+    let complete = common::samples_dir().join("ue_4.27/BP_DecoderTest.uasset");
+    for mode in [None, Some("--dump"), Some("--json")] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_bp-inspect"));
+        command.arg(&broken);
+        if let Some(mode) = mode {
+            command.arg(mode);
+        }
+        let output = command.output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{mode:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("pin wrapper does not match"));
+        if mode == Some("--json") {
+            let asset: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(asset["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|diagnostic| diagnostic["export_index"] == export_index));
+        }
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_bp-inspect"))
+        .args(["--diff", "--filter", "cannot-match-anything"])
+        .arg(&complete)
+        .arg(&broken)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("pin wrapper does not match"));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_bp-inspect"))
+        .arg("--json")
+        .arg(&complete)
+        .arg(&broken)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let assets: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(assets.as_array().unwrap().len(), 2);
+    assert!(assets
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|asset| asset["diagnostics"].is_array()));
+}

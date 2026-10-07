@@ -636,20 +636,9 @@ fn opcode_mnemonic(opcode: u8) -> String {
     name.to_string()
 }
 
-/// (version directory, event-name substrings to match in `disk_entries`).
-/// Events are matched by `contains` so mangled headers (Input axes,
-/// component-signature events) still resolve. The same target list runs
-/// against every version; missing fixtures no-op.
+/// Event names in the committed synthetic control-flow fixture.
 fn rc_probe_targets() -> Vec<&'static str> {
-    vec![
-        "OnActorReleased",
-        "AttemptGrip",
-        "Interact",
-        "GripOutOfRangeActor",
-        "ReleaseGrip",
-        "GripLeftAxis",
-        "ComponentEndOverlapSignature",
-    ]
+    vec!["OnLeftAxis", "OnRightAxis", "Conv_", "Seq_", "Loop_"]
 }
 
 /// One conditional block's reaching-condition analysis, rendered into the
@@ -751,7 +740,7 @@ fn reaching_condition_probe() {
     let mut jin_mapping_note: Option<String> = None;
 
     for baseline_name in baseline_names() {
-        if !baseline_name.contains("VRPlayer") {
+        if !baseline_name.contains("BP_DecoderTest") {
             continue;
         }
         let Some(sample_path) = sample_path_for_baseline(&baseline_name) else {
@@ -778,11 +767,7 @@ fn reaching_condition_probe() {
             .unwrap_or("?");
         report.push_str(&format!("\n## {} ({})\n\n", baseline_name, version));
 
-        // Record which targets resolved to a ubergraph event and which did
-        // not. The named function-graph events (OnActorReleased, AttemptGrip,
-        // GripOutOfRangeActor, ReleaseGrip) are separate Function exports, not
-        // ubergraph entries, so `probe_ubergraph_partition` does not surface
-        // them; this section documents that gap honestly.
+        // Function graphs are reported separately from ubergraph entries.
         let mut matched: Vec<&str> = Vec::new();
         for target in &targets {
             if probe
@@ -851,8 +836,7 @@ fn reaching_condition_probe() {
     final_report.push_str(
         "Read-only diagnostic. For each genuine conditional block\n\
          (`EX_JUMP_IF_NOT` or `EX_POP_FLOW_IF_NOT`, excluding DoOnce macro\n\
-         gates) in a handful of gnarly VRPlayer events and the dropped-else\n\
-         target Functions, this\n\
+         gates) in synthetic fixture events and functions, this\n\
          lists the reaching condition of every block reachable from it and the\n\
          bucket that condition implies.\n\n\
          Legend:\n\
@@ -1003,12 +987,8 @@ fn build_function_cfg_and_region_tree(
     (cfg, region_tree, ipostdom, fn_graph)
 }
 
-/// Append the `## FUNCTIONS` section for one fixture: the four dropped-else
-/// target functions (matched by name substring) rendered exactly as events
-/// are, plus a one-line note for any other `.Function` that holds a genuine
-/// conditional. `.Function` exports never surface through
-/// `probe_ubergraph_partition` (it is ubergraph-only), so this builds each
-/// function's CFG directly from its disk bytecode.
+/// Render synthetic loop and sequence functions, plus a summary of other
+/// functions with conditional control flow.
 fn render_function_section(
     report: &mut String,
     asset: &crate::types::ParsedAsset,
@@ -1023,12 +1003,7 @@ fn render_function_section(
         .map(|(hdr, _)| hdr.object_name.clone())
         .collect();
 
-    let function_targets = [
-        "OnActorReleased",
-        "AttemptGrip",
-        "GripOutOfRangeActor",
-        "ReleaseGrip",
-    ];
+    let function_targets = ["Loop_", "Seq_"];
 
     report.push_str("### FUNCTIONS\n\n");
 
@@ -1157,7 +1132,7 @@ fn describe_jin_mapping(
 // regression guard: it fails on any disagreement, machine-checking the
 // "bytecode determines semantics" contract for conditional structure.
 // Where `reaching_condition_probe` dumps RC for a handful of hand-picked
-// VRPlayer events, this widens to every event AND standalone function in
+// synthetic events, this widens to every event AND standalone function in
 // every sample asset present on disk and cross-checks the region-scoped
 // RC bucket of each block against the structural arm assignment the
 // decoder actually emits.
@@ -1172,7 +1147,7 @@ fn describe_jin_mapping(
 //
 // The RC signal is `classify_bucket_in_context(region.entry, RC(block),
 // RC(region.entry))`: region-scoped so an ancestor predicate fixed inside
-// the region (the benign MouseY whole-function artifact) collapses rather
+// the region collapses rather
 // than leaking.
 //
 // A disagreement is a block whose RC bucket and structural bucket are both

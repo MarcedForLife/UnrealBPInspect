@@ -59,7 +59,7 @@ Call graph:
   UpdateAudio → GetSteeringAngle, GetWheelVelocity
 
 Functions:
-  ClampWheelRotation(CurrentAngle: float) [Public|BlueprintPure]
+  ClampWheelRotation(CurrentAngle: float) [Public|HasDefaults|BlueprintEvent]
     $Multiply_FloatFloat = (self.MaxRotation * -1.0000)
     $Greater_FloatFloat = (CurrentAngle > self.MaxRotation)
     $Less_FloatFloat = (CurrentAngle < $Multiply_FloatFloat)
@@ -79,7 +79,7 @@ Functions:
     }
 
   // Called by: UpdateAudio
-  GetSteeringAngle(out SteeringAngle: float) [Public|HasOutParms|BlueprintPure|Const]
+  GetSteeringAngle(out SteeringAngle: float) [Public|HasOutParms|BlueprintEvent|BlueprintPure]
     // "Ugh, bit of a hack but I'm"
     // "struggling to get the constraint"
     // "to lock perfectly at max rotation"
@@ -89,7 +89,7 @@ Functions:
     out SteeringAngle = $FClamp
 
   // Called by: UpdateAudio
-  GetWheelVelocity(out Velocity: float) [Public|HasOutParms|BlueprintPure|Const]
+  GetWheelVelocity(out Velocity: float) [Public|HasOutParms|HasDefaults|BlueprintEvent|BlueprintPure]
     $GetComponentToWorld = self.Stand.GetComponentToWorld()
     $GetPhysicsAngularVelocityInDegrees = self.Wheel.GetPhysicsAngularVelocityInDegrees('None')
     BreakVector(InverseTransformDirection($GetComponentToWorld, $GetPhysicsAngularVelocityInDegrees), $X, $Y, $Z)
@@ -97,7 +97,7 @@ Functions:
     out Velocity = $Abs
 
   // Called by: ReceiveTick
-  UpdateAudio() [Public|BlueprintPure]
+  UpdateAudio() [Public|BlueprintEvent]
     // Sequence [0]:
     GetWheelVelocity(out $Velocity)
     $Divide_FloatFloat_1 = ($Velocity / 150.0000)
@@ -142,7 +142,12 @@ Functions:
     }
 
   // Called by: ReceiveTick
-  UpdateWheelRotation() [Public|BlueprintPure]
+  UpdateWheelRotation() [Public|BlueprintEvent]
+    // Graph comment (location unresolved)
+    // "Enabled/Disable the twist limit if closer/further than 180 degrees to the max rotation limit"
+    // Graph comment (location unresolved)
+    // "Make sure we set the twist limit if we are below"
+    // "180 degrees until the max rotation"
     $GetCurrentTwist = self.VREPhysicsConstraint.GetCurrentTwist()
     // "Capture the change in rotation since last update"
     RotationDifference = ($GetCurrentTwist - self.PreviousRotation)
@@ -191,10 +196,6 @@ Functions:
         $Greater_FloatFloat_1 = (self.TotalRotation > 0.0000)
         $TwistLimitAngle = FClamp(SelectFloat($Subtract_FloatFloat, $Add_FloatFloat, $Greater_FloatFloat_1), 0.0000,
             170.0000)
-        // "Enabled/Disable the twist limit if closer/further than 180 degrees to the max rotation
-        //  limit"
-        // "Make sure we set the twist limit if we are below"
-        // "180 degrees until the max rotation"
         self.VREPhysicsConstraint.SetAngularTwistLimit(1, $TwistLimitAngle)
     } else {
         self.VREPhysicsConstraint.SetAngularTwistLimit(0, 0.0000)

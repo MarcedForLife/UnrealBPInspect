@@ -30,6 +30,7 @@ pub(crate) fn decode_expr(pos: &mut usize, ctx: &DecodeCtx) -> Expr {
         ue5: ctx.ue5,
         bytecode: ctx.bytecode,
         name_table: ctx.name_table,
+        function_signatures: ctx.function_signatures,
     };
     walk_opcode(&walk_ctx, pos, &mut visitor)
 }
@@ -39,6 +40,8 @@ pub(crate) fn decode_expr(pos: &mut usize, ctx: &DecodeCtx) -> Expr {
 /// import / export tables so it can resolve `FPackageIndex` operands
 /// to display names without re-walking the asset.
 struct ExprVisitor<'a> {
+    function_signatures:
+        Option<&'a std::collections::BTreeMap<String, crate::types::FunctionSignature>>,
     imports: &'a [ImportEntry],
     export_names: &'a [String],
     ue5: i32,
@@ -355,14 +358,30 @@ impl OpcodeVisitor for ExprVisitor<'_> {
 
     fn on_virtual_function(
         &mut self,
-        _opcode: u8,
+        opcode: u8,
         function_name: String,
         args: Vec<Expr>,
         _start_offset: usize,
     ) -> Expr {
+        let signature = self.function_signatures.and_then(|signatures| {
+            let signature = signatures.get(&function_name)?;
+            if opcode != EX_LOCAL_VIRTUAL_FUNCTION
+                && signatures.iter().any(|(key, candidate)| {
+                    key.rsplit_once('.')
+                        .is_some_and(|(_, name)| name == function_name)
+                        && (candidate.params.len() != signature.params.len()
+                            || candidate.params.iter().zip(&signature.params).any(
+                                |(candidate, local)| (candidate.flags ^ local.flags) & 0x100 != 0,
+                            ))
+                })
+            {
+                return None;
+            }
+            Some(signature)
+        });
         Expr::Call {
             name: self.normalise_call_name(&function_name),
-            args,
+            args: wrap_out_args(args, signature),
         }
     }
 
@@ -374,9 +393,15 @@ impl OpcodeVisitor for ExprVisitor<'_> {
         _start_offset: usize,
     ) -> Expr {
         let raw_name = self.obj_name(callee_obj_idx);
+        let signature_key =
+            crate::resolve::resolve_index(self.imports, self.export_names, callee_obj_idx);
         Expr::Call {
             name: self.normalise_call_name(&raw_name),
-            args,
+            args: wrap_out_args(
+                args,
+                self.function_signatures
+                    .and_then(|signatures| signatures.get(&signature_key)),
+            ),
         }
     }
 
@@ -668,6 +693,32 @@ impl OpcodeVisitor for ExprVisitor<'_> {
             default: Box::new(default),
         }
     }
+}
+
+/// Parameter position is trustworthy only when the complete arity matches.
+/// This also excludes split editor pins and variadic call-node expansions.
+pub(super) fn wrap_out_args(
+    args: Vec<Expr>,
+    signature: Option<&crate::types::FunctionSignature>,
+) -> Vec<Expr> {
+    let Some(signature) = signature.filter(|signature| signature.params.len() == args.len()) else {
+        return args;
+    };
+    args.into_iter()
+        .zip(&signature.params)
+        .map(|(argument, parameter)| {
+            if parameter.flags & 0x100 != 0
+                && matches!(
+                    argument,
+                    Expr::Var(_) | Expr::FieldAccess { .. } | Expr::Index { .. }
+                )
+            {
+                Expr::Out(Box::new(argument))
+            } else {
+                argument
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

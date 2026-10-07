@@ -4,7 +4,7 @@
 //! 3. Per-export tagged properties and bytecode
 
 use anyhow::{ensure, Context, Result};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::binary::*;
@@ -328,7 +328,7 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
             total_links
         );
     }
-    Ok(ParsedAsset {
+    let mut asset = ParsedAsset {
         version: ver,
         name_table,
         diagnostics: parsed_exports.diagnostics,
@@ -337,7 +337,134 @@ pub fn parse_asset(data: &[u8], debug: bool) -> Result<ParsedAsset> {
         pin_data: parsed_exports.pin_data,
         function_signatures: parsed_exports.function_signatures,
         bytecode_by_export: parsed_exports.bytecode_by_export,
-    })
+    };
+    add_imported_function_signatures(&mut asset);
+    Ok(asset)
+}
+
+/// Recover imported parameter directions only when all stored call nodes agree.
+/// Qualified import paths keep unrelated functions with the same name separate.
+fn add_imported_function_signatures(asset: &mut ParsedAsset) {
+    use crate::prop_query::{find_prop, find_prop_str};
+    use crate::resolve::resolve_import_path;
+
+    let mut candidates: BTreeMap<String, Vec<(String, String, u64)>> = BTreeMap::new();
+    let mut ambiguous = BTreeSet::new();
+    for (&node_index, pin_data) in &asset.pin_data {
+        let Some((header, properties)) = asset.exports.get(node_index.saturating_sub(1)) else {
+            continue;
+        };
+        if header.class_index >= 0
+            || asset
+                .imports
+                .get((-header.class_index - 1) as usize)
+                .is_none_or(|import| import.object_name != "K2Node_CallFunction")
+        {
+            continue;
+        }
+        let Some(Property {
+            value: PropValue::Struct { fields, .. },
+            ..
+        }) = find_prop(properties, "FunctionReference")
+        else {
+            continue;
+        };
+        let Some(member_name) = find_prop_str(fields, "MemberName") else {
+            continue;
+        };
+        let Some(Property {
+            value: PropValue::Object(parent),
+            ..
+        }) = find_prop(fields, "MemberParent")
+        else {
+            continue;
+        };
+        if *parent >= 0 {
+            continue;
+        }
+        let key = format!(
+            "{}.{}",
+            resolve_import_path(&asset.imports, *parent),
+            member_name
+        );
+        let params: Vec<_> = pin_data
+            .pins
+            .iter()
+            .filter(|pin| {
+                pin.pin_type != PIN_TYPE_EXEC && pin.name != "self" && pin.name != "ReturnValue"
+            })
+            .map(|pin| {
+                (
+                    pin.name.clone(),
+                    pin.pin_type.clone(),
+                    if pin.is_data_output() { 0x180 } else { 0x80 },
+                )
+            })
+            .collect();
+        if let Some(previous) = candidates.get(&key) {
+            if previous != &params {
+                ambiguous.insert(key);
+            }
+        } else {
+            candidates.insert(key, params);
+        }
+    }
+    insert_imported_function_signatures(asset, candidates, ambiguous);
+}
+
+fn insert_imported_function_signatures(
+    asset: &mut ParsedAsset,
+    candidates: BTreeMap<String, Vec<(String, String, u64)>>,
+    ambiguous: BTreeSet<String>,
+) {
+    use crate::resolve::resolve_import_path;
+    let mut owners_by_name: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for key in candidates.keys() {
+        if let Some((_, name)) = key.rsplit_once('.') {
+            owners_by_name
+                .entry(name.into())
+                .or_default()
+                .insert(key.clone());
+        }
+    }
+    for (index, import) in asset.imports.iter().enumerate() {
+        if import.class_name == "Function" {
+            owners_by_name
+                .entry(import.object_name.clone())
+                .or_default()
+                .insert(resolve_import_path(&asset.imports, -(index as i32) - 1));
+        }
+    }
+    for (key, params) in candidates {
+        if ambiguous.contains(&key) {
+            continue;
+        }
+        let signature = FunctionSignature {
+            params: params
+                .into_iter()
+                .map(|(name, type_name, flags)| ParamInfo {
+                    name,
+                    type_name,
+                    flags,
+                })
+                .collect(),
+            return_type: None,
+        };
+        // Virtual calls carry only an FName. Infer their direction only
+        // when this asset identifies a single owner for that name.
+        if let Some((_, name)) = key.rsplit_once('.') {
+            if owners_by_name
+                .get(name)
+                .is_some_and(|owners| owners.len() == 1)
+            {
+                asset
+                    .function_signatures
+                    .entry(name.into())
+                    .or_insert_with(|| signature.clone());
+            }
+        }
+        asset.function_signatures.insert(key, signature);
+    }
 }
 
 /// Per-export parse products collected while walking the serialized export
@@ -397,11 +524,10 @@ fn parse_one_export(
         let short = short_class(&class_name);
         let mut pin_data = None;
         if short.starts_with(K2NODE_PREFIX) || short == "EdGraphNode_Comment" {
-            // K2Node subclasses serialize additional data between the
-            // tagged property stream and the pin array. Scan forward
-            // from the current position looking for the pin data
-            // signature: deprecated_count(0) + reasonable pin_count.
-            let (pins, new_hint) = scan_for_pins(reader, pctx.name_table, end, ver, *pin_scan_hint);
+            // Class-specific data may precede the array. Repeated owning-pin
+            // wrappers identify candidates, and only complete arrays survive.
+            let (pins, new_hint) =
+                scan_for_pins(reader, pctx.name_table, end, ver, *pin_scan_hint)?;
             *pin_scan_hint = new_hint;
             if let Some(pins) = pins {
                 pin_data = Some(NodePinData { pins });
@@ -796,6 +922,127 @@ fn debug_bytecode_hex(bytecode_data: &[u8], name: &str, bytecode_size: i32, stor
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    fn imported_call_asset() -> ParsedAsset {
+        let imports = [
+            ("Class", "K2Node_CallFunction", 0),
+            ("Class", "Sensor", 0),
+            ("Function", "ReadValue", -2),
+            ("Class", "OtherSensor", 0),
+            ("Function", "ReadValue", -4),
+        ]
+        .into_iter()
+        .map(|(class_name, object_name, outer_index)| ImportEntry {
+            class_package: "Synthetic".into(),
+            class_name: class_name.into(),
+            object_name: object_name.into(),
+            outer_index,
+        })
+        .collect();
+        let mut exports = Vec::new();
+        let mut pin_data = HashMap::new();
+        for (node_index, parent, direction) in
+            [(1, -2, PIN_DIRECTION_OUTPUT), (2, -4, PIN_DIRECTION_INPUT)]
+        {
+            exports.push((
+                ExportHeader {
+                    class_index: -1,
+                    super_index: 0,
+                    outer_index: 0,
+                    object_name: format!("Call_{node_index}"),
+                    serial_offset: 0,
+                    serial_size: 0,
+                },
+                vec![Property {
+                    name: "FunctionReference".into(),
+                    value: PropValue::Struct {
+                        struct_type: "MemberReference".into(),
+                        fields: vec![
+                            Property {
+                                name: "MemberParent".into(),
+                                value: PropValue::Object(parent),
+                            },
+                            Property {
+                                name: "MemberName".into(),
+                                value: PropValue::Name("ReadValue".into()),
+                            },
+                        ],
+                    },
+                }],
+            ));
+            let pins = [
+                ("execute", PIN_TYPE_EXEC, PIN_DIRECTION_INPUT),
+                ("self", "object", PIN_DIRECTION_INPUT),
+                ("Value", "float", direction),
+                ("ReturnValue", "bool", PIN_DIRECTION_OUTPUT),
+            ]
+            .into_iter()
+            .map(|(name, pin_type, direction)| EdGraphPin {
+                name: name.into(),
+                pin_type: pin_type.into(),
+                direction,
+                pin_id: [0; 16],
+                linked_to: Vec::new(),
+            })
+            .collect();
+            pin_data.insert(node_index, NodePinData { pins });
+        }
+        ParsedAsset {
+            version: AssetVersion {
+                file_ver: 522,
+                file_ver_ue5: 0,
+            },
+            name_table: NameTable::from_names(Vec::new()),
+            diagnostics: Vec::new(),
+            imports,
+            exports,
+            pin_data,
+            function_signatures: BTreeMap::new(),
+            bytecode_by_export: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn imported_signatures_distinguish_owners_and_exclude_receiver_and_return() {
+        let mut asset = imported_call_asset();
+        add_imported_function_signatures(&mut asset);
+        let output = &asset.function_signatures["Sensor.ReadValue"];
+        let input = &asset.function_signatures["OtherSensor.ReadValue"];
+        assert_eq!(output.params.len(), 1);
+        assert_eq!(input.params.len(), 1);
+        assert_eq!(output.params[0].name, "Value");
+        assert_ne!(output.params[0].flags & 0x100, 0);
+        assert_eq!(input.params[0].flags & 0x100, 0);
+        assert!(!asset.function_signatures.contains_key("ReadValue"));
+    }
+
+    #[test]
+    fn virtual_imported_call_uses_single_graph_owner_without_function_import() {
+        let mut asset = imported_call_asset();
+        asset.imports.truncate(2);
+        asset.exports.truncate(1);
+        asset.pin_data.retain(|index, _| *index == 1);
+        add_imported_function_signatures(&mut asset);
+        assert_ne!(
+            asset.function_signatures["ReadValue"].params[0].flags & 0x100,
+            0
+        );
+        assert!(asset.function_signatures.contains_key("Sensor.ReadValue"));
+    }
+
+    #[test]
+    fn conflicting_editor_pin_layouts_do_not_infer_imported_signature() {
+        let mut asset = imported_call_asset();
+        asset.exports.push(asset.exports[0].clone());
+        let mut conflicting_pins = asset.pin_data[&1].clone();
+        conflicting_pins.pins[2].direction = PIN_DIRECTION_INPUT;
+        asset.pin_data.insert(3, conflicting_pins);
+        add_imported_function_signatures(&mut asset);
+        assert!(!asset.function_signatures.contains_key("Sensor.ReadValue"));
+        assert!(asset
+            .function_signatures
+            .contains_key("OtherSensor.ReadValue"));
+    }
 
     fn helm_fixture_path() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))

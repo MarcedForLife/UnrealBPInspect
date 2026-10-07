@@ -1120,7 +1120,7 @@
           "value": {
             "inner_type": "StrProperty",
             "items": [
-              "    self.WinchConstraintInstance.GetRotationAlpha($RotationAlpha)",
+              "    self.WinchConstraintInstance.GetRotationAlpha(out $RotationAlpha)",
               "    $Subtract_FloatFloat = (($RotationAlpha * 2.0000) - 1.0000)",
               "    out SteeringAngle = $Subtract_FloatFloat"
             ]
@@ -1128,7 +1128,7 @@
         },
         {
           "name": "FunctionFlags",
-          "value": "Public|HasOutParms|BlueprintPure|Const"
+          "value": "Public|HasOutParms|BlueprintCallable|BlueprintEvent|BlueprintPure"
         }
       ]
     },
@@ -1160,7 +1160,7 @@
         },
         {
           "name": "FunctionFlags",
-          "value": "Event|Public|BlueprintPure"
+          "value": "Event|Public|BlueprintCallable|BlueprintEvent"
         }
       ]
     },
@@ -2376,12 +2376,12 @@
   "functions": [
     {
       "bytecode": [
-        "    self.WinchConstraintInstance.GetRotationAlpha($RotationAlpha)",
+        "    self.WinchConstraintInstance.GetRotationAlpha(out $RotationAlpha)",
         "    $Subtract_FloatFloat = (($RotationAlpha * 2.0000) - 1.0000)",
         "    out SteeringAngle = $Subtract_FloatFloat"
       ],
       "export_index": 14,
-      "flags": "Public|HasOutParms|BlueprintPure|Const",
+      "flags": "Public|HasOutParms|BlueprintCallable|BlueprintEvent|BlueprintPure",
       "name": "GetSteeringAngle",
       "signature": "GetSteeringAngle(out SteeringAngle: float)"
     },
@@ -2393,7 +2393,7 @@
         "    }"
       ],
       "export_index": 15,
-      "flags": "Event|Public|BlueprintPure",
+      "flags": "Event|Public|BlueprintCallable|BlueprintEvent",
       "name": "UserConstructionScript",
       "signature": "UserConstructionScript()"
     }

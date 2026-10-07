@@ -170,12 +170,12 @@ Default values:
   bCanProxyPhysics = true
 
 Functions:
-  GetSteeringAngle(out SteeringAngle: float) [Public|HasOutParms|BlueprintPure|Const]
-    self.WinchConstraintInstance.GetRotationAlpha($RotationAlpha)
+  GetSteeringAngle(out SteeringAngle: float) [Public|HasOutParms|BlueprintEvent|BlueprintPure]
+    self.WinchConstraintInstance.GetRotationAlpha(out $RotationAlpha)
     $Subtract_FloatFloat = (($RotationAlpha * 2.0000) - 1.0000)
     out SteeringAngle = $Subtract_FloatFloat
 
-  UserConstructionScript() [Event|Public|BlueprintPure]
+  UserConstructionScript() [Event|Public|BlueprintEvent]
     $Cast_AsWinch_Constraint_BP = Cast<WinchConstraint_BP_C>(self.WheelConstraint.ChildActor)
     if ($Cast_AsWinch_Constraint_BP as bool) {
         self.WinchConstraintInstance = $Cast_AsWinch_Constraint_BP

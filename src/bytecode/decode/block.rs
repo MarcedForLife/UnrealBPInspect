@@ -346,16 +346,14 @@ pub(super) fn decode_assignment(pos: &mut usize, ctx: &DecodeCtx) -> Stmt {
 /// collapse for nested expressions; both share the predicate so the
 /// recognised-class set stays in one place.
 ///
-/// After canonicalisation, arguments at OUT-parameter positions of the
-/// callee wrap in `Expr::Out`. The lookup keys on the resolved callee
-/// name against `ctx.function_signatures`. Imported (cross-asset)
-/// callees aren't represented there and pass through unwrapped.
+/// Parameter directions are retained by the expression decoder before
+/// imported callee identities are shortened for display.
 pub(super) fn decode_call(pos: &mut usize, ctx: &DecodeCtx) -> Stmt {
     use crate::bytecode::transforms::lower_static_library_calls::is_static_library_class_literal;
 
     let offset = *pos;
     let expr = decode_expr(pos, ctx);
-    let stmt = match expr {
+    match expr {
         Expr::Call { name, args } => Stmt::Call {
             func: Expr::Var(name),
             args,
@@ -378,60 +376,6 @@ pub(super) fn decode_call(pos: &mut usize, ctx: &DecodeCtx) -> Stmt {
             args: vec![],
             offset,
         },
-    };
-    wrap_out_args(stmt, ctx)
-}
-
-/// Wrap call-site arguments at OUT-parameter positions in `Expr::Out`,
-/// using the signature recorded on `ParsedAsset` for the callee.
-///
-/// Returns the input unchanged when:
-/// - the statement is not a `Stmt::Call`,
-/// - the callee name resolves through more than a `FieldAccess` field
-///   or `Var` (no signature key),
-/// - `ctx.function_signatures` is absent (unit-test contexts),
-/// - the callee isn't in the signature map (imported / unknown),
-/// - the argument is already `Expr::Out` (avoid double-wrap).
-pub(super) fn wrap_out_args(stmt: Stmt, ctx: &DecodeCtx) -> Stmt {
-    const CPF_OUT_PARM: u64 = 0x100;
-    let signatures = match ctx.function_signatures {
-        Some(map) => map,
-        None => return stmt,
-    };
-    let Stmt::Call { func, args, offset } = stmt else {
-        return stmt;
-    };
-    let callee_name = match &func {
-        Expr::Var(name) => name.as_str(),
-        Expr::FieldAccess { field, .. } => field.as_str(),
-        _ => {
-            return Stmt::Call { func, args, offset };
-        }
-    };
-    let Some(signature) = signatures.get(callee_name) else {
-        return Stmt::Call { func, args, offset };
-    };
-    let wrapped: Vec<Expr> = args
-        .into_iter()
-        .enumerate()
-        .map(|(idx, arg)| {
-            let param = match signature.params.get(idx) {
-                Some(p) => p,
-                None => return arg,
-            };
-            if param.flags & CPF_OUT_PARM == 0 {
-                return arg;
-            }
-            if matches!(arg, Expr::Out(_)) {
-                return arg;
-            }
-            Expr::Out(Box::new(arg))
-        })
-        .collect();
-    Stmt::Call {
-        func,
-        args: wrapped,
-        offset,
     }
 }
 

@@ -61,22 +61,38 @@ pub fn matches_filter(name: &str, filters: &[String]) -> bool {
     filters.iter().any(|f| lower.contains(f))
 }
 
+// EFunctionFlags from Unreal's UObject/Script.h.
 const FUNC_FLAG_NAMES: &[(u32, &str)] = &[
     (0x00000001, "Final"),
+    (0x00000002, "RequiredAPI"),
+    (0x00000004, "BlueprintAuthorityOnly"),
+    (0x00000008, "BlueprintCosmetic"),
+    (0x00000040, "Net"),
+    (0x00000080, "NetReliable"),
+    (0x00000100, "NetRequest"),
+    (0x00000200, "Exec"),
     (0x00000400, "Native"),
     (0x00000800, "Event"),
+    (0x00001000, "NetResponse"),
     (0x00002000, "Static"),
-    (0x00004000, "MulticastDelegate"),
+    (0x00004000, "NetMulticast"),
+    (0x00008000, "UbergraphFunction"),
+    (0x00010000, "MulticastDelegate"),
     (0x00020000, "Public"),
     (0x00040000, "Private"),
     (0x00080000, "Protected"),
     (0x00100000, "Delegate"),
+    (0x00200000, "NetServer"),
     (0x00400000, "HasOutParms"),
-    (0x01000000, "BlueprintCallable"),
-    (0x02000000, "BlueprintEvent"),
-    (0x04000000, "BlueprintPure"),
-    (0x10000000, "Const"),
-    (0x40000000, "HasDefaults"),
+    (0x00800000, "HasDefaults"),
+    (0x01000000, "NetClient"),
+    (0x02000000, "DLLImport"),
+    (0x04000000, "BlueprintCallable"),
+    (0x08000000, "BlueprintEvent"),
+    (0x10000000, "BlueprintPure"),
+    (0x20000000, "EditorOnly"),
+    (0x40000000, "Const"),
+    (0x80000000, "NetValidate"),
 ];
 
 pub fn format_func_flags(flags: u32) -> String {
@@ -157,7 +173,17 @@ mod tests {
     #[test]
     fn format_func_flags_cases() {
         for (flags, expected) in [
-            (0x04020000u32, "Public|BlueprintPure"),
+            (0x04020000u32, "Public|BlueprintCallable"),
+            (
+                0x14420000,
+                "Public|HasOutParms|BlueprintCallable|BlueprintPure",
+            ),
+            (0x40000000, "Const"),
+            (0x00800000, "HasDefaults"),
+            (0x00004000, "NetMulticast"),
+            (0x00010000, "MulticastDelegate"),
+            (0x03000000, "NetClient|DLLImport"),
+            (0x08000000, "BlueprintEvent"),
             (0, "0x00000000"), // no flags: hex fallback
             (0x00000800, "Event"),
         ] {
