@@ -5,8 +5,8 @@
 //! classifier runs each box through a first-match cascade:
 //!
 //! 1. `BubbleOwned`   - a bubble comment annotating the node it sits on.
-//! 2. `EventWrapping` - a box that contains an event-entry node, rendered
-//!    above that event's header.
+//! 2. `EventWrapping` - a box containing identified event-entry nodes,
+//!    attached to every covered event and grouped when several are covered.
 //! 3. `FunctionLevel` - a box covering more than [`COVERAGE_THRESHOLD_PERCENT`]
 //!    of the identifiable nodes on its graph page AND containing the page's
 //!    execution-root, promoted to a description under the block header.
@@ -22,11 +22,10 @@
 //!    the nearest consuming statement.
 //! 7. `Unresolved`    - retain the text under its source graph page.
 //!
-//! Inline and bubble placements anchor through the byte map: contained node
-//! (or the bubble's owner) -> disk byte range -> covering statement -> the
-//! statement's disk offset, which the emitter keys annotations by. Event and
-//! function-level placements need no byte map; they key by block name and
-//! attach at the block header.
+//! Inline and bubble placements resolve graph evidence to exact statement
+//! paths. Several proven statements remain separate locations rather than
+//! implying that an intervening branch or statement belongs to the comment.
+//! Event and function-level locations attach to identified block headers.
 //!
 //! The implementation splits by concern: [`context`] holds the per-asset
 //! lookups and the node/entry helpers, [`classify`] holds the cascade body,
@@ -63,18 +62,27 @@ pub(crate) enum PlacementClass {
     Unresolved,
     /// Below the block signature, as a whole-graph description.
     FunctionLevel,
-    /// Above the statement at disk offset `statement_offset` in `block`'s body.
-    /// Covers both the spatial inline-entry case and bubble ownership; both
-    /// resolve to a covering statement through the byte map.
-    InlineAtStatement { statement_offset: usize },
+    /// Above one statement identified by its body path. The offset is retained
+    /// for audit output and unique-offset compatibility with older anchors.
+    InlineAtStatement {
+        statement_offset: usize,
+        /// Root body, statement index, then alternating child-body and statement indices.
+        /// Root zero is the block body, later roots are its owned resumptions by call offset.
+        statement_path: Vec<usize>,
+    },
 }
 
-/// One classified, rendered comment ready to interleave at emit.
+/// One exact statement or header annotated by an authored comment.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PlacedComment {
-    /// Block name, or source graph page for an unresolved comment.
+pub(crate) struct CommentLocation {
     pub block: String,
     pub class: PlacementClass,
+}
+
+/// One authored comment with every independently proven location.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlacedComment {
+    pub locations: Vec<CommentLocation>,
     /// Pre-rendered marker lines (already indented for the placement class).
     pub lines: Vec<String>,
     /// Box top-left, kept for the stable multi-comment tie-break.
@@ -105,7 +113,11 @@ impl PlacementPlan {
     pub fn count_class(&self, class: &PlacementClass) -> usize {
         self.placed
             .iter()
-            .filter(|placed| std::mem::discriminant(&placed.class) == std::mem::discriminant(class))
+            .filter(|placed| {
+                placed.locations.iter().any(|location| {
+                    std::mem::discriminant(&location.class) == std::mem::discriminant(class)
+                })
+            })
             .count()
     }
 }
@@ -125,10 +137,28 @@ pub(crate) fn build_placement_plan(
     let mut plan = PlacementPlan::default();
 
     for comment in &model.boxes {
-        let (outcome, trace) = classify(comment, model, &context);
+        let (outcome, mut trace) = classify(comment, model, &context);
         match outcome {
-            Some(Classification::Placed(placed)) => {
-                plan.unanchored += usize::from(placed.class == PlacementClass::Unresolved);
+            Some(Classification::Placed(mut placed)) => {
+                if !resolve_locations(&mut placed.locations, decoded) {
+                    if let Classification::Placed(unresolved) = Classification::unresolved(comment)
+                    {
+                        placed = unresolved;
+                    }
+                    trace.strategy =
+                        Strategy::Dropped(super::audit::DropReason::NoCoveringStatement);
+                }
+                sort_placed(std::slice::from_mut(placed.as_mut()));
+                let unresolved = placed
+                    .locations
+                    .iter()
+                    .any(|location| location.class == PlacementClass::Unresolved);
+                plan.unanchored += usize::from(unresolved);
+                trace.locations = if unresolved {
+                    Vec::new()
+                } else {
+                    placed.locations.clone()
+                };
                 plan.placed.push(*placed);
             }
             Some(Classification::Unanchored) | None => {
@@ -156,11 +186,13 @@ pub(super) enum Classification {
 impl Classification {
     fn unresolved(comment: &super::CommentBox) -> Self {
         Self::Placed(Box::new(PlacedComment {
-            block: comment
-                .graph_page
-                .clone()
-                .unwrap_or_else(|| "<unknown graph>".into()),
-            class: PlacementClass::Unresolved,
+            locations: vec![CommentLocation {
+                block: comment
+                    .graph_page
+                    .clone()
+                    .unwrap_or_else(|| "<unknown graph>".into()),
+                class: PlacementClass::Unresolved,
+            }],
             lines: Vec::new(),
             text: comment.text.clone(),
             box_x: comment.x,
@@ -213,5 +245,109 @@ impl TraceRecorder {
     /// The follow depth recorded by the winning walk.
     pub(super) fn depth(&self) -> usize {
         self.depth.get()
+    }
+}
+
+impl CommentLocation {
+    /// Resolve the exact immutable statement used by the summary emitter.
+    pub(crate) fn statement<'a>(
+        &self,
+        decoded: &'a DecodedAsset,
+    ) -> Option<&'a crate::bytecode::stmt::Stmt> {
+        let PlacementClass::InlineAtStatement {
+            statement_path,
+            statement_offset,
+        } = &self.class
+        else {
+            return None;
+        };
+        let (&root, path) = statement_path.split_first()?;
+        let (&index, children) = path.split_first()?;
+        let bodies = block_bodies(decoded, &self.block);
+        let mut statement = bodies.get(root)?.get(index)?;
+        let (steps, remainder) = children.as_chunks::<2>();
+        for step in steps {
+            statement = statement.child_bodies_all().get(step[0])?.get(step[1])?;
+        }
+        (remainder.is_empty() && statement.offset() == *statement_offset).then_some(statement)
+    }
+}
+
+fn block_bodies<'a>(
+    decoded: &'a DecodedAsset,
+    block: &str,
+) -> Vec<&'a [crate::bytecode::stmt::Stmt]> {
+    let mut bodies = Vec::new();
+    let body = decoded
+        .events
+        .iter()
+        .find(|event| event.name == block)
+        .map(|event| event.body.as_slice())
+        .or_else(|| {
+            decoded
+                .functions
+                .iter()
+                .find(|function| function.name == block)
+                .map(|function| function.body.as_slice())
+        });
+    let Some(body) = body else {
+        return bodies;
+    };
+    bodies.push(body);
+    for (offset, owner) in &decoded.resume_owner_events {
+        if owner == block {
+            if let Some(body) = decoded.resume_bodies.get(offset) {
+                bodies.push(body.as_slice());
+            }
+        }
+    }
+    bodies
+}
+
+fn resolve_locations(locations: &mut [CommentLocation], decoded: &DecodedAsset) -> bool {
+    for location in locations {
+        if let PlacementClass::InlineAtStatement {
+            statement_offset,
+            statement_path,
+        } = &mut location.class
+        {
+            if statement_path.is_empty() {
+                let mut matches = Vec::new();
+                for (root, body) in block_bodies(decoded, &location.block)
+                    .into_iter()
+                    .enumerate()
+                {
+                    collect_statement_paths(body, *statement_offset, &[root], &mut matches);
+                }
+                let [path] = matches.as_slice() else {
+                    return false;
+                };
+                *statement_path = path.clone();
+            }
+            if location.statement(decoded).is_none() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn collect_statement_paths(
+    body: &[crate::bytecode::stmt::Stmt],
+    offset: usize,
+    prefix: &[usize],
+    paths: &mut Vec<Vec<usize>>,
+) {
+    for (index, statement) in body.iter().enumerate() {
+        let mut path = prefix.to_vec();
+        path.push(index);
+        if statement.offset() == offset {
+            paths.push(path.clone());
+        }
+        for (child_index, child) in statement.child_bodies_all().iter().enumerate() {
+            let mut child_path = path.clone();
+            child_path.push(child_index);
+            collect_statement_paths(child, offset, &child_path, paths);
+        }
     }
 }

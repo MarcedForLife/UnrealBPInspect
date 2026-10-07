@@ -27,22 +27,32 @@ Call graph:
   OnRightAxis → Attempt, Release
   OnRightReleased → Release
 
-Graph comments (location unresolved):
-  Graph "EventGraph":
-    // "Complex nested symetrical flow gates with event convergence"
+Graph comments:
+  Events Conv_DirectDoOnce_A, Conv_DirectDoOnce_B:
+    // "Two events converging on one shared DoOnce, wired straight into its exec pin"
+  Events Conv_DirectDoOnce_A, Conv_DirectDoOnce_B, Conv_DivergentTail_A, Conv_DivergentTail_B, Conv_SharedCall_A,
+      Conv_SharedCall_B, Conv_SharedFlipFlop_A, Conv_SharedFlipFlop_B, Conv_SharedSequence_A, Conv_SharedSequence_B:
+    // "Cross-event convergence"
+  Events Conv_DivergentTail_A, Conv_DivergentTail_B:
+    // "Two events each run their own Sequence whose then-0 converges on one shared node, then whose
+    //  then-1 continues to event-specific content"
+  Events Conv_SharedCall_A, Conv_SharedCall_B:
+    // "Two events converging on one shared call, no gate or macro between them"
+  Events Conv_SharedFlipFlop_A, Conv_SharedFlipFlop_B:
+    // "Two events converging on one shared FlipFlop"
+  Events Conv_SharedSequence_A, Conv_SharedSequence_B:
+    // "Two events converging on one shared two-pin Sequence"
+  Events Latch_DoOnce, Latch_DoOnceInForEach, Latch_FlipFlop, Latent_OneDelay, Latent_TwoDelays:
+    // "Latches and delays"
+  Events OnLeftAxis, OnLeftReleased:
     // "Left side of a paired axis input. Above the threshold runs Attempt, dropping below resets
     //  Attempt and runs Release."
     // "Attempt and Release are shared with the right side, called here with bIsLeft = true.
     //  OnLeftReleased also triggers the Release path"
+  Events OnLeftAxis, OnLeftReleased, OnRightAxis, OnRightReleased:
+    // "Complex nested symetrical flow gates with event convergence"
+  Events OnRightAxis, OnRightReleased:
     // "Mirror of the left side, calling the shared Attempt and Release with bIsLeft = false"
-    // "Cross-event convergence"
-    // "Two events converging on one shared DoOnce, wired straight into its exec pin"
-    // "Latches and delays"
-    // "Two events converging on one shared call, no gate or macro between them"
-    // "Two events converging on one shared two-pin Sequence"
-    // "Two events converging on one shared FlipFlop"
-    // "Two events each run their own Sequence whose then-0 converges on one shared node, then whose
-    //  then-1 continues to event-specific content"
 
 Functions:
   // Called by: OnLeftAxis, OnRightAxis

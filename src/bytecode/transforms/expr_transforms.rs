@@ -55,6 +55,10 @@ fn inline_at_scope(body: &mut Vec<Stmt>, references: &BTreeMap<String, usize>) -
             _ => continue,
         };
         if substitute_var_in_stmt(&mut body[assign_idx + 1], &name, &replacement) {
+            crate::bytecode::body_origins::BodyOrigins::record(
+                body[assign_idx].offset(),
+                body[assign_idx + 1].offset(),
+            );
             body.remove(assign_idx);
             changed = true;
         }

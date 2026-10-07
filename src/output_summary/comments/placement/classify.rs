@@ -8,7 +8,7 @@ use super::anchor::{
     anchor_to_node, anchor_via_exec_follow, anchor_via_exec_follow_outward, anchor_via_pin_follow,
 };
 use super::context::{box_contains_exec_root, sorted_exec_entries, ClassifyContext};
-use super::{Classification, PlacedComment, PlacementClass, TraceRecorder};
+use super::{Classification, CommentLocation, PlacedComment, PlacementClass, TraceRecorder};
 
 /// Coverage half of the function-level promotion rule: a box must cover more
 /// than this percentage of a graph page's identifiable nodes (strictly
@@ -97,8 +97,7 @@ pub(super) fn classify(
         (Some(outcome), trace)
     };
 
-    // Event headers require exactly one decoded owner. Multi-event canvas
-    // labels retain their source page in the unresolved section.
+    // A box can describe several independently identified event headers.
     let event_nodes: Vec<&String> = contained
         .iter()
         .filter_map(|node| context.event_node_to_name.get(node))
@@ -117,24 +116,29 @@ pub(super) fn classify(
                 .into_iter()
                 .filter(|(_, node)| contained.contains(node))
                 .map(|(name, _)| name)
-                .filter(|name| {
-                    context
-                        .decoded
-                        .events
-                        .iter()
-                        .any(|event| event.name == *name)
-                })
                 .collect();
-        let [event_name] = events.as_slice() else {
+        if events.is_empty()
+            || events.iter().any(|name| {
+                !context
+                    .decoded
+                    .events
+                    .iter()
+                    .any(|event| event.name == *name)
+            })
+        {
             recorder.record(Strategy::Dropped(DropReason::OwnerEventUnresolved));
             return finish_box(Classification::unresolved(comment));
-        };
-        let event_name = event_name.clone();
+        }
         let lines = render_comment_lines(&comment.text, EVENT_WRAP_INDENT);
         recorder.record(Strategy::EventWrapping);
         let outcome = Classification::Placed(Box::new(PlacedComment {
-            block: event_name,
-            class: PlacementClass::EventWrapping,
+            locations: events
+                .into_iter()
+                .map(|block| CommentLocation {
+                    block,
+                    class: PlacementClass::EventWrapping,
+                })
+                .collect(),
             lines,
             box_x: comment.x,
             box_y: comment.y,
@@ -156,8 +160,10 @@ pub(super) fn classify(
         let lines = render_comment_lines(&comment.text, FUNCTION_LEVEL_INDENT);
         recorder.record(Strategy::FunctionLevel);
         let outcome = Classification::Placed(Box::new(PlacedComment {
-            block: page.clone(),
-            class: PlacementClass::FunctionLevel,
+            locations: vec![CommentLocation {
+                block: page.clone(),
+                class: PlacementClass::FunctionLevel,
+            }],
             lines,
             box_x: comment.x,
             box_y: comment.y,
@@ -166,12 +172,38 @@ pub(super) fn classify(
         return finish_box(outcome);
     }
 
-    // Multiple independent entries do not establish which statement owns
-    // the whole box. Canvas coordinates are not execution order.
+    // Every independent entry must resolve. Keep separate locations instead
+    // of pretending that the statements between them belong to the box.
     let entries = sorted_exec_entries(&contained, context);
     if entries.len() > 1 {
-        recorder.record(Strategy::Dropped(DropReason::NoCoveringStatement));
-        return finish_box(Classification::unresolved(comment));
+        let mut combined: Option<Box<PlacedComment>> = None;
+        for entry in &entries {
+            let Classification::Placed(placed) = anchor_to_node(
+                comment,
+                &page,
+                *entry,
+                Strategy::InlineEntry,
+                context,
+                &recorder,
+            ) else {
+                return finish_box(Classification::unresolved(comment));
+            };
+            if placed
+                .locations
+                .iter()
+                .any(|location| location.class == PlacementClass::Unresolved)
+            {
+                return finish_box(Classification::unresolved(comment));
+            }
+            if let Some(combined) = &mut combined {
+                combined.locations.extend(placed.locations);
+            } else {
+                combined = Some(placed);
+            }
+        }
+        if let Some(combined) = combined {
+            return finish_box(Classification::Placed(combined));
+        }
     }
 
     // InlineAtEntry: anchor to the top-left execution entry point of the box.
@@ -222,7 +254,7 @@ fn drop_trace(comment: &CommentBox, page: &str, reason: DropReason) -> Placement
         contained: None,
         page_total: None,
         depth: 0,
-        placement: None,
+        locations: Vec::new(),
     }
 }
 
@@ -238,18 +270,29 @@ fn trace_for(
     recorder: &TraceRecorder,
     outcome: &Classification,
 ) -> PlacementTrace {
-    let (strategy, placement) = match outcome {
+    let (strategy, locations) = match outcome {
         Classification::Placed(placed) => {
-            let strategy = recorder
-                .strategy()
-                .unwrap_or(Strategy::Dropped(DropReason::NoCoveringStatement));
-            let offset = match placed.class {
-                PlacementClass::InlineAtStatement { statement_offset } => Some(statement_offset),
-                _ => None,
+            let strategy = if placed
+                .locations
+                .iter()
+                .any(|location| location.class == PlacementClass::Unresolved)
+            {
+                match recorder.strategy() {
+                    Some(Strategy::Dropped(reason)) => Strategy::Dropped(reason),
+                    _ => Strategy::Dropped(DropReason::NoCoveringStatement),
+                }
+            } else {
+                recorder
+                    .strategy()
+                    .unwrap_or(Strategy::Dropped(DropReason::NoCoveringStatement))
             };
-            let placement = (placed.class != PlacementClass::Unresolved)
-                .then(|| (placed.block.clone(), offset));
-            (strategy, placement)
+            let locations = placed
+                .locations
+                .iter()
+                .filter(|location| location.class != PlacementClass::Unresolved)
+                .cloned()
+                .collect();
+            (strategy, locations)
         }
         Classification::Unanchored => {
             let reason = recorder
@@ -259,7 +302,7 @@ fn trace_for(
                     _ => None,
                 })
                 .unwrap_or(DropReason::PinFollowDeadEnd);
-            (Strategy::Dropped(reason), None)
+            (Strategy::Dropped(reason), Vec::new())
         }
     };
     PlacementTrace {
@@ -269,6 +312,6 @@ fn trace_for(
         contained,
         page_total,
         depth: recorder.depth(),
-        placement,
+        locations,
     }
 }

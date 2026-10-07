@@ -8,10 +8,9 @@
 //! - Header annotations (`event_wrapping` / `function_level`) keyed by block
 //!   name, emitted around the block header in `emit_event_block` /
 //!   `emit_function_block`.
-//! - Inline annotations keyed by `(block, statement_offset)`, installed as a
-//!   thread-local around each block's body so the statement-emit arm can look
-//!   them up by the statement's disk offset without threading a parameter
-//!   through every `Stmt` variant.
+//! - Inline annotations keyed by the resolved statement's address, installed
+//!   around each block's emission. Addresses are compared as integers and never
+//!   dereferenced. The decoded asset stays immutable until emission finishes.
 //!
 //! The thread-local is only ever installed by the summary block emitters, so
 //! the `--dump`/`--json` paths (which call `emit_body` without installing it)
@@ -22,7 +21,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use crate::bytecode::asset::DecodedAsset;
-use crate::bytecode::emit::scoped_value::ScopedValue;
+use crate::bytecode::scoped_value::ScopedValue;
 use crate::output_summary::comments::extract::build_comment_model;
 use crate::output_summary::comments::placement::{
     build_placement_plan, PlacedComment, PlacementClass,
@@ -35,11 +34,12 @@ use crate::types::ParsedAsset;
 pub(crate) struct CommentEmitPlan {
     /// Authored texts with no unique placement, keyed by source graph page.
     unresolved: BTreeMap<String, Vec<String>>,
-    /// Lines emitted directly above an event header, keyed by event name.
-    event_wrapping: BTreeMap<String, Vec<String>>,
+    /// Header annotations keyed by all covered events. Shared groups render
+    /// once with their event labels, single-event comments precede that header.
+    pub(crate) event_wrapping: BTreeMap<Vec<String>, Vec<String>>,
     /// Lines emitted directly below a block signature, keyed by block name.
     function_level: BTreeMap<String, Vec<String>>,
-    /// Raw comment texts keyed by block name then statement offset. Inline
+    /// Raw comment texts keyed by block name then resolved statement address. Inline
     /// annotations are rendered at the consult site with the emitting
     /// statement's actual indent (header classes use fixed indents and stay
     /// pre-rendered).
@@ -64,36 +64,59 @@ impl CommentEmitPlan {
 
         let mut emit_plan = CommentEmitPlan::default();
         for placed in plan.placed {
-            emit_plan.insert(placed);
+            emit_plan.insert(placed, decoded);
         }
         emit_plan
     }
 
-    fn insert(&mut self, placed: PlacedComment) {
-        let PlacedComment {
-            block,
-            class,
-            lines,
-            text,
-            ..
-        } = placed;
-        match class {
-            PlacementClass::Unresolved => {
-                self.unresolved.entry(block).or_default().push(text);
-            }
-            PlacementClass::EventWrapping => {
-                self.event_wrapping.entry(block).or_default().extend(lines);
-            }
-            PlacementClass::FunctionLevel => {
-                self.function_level.entry(block).or_default().extend(lines);
-            }
-            PlacementClass::InlineAtStatement { statement_offset } => {
-                self.inline
-                    .entry(block)
-                    .or_default()
-                    .entry(statement_offset)
-                    .or_default()
-                    .push(text);
+    fn insert(&mut self, placed: PlacedComment, decoded: &DecodedAsset) {
+        if placed.locations.len() > 1
+            && placed
+                .locations
+                .iter()
+                .all(|location| location.class == PlacementClass::EventWrapping)
+        {
+            let blocks = placed
+                .locations
+                .iter()
+                .map(|location| location.block.clone())
+                .collect();
+            self.event_wrapping
+                .entry(blocks)
+                .or_default()
+                .extend(render_comment_lines(&placed.text, "    "));
+            return;
+        }
+        for location in &placed.locations {
+            match &location.class {
+                PlacementClass::Unresolved => {
+                    self.unresolved
+                        .entry(location.block.clone())
+                        .or_default()
+                        .push(placed.text.clone());
+                }
+                PlacementClass::EventWrapping => {
+                    self.event_wrapping
+                        .entry(vec![location.block.clone()])
+                        .or_default()
+                        .extend(placed.lines.clone());
+                }
+                PlacementClass::FunctionLevel => {
+                    self.function_level
+                        .entry(location.block.clone())
+                        .or_default()
+                        .extend(placed.lines.clone());
+                }
+                PlacementClass::InlineAtStatement { .. } => {
+                    if let Some(statement) = location.statement(decoded) {
+                        self.inline
+                            .entry(location.block.clone())
+                            .or_default()
+                            .entry(statement as *const crate::bytecode::stmt::Stmt as usize)
+                            .or_default()
+                            .push(placed.text.clone());
+                    }
+                }
             }
         }
     }
@@ -122,7 +145,9 @@ impl CommentEmitPlan {
 
     /// Event-wrapping lines for `block`, if any.
     pub(crate) fn event_wrapping_lines(&self, block: &str) -> Option<&[String]> {
-        self.event_wrapping.get(block).map(Vec::as_slice)
+        self.event_wrapping
+            .get(&vec![block.to_owned()])
+            .map(Vec::as_slice)
     }
 
     /// Function-level description lines for `block`, if any.
@@ -130,7 +155,7 @@ impl CommentEmitPlan {
         self.function_level.get(block).map(Vec::as_slice)
     }
 
-    /// Inline annotation map for `block` (offset -> lines), if any.
+    /// Exact statement annotations for one block, including its resumptions.
     fn inline_for_block(&self, block: &str) -> Option<&BTreeMap<usize, Vec<String>>> {
         self.inline.get(block)
     }
@@ -141,7 +166,7 @@ thread_local! {
     /// for blocks with no inline comments and for the `--dump`/`--json` paths
     /// (which never install it). Set by [`with_block_comments`] around each
     /// block's body so the statement-emit arm can prepend annotation lines by
-    /// the statement's disk offset. The map is stored by value (cloned in at
+    /// the statement's address. The map is stored by value (cloned in at
     /// scope entry) so the consult path holds no borrow.
     static ACTIVE_INLINE_COMMENTS: RefCell<Option<BTreeMap<usize, Vec<String>>>> =
         const { RefCell::new(None) };
@@ -171,13 +196,16 @@ pub(crate) fn with_inline_comments<R>(
     body()
 }
 
-/// Inline annotation lines for the statement at `offset` in the active block,
+/// Inline annotation lines for this exact statement in the active block,
 /// rendered with `indent` (the emitting statement's own indent, so the
 /// annotation lines up with the construct it annotates). `None` when no
 /// comment anchors there (or no map is installed).
-pub(crate) fn inline_comment_lines(offset: usize, indent: &str) -> Option<Vec<String>> {
+pub(crate) fn inline_comment_lines(
+    statement: &crate::bytecode::stmt::Stmt,
+    indent: &str,
+) -> Option<Vec<String>> {
     ScopedValue::with_current(&ACTIVE_INLINE_COMMENTS, |map| {
-        let texts = map.get(&offset)?;
+        let texts = map.get(&(statement as *const crate::bytecode::stmt::Stmt as usize))?;
         Some(
             texts
                 .iter()
@@ -191,12 +219,40 @@ pub(crate) fn inline_comment_lines(offset: usize, indent: &str) -> Option<Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output_summary::comments::placement::PlacedComment;
+    use crate::output_summary::comments::placement::{CommentLocation, PlacedComment};
+
+    fn decoded_with_function() -> DecodedAsset {
+        use crate::bytecode::{asset::Function, expr::Expr, stmt::Stmt};
+        DecodedAsset {
+            diagnostics: vec![],
+            functions: vec![Function {
+                name: "Fn".into(),
+                export_index: None,
+                body: [12, 40]
+                    .into_iter()
+                    .map(|offset| Stmt::Call {
+                        func: Expr::Var("Work".into()),
+                        args: vec![],
+                        offset,
+                    })
+                    .collect(),
+            }],
+            events: vec![],
+            resume_bodies: Default::default(),
+            resume_owner_events: Default::default(),
+            byte_maps: Default::default(),
+            function_origins: Default::default(),
+            event_origins: Default::default(),
+            resume_origins: Default::default(),
+        }
+    }
 
     fn placed(block: &str, class: PlacementClass, lines: &[&str], text: &str) -> PlacedComment {
         PlacedComment {
-            block: block.into(),
-            class,
+            locations: vec![CommentLocation {
+                block: block.into(),
+                class,
+            }],
             lines: lines.iter().map(|line| line.to_string()).collect(),
             box_x: 0,
             box_y: 0,
@@ -206,27 +262,33 @@ mod tests {
 
     #[test]
     fn buckets_by_class_and_block() {
+        let decoded = decoded_with_function();
         let mut plan = CommentEmitPlan::default();
-        plan.insert(placed(
-            "Ev",
-            PlacementClass::EventWrapping,
-            &["  // \"ev\""],
-            "ev",
-        ));
-        plan.insert(placed(
-            "Fn",
-            PlacementClass::FunctionLevel,
-            &["    // \"fn\""],
-            "fn",
-        ));
-        plan.insert(placed(
-            "Fn",
-            PlacementClass::InlineAtStatement {
-                statement_offset: 12,
-            },
-            &[],
-            "inl",
-        ));
+        plan.insert(
+            placed("Ev", PlacementClass::EventWrapping, &["  // \"ev\""], "ev"),
+            &decoded,
+        );
+        plan.insert(
+            placed(
+                "Fn",
+                PlacementClass::FunctionLevel,
+                &["    // \"fn\""],
+                "fn",
+            ),
+            &decoded,
+        );
+        plan.insert(
+            placed(
+                "Fn",
+                PlacementClass::InlineAtStatement {
+                    statement_offset: 12,
+                    statement_path: vec![0, 0],
+                },
+                &[],
+                "inl",
+            ),
+            &decoded,
+        );
 
         assert_eq!(
             plan.event_wrapping_lines("Ev"),
@@ -240,52 +302,61 @@ mod tests {
 
         // Inline buckets hold raw texts; rendering happens at consult time.
         let inline = plan.inline_for_block("Fn").unwrap();
-        assert_eq!(inline.get(&12).unwrap(), &vec!["inl".to_string()]);
+        assert_eq!(
+            inline
+                .get(&(&decoded.functions[0].body[0] as *const _ as usize))
+                .unwrap(),
+            &vec!["inl".to_string()]
+        );
     }
 
     #[test]
     fn thread_local_consult_scoped_to_block() {
+        let decoded = decoded_with_function();
         let mut plan = CommentEmitPlan::default();
-        plan.insert(placed(
-            "Fn",
-            PlacementClass::InlineAtStatement {
-                statement_offset: 40,
-            },
-            &[],
-            "at40",
-        ));
+        plan.insert(
+            placed(
+                "Fn",
+                PlacementClass::InlineAtStatement {
+                    statement_offset: 40,
+                    statement_path: vec![0, 1],
+                },
+                &[],
+                "at40",
+            ),
+            &decoded,
+        );
 
         // Outside any installed scope there is no annotation.
-        assert!(inline_comment_lines(40, "    ").is_none());
+        assert!(inline_comment_lines(&decoded.functions[0].body[1], "    ").is_none());
 
         with_block_comments(&plan, "Fn", || {
             // Rendered at consult with the indent the emitter passes in.
             assert_eq!(
-                inline_comment_lines(40, "        "),
+                inline_comment_lines(&decoded.functions[0].body[1], "        "),
                 Some(vec!["        // \"at40\"".to_string()])
             );
             // A different offset in the same block has nothing.
-            assert!(inline_comment_lines(0, "    ").is_none());
+            assert!(inline_comment_lines(&decoded.functions[0].body[0], "    ").is_none());
             // Clearing the map (nested-body recursion) suppresses lookups.
             with_inline_comments(None, || {
-                assert!(inline_comment_lines(40, "    ").is_none());
+                assert!(inline_comment_lines(&decoded.functions[0].body[1], "    ").is_none());
             });
             // Restored after the nested scope.
-            assert!(inline_comment_lines(40, "    ").is_some());
+            assert!(inline_comment_lines(&decoded.functions[0].body[1], "    ").is_some());
         });
 
         // Restored to empty after the block scope.
-        assert!(inline_comment_lines(40, "    ").is_none());
+        assert!(inline_comment_lines(&decoded.functions[0].body[1], "    ").is_none());
     }
     #[test]
     fn unresolved_comments_render_and_filter_by_page_or_text() {
+        let decoded = decoded_with_function();
         let mut plan = CommentEmitPlan::default();
-        plan.insert(placed(
-            "Example",
-            PlacementClass::Unresolved,
-            &[],
-            "Keep this note",
-        ));
+        plan.insert(
+            placed("Example", PlacementClass::Unresolved, &[], "Keep this note"),
+            &decoded,
+        );
         let lines = plan.unresolved_lines(&[]);
         assert_eq!(
             lines,
@@ -320,9 +391,19 @@ mod tests {
             completion: None,
             offset: 10,
         }];
+        let Stmt::Loop {
+            kind: LoopKind::ForC { init, increment },
+            ..
+        } = &body[0]
+        else {
+            unreachable!()
+        };
         let map = BTreeMap::from([
-            (10, vec!["initialize".into()]),
-            (30, vec!["advance".into()]),
+            (&init[0] as *const Stmt as usize, vec!["initialize".into()]),
+            (
+                &increment[0] as *const Stmt as usize,
+                vec!["advance".into()],
+            ),
         ]);
         let lines = with_inline_comments(Some(&map), || {
             crate::bytecode::emit::render_body_lines(&body, &BTreeMap::new())
@@ -362,7 +443,16 @@ mod tests {
                 offset: 20,
             }],
         }];
-        let map = BTreeMap::from([(20, vec!["toggle body".into()])]);
+        let Stmt::Latch {
+            body: latch_body, ..
+        } = &body[0]
+        else {
+            unreachable!()
+        };
+        let map = BTreeMap::from([(
+            &latch_body[0] as *const Stmt as usize,
+            vec!["toggle body".into()],
+        )]);
         let lines = with_inline_comments(Some(&map), || {
             crate::bytecode::emit::render_body_lines(&body, &BTreeMap::new())
         });
@@ -371,5 +461,46 @@ mod tests {
             .position(|line| line.contains("toggle body"))
             .unwrap();
         assert!(lines[note + 1].contains("A|B:"));
+    }
+    #[test]
+    fn exact_locations_annotate_repeated_offsets_without_claiming_intervening_statements() {
+        use crate::bytecode::stmt::Stmt;
+        let mut decoded = decoded_with_function();
+        let first = decoded.functions[0].body[0].clone();
+        decoded.functions[0].body = vec![first.clone(), first.clone(), first];
+        let body = &decoded.functions[0].body;
+        let mut plan = CommentEmitPlan::default();
+        let mut comment = placed(
+            "Fn",
+            PlacementClass::InlineAtStatement {
+                statement_offset: 12,
+                statement_path: vec![0, 0],
+            },
+            &[],
+            "Selected operations",
+        );
+        comment.locations.push(CommentLocation {
+            block: "Fn".into(),
+            class: PlacementClass::InlineAtStatement {
+                statement_offset: 12,
+                statement_path: vec![0, 2],
+            },
+        });
+        plan.insert(comment, &decoded);
+        let lines = with_block_comments(&plan, "Fn", || {
+            crate::bytecode::emit::render_body_lines(body, &BTreeMap::new())
+        });
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|line| line.contains("Selected operations"))
+                .count(),
+            2
+        );
+        assert!(lines[0].contains("Selected operations"));
+        assert!(lines[1].contains("Work("));
+        assert!(lines[2].contains("Work("));
+        assert!(lines[3].contains("Selected operations"));
+        assert!(matches!(&body[1], Stmt::Call { .. }));
     }
 }

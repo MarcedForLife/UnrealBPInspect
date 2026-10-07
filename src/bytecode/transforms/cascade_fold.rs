@@ -228,6 +228,7 @@ fn drain_chain(
     head_case_value: Option<Expr>,
 ) -> (Vec<CascadeLink>, Vec<Stmt>) {
     let mut links = Vec::new();
+    let head_offset = stmt.offset();
     let mut cursor: &mut Stmt = stmt;
     let mut head_case_value = head_case_value;
     loop {
@@ -237,6 +238,7 @@ fn drain_chain(
         if !advance && !advance_via_head_chain {
             break;
         }
+        crate::bytecode::body_origins::BodyOrigins::record(cursor.offset(), head_offset);
         // Take fields out of the current branch.
         let Stmt::Branch {
             cond,

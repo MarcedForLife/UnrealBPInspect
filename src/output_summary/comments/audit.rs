@@ -11,6 +11,7 @@
 //! run but consumed only here, so correctness of the placement plan does not
 //! depend on it.
 
+use super::placement::{CommentLocation, PlacementClass};
 use std::collections::BTreeMap;
 
 /// The cascade strategy that anchored (or failed to anchor) one comment.
@@ -112,9 +113,8 @@ pub(crate) struct PlacementTrace {
     /// Follow depth actually used by pin-follow / exec-follow; `0` for direct
     /// and header anchors.
     pub depth: usize,
-    /// Resolved `(block, statement_offset)` for inline placements, the block
-    /// name for header placements, `None` for drops.
-    pub placement: Option<(String, Option<usize>)>,
+    /// Every proven statement/header location, empty for unresolved comments.
+    pub locations: Vec<CommentLocation>,
 }
 
 /// Truncate text to a single short snippet line for the per-comment audit row.
@@ -159,11 +159,27 @@ fn format_trace_line(trace: &PlacementTrace) -> String {
         (Some(contained), None) => format!("{contained}/-"),
         _ => "-".to_string(),
     };
-    let outcome = match (&trace.placement, trace.strategy) {
-        (Some((block, Some(offset))), _) => format!("-> {block}@0x{offset:x}"),
-        (Some((block, None)), _) => format!("-> {block} (header)"),
-        (None, Strategy::Dropped(reason)) => format!("UNRESOLVED {}", reason.tag()),
-        (None, _) => "UNRESOLVED".to_string(),
+    let outcome = if trace.locations.is_empty() {
+        match trace.strategy {
+            Strategy::Dropped(reason) => format!("UNRESOLVED {}", reason.tag()),
+            _ => "UNRESOLVED".to_string(),
+        }
+    } else {
+        trace
+            .locations
+            .iter()
+            .map(|location| match &location.class {
+                PlacementClass::InlineAtStatement {
+                    statement_offset,
+                    statement_path,
+                } => format!(
+                    "-> {}@0x{statement_offset:x} {statement_path:?}",
+                    location.block
+                ),
+                _ => format!("-> {} (header)", location.block),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     format!(
         "[{page}] {strategy:<22} cov={coverage:<7} depth={depth} {outcome}  \"{snippet}\"",
@@ -259,7 +275,7 @@ mod tests {
             contained,
             page_total: total,
             depth: 0,
-            placement: None,
+            locations: Vec::new(),
         }
     }
 
