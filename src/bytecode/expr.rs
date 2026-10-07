@@ -109,14 +109,9 @@ pub enum Expr {
         default: Box<Expr>,
     },
 
-    /// A folded struct constructor (`Make<Type>(field=value, ...)`).
-    /// Not produced directly by the decoder, populated by the
-    /// statement-level struct-fold transform when it collapses a
-    /// contiguous run of field assignments to a temporary into a
-    /// single-expression constructor. `type_name` records the struct
-    /// type name when the transform can determine it; otherwise the
-    /// transform falls back to `"<unknown>"` so the rendered shape is
-    /// still recognisable.
+    /// An explicit struct constructor supplied by an IR consumer.
+    /// The decoder keeps field writes separate because it lacks the field
+    /// layout and initialization evidence needed to infer a constructor.
     StructConstruct {
         type_name: String,
         fields: Vec<(String, Expr)>,

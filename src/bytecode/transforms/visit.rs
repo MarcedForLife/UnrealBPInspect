@@ -112,7 +112,7 @@ pub(crate) fn scope_stack<'a>(prefix: &'a [Stmt], ancestors: &[&'a [Stmt]]) -> V
 /// `child_ancestors` is innermost-first: the statement's preceding
 /// siblings (`body[..i]`) as the innermost slice, then `ancestors`
 /// unchanged. This captures the `split_at_mut` borrow-split that several
-/// chain-resolving transforms (cascade_fold, demote_invariant_loops,
+/// chain-resolving transforms (cascade_fold,
 /// latch_recognition, lower_sentinel_cascade, refine_loops) share so a
 /// rewrite at one statement can resolve `Var` chains through every outer
 /// scope. The immutable prefix and the mutable current-statement borrow
@@ -209,7 +209,7 @@ fn any_expr_children<F: FnMut(&Expr) -> bool>(expr: &Expr, pred: &mut F) -> bool
 }
 
 /// Returns `true` if any node in the expression tree is `Expr::Unknown`.
-/// Used by transforms (inliner, dead-stmt, struct-fold, ternary-fold) to
+/// Used by transforms (inliner, dead-stmt, ternary-fold) to
 /// reject candidates whose RHS contains an unrecognised opcode.
 pub(crate) fn expr_contains_unknown(expr: &Expr) -> bool {
     any_expr(expr, &mut |node| matches!(node, Expr::Unknown { .. }))
@@ -747,7 +747,7 @@ where
 /// SkipUses semantics (the default walker) is correct for transforms that
 /// rewrite uses without touching defs (substitution, dead-stmt scans). A
 /// minority of transforms must rewrite the lhs too: var_names renames the
-/// ForC counter on both sides of `i = i + 1`, and struct_fold's use-count
+/// ForC counter on both sides of `i = i + 1`, and storage-aware use-count
 /// must observe `Var(temp)` appearing inside an `Assignment::lhs`'s
 /// `FieldAccess { recv, .. }` to detect remaining writes that would
 /// invalidate a fold. Those callers use this variant instead.

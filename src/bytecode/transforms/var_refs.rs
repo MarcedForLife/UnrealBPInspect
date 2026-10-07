@@ -78,17 +78,19 @@ pub(crate) fn count_var(body: &[Stmt], name: &str, scope: VarScope, defs: Defs) 
     }
 }
 
-/// Count every distinct `Var` name used across `body` (`Deep` + `SkipLhs`) in
-/// a single pass. Map form of [`count_var`] for callers that screen many
-/// candidate names at once (the single-use temp inliner, struct-fold read
-/// counts).
-pub(crate) fn count_all_var_uses(body: &[Stmt]) -> BTreeMap<String, usize> {
+/// Count every distinct `Var` name across the whole body under the given
+/// assignment policy. Map form of [`count_var`] for callers screening many names.
+pub(crate) fn count_all_var_uses(body: &[Stmt], defs: Defs) -> BTreeMap<String, usize> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    walk_body_exprs(body, &mut |expr| {
+    let mut tally = |expr: &Expr| {
         if let Expr::Var(name) = expr {
             *counts.entry(name.clone()).or_insert(0) += 1;
         }
-    });
+    };
+    match defs {
+        Defs::SkipLhs => walk_body_exprs(body, &mut tally),
+        Defs::VisitLhs => walk_body_exprs_visit_lhs(body, &mut tally),
+    }
     counts
 }
 
@@ -242,7 +244,7 @@ mod tests {
     #[test]
     fn deep_visitlhs_counts_lhs_that_skiplhs_misses() {
         // $t.Field = 1  -- a field-write back into temp t. The lhs receiver
-        // Var(t) is a use under VisitLhs (this is what blocks struct-fold),
+        // The receiver variable is a use under VisitLhs,
         // and invisible under SkipLhs.
         let body = vec![assign_expr(field("t", "Field"), lit("1"))];
         assert_eq!(count_var(&body, "t", VarScope::Deep, Defs::SkipLhs), 0);

@@ -86,20 +86,6 @@ const STACK: &[Pass] = &[
         run: |body| tf::cascade_fold::fold_switch_cascades(body),
     },
     Pass {
-        name: "struct_fold",
-        doc: "Collapse a contiguous run of field assignments to a temporary into a single \
-              Expr::StructConstruct at the use site.",
-        run: |body| tf::struct_fold::fold_struct_constructions(body),
-    },
-    Pass {
-        name: "demote_invariant_loops",
-        doc: "Demote invariant-cond While loops back to Branches. Some back-edges try_decode_loop \
-              accepts come from non-loop control (Sequence pins, IsValid/DoOnce wrappers) whose \
-              cond is a single never-mutated Var, which a real While never is. Runs chain-aware \
-              over the un-inlined IR, before refine_loops.",
-        run: |body| tf::demote_invariant_loops::demote_invariant_loops(body),
-    },
-    Pass {
         name: "refine_loops",
         doc: "Promote While loops to ForC or ForEach. Runs chain-aware over un-inlined \
               cond/increment shapes, so it must precede temp inlining.",
@@ -480,5 +466,255 @@ mod tests {
         });
         assert_eq!(projection_count, 1);
         assert_eq!(call_count(&body, "Consume"), 1);
+    }
+
+    fn field_assign(temp: &str, field: &str, rhs: Expr) -> Stmt {
+        Stmt::Assignment {
+            lhs: Expr::FieldAccess {
+                recv: Box::new(var(temp)),
+                field: field.into(),
+            },
+            rhs,
+            offset: 0,
+        }
+    }
+
+    fn expression_call(name: &str) -> Expr {
+        Expr::Call {
+            name: name.into(),
+            args: vec![],
+        }
+    }
+
+    fn struct_field_writes(temp: &str) -> Vec<Stmt> {
+        vec![
+            field_assign(temp, "First", expression_call("ReadFirst")),
+            field_assign(temp, "Second", lit("2")),
+        ]
+    }
+
+    #[test]
+    fn struct_field_evaluations_stay_before_later_call_arguments() {
+        let temp = "$MakeStruct_Pair";
+        let mut body = struct_field_writes(temp);
+        body.push(call(
+            "Consume",
+            vec![expression_call("MutateSource"), var(temp)],
+        ));
+        let original = body.clone();
+
+        apply_transform_stack_to_body(&mut body);
+
+        assert!(
+            body == original,
+            "field evaluation must precede MutateSource"
+        );
+    }
+
+    #[test]
+    fn struct_field_evaluations_stay_before_lazy_and_repeated_uses() {
+        let temp = "$MakeStruct_Pair";
+        for consumer in [
+            call(
+                "Consume",
+                vec![Expr::Ternary {
+                    cond: Box::new(var("Enabled")),
+                    then_expr: Box::new(var(temp)),
+                    else_expr: Box::new(lit("None")),
+                }],
+            ),
+            Stmt::Branch {
+                cond: var("Enabled"),
+                then_body: vec![call("Consume", vec![var(temp)])],
+                else_body: vec![],
+                offset: 0,
+            },
+            Stmt::Loop {
+                kind: LoopKind::While,
+                cond: Some(Expr::FieldAccess {
+                    recv: Box::new(var(temp)),
+                    field: "Second".into(),
+                }),
+                body: vec![call("UpdateState", vec![])],
+                completion: None,
+                offset: 0,
+            },
+        ] {
+            let mut body = struct_field_writes(temp);
+            body.push(consumer);
+            let original = body.clone();
+
+            apply_transform_stack_to_body(&mut body);
+
+            assert!(
+                body == original,
+                "field evaluations must execute once, eagerly"
+            );
+        }
+    }
+
+    #[test]
+    fn struct_updates_keep_existing_fields_and_repeated_writes() {
+        let temp = "$MakeStruct_Pair";
+        let mut body = vec![
+            assign(temp, expression_call("LoadExisting")),
+            field_assign(temp, "First", expression_call("ReadFirst")),
+            field_assign(temp, "First", expression_call("ReadReplacement")),
+            call("Consume", vec![var(temp)]),
+        ];
+        let original = body.clone();
+
+        apply_transform_stack_to_body(&mut body);
+
+        assert!(
+            body == original,
+            "partial update must retain untouched fields and both calls"
+        );
+    }
+
+    #[test]
+    fn struct_field_writes_preserve_storage_and_cross_scope_references() {
+        let temp = "$MakeStruct_Pair";
+        for consumer in [
+            call("Mutate", vec![Expr::Out(Box::new(var(temp)))]),
+            field_assign(temp, "Third", expression_call("ReadThird")),
+        ] {
+            let mut body = struct_field_writes(temp);
+            body.push(consumer);
+            body.push(Stmt::Branch {
+                cond: var("Enabled"),
+                then_body: vec![call("Observe", vec![var(temp)])],
+                else_body: vec![],
+                offset: 0,
+            });
+            let original = body.clone();
+
+            apply_transform_stack_to_body(&mut body);
+
+            assert!(
+                body == original,
+                "storage and later uses must retain the original struct"
+            );
+        }
+    }
+
+    #[test]
+    fn struct_field_writes_do_not_invent_complete_constructors() {
+        for destination in ["$MakeStruct_Pair", "SavedState", "self.State"] {
+            let mut body = struct_field_writes(destination);
+            body.push(call("Consume", vec![var(destination)]));
+            let original = body.clone();
+
+            apply_transform_stack_to_body(&mut body);
+
+            assert!(
+                body == original,
+                "a name and two fields cannot prove a complete constructor"
+            );
+        }
+    }
+
+    #[test]
+    fn invariant_loop_conditions_do_not_reduce_iteration_count() {
+        for condition in [var("Enabled"), var("self.KeepRunning"), lit("true")] {
+            for loop_body in [vec![], vec![call("UpdateState", vec![])]] {
+                let mut body = vec![Stmt::Loop {
+                    kind: LoopKind::While,
+                    cond: Some(condition.clone()),
+                    body: loop_body,
+                    completion: None,
+                    offset: 0,
+                }];
+                let original = body.clone();
+
+                apply_transform_stack_to_body(&mut body);
+
+                assert!(
+                    body == original,
+                    "invariant conditions still describe repeating loops"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decoded_member_condition_loop_survives_the_full_pipeline() {
+        use crate::binary::NameTable;
+        use crate::bytecode::decode::decode_asset;
+        use crate::bytecode::opcodes::*;
+        use crate::types::{AssetVersion, ExportHeader, ImportEntry, ParsedAsset};
+        use std::collections::{BTreeMap, HashMap};
+
+        // Disk field paths occupy 17 bytes but their in-memory form occupies 9.
+        // The return starts at memory offset 33, after the backward jump to 0.
+        let mut bytecode = vec![EX_JUMP_IF_NOT];
+        bytecode.extend_from_slice(&33u32.to_le_bytes());
+        bytecode.push(EX_INSTANCE_VARIABLE);
+        for component in [1i32, 0, 0, 0] {
+            bytecode.extend_from_slice(&component.to_le_bytes());
+        }
+        bytecode.push(EX_VIRTUAL_FUNCTION);
+        bytecode.extend_from_slice(&1i32.to_le_bytes());
+        bytecode.extend_from_slice(&0i32.to_le_bytes());
+        bytecode.push(EX_END_FUNCTION_PARMS);
+        bytecode.push(EX_JUMP);
+        bytecode.extend_from_slice(&0u32.to_le_bytes());
+        bytecode.extend_from_slice(&[EX_RETURN, EX_NOTHING, EX_END_OF_SCRIPT]);
+        let asset = ParsedAsset {
+            version: AssetVersion {
+                file_ver: 522,
+                file_ver_ue5: 0,
+            },
+            name_table: NameTable::from_names(vec!["KeepRunning".into(), "UpdateState".into()]),
+            diagnostics: vec![],
+            imports: vec![
+                ImportEntry {
+                    class_package: "/Script/CoreUObject".into(),
+                    class_name: "Package".into(),
+                    object_name: "/Script/CoreUObject".into(),
+                    outer_index: 0,
+                },
+                ImportEntry {
+                    class_package: "/Script/CoreUObject".into(),
+                    class_name: "Class".into(),
+                    object_name: "Function".into(),
+                    outer_index: -1,
+                },
+            ],
+            exports: vec![(
+                ExportHeader {
+                    class_index: -2,
+                    super_index: 0,
+                    outer_index: 0,
+                    object_name: "LoopProbe".into(),
+                    serial_offset: 0,
+                    serial_size: 0,
+                },
+                vec![],
+            )],
+            pin_data: HashMap::new(),
+            function_signatures: BTreeMap::new(),
+            bytecode_by_export: BTreeMap::from([(1, (bytecode, 36))]),
+        };
+
+        let decoded = decode_asset(&asset);
+
+        assert!(decoded.diagnostics.is_empty(), "{:?}", decoded.diagnostics);
+        let function = decoded
+            .functions
+            .iter()
+            .find(|function| function.name == "LoopProbe")
+            .unwrap();
+        let Stmt::Loop {
+            kind: LoopKind::While,
+            cond: Some(condition),
+            body,
+            ..
+        } = &function.body[0]
+        else {
+            panic!("a backedge through UpdateState must remain a loop");
+        };
+        assert_eq!(condition, &var("self.KeepRunning"));
+        assert_eq!(call_count(body, "UpdateState"), 1);
     }
 }

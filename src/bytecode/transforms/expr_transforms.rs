@@ -5,10 +5,8 @@ use std::collections::BTreeMap;
 use crate::bytecode::expr::{BinaryOp, Expr};
 use crate::bytecode::stmt::Stmt;
 use crate::bytecode::transforms::name_shape::is_compiler_temp_name;
-use crate::bytecode::transforms::var_refs::collect_loop_items;
-use crate::bytecode::transforms::visit::{
-    any_expr, walk_body_exprs_visit_lhs, walk_stmt_children_mut,
-};
+use crate::bytecode::transforms::var_refs::{collect_loop_items, count_all_var_uses, Defs};
+use crate::bytecode::transforms::visit::{any_expr, walk_stmt_children_mut};
 
 const MAX_INLINE_ITERATIONS: usize = 16;
 
@@ -18,12 +16,7 @@ const MAX_INLINE_ITERATIONS: usize = 16;
 /// Nested bodies can simplify locally but never exchange evaluations.
 pub fn inline_single_use_temps(body: &mut Vec<Stmt>) {
     for _ in 0..MAX_INLINE_ITERATIONS {
-        let mut references = BTreeMap::new();
-        walk_body_exprs_visit_lhs(body, &mut |expr| {
-            if let Expr::Var(name) = expr {
-                *references.entry(name.clone()).or_insert(0) += 1;
-            }
-        });
+        let mut references = count_all_var_uses(body, Defs::VisitLhs);
         collect_loop_items(body, &mut references);
         if !inline_at_scope(body, &references) {
             return;

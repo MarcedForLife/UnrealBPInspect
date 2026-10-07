@@ -15,9 +15,8 @@
 //!   assigns into a var matching `Temp_struct_var_<N>`, the var is renamed to
 //!   a short form derived from `type_name` (stripping a leading `F` for UE
 //!   struct types, e.g. `FVector` -> `Vector`). All subsequent uses of the
-//!   old name in the same body are updated. Skips when `type_name` is the
-//!   `<unknown>` placeholder emitted by struct-fold before the decoder
-//!   threads the originating type through.
+//!   old name in the same body are updated. Skips constructors whose
+//!   `type_name` is `<unknown>`.
 
 use std::collections::BTreeMap;
 
@@ -37,7 +36,7 @@ const TEMP_INT_PREFIXES: &[&str] = &["Temp_int_Loop_Counter_Variable_", "Temp_in
 /// Prefix used for struct-construction temporaries.
 const TEMP_STRUCT_PREFIX: &str = "Temp_struct_var_";
 
-/// Placeholder emitted by struct_fold when the struct type is not yet known.
+/// Placeholder for a struct constructor whose type is not known.
 pub(super) const UNKNOWN_TYPE_NAME: &str = "<unknown>";
 
 /// Sequence of names assigned to ForC counter variables by nesting depth.
