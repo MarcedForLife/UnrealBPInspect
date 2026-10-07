@@ -432,7 +432,7 @@ fn is_library_func(name: &str) -> bool {
 pub(super) fn fallback_name_from_gate(gate_name: &str) -> String {
     let suffix = gate_name
         .strip_prefix(DOONCE_GATE_PREFIX)
-        .unwrap_or("")
+        .unwrap_or(gate_name)
         .trim_start_matches('_');
     if suffix.is_empty() {
         DOONCE_CALL_NAME.to_string()

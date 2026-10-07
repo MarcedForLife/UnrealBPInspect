@@ -172,6 +172,8 @@ Temporary assignments and loop-condition recomputations remain when moving or re
 
 Control-flow reconstruction preserves branch continuations, nested loop exit conditions and Sequence pin boundaries. Synthetic trace tests cover zero-iteration loops and completion order.
 
+Shared DoOnce gates keep the same identity across events and latent continuations. Independent gates remain distinct, and reset operations retain their original guarded order. Synthetic tests exercise repeated invocations and resets.
+
 ## Development
 
 ```sh

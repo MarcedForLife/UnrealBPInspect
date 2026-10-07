@@ -688,6 +688,11 @@ fn match_user_body_sequence(
         if !pin_is_pure_user_body(pin) {
             continue;
         }
+        // An already-recognized gate is not evidence that a sibling reset
+        // guards it. Genuine nesting must carry its own gate-check prefix.
+        if pin.iter().any(|stmt| matches!(stmt, Stmt::Latch { .. })) {
+            continue;
+        }
         if !sibling_pins_have_suffix_scaffold(pins, pin_idx, target_suffix) {
             continue;
         }

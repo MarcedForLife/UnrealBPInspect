@@ -210,17 +210,29 @@ fn decode_asset_inner(asset: &ParsedAsset) -> DecodedAsset {
         }
     }
 
-    // Asset-wide DoOnce display-name resolution. The per-body
-    // `rewrite_reset_doonce_names` pass inside `apply_transform_stack` only
-    // sees Latches in the same event/function body, so a synthetic
-    // `Call(ResetDoOnce(DoOnce_<N>))` whose gate variable's Latch wrap
-    // lives in another body stays as the bare fallback name. This pass
-    // walks every body, builds a unique `gate_var -> display_name` map
-    // from non-fallback Latch names (excluding gate_vars with ambiguous
-    // mappings), then rewrites surviving fallback ResetDoOnce arguments.
+    // A shared macro's owner can prove duplicate wrappers in another entry.
+    // Reuse only that gate-and-bytecode evidence, without synthesizing new calls.
+    if let Some(map) = &ubergraph_byte_map {
+        for event in &mut events {
+            for plan in doonce_wrap_plans.values().flatten() {
+                crate::bytecode::doonce_wrap_synthesis::unwrap_misbound_latch(
+                    &mut event.body,
+                    plan,
+                    map,
+                );
+            }
+        }
+    }
+
+    // Resolve shared gate names only after every event and latent continuation
+    // has completed structural transforms and graph-based latch synthesis.
+    for body in resume_bodies.values_mut() {
+        apply_transform_stack_to_body(body);
+    }
     crate::bytecode::transforms::latch_recognition::rewrite_asset_wide_reset_doonce_names(
         &mut functions,
         &mut events,
+        &mut resume_bodies,
     );
 
     // Env-gated audit. No-op unless BP_GRAPH_CLAIM_AUDIT is set.
@@ -232,13 +244,6 @@ fn decode_asset_inner(asset: &ParsedAsset) -> DecodedAsset {
     let asset_label = format!("ue5={} {}", ue5, ubergraph_name);
     if let Err(audit_err) = super::k2node_macro_audit::run_audit(asset, &asset_label, &events) {
         eprintln!("decode: graph-claim audit log write failed: {}", audit_err);
-    }
-
-    // Apply the same transform stack to each resume body so the
-    // interleaved continuation renders consistently with the call site
-    // around it (binary ops lowered, library prefixes stripped, etc.).
-    for body in resume_bodies.values_mut() {
-        apply_transform_stack_to_body(body);
     }
 
     let sequence_masks = collect_sequence_masks(asset, &export_names);
@@ -1238,25 +1243,23 @@ pub(crate) fn synthesize_owner_flipflop(
 }
 
 /// Re-decode the owning event of a shared DoOnce and return its recognised
-/// DoOnce latch display name (e.g. `DoOnce_3`), so a non-owner inline can
-/// render the same gate name the owner does instead of the first call name
-/// the local synthesis would otherwise pick.
+/// DoOnce gate identity and display name for a non-owner inline body.
 ///
 /// Returns `None` when the owner can't be decoded or has no recognised
 /// DoOnce latch.
-pub(crate) fn synthesize_owner_doonce_name(
+pub(crate) fn synthesize_owner_doonce(
     owner_event_name: &str,
     owner_ranges: &[Range<usize>],
     base_ctx: &DecodeCtx,
-) -> Option<String> {
+) -> Option<crate::bytecode::stmt::LatchKind> {
     use crate::bytecode::stmt::{LatchKind, Stmt};
     let body = decode_owner_event_body(owner_event_name, owner_ranges, base_ctx)?;
     let latch = first_latch_matching(&body, |kind| matches!(kind, LatchKind::DoOnce { .. }))?;
     match latch {
         Stmt::Latch {
-            kind: LatchKind::DoOnce { name, .. },
+            kind: kind @ LatchKind::DoOnce { .. },
             ..
-        } => Some(name.clone()),
+        } => Some(kind.clone()),
         _ => None,
     }
 }

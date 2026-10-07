@@ -262,7 +262,7 @@ mod tests {
         let asset = DecodedAsset {
             diagnostics: Vec::new(),
             functions: vec![Function {
-                name: "ReleaseGrip".into(),
+                name: "ReleaseResource".into(),
                 export_index: None,
                 body: vec![Stmt::Call {
                     func: Expr::FieldAccess {

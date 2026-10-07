@@ -755,6 +755,30 @@ fn assignment(stream: &mut Vec<u8>, name_index: i32, value: Vec<u8>) {
     stream.extend(value);
 }
 
+fn doonce_program(gates: &[i32]) -> Vec<u8> {
+    let mut stream = Vec::new();
+    let mut exits = Vec::new();
+    for gate in gates {
+        exits.push(jump(&mut stream, EX_JUMP_IF_NOT));
+        stream.extend(math(12, &[local(*gate)]));
+        assignment(&mut stream, *gate, vec![EX_TRUE]);
+    }
+    call(&mut stream, 6);
+    let exit = finish(&mut stream);
+    for conditional in exits {
+        patch(&mut stream, conditional, exit);
+    }
+    stream
+}
+
+fn reset_program(gate: i32, initialized: i32) -> Vec<u8> {
+    let mut stream = Vec::new();
+    assignment(&mut stream, gate, vec![EX_FALSE]);
+    assignment(&mut stream, initialized, vec![EX_TRUE]);
+    finish(&mut stream);
+    stream
+}
+
 fn initial_state() -> BTreeMap<String, i64> {
     [
         "Counter",
@@ -828,6 +852,91 @@ fn assert_invocations(
     }
     assert_eq!(reference_trace, expected);
     transformed
+}
+
+#[test]
+fn shared_doonce_entries_and_independent_resets_preserve_state_across_invocations() {
+    let programs = [
+        doonce_program(&[10]),
+        doonce_program(&[10]),
+        doonce_program(&[11]),
+        reset_program(10, 13),
+        reset_program(11, 14),
+    ];
+    for first_closed in [0, 1] {
+        for second_closed in [0, 1] {
+            let mut initial = initial_state();
+            initial.insert("Temp_bool_IsClosed_Variable_1".into(), first_closed);
+            initial.insert("Temp_bool_IsClosed_Variable_2".into(), second_closed);
+            let expected = vec!["Primary"; (4 - first_closed - second_closed) as usize];
+            let bodies = assert_invocations(
+                &programs,
+                &[0, 1, 2, 0, 3, 1, 2, 4, 2],
+                initial,
+                &expected,
+                true,
+            );
+            assert!(bodies[0].iter().any(|stmt| matches!(
+                stmt,
+                Stmt::Latch {
+                    kind: LatchKind::DoOnce { .. },
+                    ..
+                }
+            )));
+            assert!(bodies[3].iter().any(|stmt| matches!(stmt, Stmt::Call { func: Expr::Var(name), .. } if name == "ResetDoOnce")));
+        }
+    }
+}
+
+#[test]
+fn nested_doonce_gates_require_both_resets_before_the_body_runs_again() {
+    let programs = [
+        doonce_program(&[10, 11]),
+        reset_program(10, 13),
+        reset_program(11, 14),
+    ];
+    assert_invocations(
+        &programs,
+        &[0, 0, 1, 0, 2, 0, 1, 0],
+        initial_state(),
+        &["Primary", "Primary"],
+        true,
+    );
+}
+
+#[test]
+fn flipflop_alternates_across_repeated_entries_and_restores_initial_phase() {
+    let mut flip = Vec::new();
+    assignment(&mut flip, 12, math(12, &[local(12)]));
+    let conditional = branch(&mut flip, 12);
+    call(&mut flip, 6);
+    let done = jump(&mut flip, EX_JUMP);
+    let alternate = flip.len();
+    call(&mut flip, 7);
+    let exit = finish(&mut flip);
+    patch(&mut flip, conditional, alternate);
+    patch(&mut flip, done, exit);
+    for (phase, expected) in [
+        (0, vec!["Primary", "Secondary", "Primary", "Secondary"]),
+        (1, vec!["Secondary", "Primary", "Secondary", "Primary"]),
+    ] {
+        let mut initial = initial_state();
+        initial.insert("Temp_bool_Variable_7".into(), phase);
+        let bodies = assert_invocations(
+            std::slice::from_ref(&flip),
+            &[0, 0, 0, 0],
+            initial,
+            &expected,
+            true,
+        );
+        assert!(bodies[0].iter().any(|stmt| matches!(
+            stmt,
+            Stmt::Latch {
+                kind: LatchKind::FlipFlop { .. },
+                ..
+            }
+        )));
+    }
 }
 
 #[test]

@@ -63,12 +63,6 @@ const STACK: &[Pass] = &[
         run: |body| tf::latch_recognition::recognize_latches(body),
     },
     Pass {
-        name: "rewrite_reset_doonce_names",
-        doc: "Resolve sibling ResetDoOnce(DoOnce_N) arguments back to the matching latch's \
-              display name. Runs right after recognize_latches, while the latches are fresh.",
-        run: |body| tf::latch_recognition::rewrite_reset_doonce_names(body),
-    },
-    Pass {
         name: "derive_flipflop_names",
         doc: "Derive the A/B-side labels for recognised FlipFlop latches.",
         run: |body| tf::flipflop_naming::derive_flipflop_names(body),

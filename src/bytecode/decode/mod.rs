@@ -62,7 +62,7 @@ pub(crate) use mem_disk::build_mem_to_disk_map;
 pub use orchestrate::decode_asset;
 pub(crate) use orchestrate::{
     build_event_cfg_and_region_tree, build_inline_cfg_and_region_tree_flow_scoped,
-    decode_region_body, synthesize_owner_doonce_name, synthesize_owner_flipflop,
+    decode_region_body, synthesize_owner_doonce, synthesize_owner_flipflop,
 };
 // The canonical event-name -> entry-K2Node derivation, also consumed by the
 // summary comment classifier (placement.rs) so EventWrapping detection and

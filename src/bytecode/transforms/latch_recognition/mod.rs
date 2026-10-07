@@ -25,8 +25,7 @@ mod shared;
 pub use doonce::{rewrite_asset_wide_reset_doonce_names, rewrite_reset_doonce_names};
 pub(crate) use shared::LIBRARY_FUNC_PREFIXES;
 pub(crate) use shared::{
-    DOONCE_CALL_NAME, DOONCE_GATE_PREFIX, DOONCE_INIT_PREFIX, FLIPFLOP_TOGGLE_PREFIX,
-    RESET_DOONCE_CALL_NAME,
+    DOONCE_GATE_PREFIX, DOONCE_INIT_PREFIX, FLIPFLOP_TOGGLE_PREFIX, RESET_DOONCE_CALL_NAME,
 };
 
 use crate::bytecode::stmt::Stmt;

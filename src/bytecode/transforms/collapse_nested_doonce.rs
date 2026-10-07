@@ -1,21 +1,5 @@
-//! Collapse same-macro nested DoOnce wraps.
-//!
-//! The Blueprint compiler sometimes allocates two gate variables
-//! (`IsClosed` + `IsClosed_2`) for what is one logical macro instance,
-//! producing
-//!
-//! ```text
-//! Latch{DoOnce(outer) { Latch{DoOnce(inner) { body }} }}
-//! ```
-//!
-//! where the outer wrap's body is *exactly* one statement: the inner
-//! `Latch{DoOnce}`. The outer's identifier (typically `DoOnce_2`) is
-//! synthetic scaffold; only the inner carries the user-facing display
-//! name. Folding the outer away leaves a single `DoOnce` that matches
-//! the editor graph.
-//!
-//! Runs after `recognize_latches` / `rewrite_reset_doonce_names` so the
-//! `Stmt::Latch { kind: LatchKind::DoOnce, .. }` shape is stable.
+//! Remove duplicate DoOnce wrappers for the same gate and bytecode origin.
+//! Independent gates must remain nested because each has its own reset state.
 
 use crate::bytecode::stmt::{LatchKind, Stmt};
 use crate::bytecode::transforms::visit::walk_stmt_children_mut;
@@ -59,10 +43,13 @@ pub fn collapse_nested_doonce(body: &mut Vec<Stmt>) {
 /// owned still run before the inner gate.
 fn try_collapse(stmt: &Stmt) -> Option<Stmt> {
     let Stmt::Latch {
-        kind: LatchKind::DoOnce { .. },
+        kind: LatchKind::DoOnce {
+            gate_var: outer_gate,
+            ..
+        },
         init: outer_init,
         body: outer_body,
-        ..
+        offset: outer_offset,
     } = stmt
     else {
         return None;
@@ -74,13 +61,20 @@ fn try_collapse(stmt: &Stmt) -> Option<Stmt> {
 
     let inner = &outer_body[0];
     let Stmt::Latch {
-        kind: LatchKind::DoOnce { .. },
+        kind: LatchKind::DoOnce {
+            gate_var: inner_gate,
+            ..
+        },
+        offset: inner_offset,
         ..
     } = inner
     else {
         return None;
     };
 
+    if outer_gate != inner_gate || outer_offset != inner_offset {
+        return None;
+    }
     let mut merged = inner.clone();
     if !outer_init.is_empty() {
         if let Stmt::Latch { init, .. } = &mut merged {
@@ -135,15 +129,15 @@ mod tests {
 
     #[test]
     fn collapses_simple_nested_doonce() {
-        let inner_body = vec![call("AttemptGrip", vec![Expr::Literal("false".into())])];
-        let inner = doonce("AttemptGrip", "Temp_bool_IsClosed_Variable", inner_body);
-        let outer = doonce("DoOnce_2", "Temp_bool_IsClosed_Variable_2", vec![inner]);
+        let inner_body = vec![call("TryAcquire", vec![Expr::Literal("false".into())])];
+        let inner = doonce("TryAcquire", "Temp_bool_IsClosed_Variable", inner_body);
+        let outer = doonce("DoOnce_2", "Temp_bool_IsClosed_Variable", vec![inner]);
         let mut body = vec![outer];
 
         collapse_nested_doonce(&mut body);
 
         assert_eq!(body.len(), 1);
-        assert_eq!(expect_doonce_name(&body[0]), "AttemptGrip");
+        assert_eq!(expect_doonce_name(&body[0]), "TryAcquire");
         // Inner body preserved.
         if let Stmt::Latch {
             body: inner_body, ..
@@ -159,9 +153,9 @@ mod tests {
     #[test]
     fn no_collapse_when_outer_has_sibling_content() {
         let inner = doonce(
-            "AttemptGrip",
+            "TryAcquire",
             "Temp_bool_IsClosed_Variable",
-            vec![call("AttemptGrip", vec![])],
+            vec![call("TryAcquire", vec![])],
         );
         let outer_body = vec![inner, call("OtherSibling", vec![])];
         let outer = doonce("DoOnce_2", "Temp_bool_IsClosed_Variable_2", outer_body);
@@ -186,7 +180,7 @@ mod tests {
         let outer = doonce(
             "DoOnce_2",
             "Temp_bool_IsClosed_Variable_2",
-            vec![call("AttemptGrip", vec![])],
+            vec![call("TryAcquire", vec![])],
         );
         let mut body = vec![outer];
 
@@ -225,18 +219,18 @@ mod tests {
     #[test]
     fn collapses_three_deep_chain_to_innermost() {
         let innermost = doonce(
-            "AttemptGrip",
+            "TryAcquire",
             "Temp_bool_IsClosed_Variable",
-            vec![call("AttemptGrip", vec![])],
+            vec![call("TryAcquire", vec![])],
         );
-        let middle = doonce("DoOnce_3", "Temp_bool_IsClosed_Variable_3", vec![innermost]);
-        let outer = doonce("DoOnce_2", "Temp_bool_IsClosed_Variable_2", vec![middle]);
+        let middle = doonce("DoOnce_3", "Temp_bool_IsClosed_Variable", vec![innermost]);
+        let outer = doonce("DoOnce_2", "Temp_bool_IsClosed_Variable", vec![middle]);
         let mut body = vec![outer];
 
         collapse_nested_doonce(&mut body);
 
         assert_eq!(body.len(), 1);
-        assert_eq!(expect_doonce_name(&body[0]), "AttemptGrip");
+        assert_eq!(expect_doonce_name(&body[0]), "TryAcquire");
         if let Stmt::Latch {
             body: inner_body, ..
         } = &body[0]
@@ -253,11 +247,11 @@ mod tests {
     #[test]
     fn recurses_into_branch_arms() {
         let inner = doonce(
-            "AttemptGrip",
+            "TryAcquire",
             "Temp_bool_IsClosed_Variable",
-            vec![call("AttemptGrip", vec![])],
+            vec![call("TryAcquire", vec![])],
         );
-        let outer = doonce("DoOnce_2", "Temp_bool_IsClosed_Variable_2", vec![inner]);
+        let outer = doonce("DoOnce_2", "Temp_bool_IsClosed_Variable", vec![inner]);
         let branch = Stmt::Branch {
             cond: Expr::Var("guard".into()),
             then_body: vec![outer],
@@ -270,11 +264,57 @@ mod tests {
 
         if let Stmt::Branch { then_body, .. } = &body[0] {
             assert_eq!(then_body.len(), 1);
-            assert_eq!(expect_doonce_name(&then_body[0]), "AttemptGrip");
+            assert_eq!(expect_doonce_name(&then_body[0]), "TryAcquire");
         } else {
             panic!("expected Branch");
         }
         // Smoke check that the lift didn't leave a spurious sibling around.
         let _ = var("unused");
+    }
+
+    #[test]
+    fn independent_nested_gates_keep_both_reset_states() {
+        let inner = doonce(
+            "TryAcquire",
+            "Temp_bool_IsClosed_Variable_3",
+            vec![call("TryAcquire", vec![])],
+        );
+        let outer = doonce("TryAcquire", "Temp_bool_IsClosed_Variable_2", vec![inner]);
+        let mut body = vec![outer];
+        collapse_nested_doonce(&mut body);
+        let Stmt::Latch {
+            kind: LatchKind::DoOnce { gate_var, .. },
+            body: nested,
+            ..
+        } = &body[0]
+        else {
+            unreachable!()
+        };
+        assert_eq!(gate_var, "Temp_bool_IsClosed_Variable_2");
+        assert!(
+            matches!(&nested[0], Stmt::Latch { kind: LatchKind::DoOnce { gate_var, .. }, .. }
+            if gate_var == "Temp_bool_IsClosed_Variable_3")
+        );
+    }
+    #[test]
+    fn repeated_gate_at_different_execution_sites_is_not_a_duplicate() {
+        let mut inner = doonce(
+            "TryAcquire",
+            "Temp_bool_IsClosed_Variable_3",
+            vec![call("TryAcquire", vec![])],
+        );
+        let Stmt::Latch { offset, .. } = &mut inner else {
+            unreachable!()
+        };
+        *offset = 20;
+        let mut body = vec![doonce(
+            "TryAcquire",
+            "Temp_bool_IsClosed_Variable_3",
+            vec![inner],
+        )];
+        collapse_nested_doonce(&mut body);
+        assert!(
+            matches!(&body[0], Stmt::Latch { body, .. } if matches!(body[0], Stmt::Latch { .. }))
+        );
     }
 }

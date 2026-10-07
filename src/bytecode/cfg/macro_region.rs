@@ -183,8 +183,7 @@ impl MacroRegionResult {
 /// in another body region) the PUSH bytes are attributed to a sibling
 /// partition, so the DoOnce's own footprint never pushes even though
 /// `associate_frame` finds its shared frame during formation. Requiring
-/// a footprint PUSH drops real candidates (verified: it loses the
-/// VRPlayer GripLeft AttemptGrip synthesized wrap).
+/// a footprint PUSH drops these cross-body candidates.
 /// - DoOnce / MultiGate enter by kind alone (frame may live elsewhere).
 /// - FlipFlop (toggle) and IsValid (lexical jump-if-not) never own a
 ///   frame; excluded.

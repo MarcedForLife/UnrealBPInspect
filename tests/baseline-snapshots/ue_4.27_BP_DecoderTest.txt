@@ -345,19 +345,19 @@ Functions:
   OnLeftAxis():
     self.LeftAxis = $CustomEvent_Axis_1
     if (self.LeftAxis >= self.AxisThreshold) {
-        DoOnce(Attempt) {
+        DoOnce(DoOnce_1) {
             Attempt(true)
-            ResetDoOnce(Release)
+            ResetDoOnce(DoOnce)
         }
     } else {
-        ResetDoOnce(Attempt)
-        DoOnce(Release) {
+        ResetDoOnce(DoOnce_1)
+        DoOnce(DoOnce) {
             Release(true)
         }
     }
 
   OnLeftReleased():
-    DoOnce(Release) {
+    DoOnce(DoOnce) {
         Release(true)
     }
 
@@ -365,19 +365,19 @@ Functions:
   OnRightAxis():
     self.RightAxis = $CustomEvent_Axis
     if (self.RightAxis >= self.AxisThreshold) {
-        DoOnce(Attempt) {
+        DoOnce(DoOnce_6) {
             Attempt(false)
-            ResetDoOnce(Release)
+            ResetDoOnce(DoOnce_2)
         }
     } else {
-        ResetDoOnce(Attempt)
-        DoOnce(Release) {
+        ResetDoOnce(DoOnce_6)
+        DoOnce(DoOnce_2) {
             Release(false)
         }
     }
 
   OnRightReleased():
-    DoOnce(Release) {
+    DoOnce(DoOnce_2) {
         Release(false)
     }
 
