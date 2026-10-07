@@ -1025,6 +1025,7 @@ mod tests {
                 direction,
                 pin_id: [0; 16],
                 linked_to: Vec::new(),
+                ..Default::default()
             })
             .collect();
             pin_data.insert(node_index, NodePinData { pins });

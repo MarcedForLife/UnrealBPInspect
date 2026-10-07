@@ -7,6 +7,7 @@ use crate::types::{AssetVersion, ExportHeader, ImportEntry, NodePinData, PropVal
 
 fn pin(name: &str, direction: u8, identity: u8, source: Option<usize>) -> EdGraphPin {
     EdGraphPin {
+        metadata: None,
         name: name.into(),
         pin_type: if name == "execute" { "exec" } else { "object" }.into(),
         direction,

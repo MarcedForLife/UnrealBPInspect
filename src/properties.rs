@@ -592,7 +592,7 @@ fn read_struct_property(
             .get(value_start as usize..value_data_end as usize)
             .context("pin type payload exceeds available data")?;
         let mut bounded = std::io::Cursor::new(payload);
-        if let Ok(fields) = read_edgraph_pin_type(&mut bounded, ctx) {
+        if let Ok(fields) = read_edgraph_pin_type(&mut bounded, ctx.name_table, ctx.ver.is_lwc()) {
             if bounded.position() == payload.len() as u64 {
                 reader.set_position(value_data_end);
                 return Ok(PropValue::Struct {
@@ -785,12 +785,16 @@ fn read_native_bool(reader: &mut Reader) -> Result<PropValue> {
     Ok(PropValue::Bool(value != 0))
 }
 
-fn read_edgraph_pin_type(reader: &mut Reader, ctx: &PropCtx) -> Result<Vec<Property>> {
+pub(crate) fn read_edgraph_pin_type(
+    reader: &mut Reader,
+    name_table: &NameTable,
+    ue5: bool,
+) -> Result<Vec<Property>> {
     let mut fields = Vec::new();
     for name in ["PinCategory", "PinSubCategory"] {
         fields.push(Property {
             name: name.into(),
-            value: PropValue::Name(read_name_reference(reader, ctx.name_table)?),
+            value: PropValue::Name(read_name_reference(reader, name_table)?),
         });
     }
     fields.push(Property {
@@ -813,7 +817,7 @@ fn read_edgraph_pin_type(reader: &mut Reader, ctx: &PropCtx) -> Result<Vec<Prope
         for name in ["TerminalCategory", "TerminalSubCategory"] {
             terminal_fields.push(Property {
                 name: name.into(),
-                value: PropValue::Name(read_name_reference(reader, ctx.name_table)?),
+                value: PropValue::Name(read_name_reference(reader, name_table)?),
             });
         }
         terminal_fields.push(Property {
@@ -845,7 +849,7 @@ fn read_edgraph_pin_type(reader: &mut Reader, ctx: &PropCtx) -> Result<Vec<Prope
         });
     }
     let member_parent = PropValue::Object(read_i32(reader)?);
-    let member_name = PropValue::Name(read_name_reference(reader, ctx.name_table)?);
+    let member_name = PropValue::Name(read_name_reference(reader, name_table)?);
     let member_guid = PropValue::Str(format!("{:02x?}", read_guid(reader)?));
     fields.push(Property {
         name: "PinSubCategoryMemberReference".into(),
@@ -873,7 +877,7 @@ fn read_edgraph_pin_type(reader: &mut Reader, ctx: &PropCtx) -> Result<Vec<Prope
             value: read_native_bool(reader)?,
         });
     }
-    if ctx.ver.is_lwc() {
+    if ue5 {
         fields.push(Property {
             name: "bSerializeAsSinglePrecisionFloat".into(),
             value: read_native_bool(reader)?,

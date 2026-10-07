@@ -78,6 +78,7 @@ fn empty_parsed() -> ParsedAsset {
 /// One exec pin in `direction`, optionally linked to `target`.
 fn exec_pin(direction: u8, target: Option<usize>) -> EdGraphPin {
     EdGraphPin {
+        metadata: None,
         name: "exec".into(),
         pin_type: PIN_TYPE_EXEC.into(),
         direction,
@@ -108,6 +109,7 @@ fn exec_root_pins(target: usize) -> NodePinData {
 fn pure_node_pins(target: usize) -> NodePinData {
     NodePinData {
         pins: vec![EdGraphPin {
+            metadata: None,
             name: "Out".into(),
             pin_type: "float".into(),
             direction: PIN_DIRECTION_OUTPUT,
