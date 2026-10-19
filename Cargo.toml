@@ -9,7 +9,7 @@ repository = "https://github.com/MarcedForLife/UnrealBPInspect"
 homepage = "https://github.com/MarcedForLife/UnrealBPInspect"
 keywords = ["unreal-engine", "blueprint", "uasset", "gamedev", "parser"]
 categories = ["command-line-utilities", "game-development", "parser-implementations"]
-exclude = ["samples/*", ".github/*"]
+exclude = ["samples/*", ".github/*", "brand/*"]
 
 [[bin]]
 name = "bp-inspect"

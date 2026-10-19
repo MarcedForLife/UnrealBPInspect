@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-8 -8 80 80" width="80" height="80">
+  <!-- bp-inspect: the Blueprint graph's exec pin set as a shell prompt, with the cursor after it
+       in the editor's vector pin gold, on the graph canvas with its grid and a node body's sheen.
+       The 64 box sits in an 80 viewBox so its shadow is not clipped. -->
+  <defs>
+    <pattern id="grid" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="translate(4 4)">
+      <path d="M8 0H0V8" fill="none" stroke="#fff" stroke-opacity=".17" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff" stop-opacity=".11"/>
+      <stop offset=".55" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff" stop-opacity=".32"/>
+      <stop offset=".5" stop-color="#fff" stop-opacity=".04"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3"/>
+    </filter>
+  </defs>
+  <rect x="1" y="3" width="62" height="62" rx="14" fill="#000" fill-opacity=".6" filter="url(#shadow)"/>
+  <rect width="64" height="64" rx="14" fill="#393939"/>
+  <rect width="64" height="64" rx="14" fill="url(#grid)"/>
+  <rect width="64" height="64" rx="14" fill="url(#sheen)"/>
+  <rect x=".75" y=".75" width="62.5" height="62.5" rx="13.25" fill="none" stroke="url(#edge)" stroke-width="1.5"/>
+  <path d="M10 20H24L34 32L24 44H10Z" fill="#fff" stroke="#fff" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M43 42H52" fill="none" stroke="#ffc53d" stroke-width="6" stroke-linecap="round"/>
+</svg>

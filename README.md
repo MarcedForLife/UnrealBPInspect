@@ -1,4 +1,7 @@
-# Unreal Blueprint Inspect
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="brand/lockup-dark.svg">
+  <img src="brand/lockup-light.svg" alt="bp-inspect" width="260">
+</picture>
 
 `bp-inspect` reads Unreal Engine Blueprint `.uasset` files and outputs readable pseudocode, component trees, variables, and function signatures. It runs without Unreal Editor or the original project, and supports JSON output and Git diffs.
 
