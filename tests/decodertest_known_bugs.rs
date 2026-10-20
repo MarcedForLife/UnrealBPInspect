@@ -186,7 +186,7 @@ fn finding3_seq_twopin_no_trailing_duplicate() {
         .count();
     assert_eq!(
         calls, 2,
-        "EXPECTED-FAIL (finding 3): Seq_TwoPin emits {} PrintString calls, should \
+        "Finding 3 regressed: Seq_TwoPin emits {} PrintString calls, should \
          be 2 (then0 -> A, then1 -> B). A trailing copy of pin 0's call is being \
          duplicated after the sequence.",
         calls
@@ -294,7 +294,7 @@ fn g1_no_trailing_loop_body_redecode() {
     let foreach_int = function_body(emit, "Loop_ForEachInt");
     assert!(
         !foreach_int.contains("self.IntArray[0]"),
-        "EXPECTED-FAIL (finding G1): Loop_ForEachInt re-decodes its loop body \
+        "Finding G1 regressed: Loop_ForEachInt re-decodes its loop body \
          and leaks a trailing `$Array_Get_Item = self.IntArray[0]` after the \
          `for`.\nbody:\n{}",
         foreach_int
@@ -303,7 +303,7 @@ fn g1_no_trailing_loop_body_redecode() {
     let foreach_name = function_body(emit, "Loop_ForEachItemName");
     assert!(
         !foreach_name.contains("GrabbedActors[0]"),
-        "EXPECTED-FAIL (finding G1): Loop_ForEachItemName re-decodes its loop \
+        "Finding G1 regressed: Loop_ForEachItemName re-decodes its loop \
          body and leaks a trailing `$Array_Get_Item = GrabbedActors[0]` after \
          the `for`.\nbody:\n{}",
         foreach_name
@@ -313,7 +313,7 @@ fn g1_no_trailing_loop_body_redecode() {
     let for_simple_prints = for_simple.matches("PrintString(").count();
     assert_eq!(
         for_simple_prints, 2,
-        "EXPECTED-FAIL (finding G1): Loop_ForSimple has {} PrintString calls, \
+        "Finding G1 regressed: Loop_ForSimple has {} PrintString calls, \
          should be 2 (body + Done). The loop body re-decode leaks a third copy \
          of the body Print after `// Completed:`.\nbody:\n{}",
         for_simple_prints, for_simple
@@ -325,7 +325,7 @@ fn g1_no_trailing_loop_body_redecode() {
         .count();
     assert_eq!(
         loop_while_increments, 1,
-        "EXPECTED-FAIL (finding G1): Loop_While has {} `LoopCounter = (LoopCounter + 1)` \
+        "Finding G1 regressed: Loop_While has {} `LoopCounter = (LoopCounter + 1)` \
          lines, should be 1 (the body increment only). The loop body re-decode \
          leaks a second copy after `// Completed:`.\nbody:\n{}",
         loop_while_increments, loop_while
@@ -350,7 +350,7 @@ fn g2_foreach_no_leading_bound_expr() {
         let body = function_body(emit, name);
         assert!(
             !body.contains("$Less_IntInt"),
-            "EXPECTED-FAIL (finding G2): {}() leaks the loop's canonical head \
+            "Finding G2 regressed: {}() leaks the loop's canonical head \
              condition `$Less_IntInt = (0 < Array_Length(...))` as a sibling \
              before the ForEach `for`; it has no editor-graph counterpart and \
              should be dropped.\nbody:\n{}",
@@ -378,7 +378,7 @@ fn g5_loop_while_not_emptied_forc() {
     let body = function_body(emit, "Loop_While");
     assert!(
         body.contains("while (") && !body.contains("for ("),
-        "EXPECTED-FAIL (finding G5): Loop_While should render as a `while` loop, \
+        "Finding G5 regressed: Loop_While should render as a `while` loop, \
          not be misclassified as an empty-body `for`.\nbody:\n{}",
         body
     );
@@ -386,7 +386,7 @@ fn g5_loop_while_not_emptied_forc() {
     // appear inside the while body (which must therefore be non-empty).
     assert!(
         body.contains("LoopCounter = (LoopCounter + 1)"),
-        "EXPECTED-FAIL (finding G5): Loop_While's body should contain the counter \
+        "Finding G5 regressed: Loop_While's body should contain the counter \
          increment `LoopCounter = (LoopCounter + 1)`; the ForC misclassification \
          drains it into the for-header and empties the body.\nbody:\n{}",
         body
@@ -406,14 +406,14 @@ fn g4_nested_outer_foreach() {
     let body = function_body(emit, "Loop_ForEachNested");
     assert!(
         body.contains("for (OverlappingActor in self.OverlappingActors)"),
-        "EXPECTED-FAIL (finding G4): Loop_ForEachNested's outer loop should render \
+        "Finding G4 regressed: Loop_ForEachNested's outer loop should render \
          as `for (OverlappingActor in self.OverlappingActors)` (unused-item \
          ForEach), not an index-`for`.\nbody:\n{}",
         body
     );
     assert!(
         !body.contains("for (i = 0 to"),
-        "EXPECTED-FAIL (finding G4): Loop_ForEachNested's outer loop should not \
+        "Finding G4 regressed: Loop_ForEachNested's outer loop should not \
          render as an index-`for`.\nbody:\n{}",
         body
     );
@@ -466,21 +466,21 @@ fn g3_foreach_with_break_recovers_break_else() {
 
     assert!(
         inner.contains("break"),
-        "EXPECTED-FAIL (finding G3): Loop_ForEachWithBreak's loop body should \
+        "Finding G3 regressed: Loop_ForEachWithBreak's loop body should \
          contain a `break` (the true-arm of the `if (item > 5)` break-test); the \
          displaced two-pop truncation drops it, leaving an empty `if`.\nbody:\n{}",
         body
     );
     assert!(
         inner.contains("PrintString("),
-        "EXPECTED-FAIL (finding G3): Loop_ForEachWithBreak's false-arm \
+        "Finding G3 regressed: Loop_ForEachWithBreak's false-arm \
          `PrintString(...)` should render INSIDE the loop as the else; the \
          truncation ejects it past the loop.\nbody:\n{}",
         body
     );
     assert!(
         !body.contains("if (!("),
-        "EXPECTED-FAIL (finding G3): Loop_ForEachWithBreak should have NO post-loop \
+        "Finding G3 regressed: Loop_ForEachWithBreak should have NO post-loop \
          `if (!(...))` guard; the false-arm Print belongs inside the loop, not \
          ejected after it.\nbody:\n{}",
         body
@@ -506,7 +506,7 @@ fn g7_foreach_with_break_drops_head_cond_leak() {
 
     assert!(
         !body.contains("$BooleanAND"),
-        "EXPECTED-FAIL (finding G7): Loop_ForEachWithBreak should NOT leak the \
+        "Finding G7 regressed: Loop_ForEachWithBreak should NOT leak the \
          `$BooleanAND` break-flag head cond before the loop; it is dead scaffolding \
          and the `for (item in ...)` already carries the bound.\nbody:\n{}",
         body
@@ -539,21 +539,21 @@ fn g3_for_with_break_recovers_break_else() {
 
     assert!(
         inner.contains("break"),
-        "EXPECTED-FAIL (finding G3): Loop_ForWithBreak's loop body should contain \
+        "Finding G3 regressed: Loop_ForWithBreak's loop body should contain \
          a `break` (the true-arm of the `if (Temp_int_Variable == 5)` break-test); \
          the displaced two-pop truncation drops it.\nbody:\n{}",
         body
     );
     assert!(
         inner.contains("IntToString(Temp_int_Variable)"),
-        "EXPECTED-FAIL (finding G3): Loop_ForWithBreak's false-arm \
+        "Finding G3 regressed: Loop_ForWithBreak's false-arm \
          `PrintString(IntToString(Temp_int_Variable))` should render INSIDE the \
          loop as the else; the truncation ejects it past the loop.\nbody:\n{}",
         body
     );
     assert!(
         !body.contains("if (!("),
-        "EXPECTED-FAIL (finding G3): Loop_ForWithBreak should have NO post-loop \
+        "Finding G3 regressed: Loop_ForWithBreak should have NO post-loop \
          `if (!(...))` guard; the false-arm Print belongs inside the loop.\nbody:\n{}",
         body
     );
@@ -619,27 +619,27 @@ fn l1_latch_doonce_in_foreach_keeps_loop() {
 
     assert!(
         body.contains("for (item in self.IntArray)"),
-        "EXPECTED-FAIL (finding L1): Latch_DoOnceInForEach should render \
+        "Finding L1 regressed: Latch_DoOnceInForEach should render \
          `for (item in self.IntArray)`; the in-body DoOnce defeats ForEach \
          refinement and it falls back to a raw counter `while`.\nbody:\n{}",
         body
     );
     assert!(
         !body.contains("while ("),
-        "EXPECTED-FAIL (finding L1): Latch_DoOnceInForEach should have NO `while (` \
+        "Finding L1 regressed: Latch_DoOnceInForEach should have NO `while (` \
          header; the ForEach must be recognized despite the in-body DoOnce.\nbody:\n{}",
         body
     );
     assert!(
         !body.contains("self.IntArray[0]"),
-        "EXPECTED-FAIL (finding L1): Latch_DoOnceInForEach hoists the loop body out \
+        "Finding L1 regressed: Latch_DoOnceInForEach hoists the loop body out \
          of the loop with a hardcoded `self.IntArray[0]` fetch; the element read \
          belongs inside the loop as `IntToString(item)`.\nbody:\n{}",
         body
     );
     assert!(
         !body.contains("Temp_int_Loop_Counter_Variable"),
-        "EXPECTED-FAIL (finding L1): Latch_DoOnceInForEach leaks the ForEach \
+        "Finding L1 regressed: Latch_DoOnceInForEach leaks the ForEach \
          scaffolding counter (`Temp_int_Loop_Counter_Variable` init/increment) as \
          siblings; a recognized ForEach carries its own bound.\nbody:\n{}",
         body
@@ -648,7 +648,7 @@ fn l1_latch_doonce_in_foreach_keeps_loop() {
     let inner = first_loop_inner(&body);
     assert!(
         inner.contains("DoOnce(") && inner.contains("IntToString(item)"),
-        "EXPECTED-FAIL (finding L1): Latch_DoOnceInForEach's loop body should keep \
+        "Finding L1 regressed: Latch_DoOnceInForEach's loop body should keep \
          its `DoOnce(...) {{ Print(IntToString(item)) }}` INSIDE the loop.\nbody:\n{}",
         body
     );
@@ -675,7 +675,7 @@ fn l2_latch_doonce_single_gate_no_phantom() {
     );
     assert!(
         !body.contains("(PrintString)"),
-        "EXPECTED-FAIL (finding L2): Latch_DoOnce names a latch gate `PrintString` \
+        "Finding L2 regressed: Latch_DoOnce names a latch gate `PrintString` \
          (`ResetDoOnce(PrintString)` / `DoOnce(PrintString)`); the gate should be \
          the DoOnce node, never the downstream call.\nbody:\n{}",
         body
@@ -686,7 +686,7 @@ fn l2_latch_doonce_single_gate_no_phantom() {
     let doonce_blocks = body.matches("DoOnce(").count() - body.matches("ResetDoOnce(").count();
     assert_eq!(
         doonce_blocks, 1,
-        "EXPECTED-FAIL (finding L2): Latch_DoOnce should open exactly ONE DoOnce \
+        "Finding L2 regressed: Latch_DoOnce should open exactly ONE DoOnce \
          block (got {}); the second `DoOnce(PrintString)` wrapping \"Reset done\" \
          is a phantom latch and must not be synthesized.\nbody:\n{}",
         doonce_blocks, body
@@ -729,7 +729,7 @@ fn l4_onleftaxis_in_call_graph() {
     });
     assert!(
         has_onleftaxis_edge,
-        "EXPECTED-FAIL (finding L4): OnLeftAxis is missing from the call graph; it \
+        "Finding L4 regressed: OnLeftAxis is missing from the call graph; it \
          calls Attempt(true) and Release(true) and must be listed \
          `OnLeftAxis → Attempt, Release`.\n{}",
         emit
@@ -751,7 +751,7 @@ fn l4_onleftaxis_in_call_graph() {
         .count();
     assert!(
         called_by_left >= 2,
-        "EXPECTED-FAIL (finding L4): only {} `// Called by:` line(s) name OnLeftAxis; \
+        "Finding L4 regressed: only {} `// Called by:` line(s) name OnLeftAxis; \
          both Attempt and Release should attribute the call to OnLeftAxis.\n{}",
         called_by_left,
         emit
