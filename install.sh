@@ -121,7 +121,7 @@ fi
 if command -v git >/dev/null 2>&1; then
     # textconv is a shell command, so retain quoting inside the config value.
     QUOTED_TARGET=$(printf '%s' "$TARGET" | sed "s/'/'\\\\''/g")
-    git config --global diff.bp-inspect.textconv "'$QUOTED_TARGET'"
+    git config --global diff.bp-inspect.textconv "'$QUOTED_TARGET' --textconv"
     git config --global diff.bp-inspect.cachetextconv true
 fi
 

@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser as ClapParser;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 use unreal_bp_inspect::bytecode::asset::DecodedAsset;
@@ -48,6 +49,10 @@ struct Cli {
     #[arg(long, default_value = "3")]
     context: usize,
 
+    /// Git textconv: print the summary, or why it is unavailable, and always exit 0
+    #[arg(long, conflicts_with_all = ["json", "dump", "diff", "update"])]
+    textconv: bool,
+
     /// Debug: dump raw table data
     #[arg(long)]
     debug: bool,
@@ -88,16 +93,58 @@ fn collect_from_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn process_file(path: &Path, debug: bool) -> Result<(ParsedAsset, DecodedAsset)> {
-    let data = std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut asset =
-        parse_asset(&data, debug).with_context(|| format!("failed to parse {}", path.display()))?;
+fn decode_bytes(data: &[u8], debug: bool) -> Result<(ParsedAsset, DecodedAsset)> {
+    let mut asset = parse_asset(data, debug)?;
     let decoded = decode_asset(&asset);
     asset.diagnostics = decoded.diagnostics.clone();
+    Ok((asset, decoded))
+}
+
+fn process_file(path: &Path, debug: bool) -> Result<(ParsedAsset, DecodedAsset)> {
+    let data = std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let (asset, decoded) = decode_bytes(&data, debug)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
     for diagnostic in &asset.diagnostics {
         eprintln!("{}: {}", path.display(), diagnostic.reason);
     }
     Ok((asset, decoded))
+}
+
+/// Text for Git's textconv hook. Git aborts the whole diff when a textconv
+/// command fails, so every problem is reported in the text instead. An
+/// unreadable asset shows its size and SHA-256, keeping binary changes
+/// visible. The path is omitted because Git passes a temporary file.
+fn textconv_text(path: &Path, filters: &[String]) -> String {
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(error) => return format!("bp-inspect could not read this file: {error}\n"),
+    };
+    let unreadable = |reason: &str| {
+        let sha256: String = Sha256::digest(&data)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        format!(
+            "bp-inspect could not read this asset: {reason}\nSize: {} bytes\nSHA-256: {sha256}\n",
+            data.len()
+        )
+    };
+    match std::panic::catch_unwind(|| decode_bytes(&data, false)) {
+        Ok(Ok((asset, decoded))) => {
+            let mut text = String::new();
+            if !asset.diagnostics.is_empty() {
+                text.push_str("Incomplete result:\n");
+                for diagnostic in &asset.diagnostics {
+                    text.push_str(&format!("  {}\n", diagnostic.reason));
+                }
+                text.push('\n');
+            }
+            text.push_str(&filter_summary(&decoded, &asset, filters));
+            text
+        }
+        Ok(Err(error)) => unreadable(&format!("{error:#}")),
+        Err(_) => unreadable("internal decoder error"),
+    }
 }
 
 fn format_asset(
@@ -146,6 +193,13 @@ fn run(cli: Cli) -> Result<bool> {
 
     if cli.diff {
         return run_diff(&cli.paths, &filters, cli.context);
+    }
+    if cli.textconv {
+        let [path] = cli.paths.as_slice() else {
+            bail!("--textconv requires exactly 1 .uasset file");
+        };
+        print!("{}", textconv_text(path, &filters));
+        return Ok(true);
     }
 
     let files = collect_uasset_paths(&cli.paths)?;

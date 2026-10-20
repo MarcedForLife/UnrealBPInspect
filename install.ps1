@@ -97,7 +97,7 @@ if (($UserPath -split ';') -notcontains $InstallDir) {
 if (($env:Path -split ';') -notcontains $InstallDir) { $env:Path = "$env:Path;$InstallDir" }
 if (Get-Command git -ErrorAction SilentlyContinue) {
     $GitBinaryPath = ($BinaryPath -replace '\\', '/').Replace("'", "'\''")
-    git config --global diff.bp-inspect.textconv "'$GitBinaryPath'"
+    git config --global diff.bp-inspect.textconv "'$GitBinaryPath' --textconv"
     if ($LASTEXITCODE -ne 0) { throw "Failed to configure Git textconv." }
     git config --global diff.bp-inspect.cachetextconv true
     if ($LASTEXITCODE -ne 0) { throw "Failed to configure Git textconv caching." }

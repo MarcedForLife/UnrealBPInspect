@@ -52,7 +52,7 @@ bp-inspect --diff "Old_Enemy_BP.uasset" "New_Enemy_BP.uasset" --filter ApplyDama
 
 Pass the older file first. Exit code 0 means the summaries match. Exit code 1 means differences and 2 means an error. Errors are written to stderr. Older releases also use 1 for errors, so check stderr when using those versions. A decoded diff can omit binary changes that do not affect the summary.
 
-For Git revisions, use an existing textconv setup or extract each revision to a separate temporary file. Preserve the binary bytes when extracting and leave the working asset intact.
+For Git revisions, use an existing textconv setup or extract each revision to a separate temporary file. Preserve the binary bytes when extracting and leave the working asset intact. Textconv output always succeeds, so check it for an `Incomplete result:` note or a size and SHA-256 in place of a summary.
 
 ## Explain or migrate
 
