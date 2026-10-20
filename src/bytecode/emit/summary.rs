@@ -5,7 +5,8 @@
 //! (params, return types, nested control flow bodies) consistently
 //! across asset versions so cross-version diffs stay clean.
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::bytecode::asset::DecodedAsset;
 use crate::bytecode::emit::comments::{inline_comment_lines, with_block_comments};
@@ -13,25 +14,43 @@ use crate::bytecode::emit::sections::{emit_prefix_sections, filter_flags_for_sum
 use crate::bytecode::expr::{
     binary_op_symbol, unary_op_symbol, BinaryOp, CastKind, Expr, SwitchExprCase,
 };
+use crate::bytecode::scoped_value::ScopedValue;
 use crate::bytecode::stmt::{LatchKind, LoopKind, Stmt, SwitchCase};
 use crate::bytecode::transforms::fold_long_lines;
 use crate::enums::{resolve_enum_args, resolve_enum_comparison};
 use crate::output_summary::ubergraph::clean_event_header;
 use crate::types::ParsedAsset;
 
-/// Look up a latent call's resume body by the call's disk offset.
-/// Returns `None` when the call carries no harvested continuation.
-fn lookup_resume_body(
-    resume_bodies: &BTreeMap<usize, Vec<Stmt>>,
-    offset: usize,
-) -> Option<&[Stmt]> {
-    resume_bodies.get(&offset).map(|body| body.as_slice())
+thread_local! {
+    /// Call offsets whose latent continuations are being rendered on the
+    /// current emit path. A continuation that reaches its own call again
+    /// renders the call line without expanding the continuation a second
+    /// time.
+    static EXPANDING_CONTINUATIONS: RefCell<Option<BTreeSet<usize>>> =
+        const { RefCell::new(None) };
 }
 
-/// True if `name` is a recognised latent UFUNCTION whose Call statement
-/// carries an interleaved resume continuation.
-pub(crate) fn is_latent_function(name: &str) -> bool {
-    crate::bytecode::names::LATENT_FUNCTIONS.contains(&name)
+/// Interleave the latent continuation the partitioner associated with the
+/// call at `call_offset`, at the call's own indent level. The association
+/// comes from the call's bytecode, so any latent function qualifies.
+/// Continuations belong to the ubergraph stream, so callers pass an empty
+/// map for standalone function bodies, whose offsets index other bytecode.
+fn emit_continuation(
+    output: &mut String,
+    call_offset: usize,
+    indent_level: usize,
+    resume_bodies: &BTreeMap<usize, Vec<Stmt>>,
+) {
+    let Some(resume_body) = resume_bodies.get(&call_offset) else {
+        return;
+    };
+    let mut expanding =
+        ScopedValue::with_current(&EXPANDING_CONTINUATIONS, Clone::clone).unwrap_or_default();
+    if !expanding.insert(call_offset) {
+        return;
+    }
+    let _scope = ScopedValue::set(&EXPANDING_CONTINUATIONS, Some(expanding));
+    emit_body(output, resume_body, indent_level, resume_bodies);
 }
 
 /// Render only the function and event bodies in the decoder's native
@@ -46,7 +65,7 @@ pub(crate) fn emit_summary(asset: &DecodedAsset) -> String {
     let mut output = String::new();
     for function in &asset.functions {
         emit_block_header(&mut output, "function", &function.name);
-        emit_body(&mut output, &function.body, 1, resume_bodies);
+        emit_body(&mut output, &function.body, 1, &BTreeMap::new());
         output.push_str("}\n\n");
     }
     for event in &asset.events {
@@ -91,9 +110,10 @@ pub fn filter_summary(decoded: &DecodedAsset, parsed: &ParsedAsset, filters: &[S
 /// Produces exactly the lines the summary emitter writes for that body
 /// (the same `emit_body` walk at indent level 1, with latent-call resume
 /// continuations interleaved from `resume_bodies`), one `String` per line
-/// with the trailing newline stripped. Used by the `--dump`/`--json`
-/// override bridge so the `BytecodeSummary` property they render stays
-/// byte-identical to the summary mode's function-body output.
+/// with the trailing newline stripped. Pass an empty map for a standalone
+/// function body. Used by the `--dump`/`--json` override bridge so the
+/// `BytecodeSummary` property they render stays byte-identical to the
+/// summary mode's function-body output.
 pub fn render_body_lines(body: &[Stmt], resume_bodies: &BTreeMap<usize, Vec<Stmt>>) -> Vec<String> {
     let mut output = String::new();
     emit_body(&mut output, body, 1, resume_bodies);
@@ -108,14 +128,9 @@ pub fn render_body_lines(body: &[Stmt], resume_bodies: &BTreeMap<usize, Vec<Stmt
 /// Emit one regular function block: optional `// Called by:` line,
 /// signature header (`  Name(args) [flags]`), then the body indented by
 /// one extra level. Falls back to `<name>()` when the export's
-/// `Signature` property is missing.
-pub(super) fn emit_function_block(
-    output: &mut String,
-    name: &str,
-    body: &[Stmt],
-    ctx: &EmitCtx,
-    resume_bodies: &BTreeMap<usize, Vec<Stmt>>,
-) {
+/// `Signature` property is missing. Function bytecode carries no latent
+/// continuations.
+pub(super) fn emit_function_block(output: &mut String, name: &str, body: &[Stmt], ctx: &EmitCtx) {
     if let Some(callers) = ctx.callers_map.get(name) {
         output.push_str("  // Called by: ");
         output.push_str(&callers.join(", "));
@@ -140,7 +155,7 @@ pub(super) fn emit_function_block(
     // Function-level descriptions sit directly below the signature.
     emit_comment_lines(output, ctx.comments.function_level_lines(name));
     with_block_comments(&ctx.comments, name, || {
-        emit_body(output, body, 1, resume_bodies);
+        emit_body(output, body, 1, &BTreeMap::new());
     });
 }
 
@@ -251,18 +266,9 @@ fn emit_stmt(
             output.push('(');
             output.push_str(&args_to_string(args, func_name_for_resolve(func)));
             output.push_str(")\n");
-            // Interleave a latent call's resume continuation at the
-            // same indent level as the call itself: the body the latent
-            // action eventually resumes onto is an orphan continuation,
-            // the post-resume statements run in the same scope as the call
-            // site, not nested inside it. Only look up when the callee is
-            // in the recognised latent set so the cost stays bounded.
-            let callee = func_name_for_resolve(func);
-            if is_latent_function(callee) {
-                if let Some(resume_body) = lookup_resume_body(resume_bodies, *offset) {
-                    emit_body(output, resume_body, indent_level, resume_bodies);
-                }
-            }
+            // The post-resume statements run in the same scope as the call
+            // site, not nested inside it.
+            emit_continuation(output, *offset, indent_level, resume_bodies);
         }
         Stmt::Return { value: None, .. } => {
             output.push_str(&indent);

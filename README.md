@@ -108,7 +108,7 @@ Illustrative function with a ForEach loop, nested branch, and switch cases
     }
 ```
 
-The decoder also recognises counted and while loops, loop breaks, Sequence pins, DoOnce and FlipFlop patterns, and continuations after latent actions such as Delay. Recovery depends on the compiled bytecode pattern. Temporary variables are kept where removing them could change evaluation order.
+The decoder also recognises counted and while loops, loop breaks, Sequence pins, DoOnce and FlipFlop patterns, and continuations after latent actions such as Delay, including engine and project latent functions. Recovery depends on the compiled bytecode pattern. A continuation that resumes in code already shown in an event, such as a Delay looping back to an earlier node, is marked `UNKNOWN` with the event's name. A continuation that can't be located is marked the same way and reported as an incomplete result. Temporary variables are kept where removing them could change evaluation order.
 
 ### Comparing Blueprints
 

@@ -87,13 +87,7 @@ pub(crate) fn emit_prefix_sections(
     let mut blocks = Vec::new();
     for function in &decoded.functions {
         let mut block = String::new();
-        super::summary::emit_function_block(
-            &mut block,
-            &function.name,
-            &function.body,
-            &context,
-            &decoded.resume_bodies,
-        );
+        super::summary::emit_function_block(&mut block, &function.name, &function.body, &context);
         if block_matches_filter(&block, filters) {
             matched_funcs.insert(function.name.clone());
             blocks.push(block);

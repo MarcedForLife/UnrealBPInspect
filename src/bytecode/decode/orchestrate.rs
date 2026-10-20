@@ -8,7 +8,7 @@
 //! FlipFlop/DoOnce synthesis.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 
 use crate::binary::NameTable;
@@ -18,9 +18,11 @@ use crate::bytecode::decode::ctx::debug_enabled;
 use crate::bytecode::names::{EXECUTE_UBERGRAPH_PREFIX, K2NODE_EXECUTION_SEQUENCE};
 use crate::bytecode::partition::{
     build_opcode_graph, build_opcode_graph_with_resume, partition_ubergraph_with_translation,
-    EventEntry,
+    EventEntry, OpcodeGraph,
 };
+use crate::bytecode::stmt::Stmt;
 use crate::bytecode::structure::build_skeleton;
+use crate::bytecode::transforms::visit::walk_stmt_children;
 use crate::resolve::{class_of, enclosing_graph_name, resolve_index, short_class};
 use crate::types::{AssetDiagnostic, ParsedAsset};
 
@@ -296,6 +298,16 @@ fn decode_asset_inner(asset: &ParsedAsset) -> DecodedAsset {
             .unwrap()
             .update(&resume_bodies_before[offset], body, &[]);
     }
+    let ubergraph_export_index = ubergraph_export.map(|(index, _)| index + 1);
+    for call_offset in unattached_continuations(&events, &resume_bodies) {
+        diagnostics.push(AssetDiagnostic {
+            export_index: ubergraph_export_index,
+            reason: format!(
+                "latent continuation of the call at 0x{call_offset:x} in {ubergraph_name} is not \
+                 shown, no decoded event contains the call"
+            ),
+        });
+    }
     DecodedAsset {
         function_origins,
         event_origins,
@@ -482,6 +494,26 @@ fn decode_ubergraph_events(
                         );
                         for (call_offset, body) in ug_resume_bodies {
                             resume_bodies.insert(call_offset, body);
+                        }
+                        // A harvested resume target that yields no chunk
+                        // would silently drop what the latent action resumes
+                        // onto. Mark the call site instead.
+                        for (call_offset, marker, lost) in rejected_resume_targets(
+                            &latent_resumes,
+                            &resume_blocks,
+                            &graph,
+                            &event_ranges,
+                        ) {
+                            if let Some(detail) = lost {
+                                diagnostics.push(AssetDiagnostic {
+                                    export_index: Some(ug_export_index),
+                                    reason: format!(
+                                        "latent continuation of the call at 0x{call_offset:x} in \
+                                         {ug_name} is not shown, {detail}"
+                                    ),
+                                });
+                            }
+                            resume_bodies.insert(call_offset, vec![marker]);
                         }
                         // Parallel K2Node-byte attribution map.
                         // DecodeCtx threads an optional reference so
@@ -785,6 +817,101 @@ fn build_resume_owner_map(
         }
     }
     owner
+}
+
+/// Latent calls whose harvested resume target produced no resume chunk, as
+/// `(call offset, marker, lost)`. The marker stands in for the continuation
+/// after the call. A target inside an event's owned code, such as a Delay
+/// looping back to an earlier node, resumes onto statements that event
+/// already shows, so only the link is missing. Any other target loses the
+/// continuation, and `lost` describes why.
+fn rejected_resume_targets(
+    latent_resumes: &BTreeMap<usize, usize>,
+    resume_blocks: &BTreeMap<usize, Range<usize>>,
+    graph: &OpcodeGraph,
+    event_ranges: &BTreeMap<String, Vec<Range<usize>>>,
+) -> Vec<(usize, Stmt, Option<String>)> {
+    latent_resumes
+        .iter()
+        .filter(|(call_offset, _)| !resume_blocks.contains_key(call_offset))
+        .map(|(&call_offset, &resume_target)| {
+            let owner = event_ranges.iter().find_map(|(name, ranges)| {
+                ranges
+                    .iter()
+                    .any(|range| range.contains(&resume_target))
+                    .then_some(name)
+            });
+            let (reason, lost) = match owner {
+                Some(name) if graph.boundaries.contains(&resume_target) => (
+                    format!("latent continuation resumes in code shown in event {name}"),
+                    None,
+                ),
+                _ => {
+                    let detail = if graph.boundaries.contains(&resume_target) {
+                        format!("resume target 0x{resume_target:x} is outside every resume range")
+                    } else {
+                        format!("resume target 0x{resume_target:x} is not an opcode boundary")
+                    };
+                    (
+                        format!("latent continuation not decoded, {detail}"),
+                        Some(detail),
+                    )
+                }
+            };
+            let marker = Stmt::Unknown {
+                reason,
+                raw_bytes: vec![],
+                offset: resume_target,
+                length: 0,
+            };
+            (call_offset, marker, lost)
+        })
+        .collect()
+}
+
+/// Continuation keys no rendered body reaches: no `Stmt::Call` at the key's
+/// offset survives in an event body, or in a continuation that is itself
+/// reached. The emitter interleaves continuations only at their call, so
+/// these would otherwise vanish from every output mode.
+fn unattached_continuations(
+    events: &[Event],
+    resume_bodies: &BTreeMap<usize, Vec<Stmt>>,
+) -> Vec<usize> {
+    fn collect_call_offsets(body: &[Stmt], offsets: &mut BTreeSet<usize>) {
+        for stmt in body {
+            if let Stmt::Call { offset, .. } = stmt {
+                offsets.insert(*offset);
+            }
+            walk_stmt_children(stmt, &mut |child| collect_call_offsets(child, offsets));
+        }
+    }
+    let mut call_offsets = BTreeSet::new();
+    for event in events {
+        collect_call_offsets(&event.body, &mut call_offsets);
+    }
+    let mut attached = BTreeSet::new();
+    let mut pending: Vec<usize> = call_offsets
+        .iter()
+        .copied()
+        .filter(|offset| resume_bodies.contains_key(offset))
+        .collect();
+    while let Some(call_offset) = pending.pop() {
+        if !attached.insert(call_offset) {
+            continue;
+        }
+        let mut nested = BTreeSet::new();
+        collect_call_offsets(&resume_bodies[&call_offset], &mut nested);
+        pending.extend(
+            nested
+                .into_iter()
+                .filter(|offset| resume_bodies.contains_key(offset)),
+        );
+    }
+    resume_bodies
+        .keys()
+        .copied()
+        .filter(|offset| !attached.contains(offset))
+        .collect()
 }
 
 /// Shared inputs for decoding one ubergraph event body. Bundled because
@@ -1872,5 +1999,47 @@ mod coverage_tests {
         assert!(reachable_statement_offsets(&graph)
             .unwrap_err()
             .contains("flow-stack limit"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytecode::expr::Expr;
+
+    fn call_at(offset: usize) -> Stmt {
+        Stmt::Call {
+            func: Expr::Var("Latent".into()),
+            args: vec![],
+            offset,
+        }
+    }
+
+    #[test]
+    fn continuations_are_attached_only_through_a_rendered_call() {
+        let events = [Event {
+            name: "Ev".into(),
+            body: vec![Stmt::Branch {
+                cond: Expr::Var("Ready".into()),
+                then_body: vec![call_at(0x10)],
+                else_body: vec![],
+                offset: 0x08,
+            }],
+            export_index: None,
+        }];
+        // 0x10 is called by the event and chains to 0x20. 0x30 and 0x40
+        // only reach each other, so neither is ever rendered.
+        let resume_bodies: BTreeMap<usize, Vec<Stmt>> = [
+            (0x10, vec![call_at(0x20)]),
+            (0x20, vec![]),
+            (0x30, vec![call_at(0x40)]),
+            (0x40, vec![call_at(0x30)]),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            unattached_continuations(&events, &resume_bodies),
+            vec![0x30, 0x40]
+        );
     }
 }

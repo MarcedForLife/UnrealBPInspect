@@ -1,29 +1,30 @@
 //! Strip the trailing `MakeLatentActionInfo` argument from latent
 //! function calls.
 //!
-//! Latent UFUNCTION calls in Blueprint (`Delay`, `RetriggerableDelay`,
-//! `MoveComponentTo`, etc.) take a compiler-emitted `FLatentActionInfo`
-//! struct as their final argument. The struct carries the resume offset
-//! and the ubergraph function name, both of which are internal plumbing
-//! the editor never shows. Without this pass the decoder emits the full
+//! Latent UFUNCTION calls in Blueprint (`Delay`, `LoadStreamLevel`,
+//! project-defined latent functions, etc.) take a compiler-emitted
+//! `FLatentActionInfo` struct as their final argument. The struct carries
+//! the resume offset and the ubergraph function name, both of which are
+//! internal plumbing the editor never shows. Without this pass the decoder
+//! emits the full
 //! `MakeLatentActionInfo(skip_offset(0xHEX), ..., 'ExecuteUbergraph_*', self)`
 //! call expression verbatim, so this pass elides the wrapper before
 //! rendering.
 //!
 //! The pass walks the statement tree, finds `Stmt::Call` and `Expr::Call`
-//! whose name appears in the latent-function list, and drops the
-//! trailing argument when it is structurally `Expr::Call { name:
-//! "MakeLatentActionInfo", .. }`. Any other shape leaves the argument
-//! untouched, the structural check guards against over-firing on
-//! non-latent calls that happen to share a name.
+//! and drops the trailing argument when it is a `MakeLatentActionInfo`
+//! struct whose `Linkage` field is an `EX_SKIP_OFFSET_CONST` operand
+//! (`skip_offset(..)`). The compiler only emits that opcode for the
+//! linkage of a latent call, so the evidence comes from the bytecode
+//! rather than the callee's name. Any other shape leaves the argument
+//! untouched, including ordinary calls named like a latent function.
 //!
 //! Pipeline position: runs after `lower_static_library_calls` so the
 //! function name is already in its canonical free-function form, and
 //! before the recognisers and inliner so downstream passes see the
 //! cleaner argument list.
 
-use crate::bytecode::expr::Expr;
-use crate::bytecode::names::LATENT_FUNCTIONS;
+use crate::bytecode::expr::{Expr, LiteralValue};
 use crate::bytecode::stmt::Stmt;
 use crate::bytecode::transforms::visit::{rewrite_stmts_preorder, walk_body_exprs_mut, Action};
 
@@ -31,11 +32,14 @@ use crate::bytecode::transforms::visit::{rewrite_stmts_preorder, walk_body_exprs
 /// `FLatentActionInfo` arguments.
 const LATENT_INFO_STRUCT: &str = "MakeLatentActionInfo";
 
+/// Literal prefix the expression decoder gives an `EX_SKIP_OFFSET_CONST`
+/// operand.
+const SKIP_OFFSET_PREFIX: &str = "skip_offset(";
+
 /// Walk `body`, strip the trailing `MakeLatentActionInfo` arg from
-/// every recognised latent call (both `Stmt::Call` and nested
-/// `Expr::Call`), and recurse through every nested body so latent
-/// calls inside branches, sequences, loops, switches, and latches are
-/// covered.
+/// every latent call (both `Stmt::Call` and nested `Expr::Call`), and
+/// recurse through every nested body so latent calls inside branches,
+/// sequences, loops, switches, and latches are covered.
 pub fn strip_latent_action_info(body: &mut [Stmt]) {
     // Preorder; strip_in_stmt at each node also walks the node's own call
     // expressions. The order is irrelevant to output (try_strip_call is
@@ -49,45 +53,38 @@ pub fn strip_latent_action_info(body: &mut [Stmt]) {
 /// only place a Call shape is conceptually a definition rather than a
 /// use.
 fn strip_in_stmt(stmt: &mut Stmt) {
-    if let Stmt::Call { func, args, .. } = stmt {
-        try_strip_call(func_name(func), args);
+    if let Stmt::Call { args, .. } = stmt {
+        try_strip_call(args);
     }
     walk_body_exprs_mut(std::slice::from_mut(stmt), &mut |expr: &mut Expr| {
-        if let Expr::Call { name, args } = expr {
-            try_strip_call(name.as_str(), args);
+        if let Expr::Call { args, .. } = expr {
+            try_strip_call(args);
         }
         Action::Continue
     });
 }
 
-/// Drop the last element of `args` when:
-/// 1. `call_name` is in `LATENT_FUNCTIONS`, and
-/// 2. the last element is structurally `Expr::Call { name:
-///    "MakeLatentActionInfo", .. }`.
-///
-/// Either condition failing leaves `args` untouched.
-fn try_strip_call(call_name: &str, args: &mut Vec<Expr>) {
-    if !LATENT_FUNCTIONS.contains(&call_name) {
-        return;
-    }
-    let drop_last = matches!(
-        args.last(),
-        Some(Expr::Call { name, .. }) if name == LATENT_INFO_STRUCT
-    );
-    if drop_last {
+/// Drop the last element of `args` when it is a compiler-emitted latent
+/// action info struct. Any other trailing argument leaves `args` untouched.
+fn try_strip_call(args: &mut Vec<Expr>) {
+    if args.last().is_some_and(is_latent_action_info) {
         args.pop();
     }
 }
 
-/// Trailing identifier of a `Stmt::Call`'s `func` expression. Matches
-/// the lookup key the emitter uses, so the strip predicate sees the
-/// same name the renderer would print.
-fn func_name(func: &Expr) -> &str {
-    match func {
-        Expr::Var(name) => name.as_str(),
-        Expr::FieldAccess { field, .. } => field.as_str(),
-        _ => "",
-    }
+/// True for `MakeLatentActionInfo(skip_offset(..), ..)`. The linkage is
+/// the struct's first field, and a `skip_offset` literal only comes from
+/// the `EX_SKIP_OFFSET_CONST` opcode the compiler writes for it. A
+/// `MakeLatentActionInfo` value built any other way is ordinary data.
+fn is_latent_action_info(expr: &Expr) -> bool {
+    let Expr::Call { name, args } = expr else {
+        return false;
+    };
+    name == LATENT_INFO_STRUCT
+        && matches!(
+            args.first(),
+            Some(Expr::Literal(LiteralValue::Text(linkage))) if linkage.starts_with(SKIP_OFFSET_PREFIX)
+        )
 }
 
 #[cfg(test)]
@@ -96,14 +93,27 @@ mod tests {
     use crate::bytecode::transforms::test_fixtures::{lit, var};
 
     fn lai_call() -> Expr {
+        lai_with_linkage(lit("skip_offset(0xf)"))
+    }
+
+    fn lai_with_linkage(linkage: Expr) -> Expr {
         Expr::Call {
             name: "MakeLatentActionInfo".into(),
             args: vec![
-                lit("skip_offset(0xf)"),
+                linkage,
                 lit("-984220974"),
                 lit("'ExecuteUbergraph_X'"),
                 var("self"),
             ],
+        }
+    }
+
+    fn stripped_arg_count(name: &str, args: Vec<Expr>) -> usize {
+        let mut body = vec![stmt_call(name, args)];
+        strip_latent_action_info(&mut body);
+        match &body[0] {
+            Stmt::Call { args, .. } => args.len(),
+            _ => panic!("expected Stmt::Call"),
         }
     }
 
@@ -171,18 +181,52 @@ mod tests {
     }
 
     #[test]
-    fn non_latent_call_unchanged() {
-        // A regular function with a Make* last arg should NOT be stripped.
-        let mut body = vec![stmt_call(
-            "DrawDebugLine",
-            vec![var("start"), var("end"), lai_call()],
-        )];
-        strip_latent_action_info(&mut body);
-        if let Stmt::Call { args, .. } = &body[0] {
-            assert_eq!(args.len(), 3, "non-latent call must keep all args");
-        } else {
-            panic!("expected Stmt::Call");
+    fn unfamiliar_latent_name_strips() {
+        // Engine and project latent functions are recognised by the
+        // compiler-written linkage, not by a list of known names.
+        for name in ["LoadStreamLevel", "WaitForProjectSignal"] {
+            assert_eq!(
+                stripped_arg_count(name, vec![var("self"), lit("1.0"), lai_call()]),
+                2,
+                "{name} must lose its latent action info"
+            );
         }
+    }
+
+    #[test]
+    fn no_continuation_sentinel_strips() {
+        // An unwired Completed pin still compiles a skip-offset linkage, with
+        // the -1 sentinel as its value.
+        let lai = lai_with_linkage(lit("skip_offset(0xffffffff)"));
+        assert_eq!(stripped_arg_count("Delay", vec![var("self"), lai]), 1);
+    }
+
+    #[test]
+    fn latent_info_without_linkage_evidence_unchanged() {
+        // A struct value built from ordinary data is a real argument, even
+        // on a call that shares a latent function's name.
+        for linkage in [lit("12"), var("Linkage"), lit("\"skip_offset(0x1)\"")] {
+            assert_eq!(
+                stripped_arg_count("Delay", vec![var("self"), lai_with_linkage(linkage)]),
+                2
+            );
+        }
+        let user_struct = Expr::Call {
+            name: "MakeLatentActionInfo".into(),
+            args: vec![],
+        };
+        assert_eq!(
+            stripped_arg_count("Delay", vec![var("self"), user_struct]),
+            2
+        );
+    }
+
+    #[test]
+    fn latent_info_before_last_arg_unchanged() {
+        assert_eq!(
+            stripped_arg_count("DrawDebugLine", vec![lai_call(), var("end")]),
+            2
+        );
     }
 
     #[test]
