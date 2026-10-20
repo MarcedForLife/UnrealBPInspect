@@ -90,6 +90,8 @@ pub enum PropValue {
         value_type: String,
         entries: Vec<(PropValue, PropValue)>,
     },
+    /// An FText in UE's text export syntax, such as
+    /// `NSLOCTEXT("Namespace", "Key", "Source")`.
     Text(String),
     SoftObject(String),
     Byte {

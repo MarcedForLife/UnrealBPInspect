@@ -352,49 +352,92 @@ fn read_pin_string(reader: &mut Reader) -> Result<String> {
     Ok(value)
 }
 
-/// Skip an FText in the binary stream.
-///
-/// UE4 FText format: i32 Flags, i8 HistoryType, then type-specific content.
-/// For None (-1): bool bHasCultureInvariantString + optional FString.
-/// For Base (0): FString Namespace + FString Key + FString SourceString.
-fn skip_ftext(reader: &mut Reader, name_table: &NameTable) -> Result<()> {
-    read_ftext_source(reader, name_table, 0).map(|_| ())
+/// One serialized FText, by `ETextHistoryType`. Formatted histories are
+/// parsed so the reader stays aligned, but their arguments are not kept.
+pub(crate) enum TextHistory {
+    /// `None`: text with no localisation identity, empty when no culture
+    /// invariant string was saved.
+    Invariant {
+        culture_invariant: bool,
+        text: String,
+    },
+    /// `Base`: localisable source text and its localisation identity.
+    Base {
+        namespace: String,
+        key: String,
+        source: String,
+    },
+    /// `StringTableEntry`: the text lives in a string table asset.
+    StringTableEntry { table: String, key: String },
+    /// `NamedFormat` or `OrderedFormat`, whose result needs a culture.
+    Format,
 }
 
+/// `ETextFlag::CultureInvariant`.
+const TEXT_FLAG_CULTURE_INVARIANT: i32 = 1 << 1;
+
+/// Skip an FText in the binary stream.
+fn skip_ftext(reader: &mut Reader, name_table: &NameTable) -> Result<()> {
+    read_text_history(reader, name_table, 0).map(|_| ())
+}
+
+/// Source text of a pin's FText, or `None` for histories whose display
+/// text needs context the asset doesn't carry.
 fn read_ftext_source(
     reader: &mut Reader,
     name_table: &NameTable,
     depth: usize,
 ) -> Result<Option<String>> {
-    ensure!(depth < 64, "formatted pin text nesting exceeds limit");
-    let _flags = read_i32(reader)?;
-    let history_type = {
-        let val = read_u8(reader)?;
-        val as i8
-    };
+    Ok(match read_text_history(reader, name_table, depth)? {
+        TextHistory::Invariant { text, .. } => Some(text),
+        TextHistory::Base { source, .. } => Some(source),
+        TextHistory::StringTableEntry { .. } | TextHistory::Format => None,
+    })
+}
+
+/// Read an FText: i32 Flags, i8 HistoryType, then the history's content.
+/// For None (-1): bool bHasCultureInvariantString + optional FString.
+/// For Base (0): FString Namespace + FString Key + FString SourceString.
+/// Other histories are rejected. Strings are decoded strictly, so an
+/// invalid encoding is an error rather than lossy text.
+pub(crate) fn read_text_history(
+    reader: &mut Reader,
+    name_table: &NameTable,
+    depth: usize,
+) -> Result<TextHistory> {
+    ensure!(depth < 64, "formatted text nesting exceeds limit");
+    let flags = read_i32(reader)?;
+    let history_type = read_u8(reader)? as i8;
     match history_type {
         -1 => {
-            // None: bool bHasCultureInvariantString + optional FString
             let has_invariant = read_i32(reader)?; // bool as i32
             ensure!(
                 matches!(has_invariant, 0 | 1),
                 "invalid invariant text flag {has_invariant}"
             );
-            return Ok(Some(if has_invariant != 0 {
+            let text = if has_invariant != 0 {
                 read_pin_string(reader)?
             } else {
                 String::new()
-            }));
+            };
+            Ok(TextHistory::Invariant {
+                culture_invariant: flags & TEXT_FLAG_CULTURE_INVARIANT != 0,
+                text,
+            })
         }
         0 => {
-            // Base: namespace + key + source string
-            let _ns = read_pin_string(reader)?;
-            let _key = read_pin_string(reader)?;
-            return read_pin_string(reader).map(Some);
+            let namespace = read_pin_string(reader)?;
+            let key = read_pin_string(reader)?;
+            let source = read_pin_string(reader)?;
+            Ok(TextHistory::Base {
+                namespace,
+                key,
+                source,
+            })
         }
         1 | 2 => {
             // Named and ordered histories store typed format arguments.
-            read_ftext_source(reader, name_table, depth + 1)?;
+            read_text_history(reader, name_table, depth + 1)?;
             let arg_count = read_i32(reader)?;
             ensure!(
                 (0..=MAX_PIN_COUNT).contains(&arg_count),
@@ -404,24 +447,24 @@ fn read_ftext_source(
                 if history_type == 1 {
                     let _arg_name = read_pin_string(reader)?;
                 }
-                // Pin labels use text placeholders. Other payload widths can
-                // depend on custom versions we have not retained here.
+                // Text arguments are self-describing. Other payload widths
+                // can depend on custom versions we have not retained here.
                 let argument_type = read_u8(reader)?;
                 ensure!(
                     argument_type == 4,
-                    "unsupported formatted pin text argument type {argument_type}"
+                    "unsupported formatted text argument type {argument_type}"
                 );
-                read_ftext_source(reader, name_table, depth + 1)?;
+                read_text_history(reader, name_table, depth + 1)?;
             }
+            Ok(TextHistory::Format)
         }
         11 => {
-            // StringTableEntry: table_id (FName) + key (FString)
-            let _table = name_table.fname(reader)?;
-            let _key = read_pin_string(reader)?;
+            let table = name_table.fname(reader)?;
+            let key = read_pin_string(reader)?;
+            Ok(TextHistory::StringTableEntry { table, key })
         }
         _ => anyhow::bail!("unhandled FText history_type={history_type}"),
     }
-    Ok(None)
 }
 
 #[cfg(test)]

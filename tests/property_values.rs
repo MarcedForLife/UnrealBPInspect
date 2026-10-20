@@ -1,5 +1,6 @@
 mod common;
 
+use sha2::{Digest, Sha256};
 use std::process::Command;
 use unreal_bp_inspect::bytecode::decode::decode_asset;
 use unreal_bp_inspect::bytecode::emit::emit_summary_with_asset;
@@ -229,9 +230,10 @@ fn property_text_escapes_delimiters_without_hiding_text_or_soft_objects() {
         prop_value_short(&PropValue::Str(text.into()), &[], &[]),
         "\"first\\n\\\"second\\\"\\\\third\""
     );
+    let literal = "NSLOCTEXT(\"Game\", \"Key\", \"first\\n\\\"second\\\"\")";
     assert_eq!(
-        prop_value_short(&PropValue::Text("label".into()), &[], &[]),
-        "Text(\"label\")"
+        prop_value_short(&PropValue::Text(literal.into()), &[], &[]),
+        literal
     );
     assert_eq!(
         prop_value_short(&PropValue::SoftObject("/Game/First.Asset".into()), &[], &[]),
@@ -466,4 +468,242 @@ fn cli_diff_detects_equal_size_opaque_payload_changes_inside_a_tagged_struct() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.contains("ActorTickFunction"));
     assert!(hashes.iter().all(|hash| text.contains(hash)), "{text}");
+}
+
+/// UE FString: ASCII as a terminated byte string, anything else as UTF-16
+/// with a negative length.
+fn fstring(text: &str) -> Vec<u8> {
+    if text.is_ascii() {
+        let mut bytes = ((text.len() + 1) as i32).to_le_bytes().to_vec();
+        bytes.extend(text.as_bytes());
+        bytes.push(0);
+        return bytes;
+    }
+    let units: Vec<u16> = text.encode_utf16().chain([0]).collect();
+    let mut bytes = (-(units.len() as i32)).to_le_bytes().to_vec();
+    bytes.extend(units.into_iter().flat_map(u16::to_le_bytes));
+    bytes
+}
+
+/// FText with `ETextHistoryType::Base`: flags, history, namespace, key, source.
+fn base_text(namespace: &str, key: &str, source: &str) -> Vec<u8> {
+    let mut bytes = 0_i32.to_le_bytes().to_vec();
+    bytes.push(0);
+    for part in [namespace, key, source] {
+        bytes.extend(fstring(part));
+    }
+    bytes
+}
+
+/// FText with `ETextHistoryType::None`, optionally carrying a culture
+/// invariant string.
+fn invariant_text(flags: i32, invariant: Option<&str>) -> Vec<u8> {
+    let mut bytes = flags.to_le_bytes().to_vec();
+    bytes.push(0xff);
+    bytes.extend(i32::from(invariant.is_some()).to_le_bytes());
+    if let Some(text) = invariant {
+        bytes.extend(fstring(text));
+    }
+    bytes
+}
+
+fn text_default_summary(payload: &[u8]) -> String {
+    let bytes = replace_default_payload("TextProperty", &[], payload);
+    common::decoded_summary(&bytes)
+}
+
+fn text_default_line(payload: &[u8]) -> String {
+    let summary = text_default_summary(payload);
+    summary
+        .lines()
+        .find(|line| line.trim_start().starts_with("PrimaryActorTick ="))
+        .unwrap_or_else(|| panic!("no text default in\n{summary}"))
+        .trim()
+        .to_string()
+}
+
+fn run_text_diff(before: &[u8], after: &[u8]) -> (Option<i32>, String) {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = [("before", before), ("after", after)].map(|(name, payload)| {
+        let path = directory.path().join(format!("{name}.uasset"));
+        std::fs::write(&path, replace_default_payload("TextProperty", &[], payload)).unwrap();
+        path
+    });
+    let output = Command::new(env!("CARGO_BIN_EXE_bp-inspect"))
+        .arg("--diff")
+        .args(&paths)
+        .output()
+        .unwrap();
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (
+        output.status.code(),
+        String::from_utf8(output.stdout).unwrap(),
+    )
+}
+
+#[test]
+fn text_defaults_keep_unicode_line_breaks_and_identity_in_every_mode() {
+    for (source, rendered) in [
+        ("Café crème", "Café crème"),
+        ("日本語のテキスト", "日本語のテキスト"),
+        ("Launch 🚀", "Launch 🚀"),
+        ("Line one\nLine two", "Line one\\nLine two"),
+        ("Say \"hi\"", "Say \\\"hi\\\""),
+    ] {
+        let payload = base_text("Game", "Greeting", source);
+        let literal = format!("NSLOCTEXT(\"Game\", \"Greeting\", \"{rendered}\")");
+        assert_eq!(
+            text_default_line(&payload),
+            format!("PrimaryActorTick = {literal}")
+        );
+
+        let bytes = replace_default_payload("TextProperty", &[], &payload);
+        assert!(common::decoded_text(&bytes).contains(&format!("PrimaryActorTick: {literal}")));
+        let json: serde_json::Value = serde_json::from_str(&common::decoded_json(&bytes)).unwrap();
+        assert!(json
+            .to_string()
+            .contains(&serde_json::to_string(&literal).unwrap()));
+    }
+}
+
+#[test]
+fn text_histories_without_localisation_render_their_own_form() {
+    // Flag 2 is ETextFlag::CultureInvariant.
+    for (payload, expected) in [
+        (invariant_text(0, None), "\"\""),
+        (invariant_text(2, Some("Fixed")), "INVTEXT(\"Fixed\")"),
+        (invariant_text(0, Some("Plain")), "\"Plain\""),
+        (base_text("", "", ""), "NSLOCTEXT(\"\", \"\", \"\")"),
+    ] {
+        assert_eq!(
+            text_default_line(&payload),
+            format!("PrimaryActorTick = {expected}")
+        );
+    }
+}
+
+#[test]
+fn text_changes_stay_readable_in_cli_diff() {
+    // The first two pairs rendered identically under the old printable
+    // ASCII filter.
+    for (before, after, removed, added) in [
+        (
+            base_text("Game", "Greeting", "Café"),
+            base_text("Game", "Greeting", "Cafè"),
+            "\"Café\"",
+            "\"Cafè\"",
+        ),
+        (
+            base_text("Game", "Greeting", "Hello\nWorld"),
+            base_text("Game", "Greeting", "HelloWorld"),
+            "\"Hello\\nWorld\"",
+            "\"HelloWorld\"",
+        ),
+        (
+            base_text("Game", "Greeting", "Hi"),
+            base_text("Menu", "Greeting", "Hi"),
+            "NSLOCTEXT(\"Game\"",
+            "NSLOCTEXT(\"Menu\"",
+        ),
+        (
+            base_text("Game", "Greeting", "Hi"),
+            base_text("Game", "Farewell", "Hi"),
+            "\"Greeting\"",
+            "\"Farewell\"",
+        ),
+        (
+            invariant_text(0, None),
+            base_text("Game", "Greeting", ""),
+            "PrimaryActorTick = \"\"",
+            "PrimaryActorTick = NSLOCTEXT",
+        ),
+    ] {
+        let (code, diff) = run_text_diff(&before, &after);
+        assert_eq!(code, Some(1), "{diff}");
+        let line_with = |prefix: char, needle: &str| {
+            diff.lines()
+                .any(|line| line.starts_with(prefix) && line.contains(needle))
+        };
+        assert!(line_with('-', removed) && line_with('+', added), "{diff}");
+    }
+}
+
+#[test]
+fn string_table_text_is_shown_as_an_unresolved_reference() {
+    let bytes = common::load_fixture("ue_4.27/BP_DecoderTest.uasset");
+    let parsed = parse_asset(&bytes, false).unwrap();
+    let table = (0_i32..10_000)
+        .find(|index| parsed.name_table.get(*index) == "TextProperty")
+        .unwrap();
+    let mut payload = 0_i32.to_le_bytes().to_vec();
+    payload.push(11);
+    payload.extend(table.to_le_bytes());
+    payload.extend(0_i32.to_le_bytes());
+    payload.extend(fstring("Greeting"));
+    assert_eq!(
+        text_default_line(&payload),
+        "PrimaryActorTick = LOCTABLE(\"TextProperty\", \"Greeting\")"
+    );
+}
+
+#[test]
+fn unsupported_text_histories_stay_opaque_and_detectable() {
+    // ETextHistoryType::AsNumber with a fixed-size body, then a named format
+    // whose source is a base text. Neither can be resolved without context.
+    let as_number = |value: i32| {
+        let mut bytes = 0_i32.to_le_bytes().to_vec();
+        bytes.push(4);
+        bytes.extend(value.to_le_bytes());
+        bytes.extend([0; 8]);
+        bytes
+    };
+    let named_format = |source: &str| {
+        let mut bytes = 0_i32.to_le_bytes().to_vec();
+        bytes.push(1);
+        bytes.extend(base_text("Game", "Format", source));
+        bytes.extend(0_i32.to_le_bytes());
+        bytes
+    };
+    for (before, after) in [
+        (as_number(1), as_number(2)),
+        (named_format("{0} left"), named_format("{0} lost")),
+    ] {
+        assert_eq!(before.len(), after.len());
+        let mut hashes = Vec::new();
+        for payload in [&before, &after] {
+            let bytes = replace_default_payload("TextProperty", &[], payload);
+            let parsed = parse_asset(&bytes, false).unwrap();
+            let (_, properties) = parsed
+                .exports
+                .iter()
+                .find(|(header, _)| header.object_name.starts_with("Default__"))
+                .unwrap();
+            let expected_hash: String = Sha256::digest(payload)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            let PropValue::Unknown {
+                type_name,
+                size,
+                payload_sha256,
+            } = &properties[0].value
+            else {
+                panic!("expected an opaque text value");
+            };
+            assert_eq!(
+                (type_name.as_str(), *size, payload_sha256),
+                ("TextProperty", payload.len() as i32, &expected_hash)
+            );
+            assert!(common::decoded_summary(&bytes).contains(&expected_hash));
+            hashes.push(expected_hash);
+        }
+        assert_ne!(hashes[0], hashes[1]);
+        let (code, diff) = run_text_diff(&before, &after);
+        assert_eq!(code, Some(1), "{diff}");
+        assert!(hashes.iter().all(|hash| diff.contains(hash)), "{diff}");
+    }
 }

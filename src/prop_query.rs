@@ -121,7 +121,7 @@ pub fn prop_value_short(
         PropValue::Double(value) => LiteralValue::Float64(value.to_bits()).to_string(),
         PropValue::Str(value) => format!("{value:?}"),
         PropValue::Name(value) => format!("Name({value:?})"),
-        PropValue::Text(value) => format!("Text({value:?})"),
+        PropValue::Text(literal) => literal.clone(),
         PropValue::SoftObject(value) => format!("SoftObject({value:?})"),
         PropValue::Object(index) => resolve_index(imports, export_names, *index),
         PropValue::Enum { enum_name, value } | PropValue::Byte { enum_name, value } => {

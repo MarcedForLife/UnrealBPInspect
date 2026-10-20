@@ -167,6 +167,8 @@ An optional [agent skill](skill/README.md) helps coding agents inspect, compare,
 
 Numbers keep their stored precision, and summaries include array, map and struct contents, so diffs show small value changes and changes within collections. Unsupported property payloads are marked as unknown with a `payload_sha256`, so equal-size changes still show in diffs. DoOnce and FlipFlop names are inferred and may differ from editor node titles.
 
+Text values use Unreal's text export form, for example `NSLOCTEXT("Namespace", "Key", "Source")`, so localisation key changes show in diffs. String table entries show their table and key without the resolved text. Formatted and generated text, such as numbers or dates, is shown as an unknown payload.
+
 Blueprint comments appear above the statements they annotate. Comments that can't be placed reliably are listed in a separate graph-comments section.
 
 ## Development

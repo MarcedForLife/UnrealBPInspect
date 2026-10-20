@@ -109,7 +109,7 @@ fn format_value(buf: &mut String, name: &str, value: &PropValue, ctx: &TextDumpC
             value_type,
             entries,
         } => format_map(buf, name, key_type, value_type, entries, ctx, indent),
-        PropValue::Text(v) => writeln!(buf, "{}{}: \"{}\"", pad, name, v).unwrap(),
+        PropValue::Text(literal) => writeln!(buf, "{pad}{name}: {literal}").unwrap(),
         PropValue::SoftObject(v) => writeln!(buf, "{}{}: ~{}", pad, name, v).unwrap(),
         PropValue::Unknown { .. } => {
             let formatted = prop_value_short(value, ctx.imports, ctx.export_names);
