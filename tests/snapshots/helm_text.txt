@@ -84,7 +84,7 @@
           bIsUObjectWrapper: false
         }
         FriendlyName: "Winch Constraint Instance"
-        Category: "KismetSchemaDefaultDefault"
+        Category: NSLOCTEXT("KismetSchema", "Default", "Default")
         PropertyFlags: 67589
         RepNotifyFunc: None
         ReplicationCondition: COND_None (ELifetimeCondition)
@@ -696,7 +696,7 @@
 
   [22] K2Node_FunctionEntry_0 (class: /Script/BlueprintGraph.K2Node_FunctionEntry)
     MetaData: (KismetUserDeclaredFunctionMetadata) {
-      Category: "!9FA8B74E4C7F127FE7FA06A55CEF7528State"
+      Category: NSLOCTEXT("", "9FA8B74E4C7F127FE7FA06A55CEF7528", "State")
     }
     ExtraFlags: 469893120
     FunctionReference: (MemberReference) {
@@ -790,7 +790,7 @@
   [33] SCS_Node_0 (class: /Script/Engine.SCS_Node)
     ComponentClass: -> /Script/Engine.SceneComponent
     ComponentTemplate: -> DefaultSceneRoot_GEN_VARIABLE
-    CategoryName: "SCSDefaultDefault"
+    CategoryName: NSLOCTEXT("SCS", "Default", "Default")
     VariableGuid: (Guid) {
       Guid: "[91, 87, ad, a4, 77, dc, 0c, 44, 9c, d5, 2c, ce, e0, 4f, 5c, 85]"
     }
@@ -799,7 +799,7 @@
   [34] SCS_Node_1 (class: /Script/Engine.SCS_Node)
     ComponentClass: -> /Script/Engine.StaticMeshComponent
     ComponentTemplate: -> Stand_GEN_VARIABLE
-    CategoryName: "SCSDefaultDefault"
+    CategoryName: NSLOCTEXT("SCS", "Default", "Default")
     VariableGuid: (Guid) {
       Guid: "[c0, 50, a0, 94, 1e, 06, b0, 48, bd, 26, 56, c0, db, b7, 4c, ab]"
     }
@@ -808,7 +808,7 @@
   [35] SCS_Node_10 (class: /Script/Engine.SCS_Node)
     ComponentClass: -> /Script/Engine.BoxComponent
     ComponentTemplate: -> PawnBlockingCollision6_GEN_VARIABLE
-    CategoryName: "SCSDefaultDefault"
+    CategoryName: NSLOCTEXT("SCS", "Default", "Default")
     VariableGuid: (Guid) {
       Guid: "[a0, 0e, 51, dd, 4c, 1f, bc, 4c, a0, 97, 02, 2d, b8, 90, 0b, 6b]"
     }
@@ -817,7 +817,7 @@
   [36] SCS_Node_11 (class: /Script/Engine.SCS_Node)
     ComponentClass: -> /Script/Engine.CapsuleComponent
     ComponentTemplate: -> PawnBlockingCollision7_GEN_VARIABLE
-    CategoryName: "SCSDefaultDefault"
+    CategoryName: NSLOCTEXT("SCS", "Default", "Default")
     VariableGuid: (Guid) {
       Guid: "[a6, 88, 0d, 24, 79, 57, ee, 46, a9, b9, 24, 69, 0d, 7d, 6c, 36]"
     }
@@ -826,7 +826,7 @@
   [37] SCS_Node_2 (class: /Script/Engine.SCS_Node)
     ComponentClass: -> /Script/Engine.ChildActorComponent
     ComponentTemplate: -> WheelConstraint_GEN_VARIABLE
-    CategoryName: "SCSDefaultDefault"
+    CategoryName: NSLOCTEXT("SCS", "Default", "Default")
     VariableGuid: (Guid) {
       Guid: "[78, 17, 2c, c2, 02, 97, dc, 4a, 86, 94, 2a, 43, b1, 26, ec, 68]"
     }
@@ -835,7 +835,7 @@
   [38] SCS_Node_3 (class: /Script/Engine.SCS_Node)
     ComponentClass: -> /Script/Engine.BoxComponent
     ComponentTemplate: -> PawnBlockingCollision1_GEN_VARIABLE
-    CategoryName: "SCSDefaultDefault"
+    CategoryName: NSLOCTEXT("SCS", "Default", "Default")
     VariableGuid: (Guid) {
       Guid: "[41, 29, 51, 81, 6e, 85, 71, 44, a7, b7, 1f, 3d, 59, e0, fe, bf]"
     }
@@ -844,7 +844,7 @@
   [39] SCS_Node_4 (class: /Script/Engine.SCS_Node)
     ComponentClass: -> /Script/VRExpansionPlugin.GrippableStaticMeshComponent
     ComponentTemplate: -> Wheel_GEN_VARIABLE
-    CategoryName: "SCSDefaultDefault"
+    CategoryName: NSLOCTEXT("SCS", "Default", "Default")
     VariableGuid: (Guid) {
       Guid: "[b4, df, 58, 19, bb, 8d, 68, 46, 8b, 85, d1, 93, ce, d6, 40, b8]"
     }
@@ -853,7 +853,7 @@
   [40] SCS_Node_5 (class: /Script/Engine.SCS_Node)
     ComponentClass: -> /Script/Engine.SceneComponent
     ComponentTemplate: -> Scene_GEN_VARIABLE
-    CategoryName: "SCSDefaultDefault"
+    CategoryName: NSLOCTEXT("SCS", "Default", "Default")
     ChildNodes: [ObjectProperty; 10 items]
       [0]: -> SCS_Node_1
       [1]: -> SCS_Node_11
@@ -873,7 +873,7 @@
   [41] SCS_Node_6 (class: /Script/Engine.SCS_Node)
     ComponentClass: -> /Script/Engine.BoxComponent
     ComponentTemplate: -> PawnBlockingCollision2_GEN_VARIABLE
-    CategoryName: "SCSDefaultDefault"
+    CategoryName: NSLOCTEXT("SCS", "Default", "Default")
     VariableGuid: (Guid) {
       Guid: "[ef, 9d, 12, f8, 97, 5b, 71, 43, 98, 3d, 53, 2b, e1, 6f, 82, 78]"
     }
@@ -882,7 +882,7 @@
   [42] SCS_Node_7 (class: /Script/Engine.SCS_Node)
     ComponentClass: -> /Script/Engine.BoxComponent
     ComponentTemplate: -> PawnBlockingCollision3_GEN_VARIABLE
-    CategoryName: "SCSDefaultDefault"
+    CategoryName: NSLOCTEXT("SCS", "Default", "Default")
     VariableGuid: (Guid) {
       Guid: "[48, 7d, d9, 91, e5, a1, 8f, 48, ae, c6, bb, 41, e9, 8d, 80, f6]"
     }
@@ -891,7 +891,7 @@
   [43] SCS_Node_8 (class: /Script/Engine.SCS_Node)
     ComponentClass: -> /Script/Engine.BoxComponent
     ComponentTemplate: -> PawnBlockingCollision4_GEN_VARIABLE
-    CategoryName: "SCSDefaultDefault"
+    CategoryName: NSLOCTEXT("SCS", "Default", "Default")
     VariableGuid: (Guid) {
       Guid: "[6c, 37, ae, ab, 26, 59, b5, 47, ab, 8e, 56, ea, 54, 1d, d9, a3]"
     }
@@ -900,7 +900,7 @@
   [44] SCS_Node_9 (class: /Script/Engine.SCS_Node)
     ComponentClass: -> /Script/Engine.BoxComponent
     ComponentTemplate: -> PawnBlockingCollision5_GEN_VARIABLE
-    CategoryName: "SCSDefaultDefault"
+    CategoryName: NSLOCTEXT("SCS", "Default", "Default")
     VariableGuid: (Guid) {
       Guid: "[4d, 08, a5, d3, 4c, a1, 7d, 47, aa, 0d, ec, 8c, 8e, 71, be, 6e]"
     }

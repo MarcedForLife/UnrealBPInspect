@@ -10,7 +10,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::bytecode::asset::DecodedAsset;
-use crate::bytecode::emit::summary::is_latent_function;
 use crate::bytecode::expr::Expr;
 use crate::bytecode::stmt::Stmt;
 use crate::bytecode::transforms::visit::walk_expr;
@@ -31,9 +30,9 @@ pub type CallersMap = BTreeMap<String, BTreeSet<String>>;
 ///
 /// Visits every `Stmt::Call` and `Stmt::EventCall` in every function and
 /// event body, including nested positions inside Branch/Sequence/Loop/Switch/
-/// Latch and the resume continuation of a latent call (`Delay`,
-/// `MoveComponentTo`, etc.). Also descends into `Expr::Call` and
-/// `Expr::MethodCall` found in argument positions.
+/// Latch and, for events, the resume continuation of a latent call. Also
+/// descends into `Expr::Call` and `Expr::MethodCall` found in argument
+/// positions.
 ///
 /// Returns `(callees_map, callers_map)`:
 /// - `callees_map[caller]` is the set of functions/events that `caller` calls.
@@ -42,26 +41,25 @@ pub fn build_call_graph(asset: &DecodedAsset) -> (CalleesMap, CallersMap) {
     let mut callees_map: CalleesMap = BTreeMap::new();
     let mut callers_map: CallersMap = BTreeMap::new();
 
+    // Continuations are keyed by ubergraph offsets, so only event bodies
+    // can reach them.
+    let no_continuations = ResumeBodies::new();
     let bodies = asset
         .functions
         .iter()
-        .map(|func| (func.name.as_str(), func.body.as_slice()))
-        .chain(
-            asset
-                .events
-                .iter()
-                .map(|event| (event.name.as_str(), event.body.as_slice())),
-        );
-    for (caller, body) in bodies {
+        .map(|func| (func.name.as_str(), func.body.as_slice(), &no_continuations))
+        .chain(asset.events.iter().map(|event| {
+            (
+                event.name.as_str(),
+                event.body.as_slice(),
+                &asset.resume_bodies,
+            )
+        }));
+    for (caller, body, resume_bodies) in bodies {
         let mut callees: BTreeSet<String> = BTreeSet::new();
         let mut visited_resumes: BTreeSet<usize> = BTreeSet::new();
         for stmt in body {
-            collect_stmt_calls(
-                stmt,
-                &asset.resume_bodies,
-                &mut visited_resumes,
-                &mut callees,
-            );
+            collect_stmt_calls(stmt, resume_bodies, &mut visited_resumes, &mut callees);
         }
         for callee in &callees {
             callers_map
@@ -80,8 +78,8 @@ pub fn build_call_graph(asset: &DecodedAsset) -> (CalleesMap, CallersMap) {
 /// Collect all callee names reachable from a single statement, appending
 /// them into `out`. Handles all structured `Stmt` variants recursively.
 ///
-/// A latent `Stmt::Call` (`Delay`, `MoveComponentTo`, etc.) with a resume
-/// continuation at its disk offset descends into that continuation, so the
+/// A `Stmt::Call` with a latent resume continuation at its disk offset
+/// descends into that continuation, so the
 /// calls in a latent action's resume body are attributed to the function
 /// that issued the call. This mirrors the summary emitter, which interleaves
 /// the resume body inline at the call site. `visited` guards against
@@ -98,8 +96,8 @@ fn collect_stmt_calls(
     match stmt {
         Stmt::Call { func, args, offset } => {
             if let Some(name) = callee_name_from_expr(func) {
-                if is_latent_function(&name) && visited.insert(*offset) {
-                    if let Some(resume_body) = resume_bodies.get(offset) {
+                if let Some(resume_body) = resume_bodies.get(offset) {
+                    if visited.insert(*offset) {
                         for stmt in resume_body {
                             collect_stmt_calls(stmt, resume_bodies, visited, out);
                         }
@@ -341,5 +339,24 @@ mod tests {
 
         assert!(callees["Trigger"].contains("OnOverlap"));
         assert!(callers["OnOverlap"].contains("Trigger"));
+    }
+
+    #[test]
+    fn continuation_calls_belong_to_the_event_only() {
+        let latent_call = |name: &str| Stmt::Call {
+            func: Expr::Var(name.into()),
+            args: vec![],
+            offset: 0x10,
+        };
+        let mut asset = make_asset(
+            vec![make_function("Fn", vec![latent_call("Delay")])],
+            vec![make_event("Ev", vec![latent_call("WaitForProjectSignal")])],
+        );
+        asset
+            .resume_bodies
+            .insert(0x10, vec![call_stmt(Expr::Var("Resumed".into()))]);
+        let (callees, _) = build_call_graph(&asset);
+        assert!(callees["Ev"].contains("Resumed"));
+        assert!(!callees["Fn"].contains("Resumed"));
     }
 }

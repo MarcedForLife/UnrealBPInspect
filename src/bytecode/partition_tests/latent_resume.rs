@@ -149,3 +149,38 @@ fn latent_resume_skips_minus_one_sentinel() {
     partition_ubergraph(&bytecode, &entries, &names, 0)
         .expect("Linkage=-1 must be filtered, not surfaced as an edge");
 }
+
+/// A continuation that jumps back to unowned code before its resume target
+/// reaches one contiguous span starting below the target:
+/// ```text
+///   0x00: EX_FINAL_FUNCTION callee=0, EX_SKIP_OFFSET_CONST resume=0x10
+///   0x0B: EX_POP_EXECUTION_FLOW
+///   0x0C: EX_NOTHING x4                            (loop-back target)
+///   0x10: EX_NOTHING                               (resume target)
+///   0x11: EX_JUMP 0x0C
+///   0x16: EX_END_OF_SCRIPT
+/// ```
+/// The chunk must keep everything from the target onwards rather than
+/// shrinking to the target's first byte.
+#[test]
+fn latent_resume_chunk_keeps_code_after_a_back_jump() {
+    let mut bytecode = Vec::new();
+    bytecode.push(EX_FINAL_FUNCTION);
+    bytecode.extend_from_slice(&u32_le(0));
+    bytecode.push(EX_SKIP_OFFSET_CONST);
+    bytecode.extend_from_slice(&u32_le(0x10));
+    bytecode.push(EX_END_FUNCTION_PARMS);
+    bytecode.push(EX_POP_EXECUTION_FLOW);
+    while bytecode.len() < 0x11 {
+        bytecode.push(EX_NOTHING);
+    }
+    bytecode.push(EX_JUMP);
+    bytecode.extend_from_slice(&u32_le(0x0C));
+    bytecode.push(EX_END_OF_SCRIPT);
+
+    let names = empty_name_table();
+    let entries = make_entries(&[("EventA", 0x00)]);
+    let output =
+        partition_ubergraph_full(&bytecode, &entries, &names, 0).expect("partition must succeed");
+    assert_eq!(output.resume_blocks.get(&0), Some(&(0x10..0x16)));
+}

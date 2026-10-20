@@ -125,7 +125,7 @@
                   },
                   {
                     "name": "Category",
-                    "value": "KismetSchemaDefaultDefault"
+                    "value": "NSLOCTEXT(\"KismetSchema\", \"Default\", \"Default\")"
                   },
                   {
                     "name": "PropertyFlags",
@@ -2336,7 +2336,7 @@
             "fields": [
               {
                 "name": "Category",
-                "value": "!9FA8B74E4C7F127FE7FA06A55CEF7528State"
+                "value": "NSLOCTEXT(\"\", \"9FA8B74E4C7F127FE7FA06A55CEF7528\", \"State\")"
               }
             ],
             "type": "KismetUserDeclaredFunctionMetadata"
@@ -2695,7 +2695,7 @@
         },
         {
           "name": "CategoryName",
-          "value": "SCSDefaultDefault"
+          "value": "NSLOCTEXT(\"SCS\", \"Default\", \"Default\")"
         },
         {
           "name": "VariableGuid",
@@ -2730,7 +2730,7 @@
         },
         {
           "name": "CategoryName",
-          "value": "SCSDefaultDefault"
+          "value": "NSLOCTEXT(\"SCS\", \"Default\", \"Default\")"
         },
         {
           "name": "VariableGuid",
@@ -2765,7 +2765,7 @@
         },
         {
           "name": "CategoryName",
-          "value": "SCSDefaultDefault"
+          "value": "NSLOCTEXT(\"SCS\", \"Default\", \"Default\")"
         },
         {
           "name": "VariableGuid",
@@ -2800,7 +2800,7 @@
         },
         {
           "name": "CategoryName",
-          "value": "SCSDefaultDefault"
+          "value": "NSLOCTEXT(\"SCS\", \"Default\", \"Default\")"
         },
         {
           "name": "VariableGuid",
@@ -2835,7 +2835,7 @@
         },
         {
           "name": "CategoryName",
-          "value": "SCSDefaultDefault"
+          "value": "NSLOCTEXT(\"SCS\", \"Default\", \"Default\")"
         },
         {
           "name": "VariableGuid",
@@ -2870,7 +2870,7 @@
         },
         {
           "name": "CategoryName",
-          "value": "SCSDefaultDefault"
+          "value": "NSLOCTEXT(\"SCS\", \"Default\", \"Default\")"
         },
         {
           "name": "VariableGuid",
@@ -2905,7 +2905,7 @@
         },
         {
           "name": "CategoryName",
-          "value": "SCSDefaultDefault"
+          "value": "NSLOCTEXT(\"SCS\", \"Default\", \"Default\")"
         },
         {
           "name": "VariableGuid",
@@ -2940,7 +2940,7 @@
         },
         {
           "name": "CategoryName",
-          "value": "SCSDefaultDefault"
+          "value": "NSLOCTEXT(\"SCS\", \"Default\", \"Default\")"
         },
         {
           "name": "ChildNodes",
@@ -2993,7 +2993,7 @@
         },
         {
           "name": "CategoryName",
-          "value": "SCSDefaultDefault"
+          "value": "NSLOCTEXT(\"SCS\", \"Default\", \"Default\")"
         },
         {
           "name": "VariableGuid",
@@ -3028,7 +3028,7 @@
         },
         {
           "name": "CategoryName",
-          "value": "SCSDefaultDefault"
+          "value": "NSLOCTEXT(\"SCS\", \"Default\", \"Default\")"
         },
         {
           "name": "VariableGuid",
@@ -3063,7 +3063,7 @@
         },
         {
           "name": "CategoryName",
-          "value": "SCSDefaultDefault"
+          "value": "NSLOCTEXT(\"SCS\", \"Default\", \"Default\")"
         },
         {
           "name": "VariableGuid",
@@ -3098,7 +3098,7 @@
         },
         {
           "name": "CategoryName",
-          "value": "SCSDefaultDefault"
+          "value": "NSLOCTEXT(\"SCS\", \"Default\", \"Default\")"
         },
         {
           "name": "VariableGuid",

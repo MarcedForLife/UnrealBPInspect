@@ -1307,7 +1307,7 @@ pub fn partition_ubergraph_with_translation(
 /// the latent call and the next event-owned region). The reachable set
 /// is converted into a single span covering the contiguous region; if
 /// the reach is non-contiguous (one resume body links forward into
-/// another), the span clips to the LOWEST contiguous block so two
+/// another), the span clips to the block holding the resume target so two
 /// adjacent resume chunks don't bleed into each other.
 fn compute_resume_blocks(
     latent_resumes: &BTreeMap<usize, usize>,
@@ -1367,14 +1367,16 @@ fn compute_resume_blocks(
         let mut owned: Vec<usize> = reached.into_iter().collect();
         owned.sort_unstable();
         let ranges = addresses_to_ranges(&owned, bytecode, ue5, name_table);
-        // Use the first contiguous span starting at the resume target
-        // so non-contiguous reach (rare; would imply the resume body
-        // forward-jumps over an event-owned region) clips cleanly.
-        let chunk = ranges
+        // Use the contiguous span holding the resume target, from the
+        // target onwards, so non-contiguous reach (a forward jump over an
+        // event-owned region, or a jump back to code before the target)
+        // clips cleanly instead of shrinking the chunk to one byte.
+        if let Some(span) = ranges
             .into_iter()
-            .find(|range| range.start == resume_target)
-            .unwrap_or_else(|| resume_target..resume_target + 1);
-        output.insert(call_offset, chunk);
+            .find(|range| range.contains(&resume_target))
+        {
+            output.insert(call_offset, resume_target..span.end);
+        }
     }
     output
 }

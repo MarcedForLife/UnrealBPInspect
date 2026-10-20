@@ -652,4 +652,90 @@ mod tests {
             result
         );
     }
+
+    fn call_at(name: &str, offset: usize) -> Stmt {
+        Stmt::Call {
+            func: Expr::Var(name.into()),
+            args: vec![],
+            offset,
+        }
+    }
+
+    fn latent_asset(
+        functions: Vec<Function>,
+        events: Vec<Event>,
+        resume_bodies: Vec<(usize, Vec<Stmt>)>,
+    ) -> DecodedAsset {
+        DecodedAsset {
+            functions,
+            events,
+            resume_bodies: resume_bodies.into_iter().collect(),
+            ..empty_asset()
+        }
+    }
+
+    fn event(name: &str, body: Vec<Stmt>) -> Event {
+        Event {
+            name: name.into(),
+            export_index: None,
+            body,
+        }
+    }
+
+    #[test]
+    fn continuation_follows_any_call_with_a_resume_body() {
+        let asset = latent_asset(
+            vec![],
+            vec![event(
+                "Ev",
+                vec![Stmt::Branch {
+                    cond: Expr::Var("Ready".into()),
+                    then_body: vec![call_at("WaitForProjectSignal", 0x10), call_at("Last", 0x18)],
+                    else_body: vec![],
+                    offset: 0x08,
+                }],
+            )],
+            vec![
+                (
+                    0x10,
+                    vec![call_at("Resumed", 0x40), call_at("LoadStreamLevel", 0x48)],
+                ),
+                (0x48, vec![call_at("Loaded", 0x60)]),
+            ],
+        );
+        assert_eq!(
+            emit_summary(&asset),
+            "event Ev {\n    if (Ready) {\n        WaitForProjectSignal()\n        Resumed()\n        \
+             LoadStreamLevel()\n        Loaded()\n        Last()\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn function_bodies_ignore_ubergraph_continuations() {
+        // Function offsets index the function's own bytecode, so an equal
+        // ubergraph offset is a different statement.
+        let asset = latent_asset(
+            vec![Function {
+                name: "Fn".into(),
+                export_index: None,
+                body: vec![call_at("Delay", 0x10)],
+            }],
+            vec![],
+            vec![(0x10, vec![call_at("Resumed", 0x40)])],
+        );
+        assert_eq!(emit_summary(&asset), "function Fn {\n    Delay()\n}\n");
+    }
+
+    #[test]
+    fn continuation_reaching_its_own_call_expands_once() {
+        let asset = latent_asset(
+            vec![],
+            vec![event("Ev", vec![call_at("Delay", 0x10)])],
+            vec![(0x10, vec![call_at("Tick", 0x40), call_at("Delay", 0x10)])],
+        );
+        assert_eq!(
+            emit_summary(&asset),
+            "event Ev {\n    Delay()\n    Tick()\n    Delay()\n}\n"
+        );
+    }
 }

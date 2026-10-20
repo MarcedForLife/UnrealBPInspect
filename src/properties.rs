@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::binary::*;
+use crate::pins::{read_text_history, TextHistory};
 use crate::property_type::{PropertyType, PROPERTY_CLASS_SUFFIX};
 use crate::types::*;
 
@@ -456,7 +457,10 @@ fn read_value_with_meta(
         return Ok(val);
     }
     match PropertyType::from_fname(type_name) {
-        PropertyType::Text => read_text_property(reader, size).map(PropValue::Text),
+        PropertyType::Text => match read_text_literal(reader, ctx, value_data_end)? {
+            Some(literal) if reader.position() == value_data_end => Ok(PropValue::Text(literal)),
+            _ => read_unknown_value(reader, type_name, value_start, value_data_end),
+        },
 
         PropertyType::Enum => {
             let value = ctx.name_table.fname(reader)?;
@@ -740,6 +744,13 @@ fn read_typed_value(
         PropertyType::Bool => Ok(PropValue::Bool(read_u8(reader)? != 0)),
         PropertyType::Byte => Ok(PropValue::Int(read_u8(reader)? as i32)),
         PropertyType::Enum => Ok(PropValue::Name(ctx.name_table.fname(reader)?)),
+        PropertyType::Text => {
+            let start = reader.position();
+            match read_text_literal(reader, ctx, end_offset)? {
+                Some(literal) => Ok(PropValue::Text(literal)),
+                None => read_unknown_value(reader, type_name, start, end_offset),
+            }
+        }
         PropertyType::Struct => {
             if struct_type == "SoftObjectPath" {
                 return read_soft_object_value(reader, ctx).map(PropValue::SoftObject);
@@ -761,22 +772,44 @@ fn read_typed_value(
     }
 }
 
-fn read_text_property(reader: &mut Reader, size: i32) -> Result<String> {
-    if size <= 0 {
-        return Ok(String::new());
-    }
-    let mut buf = vec![0u8; size as usize];
-    reader.read_exact(&mut buf)?;
-    let text = String::from_utf8_lossy(&buf);
-    let readable: String = text
-        .chars()
-        .filter(|c| c.is_ascii_graphic() || *c == ' ')
-        .collect();
-    Ok(if readable.is_empty() {
-        "<text>".to_string()
-    } else {
-        readable
-    })
+/// Decode one FText starting at the reader and ending by `end_offset`, in
+/// UE's text export syntax: `NSLOCTEXT("Namespace", "Key", "Source")`,
+/// `INVTEXT("Text")`, a plain quoted string, or an unresolved
+/// `LOCTABLE("Table", "Key")`. Keeping the namespace and key makes a
+/// localisation identity change visible. Returns `None` with the reader
+/// unmoved for formatted and generated histories, invalid encodings and
+/// structures that overrun `end_offset`, which callers keep as opaque
+/// hashed payloads.
+fn read_text_literal(
+    reader: &mut Reader,
+    ctx: &PropCtx,
+    end_offset: u64,
+) -> Result<Option<String>> {
+    let start = reader.position();
+    let payload = reader
+        .get_ref()
+        .get(usize::try_from(start)?..usize::try_from(end_offset)?)
+        .context("text payload exceeds available data")?;
+    let mut bounded = std::io::Cursor::new(payload);
+    let Ok(history) = read_text_history(&mut bounded, ctx.name_table, 0) else {
+        return Ok(None);
+    };
+    let literal = match history {
+        TextHistory::Invariant {
+            culture_invariant: true,
+            text,
+        } => format!("INVTEXT({text:?})"),
+        TextHistory::Invariant { text, .. } => format!("{text:?}"),
+        TextHistory::Base {
+            namespace,
+            key,
+            source,
+        } => format!("NSLOCTEXT({namespace:?}, {key:?}, {source:?})"),
+        TextHistory::StringTableEntry { table, key } => format!("LOCTABLE({table:?}, {key:?})"),
+        TextHistory::Format => return Ok(None),
+    };
+    reader.set_position(start + bounded.position());
+    Ok(Some(literal))
 }
 
 fn read_native_bool(reader: &mut Reader) -> Result<PropValue> {
@@ -2127,5 +2160,143 @@ mod tests {
                 .is_err());
             }
         }
+    }
+
+    fn text_context(name_table: &NameTable) -> PropCtx<'_> {
+        PropCtx {
+            name_table,
+            soft_object_paths: &[],
+            ver: AssetVersion {
+                file_ver: 522,
+                file_ver_ue5: 0,
+            },
+        }
+    }
+
+    fn synthetic_fstring(bytes: &mut Vec<u8>, text: &str) {
+        bytes.extend(((text.len() + 1) as i32).to_le_bytes());
+        bytes.extend(text.as_bytes());
+        bytes.push(0);
+    }
+
+    fn synthetic_base_text(source: &str) -> Vec<u8> {
+        let mut bytes = 0_i32.to_le_bytes().to_vec();
+        bytes.push(0);
+        for part in ["Game", "Key", source] {
+            synthetic_fstring(&mut bytes, part);
+        }
+        bytes
+    }
+
+    fn read_text_payload(payload: &[u8], declared: usize) -> Result<PropValue> {
+        let name_table = NameTable::from_names(vec!["None".into()]);
+        let context = text_context(&name_table);
+        let mut reader = std::io::Cursor::new(payload);
+        read_value_with_meta(
+            &mut reader,
+            &context,
+            "TextProperty",
+            declared as i32,
+            &PropertyMeta::default(),
+            declared as u64,
+        )
+    }
+
+    fn expect_opaque_text(payload: &[u8]) {
+        let value = read_text_payload(payload, payload.len()).unwrap();
+        let PropValue::Unknown {
+            type_name,
+            size,
+            payload_sha256,
+        } = value
+        else {
+            panic!("expected opaque text for {payload:?}, got {value:?}");
+        };
+        let expected: String = Sha256::digest(payload)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            (type_name.as_str(), size, payload_sha256),
+            ("TextProperty", payload.len() as i32, expected)
+        );
+    }
+
+    #[test]
+    fn text_payloads_outside_supported_layouts_keep_their_complete_hash() {
+        let mut trailing = synthetic_base_text("Hi");
+        trailing.push(0);
+        let mut overrun = synthetic_base_text("");
+        let source_length = overrun.len() - 5;
+        overrun[source_length..source_length + 4].copy_from_slice(&64_i32.to_le_bytes());
+        let mut unpaired_surrogate = 0_i32.to_le_bytes().to_vec();
+        unpaired_surrogate.extend([0xff, 1, 0, 0, 0]);
+        unpaired_surrogate.extend((-2_i32).to_le_bytes());
+        unpaired_surrogate.extend([0x00, 0xd8, 0, 0]);
+        // A None history saved before the culture invariant flag existed.
+        let mut flagless_none = 0_i32.to_le_bytes().to_vec();
+        flagless_none.push(0xff);
+        for payload in [trailing, overrun, unpaired_surrogate, flagless_none, vec![]] {
+            expect_opaque_text(&payload);
+        }
+    }
+
+    #[test]
+    fn truncated_text_payload_is_an_error() {
+        let payload = synthetic_base_text("Hi");
+        assert!(read_text_payload(&payload, payload.len() + 1).is_err());
+    }
+
+    #[test]
+    fn text_collections_decode_each_element_or_stay_opaque_together() {
+        let name_table = NameTable::from_names(vec!["None".into()]);
+        let context = text_context(&name_table);
+        let meta = PropertyMeta {
+            inner_type: "TextProperty".into(),
+            ..Default::default()
+        };
+        let mut payload = 2_i32.to_le_bytes().to_vec();
+        payload.extend(synthetic_base_text("One"));
+        payload.extend(synthetic_base_text("Two"));
+        let mut reader = std::io::Cursor::new(payload.as_slice());
+        let value = read_value_with_meta(
+            &mut reader,
+            &context,
+            "ArrayProperty",
+            payload.len() as i32,
+            &meta,
+            payload.len() as u64,
+        )
+        .unwrap();
+        let PropValue::Array { items, .. } = value else {
+            panic!("expected decoded text array, got {value:?}");
+        };
+        let texts: Vec<_> = items
+            .iter()
+            .map(|item| match item {
+                PropValue::Text(literal) => literal.as_str(),
+                other => panic!("expected text, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "NSLOCTEXT(\"Game\", \"Key\", \"One\")",
+                "NSLOCTEXT(\"Game\", \"Key\", \"Two\")"
+            ]
+        );
+
+        // A formatted element can't be bounded, so the whole array is kept.
+        let mut formatted = 2_i32.to_le_bytes().to_vec();
+        formatted.extend(synthetic_base_text("One"));
+        formatted.extend(0_i32.to_le_bytes());
+        formatted.push(2);
+        formatted.extend(synthetic_base_text("{0}"));
+        formatted.extend(0_i32.to_le_bytes());
+        let value = opaque_collection("ArrayProperty", &formatted, &meta);
+        assert!(
+            matches!(&value, PropValue::Unknown { size, .. } if *size == formatted.len() as i32),
+            "{value:?}"
+        );
     }
 }

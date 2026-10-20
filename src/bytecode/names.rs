@@ -1,18 +1,6 @@
 /// Object-name prefix of the compiler-generated ubergraph entry function.
 pub(crate) const EXECUTE_UBERGRAPH_PREFIX: &str = "ExecuteUbergraph_";
 
-/// Free-function names recognised as Blueprint latent UFUNCTIONs. Their
-/// trailing `FLatentActionInfo` argument is editor-elided, and their Call
-/// statement carries an interleaved resume continuation. The argument-strip
-/// pass (`transforms::strip_latent_action_info`) and the emit-time
-/// resume-body lookup (`emit::summary`) share this single list.
-pub(crate) const LATENT_FUNCTIONS: &[&str] = &[
-    "Delay",
-    "DelayUntilNextTick",
-    "RetriggerableDelay",
-    "MoveComponentTo",
-];
-
 /// Number of hex characters in a compiler-generated GUID suffix.
 const GUID_HEX_LEN: usize = 32;
 /// Shortest name that can carry a `_<digits>_<32 hex chars>` suffix and

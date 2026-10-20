@@ -25,11 +25,12 @@ pub struct DecodedAsset {
     pub functions: Vec<Function>,
     pub events: Vec<Event>,
     /// Latent-call resume continuations, keyed by the originating call's
-    /// disk offset (the `Stmt::Call.offset` carried through transform
-    /// and emit). The emitter looks up this map when rendering a Call
-    /// at one of the recognised latent function names (`Delay`,
-    /// `MoveComponentTo`, etc.) and interleaves the resume body inline
-    /// after the call line. Empty for assets without latent calls.
+    /// ubergraph disk offset (the `Stmt::Call.offset` carried through
+    /// transform and emit). The emitter interleaves the resume body inline
+    /// after the event-body Call at that offset, whatever the callee's
+    /// name. A continuation the decoder couldn't bound holds a single
+    /// `Stmt::Unknown` and a matching diagnostic. Empty for assets without
+    /// latent calls.
     #[serde(default)]
     pub resume_bodies: BTreeMap<usize, Vec<Stmt>>,
     /// Owner event per latent-resume chain, keyed like `resume_bodies` by

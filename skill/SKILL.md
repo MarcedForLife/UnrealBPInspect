@@ -25,6 +25,7 @@ Start with the summary, or a filter when the user names a function or variable. 
 
 - Components show attachment hierarchy and saved properties, including child actor templates where available.
 - Variables show declared types and available defaults from the class default object. These are not runtime values. A missing default does not establish that the value is zero or unset.
+- Text values use Unreal's export form, such as `NSLOCTEXT("Namespace", "Key", "Source")`. `LOCTABLE("Table", "Key")` is an unresolved string table entry, and formatted text appears as an unknown payload hash.
 - The call graph helps trace calls within the decoded Blueprint. Inspect referenced assets separately when behaviour depends on another Blueprint.
 - Functions and events contain reconstructed pseudocode. It can include branches, switch cases, ForEach, counted and while loops, breaks, Sequence pins, DoOnce, FlipFlop, and latent continuations.
 - `self.Name` refers to instance state. `$Name` is usually a compiler-generated temporary. `// "..."` carries an editor comment. DoOnce and FlipFlop labels are inferred and need not match editor titles.

@@ -8,7 +8,7 @@
 //! decoded body back to the export it was decoded from by export index.
 //! Some parity gaps versus the parse-level renderer remain.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::bytecode::asset::DecodedAsset;
 use crate::bytecode::emit::render_body_lines;
@@ -39,11 +39,14 @@ use crate::types::{ParsedAsset, PropValue, Property};
 pub fn inject_v2_bytecode_props(asset: &mut ParsedAsset, decoded: &DecodedAsset) {
     // Body lookup keyed by 1-based package export index (the
     // `bytecode_by_export` convention). Events and functions occupy disjoint
-    // export indices, so insertion order is irrelevant.
+    // export indices, so insertion order is irrelevant. Only events come
+    // from the ubergraph stream that latent continuations are keyed in.
     let mut bodies: HashMap<usize, &[Stmt]> = HashMap::new();
+    let mut event_exports = HashSet::new();
     for event in &decoded.events {
         if let Some(export_index) = event.export_index {
             bodies.insert(export_index, event.body.as_slice());
+            event_exports.insert(export_index);
         }
     }
     for function in &decoded.functions {
@@ -52,11 +55,18 @@ pub fn inject_v2_bytecode_props(asset: &mut ParsedAsset, decoded: &DecodedAsset)
         }
     }
 
+    let no_continuations = BTreeMap::new();
     for (zero_based_index, (_header, props)) in asset.exports.iter_mut().enumerate() {
-        let Some(body) = bodies.get(&(zero_based_index + 1)) else {
+        let export_index = zero_based_index + 1;
+        let Some(body) = bodies.get(&export_index) else {
             continue;
         };
-        let lines = render_body_lines(body, &decoded.resume_bodies);
+        let resume_bodies = if event_exports.contains(&export_index) {
+            &decoded.resume_bodies
+        } else {
+            &no_continuations
+        };
+        let lines = render_body_lines(body, resume_bodies);
         let value = PropValue::Array {
             inner_type: "StrProperty".into(),
             items: lines.into_iter().map(PropValue::Str).collect(),
