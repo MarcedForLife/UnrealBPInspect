@@ -148,14 +148,17 @@ class InstallerTests(unittest.TestCase):
             subprocess.run(["git", "config", key, value], cwd=repository, env=self.environment, check=True)
         fixture = REPOSITORY / "samples" / "ue_4.27" / "Helm_BP.uasset"
         shutil.copyfile(fixture, repository / "sample.uasset")
+        # Any .uasset routes through textconv, including ones bp-inspect can't read.
+        (repository / "texture.uasset").write_bytes(b"not a Blueprint")
         (repository / ".gitattributes").write_text("*.uasset diff=bp-inspect\n")
         subprocess.run(["git", "add", "."], cwd=repository, env=self.environment, check=True)
-        converted = subprocess.run(
-            ["git", "cat-file", "--textconv", ":sample.uasset"],
-            cwd=repository, env=self.environment, capture_output=True,
-        )
-        self.assertEqual(converted.returncode, 0, converted.stderr.decode())
-        self.assertIn(b"Blueprint:", converted.stdout)
+        for name, expected in [("sample", b"Blueprint:"), ("texture", b"SHA-256: ")]:
+            converted = subprocess.run(
+                ["git", "cat-file", "--textconv", f":{name}.uasset"],
+                cwd=repository, env=self.environment, capture_output=True,
+            )
+            self.assertEqual(converted.returncode, 0, converted.stderr.decode())
+            self.assertIn(expected, converted.stdout)
 
     def test_fresh_installation(self):
         self.target.unlink()

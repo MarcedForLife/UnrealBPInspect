@@ -297,3 +297,80 @@ fn cli_directory_scan_does_not_follow_symlink_cycles() {
     assert_eq!(result.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&result.stderr).contains("No .uasset files found"));
 }
+
+fn run_textconv(path: &std::path::Path) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_bp-inspect"))
+        .arg("--textconv")
+        .arg(path)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn textconv_matches_the_summary_for_a_complete_asset() {
+    let fixture = common::samples_dir().join("ue_4.27/Helm_BP.uasset");
+    let summary = std::process::Command::new(env!("CARGO_BIN_EXE_bp-inspect"))
+        .arg(&fixture)
+        .output()
+        .unwrap();
+    let converted = run_textconv(&fixture);
+    assert_eq!(converted.status.code(), Some(0));
+    assert!(converted.stderr.is_empty());
+    assert_eq!(converted.stdout, summary.stdout);
+}
+
+#[test]
+fn textconv_reports_unreadable_and_incomplete_assets_inline() {
+    let directory = tempfile::tempdir().unwrap();
+    let unreadable = directory.path().join("Texture.uasset");
+    let renamed = directory.path().join("Mesh.uasset");
+    let truncated = directory.path().join("Partial.uasset");
+    std::fs::write(&unreadable, b"not an asset, version 1").unwrap();
+    std::fs::write(&renamed, b"not an asset, version 2").unwrap();
+    let bytes = common::load_fixture("ue_4.27/BP_DecoderTest.uasset");
+    std::fs::write(&truncated, &bytes[..bytes.len() / 2]).unwrap();
+
+    let mut notes = Vec::new();
+    for path in [&unreadable, &renamed] {
+        let converted = run_textconv(path);
+        assert_eq!(converted.status.code(), Some(0));
+        assert!(converted.stderr.is_empty());
+        let text = String::from_utf8(converted.stdout).unwrap();
+        assert!(
+            text.starts_with("bp-inspect could not read this asset: "),
+            "{text}"
+        );
+        assert!(text.contains("Size: 23 bytes\nSHA-256: "), "{text}");
+        // Git passes a temporary path, which must not reach the text.
+        assert!(!text.contains(directory.path().to_str().unwrap()), "{text}");
+        notes.push(text);
+    }
+    // Equal-size changes to an unreadable asset still differ.
+    assert_ne!(notes[0], notes[1]);
+
+    let converted = run_textconv(&truncated);
+    assert_eq!(converted.status.code(), Some(0));
+    assert!(converted.stderr.is_empty());
+    let text = String::from_utf8(converted.stdout).unwrap();
+    assert!(text.starts_with("Incomplete result:\n  "), "{text}");
+    assert!(text.contains("Blueprint:"), "{text}");
+}
+
+#[test]
+fn textconv_takes_one_asset_and_no_other_output_mode() {
+    let fixture = common::samples_dir().join("ue_4.27/Helm_BP.uasset");
+    for extra in [
+        vec![fixture.as_os_str()],
+        vec!["--json".as_ref()],
+        vec!["--diff".as_ref()],
+    ] {
+        let result = std::process::Command::new(env!("CARGO_BIN_EXE_bp-inspect"))
+            .arg("--textconv")
+            .arg(&fixture)
+            .args(extra)
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(2));
+        assert!(result.stdout.is_empty());
+    }
+}

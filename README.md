@@ -149,11 +149,13 @@ Add this to your Unreal project's `.gitattributes`
 The install scripts configure the text converter. For a manual or source installation, run
 
 ```sh
-git config --global diff.bp-inspect.textconv bp-inspect
+git config --global diff.bp-inspect.textconv "bp-inspect --textconv"
 git config --global diff.bp-inspect.cachetextconv true
 ```
 
 With `bp-inspect` on PATH, `git diff`, `git show`, and `git log -p` display readable Blueprint summaries. This only changes diff display, not the stored assets or binary merge behaviour.
+
+`--textconv` always exits 0, because Git stops the whole diff when a converter fails. A partly decoded Blueprint starts with an incomplete-result note, and an asset it can't read, such as an unsupported format, shows its size and SHA-256 so changes still appear.
 
 SmartGit shows the summaries in its diff view. Rider and other JetBrains IDEs show them after enabling `git.read.content.with.textconv` under Help > Find Action > Registry. VS Code shows them for committed and staged changes but not unstaged ones. GitKraken, Sublime Merge, and GitHub's web diffs don't support text conversion.
 
