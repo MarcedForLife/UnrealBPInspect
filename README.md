@@ -49,7 +49,7 @@ bp-inspect MyBlueprint.uasset --json
 bp-inspect --diff Old_BP.uasset New_BP.uasset
 ```
 
-Directories are scanned recursively without following directory symlinks. Filtering is case-insensitive and matches component, variable, and function names as well as function bodies. Multiple files produce a JSON array, while a single file produces an object. Failed files and recoverable parse or decode failures are reported on stderr. Partial results are retained, and JSON includes a `diagnostics` list when failures occurred. Incomplete graph pin arrays are reported and excluded from inference. A batch keeps available results but returns exit code 2 if any file fails or reports diagnostics.
+Directories are scanned recursively. Filtering is case-insensitive and matches component, variable, and function names as well as function bodies. Multiple files produce a JSON array, while a single file produces an object. Failures are reported on stderr and in a JSON `diagnostics` list. Partial results are kept, but the exit code is 2 if any file fails or reports diagnostics.
 
 Use `--dump` for the full import, export, and property output, `--debug` for raw table diagnostics, and `--help` for all options. `bp-inspect --update` installs the latest release, or use `--update v1.0.0` for a specific version.
 
@@ -108,7 +108,7 @@ Illustrative function with a ForEach loop, nested branch, and switch cases
     }
 ```
 
-The decoder also recognises counted and while loops, loop breaks, Sequence pins, DoOnce and FlipFlop patterns, and continuations after latent actions such as Delay. Recovery depends on the compiled bytecode pattern. Shared continuations stay under the branches that reach them, and nested loop stop conditions remain explicit. Temporary assignments and condition recomputations are retained when simplifying them could change evaluation order.
+The decoder also recognises counted and while loops, loop breaks, Sequence pins, DoOnce and FlipFlop patterns, and continuations after latent actions such as Delay. Recovery depends on the compiled bytecode pattern. Temporary variables are kept where removing them could change evaluation order.
 
 ### Comparing Blueprints
 
@@ -155,6 +155,8 @@ git config --global diff.bp-inspect.cachetextconv true
 
 With `bp-inspect` on PATH, `git diff`, `git show`, and `git log -p` display readable Blueprint summaries. This only changes diff display, not the stored assets or binary merge behaviour.
 
+SmartGit shows the summaries in its diff view. Rider and other JetBrains IDEs show them after enabling `git.read.content.with.textconv` under Help > Find Action > Registry. VS Code shows them for committed and staged changes but not unstaged ones. GitKraken, Sublime Merge, and GitHub's web diffs don't support text conversion.
+
 An optional [agent skill](skill/README.md) helps coding agents inspect, compare, and debug Blueprints with the CLI. It uses the Agent Skills format and works with agents that can run local commands.
 
 ## Supported formats
@@ -163,9 +165,9 @@ An optional [agent skill](skill/README.md) helps coding agents inspect, compare,
 - Animation and Widget Blueprints have partial support for event graphs and functions. Animation state machines and widget hierarchies are not displayed.
 - Cooked assets split across `.uasset` and `.uexp`, and UE5 IoStore files, are not supported.
 
-Pseudocode includes structured control flow and Blueprint comments. Numeric literals and property defaults retain their original precision. Summaries include parsed array, map and struct contents, so diffs show changes within collections. Unsupported property payloads are marked as unknown and include `payload_sha256`, so equal-size opaque changes remain visible in diffs. DoOnce and FlipFlop names are inferred from their bodies and may differ from editor node titles. Independent DoOnce gates retain distinct identifiers, and reset sites use the same identifier as their gate. Imported output parameters are marked when stored graph pins establish an unambiguous signature.
+Numbers keep their stored precision, and summaries include array, map and struct contents, so diffs show small value changes and changes within collections. Unsupported property payloads are marked as unknown with a `payload_sha256`, so equal-size changes still show in diffs. DoOnce and FlipFlop names are inferred and may differ from editor node titles.
 
-Comment placement uses stored execution links, data links and pin metadata, including recoverable default values and split struct pins. Statement ancestry preserves annotations through supported inlining and control-flow rewrites. Expression-node comments annotate the containing statement. Comments with several proven locations appear at each statement, while boxes covering several events render once with all event names. Filtering by any covered event or the comment text retains the shared note. Missing metadata, ambiguous matches and unproven ancestry remain in a separate graph-comments section labeled with their source page. Visible comments on reroute nodes are retained.
+Blueprint comments appear above the statements they annotate. Comments that can't be placed reliably are listed in a separate graph-comments section.
 
 ## Development
 
@@ -178,13 +180,13 @@ python tests/installers.py
 cargo run --locked -- samples/ue_4.27/Helm_BP.uasset
 ```
 
-Rust integrations call `decode_asset(&parsed)` after `parse_asset`. The parsed asset retains its version and name table, and both parsed and decoded assets expose diagnostics. Expression literals use `LiteralValue`, with exact floating-point bits retained in the serialised expression tree. CLI JSON exposes pseudocode as strings.
+Rust integrations call `decode_asset(&parsed)` after `parse_asset`. Both parsed and decoded assets expose diagnostics.
 
-Tests use the committed assets in `samples/`. See [test snapshots](tests/snapshots/README.md) for updating expected output after intentional changes. Synthetic bytecode and graph tests compare execution traces for branch continuations, nested loop exits, and gate state across repeated calls and resets. Private assets stay ignored and are not required to build or test. Installer tests use local mock downloads and temporary installation directories.
+Tests use the committed assets in `samples/` and don't need private assets. See [test snapshots](tests/snapshots/README.md) for updating expected output after intentional changes.
 
 Open a pull request for changes, or an issue for bugs and sample assets that fail to parse.
 
-To publish a release, run the Release workflow on `main` with a patch, minor, or major version bump. It prepares the version and validates all four platform builds before pushing the version commit and tag together. It then uploads binaries and SHA-256 checksums to a draft release and publishes it. If `main` changes during the build, the workflow stops before pushing and must be rerun. Pull `main` afterwards to pick up the version commit.
+To publish a release, run the Release workflow on `main` with a patch, minor, or major version bump. If `main` changes during the build, the workflow stops before pushing and must be rerun. Pull `main` afterwards to pick up the version commit.
 
 ## License
 
