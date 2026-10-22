@@ -22,6 +22,15 @@ use crate::bytecode::decode::walker::{walk_opcode, OpcodeVisitor, SwitchValueCas
 use crate::bytecode::opcodes::*;
 use crate::bytecode::readers::BytecodeView;
 
+/// Deepest simulated execution-flow stack any walk follows.
+///
+/// Compiled Blueprints nest `EX_PUSH_EXECUTION_FLOW` a handful deep, and a
+/// valid cycle pops what it pushed before it loops. A stream that pushes
+/// inside a cycle without popping, which one corrupted or misaligned
+/// operand can produce, would otherwise give every lap a new stack and
+/// never finish. States beyond this depth are dropped.
+pub(crate) const MAX_FLOW_STACK_DEPTH: usize = 64;
+
 /// An event entry point into the ubergraph bytecode.
 ///
 /// `mem_offset` is the memory-address offset (as stored in the
@@ -593,17 +602,15 @@ fn wire_pop_resume_edges(graph: &mut OpcodeGraph) -> Vec<FlowFrame> {
         // (addr, depth) visited set keeps the walk finite when a body
         // loops without crossing a PUSH; the depth distinguishes a POP
         // that pairs with THIS push (depth=1) from POPs that pair with
-        // nested pushes. A depth cap prevents unbounded growth when a
-        // cycle passes through a PUSH (each lap would otherwise generate
-        // a fresh (addr, depth) pair forever).
-        const MAX_DEPTH: usize = 64;
+        // nested pushes. The depth cap keeps the walk finite when a
+        // cycle passes through a PUSH.
         let mut visited: BTreeSet<(usize, usize)> = BTreeSet::new();
         // Depth-1 POPs paired with this push, deduped so a body that
         // reaches the same POP via two paths records one frame.
         let mut matched_pops: BTreeSet<usize> = BTreeSet::new();
         let mut stack: Vec<(usize, usize)> = vec![(pushed_target, 1)];
         while let Some((addr, depth)) = stack.pop() {
-            if depth > MAX_DEPTH {
+            if depth > MAX_FLOW_STACK_DEPTH {
                 continue;
             }
             if !visited.insert((addr, depth)) {
@@ -869,12 +876,13 @@ pub(crate) fn bfs_reachable_with_scope(
 
     // Push a successor onto the queue if it's within `boundary`, above the
     // optional `chain_head_floor`, on the seed's arm side of every arm
-    // boundary, and not a rejected back-edge from `addr`. The floor check
+    // boundary, not a rejected back-edge from `addr`, and reached with a
+    // simulated stack inside `MAX_FLOW_STACK_DEPTH`. The floor check
     // runs FIRST: any successor below the chain head is rejected
     // regardless of the edge mechanism that produced it.
     let admit =
         |addr: usize, succ: usize, stack: &[usize], queue: &mut VecDeque<(usize, Vec<usize>)>| {
-            if !boundary.contains(&succ) {
+            if !boundary.contains(&succ) || stack.len() > MAX_FLOW_STACK_DEPTH {
                 return;
             }
             if let Some(floor) = chain_head_floor {

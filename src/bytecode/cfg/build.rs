@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Range;
 
 use crate::bytecode::opcodes::{EX_JUMP, EX_POP_EXECUTION_FLOW};
-use crate::bytecode::partition::{step_successors, OpcodeGraph};
+use crate::bytecode::partition::{step_successors, OpcodeGraph, MAX_FLOW_STACK_DEPTH};
 
 use super::{BasicBlock, BlockId, ControlFlowGraph};
 
@@ -191,7 +191,9 @@ fn bfs_reachable_flow_stack(
     queue.push_back((entry, Vec::new()));
     let admit =
         |_from: usize, succ: usize, stack: &[usize], queue: &mut VecDeque<(usize, Vec<usize>)>| {
-            queue.push_back((succ, stack.to_vec()));
+            if stack.len() <= MAX_FLOW_STACK_DEPTH {
+                queue.push_back((succ, stack.to_vec()));
+            }
         };
     while let Some((addr, stack)) = queue.pop_front() {
         if !visited.insert((addr, stack.len(), stack.last().copied())) {
@@ -578,5 +580,22 @@ mod tests {
             BTreeSet::from([0, 10, 20]),
             "the matching POP must resume the deferred pushed target"
         );
+    }
+
+    /// A cycle through a PUSH with no POP grows the simulated stack on
+    /// every lap, so without the depth cap the search never finishes.
+    #[test]
+    fn push_in_a_cycle_without_a_pop_terminates() {
+        let owned: BTreeSet<usize> = [0, 10].into_iter().collect();
+        let cycle = graph(
+            &[(0, EX_PUSH_EXECUTION_FLOW), (10, EX_NOTHING)],
+            &[(0, vec![20, 10]), (10, vec![0])],
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send(bfs_reachable_flow_stack(&cycle, 0, &owned)));
+        let reached = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the search must finish");
+        assert_eq!(reached, BTreeSet::from([0, 10]));
     }
 }

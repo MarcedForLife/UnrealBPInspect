@@ -275,7 +275,7 @@ fn expand_flow_stack(
             return None;
         }
         let (offset, stack) = states[index].clone();
-        if stack.len() > 64 {
+        if stack.len() > crate::bytecode::partition::MAX_FLOW_STACK_DEPTH {
             return None;
         }
         let opcode = *graph.opcodes.get(&offset)?;

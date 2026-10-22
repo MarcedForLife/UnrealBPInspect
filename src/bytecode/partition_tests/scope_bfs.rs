@@ -2,11 +2,13 @@
 //! back-edges only when the seed sits inside the loop scope).
 
 use super::*;
-use crate::bytecode::decode::test_fixtures::empty_name_table;
+use crate::bytecode::decode::test_fixtures::{empty_name_table, u32_le};
+use crate::bytecode::opcodes::{EX_END_OF_SCRIPT, EX_JUMP, EX_PUSH_EXECUTION_FLOW};
 use crate::bytecode::partition::{
     back_edges_in_range, bfs_reachable_with_scope, build_opcode_graph, LoopScopes, PartitionCtx,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 /// Sanity-check `nested_loop_stream` boundaries match the docstring.
 #[test]
@@ -260,4 +262,35 @@ fn scope_bfs_stack_rules_push_pop() {
         reached_stacked, expected,
         "PUSH/POP with initial_stack reaches the same set"
     );
+}
+
+/// A cycle through a PUSH with no POP grows the simulated flow stack on
+/// every lap. The depth cap keeps the search finite.
+#[test]
+fn scope_bfs_terminates_when_a_cycle_pushes_without_popping() {
+    // [EX_PUSH_EXECUTION_FLOW→10]@0 [EX_JUMP→0]@5 [EX_END_OF_SCRIPT]@10
+    let mut bytecode = vec![EX_PUSH_EXECUTION_FLOW];
+    bytecode.extend_from_slice(&u32_le(10));
+    bytecode.push(EX_JUMP);
+    bytecode.extend_from_slice(&u32_le(0));
+    bytecode.push(EX_END_OF_SCRIPT);
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let nt = empty_name_table();
+        let graph = build_opcode_graph(&bytecode, 0, &nt, &BTreeMap::new());
+        let scopes = back_edges_in_range(&graph, 0..bytecode.len());
+        let ctx = PartitionCtx {
+            graph: &graph,
+            arm_boundaries: &[],
+        };
+        let reached =
+            bfs_reachable_with_scope(0, vec![], 0, &ctx, 0..bytecode.len(), &scopes, None);
+        sender.send(reached)
+    });
+    let reached = receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the search must finish");
+    // The pushed body at 10 is never popped onto, so it stays unreached.
+    assert_eq!(reached, BTreeSet::from([0, 5]));
 }

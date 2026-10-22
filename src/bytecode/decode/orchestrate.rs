@@ -18,7 +18,7 @@ use crate::bytecode::decode::ctx::debug_enabled;
 use crate::bytecode::names::{EXECUTE_UBERGRAPH_PREFIX, K2NODE_EXECUTION_SEQUENCE};
 use crate::bytecode::partition::{
     build_opcode_graph, build_opcode_graph_with_resume, partition_ubergraph_with_translation,
-    EventEntry, OpcodeGraph,
+    EventEntry, OpcodeGraph, MAX_FLOW_STACK_DEPTH,
 };
 use crate::bytecode::stmt::Stmt;
 use crate::bytecode::structure::build_skeleton;
@@ -1245,7 +1245,7 @@ fn reachable_statement_offsets(
         if !visited.insert((offset, stack.clone())) {
             continue;
         }
-        if visited.len() > budget || stack.len() > 64 {
+        if visited.len() > budget || stack.len() > MAX_FLOW_STACK_DEPTH {
             return Err("statement coverage check exceeded its flow-stack limit".into());
         }
         let Some(&opcode) = graph.opcodes.get(&offset) else {
